@@ -215,8 +215,8 @@ same itself.
 - `result.save(path)`: the record as YAML: the search's settings and space, every trial with its settings, the rungs it reached
   and their scores and forecast counts, the trials each rung promoted, and what `best()` chose. `SearchResult.load(path, make=...)`
   reads it back; `best()` of a loaded result needs `make`, and raises if `make` builds another model from a trial's settings than
-  the one the search scored (each trial records a fingerprint of it: the class, its settings as a pipeline saves them, and the
-  source of a predictor function, or its code and constants where there is no source; a global list the function reads but
+  the one the search scored (each trial records a fingerprint of it: the class, its settings as a pipeline saves them, and a
+  predictor function's source with its code, constants and default arguments; a global list the function reads in its body but
   doesn't define is not part of it, so edit the function, not such a list, or start a new journal). A
   `best()` after `save()` adds its choice to the file; a loaded result's `best()` leaves the file as it is.
 

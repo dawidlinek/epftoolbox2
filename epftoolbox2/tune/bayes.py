@@ -399,21 +399,39 @@ def _code_parts(code: types.CodeType) -> Tuple[Any, ...]:
     return (code.co_code, code.co_names, tuple(constant(c) for c in code.co_consts))
 
 
+def _stable(value: Any) -> Any:
+    """A value as text that is the same in every process: plain values by `repr`, containers item by item (a set sorted), a
+    function or class by its import path, anything else by its type (whose `repr` may hold a memory address)."""
+    if value is None or isinstance(value, (bool, int, float, str, bytes)):
+        return repr(value)
+    if isinstance(value, (list, tuple)):
+        return (type(value).__name__, tuple(_stable(item) for item in value))
+    if isinstance(value, dict):
+        return ("dict", tuple(sorted((repr(key), _stable(item)) for key, item in value.items())))
+    if isinstance(value, (set, frozenset)):
+        return ("set", tuple(sorted(repr(_stable(item)) for item in value)))
+    if callable(value):
+        return f"{getattr(value, '__module__', '')}:{getattr(value, '__qualname__', type(value).__qualname__)}"
+    return f"{type(value).__module__}:{type(value).__qualname__}"
+
+
 def _code_digest(fn: Any) -> str:
-    """A hash of what a function does: its source (`inspect.getsource`, read again from the file), else its bytecode with its
-    constants (a list it returns, the code of a function inside it) and default arguments. A global it reads but doesn't define
-    is not part of it."""
+    """A hash of what a function does: its source (`inspect.getsource`, read again from the file) where there is one, and its
+    bytecode with its constants (a list it returns, the code of a function inside it) and default arguments (whose values the
+    source doesn't show when they come from a name, `names=HELD`). A global it reads in its body but doesn't define is not part
+    of it."""
     target = getattr(fn, "func", fn)  # a functools.partial's function
     try:
-        text = inspect.getsource(target)
+        source = inspect.getsource(target)
     except (OSError, TypeError):
-        code = getattr(target, "__code__", None)
-        if code is None:
-            text = f"{type(target).__module__}:{type(target).__qualname__}"
-        else:  # with its default arguments, which the code doesn't hold
-            text = repr(
-                (_code_parts(code), getattr(target, "__defaults__", None), getattr(target, "__kwdefaults__", None))
-            )
+        source = None
+    code = getattr(target, "__code__", None)
+    if code is None:
+        compiled = f"{type(target).__module__}:{type(target).__qualname__}"
+    else:
+        defaults = (getattr(target, "__defaults__", None), getattr(target, "__kwdefaults__", None))
+        compiled = (_code_parts(code), _stable(defaults))
+    text = repr((source, compiled))
     return hashlib.sha256(text.encode()).hexdigest()[:12]
 
 

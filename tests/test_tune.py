@@ -689,6 +689,14 @@ def test_the_fingerprint_sees_edits_inside_predictor_functions(tmp_path, monkeyp
         return list(names)
 
     assert bayes.model_fingerprint(OLSModel(with_default, training_window=28, name="ols")) != by_default
+    named = ["load_d+{horizon}"]
+
+    def from_a_named_default(ctx, names=named):  # the default's value, which the source shows only by its name
+        return list(names)
+
+    before = bayes.model_fingerprint(OLSModel(from_a_named_default, training_window=28, name="ols"))
+    named.append("wind_d+{horizon}")
+    assert bayes.model_fingerprint(OLSModel(from_a_named_default, training_window=28, name="ols")) != before
     held = ["load_d+{horizon}"]
 
     def from_global(ctx):
@@ -697,6 +705,28 @@ def test_the_fingerprint_sees_edits_inside_predictor_functions(tmp_path, monkeyp
     unseen = bayes.model_fingerprint(OLSModel(from_global, training_window=28, name="ols"))
     held.append("wind_d+{horizon}")
     assert bayes.model_fingerprint(OLSModel(from_global, training_window=28, name="ols")) == unseen
+
+
+def test_the_fingerprint_is_the_same_in_another_process(tmp_path):
+    """No memory address or hash seed in it: a function with an object default and a set constant, fingerprinted in two
+    processes with different hash seeds, gives one value (a resume in another process compares it)."""
+    (tmp_path / "searched_lists2.py").write_text(
+        "def helper():\n    return None\n\n"
+        "def fn(ctx, call=helper, extra=object):\n"
+        "    return ['load_d+{horizon}'] if ctx in {'a', 'b', 'c'} else ['wind_d+{horizon}']\n"
+    )
+    code = (
+        "import sys; sys.path.insert(0, sys.argv[1]); import searched_lists2\n"
+        "from epftoolbox2.models import OLSModel\nfrom epftoolbox2.tune.bayes import model_fingerprint\n"
+        "print(model_fingerprint(OLSModel(searched_lists2.fn, training_window=28, name='ols')))"
+    )
+    seen = set()
+    for seed in ("1", "2"):
+        env = {**os.environ, "PYTHONHASHSEED": seed, "PYTHONPATH": str(ROOT)}
+        done = subprocess.run([sys.executable, "-c", code, str(tmp_path)], env=env, capture_output=True, text=True)
+        assert done.returncode == 0, done.stderr
+        seen.add(done.stdout.strip().splitlines()[-1])
+    assert len(seen) == 1
 
 
 @pytest.mark.parametrize(
