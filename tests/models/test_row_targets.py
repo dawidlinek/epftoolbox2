@@ -776,3 +776,26 @@ def test_with_all_three_none_a_record_and_a_manifest_are_unchanged(spring, tmp_p
     assert not {"cap_d+1", "flag"} & set(manifest["predictors"])
     record = json.loads(Path(tmp_path / "ols.jsonl").read_text().splitlines()[0])
     assert "detail" not in record and list(record)[-1] == "revision"
+
+
+def test_a_torch_day_model_refuses_them_and_a_period_one_is_its_run_on_y_over_c(spring):
+    """`TorchModel(output="day")` refuses them before any fit (no torch needed); with the [torch] extra, `MLPHourlyModel`
+    (period units) with `normalise_by` is its run on the frame whose target is y / c, times c, to the bit."""
+    from epftoolbox2.models import MLPHourlyModel, TorchModel
+
+    day = TorchModel("epftoolbox2.nets:MLP", predictors=["load_d+{horizon}"], output="day", bounds=(0, None))
+    with pytest.raises(ValueError, match="day units"):
+        day.run(spring, "2023-04-10", "2023-04-10", horizon=1)
+    pytest.importorskip("torch")
+    D = "2023-04-10"
+
+    def make(**kw):
+        fast = dict(training_window=28, seeds=2, max_epochs=3, patience=2, lr=1e-2, batch_size=16, device="cpu")
+        return MLPHourlyModel(PREDICTORS, hidden=[4], **fast, **kw)
+
+    scaled = by_key(run(make(normalise_by=SCALE), spring, D, day_of(D, 1), horizon=1))
+    on_ratio = by_key(run(make(), divided(spring), D, day_of(D, 1), horizon=1))
+    expected = times_scale(spring, on_ratio)
+    assert scaled.keys() == on_ratio.keys() and scaled
+    for key, record in scaled.items():
+        assert record["prediction"] == expected[key], key
