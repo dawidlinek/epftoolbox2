@@ -650,7 +650,7 @@ def run_provenance(model: Any, manifest: Any, windows: Any, test_start: Optional
     `search`, for `EvaluationReport.choices()`."""
     out = _card_provenance(model, manifest, windows, test_start)
     search = getattr(model, "_search", None)
-    if search is None:
+    if not isinstance(search, dict):
         return out
     return {**(out or {}), "search": dict(search)}
 

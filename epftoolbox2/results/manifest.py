@@ -763,7 +763,7 @@ def build_manifest(
 def _search_of(model: Any) -> Optional[Dict[str, Any]]:
     """A copy of where a model of `tune.SearchResult.best()` was chosen, or None."""
     search = getattr(model, "_search", None)
-    return None if search is None else dict(search)
+    return dict(search) if isinstance(search, dict) else None
 
 
 def _history_ahead(

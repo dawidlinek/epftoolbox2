@@ -231,7 +231,7 @@ def refuse_searched_on_test(models: Sequence[Any], test_start: Optional[str]) ->
     first = str(resolve_date(test_start))[:10]
     for model in models:
         search = getattr(model.model if isinstance(model, PooledModel) else model, "_search", None)
-        through = None if not search else search.get("data_through")
+        through = search.get("data_through") if isinstance(search, dict) else None  # a model no search chose has none
         if through is not None and str(through) >= first:
             raise ValueError(
                 f"{model.name}: the search {search.get('search')!r} chose it on data through {through} (its validation period "
@@ -267,8 +267,9 @@ def search_choices(
     manifest): its gap would compare two kinds of forecast."""
     out: Dict[str, List[Dict]] = {}
     for name, ref in refs.items():
-        search = (getattr(ref, "provenance", None) or {}).get("search")  # a stand-in ref may have none
-        if not search:
+        provenance = getattr(ref, "provenance", None)  # a stand-in ref may have none
+        search = provenance.get("search") if isinstance(provenance, dict) else None
+        if not isinstance(search, dict) or not search:
             continue
         forecasts = _forecasts_of(ref, made)
         if forecasts is not None and "target" in search:
