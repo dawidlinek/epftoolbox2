@@ -435,7 +435,8 @@ Here the models of each width are one group, their 4 seeds of every weekly fit t
 - **`TORCH_STACKS=check`** stacks as `on` does and also trains about one stacked fit in 50 alone (chosen by a hash of its
   seeds, so the same fits whatever the loop), comparing failures, best epochs and forecasts bit for bit. Each model's
   manifest records `stack_check` (fits checked, how many differed, the largest difference in the scaled space), and a model
-  with a difference warns. It costs about 2 % more training.
+  with a difference warns. A checked fit trains alone as its model would, in a stack of `pad_to` slots of its own, so on a
+  GPU with a large `pad_to` each costs about a whole stack: it is a check to run on a sample of a study, not on every run.
 - **`pad_to` on a GPU.** A step of a stack costs far less than its networks one by one: the trainer ran 67 networks per second
   (256-128, 50 epochs of 1,456-day windows) in stacks of 256 on an H100, 75 in stacks of 2,048. Alone, a fit's 4 seeds fill 4
   of its `pad_to` slots and the rest is padding; in a loop the stacks are full. Set `pad_to` for the loop (256 suits these
