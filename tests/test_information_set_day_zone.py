@@ -340,3 +340,54 @@ def test_a_rule_naming_a_chained_column_is_refused(tmp_path, key):
     with pytest.raises(InformationSetError, match="nothing replaces it"):
         added_later.refuse_rules_on_chained_columns()
     assert added_later.resolve("generation_solar_forecast_d+1").layer == "sources"  # and ignored meanwhile
+
+
+# --------------------------------------------------------------------------- a day statistic of the forecasts (agg, 7d)
+
+AGG_NAMES = {
+    "col_day_max": "col",
+    "col_day_max_d+1": "col_d+1",
+    "col_day_max_d+2": "col_d+2",
+    "col_day_max_d-1": "col_d-1",
+}
+# Every pair of levels of (upstream data zone, upstream issue zone, downstream frame zone): a Latin square, 16 of the 64.
+AGG_TRIPLES = [(ZONES[i], ZONES[j], ZONES[(i + j) % 4]) for i in range(4) for j in range(4)]
+
+
+@pytest.mark.parametrize(("data_zone", "issue_zone", "frame_zone"), AGG_TRIPLES)
+def test_a_chained_day_statistic_is_known_exactly_when_the_latest_of_its_forecasts_is(
+    tmp_path, data_zone, issue_zone, frame_zone
+):
+    """`ForecastSource(agg="max")`: read at instant u, `col_day_max` holds the maximum of the forecasts for every slot of u's
+    date in the upstream's data zone. Each of them is the forecast for its slot issued `horizon` days before that date at the
+    issue time, so the latest of them is that one instant, and the check reads exactly it on every cell, whatever the three
+    zones: the plain column's oracle. On a frame in the upstream's zone, `col_day_max_d+2` of a horizon-1 source is late on
+    every cell (refused at raise), and the verdicts equal those of `col_day_max` made by `DailyStatsTransformer` from the plain
+    chained column."""
+    upstream(tmp_path, data_zone, issue_zone)
+    freq = "15min" if (ZONES.index(data_zone) + ZONES.index(issue_zone)) % 3 == 0 else "1h"
+    for horizon in (1, 2):
+        agg = ForecastSource(tmp_path, "up", "col", horizon=horizon, agg="max")
+        info = InformationSet("11:45", "Europe/Brussels").with_source_rules([agg])
+        plain = InformationSet("11:45", "Europe/Brussels").with_source_rules(
+            [ForecastSource(tmp_path, "up", "col", horizon=horizon)]
+        )
+        for window in WINDOWS:
+            index = frame_index(frame_zone, freq, window)
+            for name, read in AGG_NAMES.items():
+                assert info.chained_of(name).agg == "max"
+                known, issued, skipped, _ = library_known(info, name, index, freq, window)
+                truth = oracle(read, frame_zone, data_zone, issue_zone, horizon, freq, window)
+                judged = ~skipped & ~np.isnat(truth)
+                assert not (judged & (known < truth)).any(), (name, horizon, window, "early")
+                assert not (judged & (known > truth)).any(), (name, horizon, window, "late")
+                assert judged.sum() > 0.9 * judged.size
+                if frame_zone == data_zone and NAMES[read] > horizon:  # every row of D reads a date of D + 2
+                    assert (known > np.broadcast_to(issued, known.shape))[judged].all(), name
+                if frame_zone == data_zone:
+                    built, *_ = library_known(plain, name, index, freq, window)
+                    assert np.array_equal(known[judged], built[judged]), (name, horizon, window)
+        late = {(period, 1): ["col_day_max_d+2"] for period in range(periods_per_day(freq))}
+        if horizon == 1 and frame_zone == data_zone:
+            with pytest.raises(InformationSetError, match="col_day_max_d\\+2"):
+                info.check(late, "price", freq, frame_index(frame_zone, freq, "spring"), *WINDOWS["spring"])

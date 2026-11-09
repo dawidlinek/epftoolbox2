@@ -33,6 +33,8 @@ _STEP_MINUTES = {"1h": 60, "15min": 15}
 _DAILY = "1D"
 _ENSEMBLE_KIND = "ensemble"
 _NO_ZONE = (None, "None", "")
+# The day statistics `agg` may name: `DailyStatsTransformer`'s, over each target date of the upstream's data zone.
+AGGREGATES = ("min", "max", "mean", "peak")
 
 
 class UpstreamError(ValueError):
@@ -114,6 +116,11 @@ class ForecastSource(DataSource):
     at its frame's daily stamp (`daily_stamp` in its manifest). Lag the column like any other: `solar_fc_d+1` on the row of D is
     the forecast for D+1 issued on D. Other horizons are other sources with other column names.
 
+    With `agg` the source emits `{column}_day_{agg}` instead: the day statistic of those forecasts over each target date, on
+    every row of the date, as `DailyStatsTransformer(columns=column, stats=[agg], freq=...)` makes it on them in the upstream's
+    data zone, bit for bit: NaN on a date missing a slot or holding a missing forecast. Every slot of a target date is issued at
+    the same instant, so the statistic is known exactly when its forecasts are, and its column takes the same rule.
+
     The upstream must have run with an issue time, so that its forecasts' availability can be stated; `available="HH:MM"` (in
     the upstream issue zone) states a later time, for forecasts revised after it, never an earlier one. Records of a live
     directory (with `issued_at`) are refused: which revision a cell may use depends on when it was issued, and that reading is
@@ -128,14 +135,25 @@ class ForecastSource(DataSource):
         column: The name of the column this source emits.
         horizon: Which of the upstream's horizons to read, in days between issue day and target day.
         available: A later time than the upstream's issue time at which its forecasts are known ("HH:MM", upstream issue zone).
+        agg: A day statistic of the forecasts instead of the forecasts, emitted as `{column}_day_{agg}`: "min", "max",
+            "mean" or "peak" (the mean from 08:00 to 19:59). None (the default) emits the forecasts as `column`.
     """
 
-    def __init__(self, path: Any, model: str, column: str, horizon: int = 1, available: Optional[str] = None):
+    def __init__(
+        self,
+        path: Any,
+        model: str,
+        column: str,
+        horizon: int = 1,
+        available: Optional[str] = None,
+        agg: Optional[str] = None,
+    ):
         self.path = os.fspath(path) if isinstance(path, os.PathLike) else path
         self.model = model
         self.column = column
         self.horizon = horizon
         self.available = available
+        self.agg = agg
         self._validate_config()
 
     def _validate_config(self) -> bool:
@@ -148,11 +166,18 @@ class ForecastSource(DataSource):
         if isinstance(self.horizon, bool) or not isinstance(self.horizon, (int, np.integer)) or self.horizon < 1:
             raise ValueError(f"ForecastSource: horizon must be a positive integer, got {self.horizon!r}")
         self.horizon = int(self.horizon)
+        if self.agg is not None and self.agg not in AGGREGATES:
+            raise ValueError(f"ForecastSource: agg must be None or one of {list(AGGREGATES)}, got {self.agg!r}")
         if self.available is not None:
             from ...information_set import _parse_time  # the information set imports the sources
 
             _parse_time(self.available)
         return True
+
+    @property
+    def output_column(self) -> str:
+        """The name of the column it emits: `column`, or with `agg` `{column}_day_{agg}`."""
+        return self.column if self.agg is None else f"{self.column}_day_{self.agg}"
 
     def get_cache_config(self) -> Optional[Dict]:
         # The upstream results grow as their pipeline runs: a per-source cache would serve stale forecasts. The single-file
@@ -254,6 +279,11 @@ class ForecastSource(DataSource):
                     f"Run the upstream again into {self.path!r} (a resume forecasts nothing new and records it)."
                 )
             stamp = _minutes_of(stamps.pop())
+            if self.agg is not None:
+                raise UpstreamError(
+                    f"ForecastSource({self.model!r}): agg={self.agg!r} takes a day statistic of a day's forecasts, and a daily "
+                    "(freq='1D') upstream has one a day: read it without agg"
+                )
         if self.available is not None and _minutes_of(self.available) < _minutes_of(issue_time):
             raise UpstreamError(
                 f"ForecastSource({self.model!r}): available={self.available!r} is before the upstream's issue time "
@@ -265,18 +295,21 @@ class ForecastSource(DataSource):
 
     def availability(self, upstream: Optional[Upstream] = None):
         """The column's rule: published at the upstream's issue time (or `available`) in its issue zone, `horizon` days before
-        the delivery day, a local date of the upstream's data zone; its archive is a snapshot (one forecast per key)."""
+        the delivery day, a local date of the upstream's data zone; its archive is a snapshot (one forecast per key). With `agg`
+        the same: the statistic of a target date is known when the latest of its forecasts is, and all of them are issued at
+        that one instant."""
         from ...information_set import Availability  # the information set imports the sources
 
         upstream = self.upstream() if upstream is None else upstream
         time = self.available or upstream.issue_time
+        what = "forecasts" if self.agg is None else f"day {self.agg} of the forecasts"
         return Availability.published(
             time,
             self.horizon,
             timezone=upstream.issue_timezone,
             day_zone=upstream.data_timezone,
             vintage="snapshot",
-            note=f"forecasts of {self.model} (horizon {self.horizon}) stored in {self.path}, issued {time} "
+            note=f"{what} of {self.model} (horizon {self.horizon}) stored in {self.path}, issued {time} "
             f"{upstream.issue_timezone} on {upstream.data_timezone} dates",
         )
 
@@ -288,7 +321,7 @@ class ForecastSource(DataSource):
         upstream = self.upstream() if upstream is None else upstream
         issued = {name: _issued_span(self._results_of(name), self.horizon) for name, _ in upstream.leaves}
         return ChainedInput(
-            column=self.column,
+            column=self.output_column,
             path=str(self._directory().resolve()),
             model=self.model,
             horizon=self.horizon,
@@ -300,6 +333,7 @@ class ForecastSource(DataSource):
             late=upstream.late_inputs(),
             unchecked=upstream.unchecked(issued),
             freq=upstream.freq,
+            agg=self.agg,
         )
 
     def content_digest(self) -> Optional[str]:
@@ -319,7 +353,8 @@ class ForecastSource(DataSource):
     # -- the column ---------------------------------------------------------------------------------------------------------
 
     def fetch(self, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
-        """The upstream's forecasts of `horizon` at their target instants in `[start, end)`, UTC."""
+        """The upstream's forecasts of `horizon` at their target instants in `[start, end)`, UTC; with `agg` their statistic
+        over each whole target date, taken before the range is cut, so a sub-range holds the same values."""
         from ...results.store import read_records
 
         upstream = self.upstream()
@@ -354,6 +389,8 @@ class ForecastSource(DataSource):
                 f"ForecastSource({self.model!r}): records at {sorted(freqs)} in results whose manifest says {upstream.freq}"
             )
         frame = _placed(picked, upstream, self.column)
+        if self.agg is not None:
+            frame = _day_statistic(frame, upstream, self.column, self.agg)
         start, end = _utc(start), _utc(end)
         out = frame[(frame.index >= start) & (frame.index < end)]
         if out.empty:
@@ -388,6 +425,20 @@ def _placed(picked: List[Tuple[str, int, float]], upstream: Upstream, column: st
         twice = index[index.duplicated()][:3]
         raise UpstreamError(f"ForecastSource: two forecasts for the instants {list(twice)}")
     return pd.DataFrame({column: placed[order]}, index=index)
+
+
+def _day_statistic(frame: pd.DataFrame, upstream: Upstream, column: str, agg: str) -> pd.DataFrame:
+    """`{column}_day_{agg}` on the rows of `frame` (UTC, at the target instants): `DailyStatsTransformer`'s statistic over each
+    local date of the upstream's data zone, on whole dates only (every slot the date has on its clock, a repeated one counted
+    on both of its rows, as any frame in that zone holds it), at the upstream's freq."""
+    from ..transformers import DailyStatsTransformer
+
+    local = frame.tz_convert(upstream.data_timezone)
+    with warnings.catch_warnings():
+        # An upstream on UTC dates is read on UTC days, which are its days.
+        warnings.filterwarnings("ignore", message="DailyStatsTransformer: the index is UTC")
+        stats = DailyStatsTransformer(columns=column, stats=[agg], freq=upstream.freq).transform(local)
+    return stats[[f"{column}_day_{agg}"]].tz_convert("UTC")
 
 
 def _outside(span: Tuple[str, str], manifest: Dict[str, Any]) -> bool:

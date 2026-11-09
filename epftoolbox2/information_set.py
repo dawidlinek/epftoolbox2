@@ -897,8 +897,9 @@ def source_rules(sources: Iterable[Any]) -> Dict[str, Availability]:
             rules.update(_pse_rules(source))
         elif isinstance(source, ForecastSource):
             # Another pipeline's forecasts: known at its issue time on the day `horizon` before their target date, a date of its
-            # data zone (`day_zone`), whatever the zone of the frame they are read on.
-            rules[source.column] = source.availability()
+            # data zone (`day_zone`), whatever the zone of the frame they are read on. A day statistic of them (`agg`) is of
+            # that date too, every slot of which is known at that instant.
+            rules[source.output_column] = source.availability()
         elif isinstance(source, EpftoolboxBenchmarkSource):
             # The files are local wall-clock time, and `index_timezone` only labels that clock (one hour off the true
             # instants in summer). So a row's delivery day is the day on that same clock: the file's 23:00 on D is
@@ -940,6 +941,7 @@ class ChainedInput:
     late: Tuple[str, ...] = ()
     unchecked: Tuple[str, ...] = ()
     freq: str = "1h"
+    agg: Optional[str] = None  # a day statistic of the forecasts over each target date (`ForecastSource(agg=)`)
 
     @property
     def late_upstream(self) -> bool:
@@ -947,8 +949,8 @@ class ChainedInput:
         return bool(self.late or self.unchecked)
 
     def record(self) -> Dict[str, Any]:
-        """What a downstream manifest records of it (`chained_inputs[column]`), coverage aside."""
-        return {
+        """What a downstream manifest records of it (`chained_inputs[column]`), coverage aside; `agg` only when set."""
+        out = {
             "path": self.path,
             "model": self.model,
             "horizon": self.horizon,
@@ -958,10 +960,14 @@ class ChainedInput:
             "available": self.available,
             "digest": self.digest,
         }
+        if self.agg is not None:
+            out["agg"] = self.agg
+        return out
 
     def describe(self) -> str:
         """`model`'s forecasts at `horizon` in `path`, for a table's rule column."""
-        return f"forecasts of {self.model} (horizon {self.horizon}) in {self.path}"
+        what = "forecasts" if self.agg is None else f"day {self.agg} of the forecasts"
+        return f"{what} of {self.model} (horizon {self.horizon}) in {self.path}"
 
 
 def chained_sources(sources: Iterable[Any]) -> Dict[str, ChainedInput]:
@@ -971,7 +977,7 @@ def chained_sources(sources: Iterable[Any]) -> Dict[str, ChainedInput]:
     out: Dict[str, ChainedInput] = {}
     for source in sources:
         if isinstance(source, ForecastSource):
-            out[source.column] = source.chained_input()
+            out[source.output_column] = source.chained_input()
     return out
 
 

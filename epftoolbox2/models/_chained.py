@@ -226,7 +226,8 @@ def _off_the_clock(index: pd.DatetimeIndex, name: str, chained: ChainedInput) ->
     """Which of these rows can't hold a value of `name` whatever the upstream holds, for a plain day shift of the chained column
     (`x`, `x_d+1`, `x_d-1`): the row reads a wall time its frame's clock skips (`x_d+1` at 02:00 the day before a spring
     switch), or a slot the upstream never plans, one its clock skips on the issue day it would be issued on (the forecast for
-    02:00 of the day after a switch at horizon 1). Every other name is judged as it stands: no row is let off."""
+    02:00 of the day after a switch at horizon 1); of a day statistic (`ForecastSource(agg=)`), every row of a date with such a
+    slot. Every other name is judged as it stands: no row is let off."""
     out = np.zeros(len(index), dtype=bool)
     if not len(index) or getattr(index, "tz", None) is None:
         return out
@@ -246,7 +247,9 @@ def _off_the_clock(index: pd.DatetimeIndex, name: str, chained: ChainedInput) ->
         gaps = skipped_periods(day.date(), chained.freq, chained.data_timezone)
         if gaps:
             at = np.asarray(issued == day)
-            unplanned[at] = np.isin(periods[at], list(gaps))
+            # A day statistic (`ForecastSource(agg=)`) of a date with an unplanned slot is NaN on every row of it: the date is
+            # never whole.
+            unplanned[at] = True if chained.agg is not None else np.isin(periods[at], list(gaps))
     out[~np.asarray(read.isna())] = unplanned
     return out
 

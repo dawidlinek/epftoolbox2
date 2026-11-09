@@ -758,3 +758,75 @@ def test_a_workflow_runs_the_upstream_then_reads_it_back_with_its_rule(df, tmp_p
     entry = json.loads((tmp_path / "down" / "runs" / "m.manifest.json").read_text())["chained_inputs"]["load_fc"]
     assert entry["path"] == str((tmp_path / "up" / "runs").resolve()) and entry["issue_time"] == "09:30"
     assert entry["coverage"]["load_fc_d+1"]["uncovered"] == 0
+
+
+# -- a day statistic of the forecasts (ForecastSource(agg=), 7d) ------------------------------------------------------------
+
+
+def with_day_statistic(df, source):
+    """`df` with the source's day statistic at its rows (`{column}_day_{agg}`) and its day lags `_d+1`, `_d-1`."""
+    data = df.copy()
+    name = source.output_column
+    data[name] = source.fetch(*WIDE)[name].reindex(df.index.tz_convert("UTC")).to_numpy()
+    lagged = LagTransformer([name], [-1, 1], "day").transform(data[[name]])
+    for column in lagged.columns.drop(name):
+        data[column] = lagged[column]
+    return data
+
+
+def test_a_day_statistic_misses_the_day_after_a_spring_switch_without_a_coverage_warning(df, shared, tmp_path):
+    """No forecast of 02:00 on 2023-03-27 is planned at horizon 1 (the switch day, its issue day, has no 02:00), so that date is
+    never whole: its maximum is NaN on every row, which no rerun of the upstream fills. The downstream's fits read it (the rows
+    of the switch day hold `load_fc_day_max_d+1` of 03-27); they are let off, and a run at raise goes through."""
+    source = ForecastSource(str(shared["root"] / "up"), model="load_up", column="load_fc", agg="max")
+    data = with_day_statistic(df, source)
+    dates = data.index.tz_localize(None).normalize()
+    assert data.loc[dates == pd.Timestamp("2023-03-27"), "load_fc_day_max"].isna().all()
+    assert (
+        data.loc[(dates >= pd.Timestamp("2023-02-11")) & (dates != pd.Timestamp("2023-03-27")), "load_fc_day_max"]
+        .iloc[: 24 * 60]
+        .notna()
+        .all()
+    )
+    pipeline = downstream(PREDICTORS + ["load_fc_day_max_d+1"], INFO.with_source_rules([source]), window=45)
+    with warnings.catch_warnings():
+        warnings.filterwarnings("error", message=".*have no value of")
+        pipeline.run(data, *TEST, horizon=1, save_dir=str(tmp_path / "down"))
+    entry = json.loads((tmp_path / "down" / "price_m.manifest.json").read_text())["chained_inputs"]["load_fc_day_max"]
+    assert (entry["agg"], entry["horizon"], entry["coverage"]["load_fc_day_max_d+1"]["uncovered"]) == ("max", 1, 0)
+
+
+def test_a_day_statistic_of_an_upstream_starting_mid_window_counts_its_missing_days(df, shared, tmp_path):
+    """The `mid` upstream's first forecast is issued on 2023-03-20: the rows of 03-05 to 03-19 read dates it has no forecast
+    for, 15 days of 24 rows; the switch day's 23 rows read 03-27, which no upstream can complete, and are not counted."""
+    source = ForecastSource(str(shared["root"] / "mid"), model="load_up", column="load_fc", agg="max")
+    data = with_day_statistic(df, source)
+    pipeline = downstream(PREDICTORS + ["load_fc_day_max_d+1"], INFO.with_source_rules([source]), availability="warn")
+    with pytest.warns(UserWarning, match="rows its fits read have no value of load_fc_day_max"):
+        pipeline.run(data, *TEST, horizon=1, save_dir=str(tmp_path / "down"))
+    found = json.loads((tmp_path / "down" / "price_m.manifest.json").read_text())["chained_inputs"]["load_fc_day_max"]
+    assert found["coverage"]["load_fc_day_max_d+1"]["uncovered"] == 15 * 24
+    assert (found["coverage"]["load_fc_day_max_d+1"]["first"], found["coverage"]["load_fc_day_max_d+1"]["last"]) == (
+        "2023-03-05",
+        "2023-03-19",
+    )
+    with pytest.raises(InformationSetError, match="have no value of load_fc_day_max"):
+        downstream(PREDICTORS + ["load_fc_day_max_d+1"], INFO.with_source_rules([source])).run(data, *TEST, horizon=1)
+
+
+def test_verify_is_ok_on_a_day_statistic_and_finds_the_leak_of_one_known_after_the_issue(df, shared):
+    """`verify` with its positive control on the chained day maximum; stated known at 12:30 (`available`), after the 11:45
+    issue, it is a leak and refused at raise."""
+    path = str(shared["root"] / "up")
+    source = ForecastSource(path, model="load_up", column="load_fc", agg="max")
+    data = with_day_statistic(df, source)
+    pipeline = downstream(PREDICTORS + ["load_fc_day_max_d+1"], INFO.with_source_rules([source]))
+    assert pipeline.verify(data, *TEST, horizon=1, days=2).table().set_index("model").loc["price_m", "status"] == "ok"
+    late = ForecastSource(path, model="load_up", column="load_fc", agg="max", available="12:30")
+    info = INFO.with_source_rules([late])
+    with pytest.raises(InformationSetError, match="load_fc_day_max_d\\+1"):
+        downstream(PREDICTORS + ["load_fc_day_max_d+1"], info).run(data, *TEST, horizon=1)
+    report = downstream(PREDICTORS + ["load_fc_day_max_d+1"], info, availability="warn").verify(
+        data, *TEST, horizon=1, days=2
+    )
+    assert report.table().set_index("model").loc["price_m", "status"] == "leak"
