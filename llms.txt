@@ -138,6 +138,10 @@ Rules to know before using the library:
 - [ExcelExporter](docs/src/content/docs/exporters/excel.md): formatted Excel workbook
 - [CsvExporter](docs/src/content/docs/exporters/csv.md): wide-format CSV
 
+## Reproductions
+
+- [Renewables Study](docs/src/content/docs/reproductions/renewables.mdx): the renewables study (DE-LU and AT solar and wind generation from issue-time weather, chained into hourly price models) scored exactly from its stored forecasts and rebuilt from library components (`RidgeModel` and pooled `HistGBModel` with `normalise_by`, `bounds`, `zero_when`; `ForecastSource`), each cell next to the published one on identical keys with counts, every DM verdict compared, honest and post-gate apart
+
 ## Reference
 
 - [API Reference](docs/src/content/docs/reference/api.md): constructor and method signatures of the pipelines, `Workflow`, `EvaluationReport` and every shipped component
