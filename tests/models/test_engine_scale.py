@@ -189,6 +189,6 @@ def test_a_model_is_the_same_bits_alone_in_its_group_and_over_8_array_tasks(tmp_
     engine = {name: json.loads((one / f"{name}.manifest.json").read_text())["engine"] for name in NAMES}
     assert all(e["fits"] > 0 for e in engine.values())
     assert sum(sum(e["fallbacks"].values()) for e in engine.values()) > 0
-    assert {json.loads((one / f"{name}.manifest.json").read_text())["fit_path"] for name in NAMES} == {"engine-1"}
+    assert {json.loads((one / f"{name}.manifest.json").read_text())["fit_path"] for name in NAMES} == {"engine-2"}
     counts = group.forecast_counts()
     assert len(counts) == len(NAMES) and (counts["produced"] > 0).all()
