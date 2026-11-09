@@ -669,11 +669,26 @@ def test_the_fingerprint_sees_edits_inside_predictor_functions(tmp_path, monkeyp
     importlib.reload(searched_lists)
     assert bayes.model_fingerprint(OLSModel(searched_lists.fn, training_window=28, name="ols")) != before
     compiled = {}
-    for listed in ("['load_d+{horizon}', 'wind_d+{horizon}']", "['load_d+{horizon}', 'solar_d+{horizon}']"):
+    for text in (
+        "def fn(ctx):\n    return ['load_d+{horizon}', 'wind_d+{horizon}']\n",
+        "def fn(ctx):\n    return ['load_d+{horizon}', 'solar_d+{horizon}']\n",
+        "def fn(ctx, names=('load_d+{horizon}',)):\n    return list(names)\n",
+        "def fn(ctx, names=('wind_d+{horizon}',)):\n    return list(names)\n",
+    ):
         namespace = {}
-        exec(compile(f"def fn(ctx):\n    return {listed}\n", "<generated>", "exec"), namespace)
-        compiled[listed] = bayes.model_fingerprint(OLSModel(namespace["fn"], training_window=28, name="ols"))
-    assert len(set(compiled.values())) == 2
+        exec(compile(text, "<generated>", "exec"), namespace)  # no source to read: its code, constants and defaults
+        compiled[text] = bayes.model_fingerprint(OLSModel(namespace["fn"], training_window=28, name="ols"))
+    assert len(set(compiled.values())) == 4
+
+    def with_default(ctx, names=("load_d+{horizon}", "wind_d+{horizon}")):
+        return list(names)
+
+    by_default = bayes.model_fingerprint(OLSModel(with_default, training_window=28, name="ols"))
+
+    def with_default(ctx, names=("load_d+{horizon}", "solar_d+{horizon}")):  # noqa: F811 (a default edited: no bytecode moves)
+        return list(names)
+
+    assert bayes.model_fingerprint(OLSModel(with_default, training_window=28, name="ols")) != by_default
     held = ["load_d+{horizon}"]
 
     def from_global(ctx):
