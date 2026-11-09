@@ -221,6 +221,19 @@ def independent_count(data, name, first_row, last_row):
     return int(missing.sum()), int(inside.sum())
 
 
+def independent_let_off(data, name, first_row, last_row):
+    """The rows `independent_count` leaves out: missing, but reading a wall time off the clock or a slot no forecast is planned
+    for."""
+    missing_all = int(
+        (
+            (data.index.tz_localize(None).normalize() >= pd.Timestamp(first_row))
+            & (data.index.tz_localize(None).normalize() <= pd.Timestamp(last_row))
+            & data[name].isna().to_numpy()
+        ).sum()
+    )
+    return missing_all - independent_count(data, name, first_row, last_row)[0]
+
+
 @pytest.mark.parametrize("availability", ["none", "warn"])
 def test_an_upstream_starting_mid_window_warns_with_its_counts_and_the_days_to_cover(shared, tmp_path, availability):
     source, data = shared["mid"], shared["mid_data"]
@@ -241,12 +254,14 @@ def test_an_upstream_starting_mid_window_warns_with_its_counts_and_the_days_to_c
     assert coverage["load_fc_d+1"] == {
         "read": read,
         "uncovered": expected,
+        "let_off": independent_let_off(data, "load_fc_d+1", "2023-03-05", "2023-04-12"),
         "first": "2023-03-05",
         "last": "2023-03-19",
         "run_from": "2023-03-05",
         "run_to": "2023-03-19",
     }
     assert expected == 15 * 24  # 15 whole days before the upstream's first forecast
+    assert coverage["load_fc_d+1"]["let_off"] == 1  # 03-25 02:00 reads 03-26 02:00, which the switch skips
     assert (coverage["load_fc_d-1"]["first"], coverage["load_fc_d-1"]["last"]) == ("2023-03-05", "2023-03-21")
     assert (coverage["load_fc_d-1"]["run_from"], coverage["load_fc_d-1"]["run_to"]) == ("2023-03-03", "2023-03-19")
 
@@ -267,6 +282,7 @@ def test_with_refit_the_rows_read_are_those_of_the_refit_days(shared, tmp_path):
     assert found["load_fc_d+1"] == {
         "read": read,
         "uncovered": expected,
+        "let_off": independent_let_off(data, "load_fc_d+1", "2023-03-03", "2023-04-08"),
         "first": "2023-03-03",
         "last": "2023-03-19",
         "run_from": "2023-03-03",
@@ -793,7 +809,11 @@ def test_a_day_statistic_misses_the_day_after_a_spring_switch_without_a_coverage
         warnings.filterwarnings("error", message=".*have no value of")
         pipeline.run(data, *TEST, horizon=1, save_dir=str(tmp_path / "down"))
     entry = json.loads((tmp_path / "down" / "price_m.manifest.json").read_text())["chained_inputs"]["load_fc_day_max"]
-    assert (entry["agg"], entry["horizon"], entry["coverage"]["load_fc_day_max_d+1"]["uncovered"]) == ("max", 1, 0)
+    found = entry["coverage"]["load_fc_day_max_d+1"]
+    assert (entry["agg"], entry["horizon"], found["uncovered"]) == ("max", 1, 0)
+    # The trace of the exemption: every row of the switch day, which reads 03-27, and 03-25 02:00, which reads the hour the
+    # switch skips.
+    assert found["let_off"] == 23 + 1
 
 
 def test_a_day_statistic_of_an_upstream_starting_mid_window_counts_its_missing_days(df, shared, tmp_path):
@@ -830,3 +850,55 @@ def test_verify_is_ok_on_a_day_statistic_and_finds_the_leak_of_one_known_after_t
         data, *TEST, horizon=1, days=2
     )
     assert report.table().set_index("model").loc["price_m", "status"] == "leak"
+
+
+# -- hour aggregates of a chained column (PeriodStatsTransformer, 7d) -------------------------------------------------------
+
+
+@pytest.mark.parametrize("shift", ["", "_d-1", "_d+1"])
+def test_an_hour_aggregate_of_a_chained_column_has_no_hole_where_the_upstream_plans_no_forecast(shift):
+    """A 15-minute upstream at horizon 1 plans no forecast of 02:00 to 02:45 on 2024-04-01 (its issue day, the spring switch,
+    has no 02:00), so the hour mean of that hour is NaN on its four rows, and on the rows its lags read it from. The coverage
+    check reads the column it was built from at the same row through the shifts after it (`x_d-1` for `x_hour_mean_d-1`) and
+    lets those rows off; a profile and a day aggregate are judged as they stand."""
+    from epftoolbox2.data.transformers import PeriodStatsTransformer
+    from epftoolbox2.information_set import ChainedInput
+    from epftoolbox2.models._chained import _off_the_clock
+
+    chained_x = ChainedInput("x", "/p", "up", 1, "11:45", "Europe/Brussels", ZONE, None, "d", freq="15min")
+    index = pd.date_range("2024-03-30", "2024-04-03", freq="15min", tz=ZONE, inclusive="left")
+    wall = index.tz_localize(None)
+    x = pd.Series(np.arange(len(index), dtype=float), index=index)
+    x[(wall.normalize() == pd.Timestamp("2024-04-01")) & (wall.hour == 2)] = np.nan  # what the source places
+    frame = PeriodStatsTransformer("x").transform(pd.DataFrame({"x": x}))
+    frame = LagTransformer(["x", "x_hour_mean", "x_hour_dev"], [1, -1], "day").transform(frame)
+    days = {"": 0, "_d-1": -1, "_d+1": 1}[shift]
+    read = wall.normalize() + pd.Timedelta(days=days)
+    inside = np.asarray(
+        (read >= pd.Timestamp("2024-03-30")) & (read <= pd.Timestamp("2024-04-02"))
+    )  # not the frame's edges
+    for name in (f"x{shift}", f"x_hour_mean{shift}", f"x_hour_dev{shift}"):
+        missing = frame[name].isna().to_numpy() & inside
+        off = _off_the_clock(frame.index, name, chained_x)
+        assert missing.any() and not (missing & ~off).any(), name
+    assert not _off_the_clock(frame.index, "x_h02_d-1", chained_x).any()
+    assert not _off_the_clock(frame.index, "x_day_max_d-1", chained_x).any()
+
+
+def test_a_model_reading_an_hour_mean_of_a_chained_column_runs_at_raise(df, shared, tmp_path):
+    """End to end over the spring switch: `load_fc_hour_mean_d-1` of the hourly upstream reads the hour mean of 03-26 02:00
+    (no row) and of 03-27 02:00 (no forecast planned) and no other hole, so the run goes through at raise, with those rows
+    let off in its manifest."""
+    from epftoolbox2.data.transformers import PeriodStatsTransformer
+
+    source = shared["up"]
+    data = PeriodStatsTransformer("load_fc", freq="1h").transform(shared["up_data"].copy())
+    data = LagTransformer(["load_fc_hour_mean"], [1], "day").transform(data)
+    pipeline = downstream(PREDICTORS + ["load_fc_hour_mean_d-1"], INFO.with_source_rules([source]), window=45)
+    with warnings.catch_warnings():
+        warnings.filterwarnings("error", message=".*have no value of")
+        pipeline.run(data, *TEST, horizon=1, save_dir=str(tmp_path / "down"))
+    entry = json.loads((tmp_path / "down" / "price_m.manifest.json").read_text())["chained_inputs"]["load_fc"]
+    found = entry["coverage"]["load_fc_hour_mean_d-1"]
+    # 03-27 02:00 reads the hour the switch skips on 03-26, 03-28 02:00 the hour no forecast is planned for on 03-27.
+    assert found["uncovered"] == 0 and found["let_off"] == 2

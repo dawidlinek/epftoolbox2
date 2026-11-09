@@ -87,7 +87,8 @@ data = (
 
 - **Whole dates only.** A date with a slot that has no forecast, or a forecast that is missing, gets NaN on all of its rows. A run
   plans no forecast for a slot its issue day's clock lacks, so the date `horizon` days after a spring switch has no 02:00
-  forecast and its statistic is NaN; the downstream's coverage check knows that no upstream can fill it and doesn't count it.
+  forecast and its statistic is NaN; the downstream's coverage check knows that no upstream can fill it and doesn't count it
+  (its manifest's `let_off` does).
 - **Dates of the upstream's data zone.** The statistic is over the upstream's target date, whatever zone the downstream frame is in.
   On a frame in another zone it is the same on the rows of that date, which are not the frame's local day: a Helsinki date runs from
   23:00 to 23:00 Warsaw time. `DailyStatsTransformer` after the plain column summarises the frame's own days instead.
