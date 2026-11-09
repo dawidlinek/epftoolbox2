@@ -537,6 +537,7 @@ def test_runtime_fields_are_resolved_settings():
         "stack": "loop",
         "pad_to": None,
         "cpu_capability": capability,  # AVX2 against the generic kernels moved a fit by 1e-6
+        "device_name": runtime.cpu_name(),  # recorded; a resume on another model only warns
     }
     assert runtime.runtime_fields(device="cpu", stack="vmap")["pad_to"] == runtime.DEFAULT_PAD
     assert runtime.runtime_fields(
@@ -550,6 +551,7 @@ def test_runtime_fields_are_resolved_settings():
         "stack": "vmap",
         "pad_to": 256,
         "cpu_capability": capability,
+        "device_name": runtime.cpu_name(),
     }
     for bad in (dict(dtype="float16"), dict(stack="stacked"), dict(stack="vmap", pad_to=0)):
         with pytest.raises(ValueError):

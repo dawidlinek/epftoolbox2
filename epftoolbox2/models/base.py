@@ -2866,5 +2866,7 @@ class BaseModel(ABC):
     def _predict_days(self, fitted: Any, rows: np.ndarray) -> np.ndarray:
         """The forecasts of a day unit's call, (rows, P) in the transformed target units, from `fitted` (`_fit_days`) and the
         scaled inputs `rows` (rows, inputs): the issue dates of every day of the unit's block the frame has, padded to the rule's
-        nominal length with copies of the first. A row's forecasts must not depend on the call's other rows."""
+        nominal length with copies of the first. A row's forecasts must not depend on the call's other rows. A fit of several
+        members (seeds) may return (members, rows, P): a forecast is then their mean in target units, each member mapped back
+        with its period's Invariant first (`_worker._fit_day_unit`)."""
         raise NotImplementedError(f"{type(self).__name__} has no _predict_days: it fits no day units")

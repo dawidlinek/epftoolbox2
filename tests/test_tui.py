@@ -107,3 +107,15 @@ def test_the_resolution_prompt_offers_daily_frames(monkeypatch):
     monkeypatch.setattr(tui.questionary, "select", select)
     assert tui._ask_freq() == "1D"
     assert offered["choices"] == ["1h", "15min", "1D"]
+
+
+def test_the_networks_can_be_built_without_fitting():
+    """The TUI's fields build the three networks (no torch needed until they fit)."""
+    daily = tui._instantiate("MLPDailyModel", {"predictors": ["price_h05_d-1"], "hidden": [32], "seeds": 2})
+    assert (daily.hidden, daily.seeds, daily.output) == ([32], 2, "day")
+    hourly = tui._instantiate("MLPHourlyModel", {"predictors": ["price_d-1"], "training_window": 364})
+    assert (hourly.output, hourly.training_window) == ("period", 364)
+    generic = tui._instantiate(
+        "TorchModel", {"module": "epftoolbox2.nets:MLP", "predictors": ["a"], "module_params": {"hidden": [8]}}
+    )
+    assert generic.module_params == {"hidden": [8]} and generic.refit == "7D"

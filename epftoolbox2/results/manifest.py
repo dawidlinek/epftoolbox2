@@ -212,9 +212,40 @@ class ManifestMismatchError(ValueError):
     """An existing results directory was produced with a different configuration than this run."""
 
 
+def _session_module_note(theirs: Any, mine: Any) -> str:
+    """Why a network whose class has no module file refuses a resume (`models.torch_model.SESSION` hashes), or ""."""
+    hashes = [params.get("module_hash") if isinstance(params, dict) else None for params in (theirs, mine)]
+    if hashes[0] == hashes[1] or not any(isinstance(h, str) and h.startswith("session-") for h in hashes):
+        return ""
+    return (
+        " (the network's class has no module file, as in a notebook, so its runs resume only in the same session with the "
+        "same, unchanged class object: a cell run again, a class changed in place or a restart makes it another class to a "
+        "resume. Define the network in a module file to resume across sessions; pass allow_manifest_mismatch=True only if you "
+        "know the class is unchanged)"
+    )
+
+
+# Entries of a carded family's `runtime` recorded but never compared: a resume where one differs warns. The device's model
+# (`models._torch.runtime.device_name`): bits are not known to hold across GPU models, nor known to differ across CPUs whose
+# kernels (`cpu_capability`, compared) are the same.
+RUNTIME_WARN_ONLY = ("device_name",)
+
+
 def _runtime_differences(name: str, theirs: Optional[Dict[str, Any]], mine: Optional[Dict[str, Any]]) -> List[str]:
     """The entries of a carded family's `runtime` or `weights` that differ, one line each (`runtime.packages.torch: ...`). Only
-    the weights' file hashes count: where the files were found (`ref`) differs between machines with the same files."""
+    the weights' file hashes count: where the files were found (`ref`) differs between machines with the same files. A
+    `RUNTIME_WARN_ONLY` entry of `runtime` that differs warns instead."""
+    if name == "runtime" and isinstance(theirs, dict) and isinstance(mine, dict):
+        for key in RUNTIME_WARN_ONLY:
+            if key in theirs and key in mine and theirs[key] != mine[key]:
+                warnings.warn(
+                    f"runtime.{key}: the results were made on {theirs[key]!r} and this run is on {mine[key]!r}; the same "
+                    "settings are not known to give the same bits on another device model",
+                    UserWarning,
+                    stacklevel=4,
+                )
+        theirs = {key: value for key, value in theirs.items() if key not in RUNTIME_WARN_ONLY}
+        mine = {key: value for key, value in mine.items() if key not in RUNTIME_WARN_ONLY}
     if name == "weights":
         refs = f" (weights {None if theirs is None else theirs.get('ref')!r} vs {None if mine is None else mine.get('ref')!r})"
         theirs = None if theirs is None else {"files": theirs.get("files")}
@@ -364,6 +395,8 @@ class Manifest:
                 note = _OLD_RESULTS_NOTE if name == "training_cut" and theirs is None else ""
                 if name == "save_coefficients":
                     note = " (None: records with their coefficients; False: written with save_coefficients=False)"
+                if name == "model_params":
+                    note = _session_module_note(theirs, mine)
                 if name == "fit_path":
                     note = (
                         " (None: the model path, engine off or a model the engine fits on it; 'engine-2': fits from shared "
