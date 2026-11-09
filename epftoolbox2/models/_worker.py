@@ -1322,7 +1322,8 @@ def _fit_pooled_unit(
         return skip_all(SKIP_NO_FINITE_TRAINING_ROWS)
     train_x, train_y, groups = train_x[finite], train_y[finite], groups[finite]
     per_period = units["target_transform"] == PER_PERIOD
-    trained = np.isin(np.arange(periods), groups) if per_period else np.ones(periods, dtype=bool)
+    # A period with no training row is skipped whatever the transform, so the forecast keys don't depend on it.
+    trained = np.isin(np.arange(periods), groups)
 
     rule = refit["rules"][unit.member]
     call_rows: List[Tuple[int, int]] = []  # (period, issue row) of each block day's period the frame has, inputs finite

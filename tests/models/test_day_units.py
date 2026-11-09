@@ -1182,3 +1182,17 @@ def test_on_the_spring_switch_each_period_trains_on_its_period_unit_s_dates(freq
             issue,
             lost,
         )  # only the skipped hour's own target is missing
+
+
+@pytest.mark.parametrize("model", [DayRidge, PooledOLS])
+def test_a_period_with_no_training_target_is_skipped_whatever_the_target_transform(market, model):
+    """No price at 05:00: that period has no training target, so its three forecasts are `no_finite_training_rows` with each
+    target transform, and the keys of the run don't depend on the transform."""
+    data = market.copy()
+    data.loc[data.index.hour == 5, "price"] = np.nan
+    transforms = ["per_period", "pooled"] if model is PooledOLS else ["per_period"]
+    for transform in transforms:
+        settings = {"target_transform": transform} if model is PooledOLS else {}
+        ref = model(**settings).run(data, "2023-04-03", "2023-04-05", horizon=1)
+        assert len(ref._results) == 69 and ref.skipped == {"no_finite_training_rows": 3}, transform
+        assert 5 not in {r["hour"] for r in ref._results}
