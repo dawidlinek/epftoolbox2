@@ -119,7 +119,9 @@ The table is empty, with the same columns, when there is nothing to list. Otherw
 - **the manifest** next to the results, under `availability`, with the level. So `ModelPipeline.report()` after array jobs, and
   a resumed run, show what the run listed, once. A resumed run lists what a fresh one does. A run over a narrower test period
   into the same directory keeps what was listed for the records it leaves out, unless the rules changed, in which case
-  this run's rows replace them. A run at level `"none"` lists nothing in its own report and writes nothing there, but leaves what
+  this run's rows replace them and the earlier ones go under `stored_under_other_rules` (kept by every later resume): the file
+  holds records judged by other rules, and a [`ForecastSource`](/epftoolbox2/data-sources/forecast/) reading it takes the model
+  as unchecked. A run at level `"none"` lists nothing in its own report and writes nothing there, but leaves what
   an earlier run wrote, unless the rules changed: results that were flagged don't read as clean because of how they were last
   resumed.
 
@@ -242,7 +244,9 @@ columns an `OpenMeteoSource` or an `EpftoolboxBenchmarkSource` emits:
   `published(issue time, days_before=horizon, timezone=issue zone, day_zone=data zone, vintage="snapshot")` from the
   upstream's manifest, and `with_source_rules` registers its upstream (`InformationSet.chained_inputs()`), which the
   downstream's input check reads for coverage and late upstream inputs: see [Chaining](/epftoolbox2/model-pipeline/chaining/).
-  Only this knows when such a column is out: outside a `Workflow`, pass `with_source_rules(data_pipeline.sources)`.
+  Only this knows when such a column is out: outside a `Workflow`, pass `with_source_rules(data_pipeline.sources)`. Unlike every
+  other source rule it comes first: no rule, accepted assumption or pattern replaces it, for the column, its shifts, profiles and
+  day aggregates, and a rule in `rules=` that names it is refused (`InformationSetError`), as it would be ignored.
 - An `EpftoolboxBenchmarkSource` gets its rules on the files' own wall clock, its `index_timezone`: `price` published
   13:00 on D-1 and the two exogenous forecasts 10:00 on D-1. That index only labels the wall clock, one hour off the
   true instants in summer, so a Brussels rule would read the file's 23:00 on D as 00:00 on D+1 all summer.

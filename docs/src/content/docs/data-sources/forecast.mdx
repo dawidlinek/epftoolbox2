@@ -36,7 +36,7 @@ pipeline.information_set = pipeline.information_set.with_source_rules(data.sourc
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `path` | str | Yes | - | The upstream run's `save_dir`. Relative to the working directory, or in YAML to the file. |
+| `path` | str | Yes | - | The upstream run's `save_dir`. Relative to the working directory, or in YAML (a pipeline file or a `Workflow`'s inline sources) to the file; `~` is your home. |
 | `model` | str | Yes | - | The upstream model's name (or an ensemble's), as `ModelPipeline` names its results: `<name>.jsonl` or `<name>.parquet` |
 | `column` | str | Yes | - | The name of the column it emits |
 | `horizon` | int | No | `1` | Which upstream horizon to read: days between the forecast's issue day and its target day |
@@ -79,6 +79,12 @@ issue zone, `horizon` days before the delivery day, a **date of the upstream's d
 the two clocks differ: Helsinki's 00:00 of D+1 is Brussels' 23:00 of D, and the forecast for it was issued on D, not on D-1; read in
 Brussels dates it would pass a day early. See [Information Set](/epftoolbox2/model-pipeline/information-set/#delivery-days-of-another-zone).
 
+This rule is the column's whatever else the information set holds: it comes before your rules, accepted assumptions and patterns
+(`generation_*`, `entsoe_a69_by_10`), for the column, its shifts, profiles and day aggregates alike, so the check, `explain` and
+`verify` all read the upstream's issue time. A rule of yours that names the column (`rules={"solar_fc": ...}` or
+`"solar_fc_d+1"`) is refused with `InformationSetError` by `with_source_rules` and by the model's input check, since it would be
+ignored; use `available=` for a later time.
+
 <Aside type="caution">
   A chained column has no built-in rule: only `with_source_rules` knows it. A `Workflow` applies it; a model run outside one needs
   `information_set.with_source_rules(data_pipeline.sources)`. Without it the column has no rule: refused at
@@ -94,20 +100,27 @@ the source raises. An upstream ensemble reads its issue time from its members' m
 A downstream model that reads the column is checked for two more things before any fit (see
 [Chaining](/epftoolbox2/model-pipeline/chaining/)):
 
-- **Coverage.** Rows its fits read where the chained predictor has no value drop out of training silently. They are counted and
-  warned about at every level, `"none"` included, naming the first and last dates and the day the upstream must start from; at
-  `availability="raise"` they are refused.
-- **Late upstream.** If the upstream (any member of an upstream ensemble) listed inputs as late or without a rule, or ran at
-  `availability="none"`, every use of its column is listed as `late upstream` at `"warn"` and refused at `"raise"`.
+- **Coverage.** Rows its fits read where the chained predictor has no value drop out of training silently: those of the periods
+  whose lists hold it at each horizon (every period for a model of day or pooled units). They are counted and warned about, once
+  per chained column, at every level, `"none"` included, naming the first and last dates and the upstream issue days that would
+  cover them; at `availability="raise"` they are refused.
+- **Late upstream.** If the upstream (any member of an upstream ensemble) listed inputs as late or without a rule, or its listing
+  doesn't vouch for every forecast it stored, every use of its column is listed as `late upstream` at `"warn"` and refused at
+  `"raise"`. A listing doesn't vouch for them when the model ran at `availability="none"` (it has none), at `"raise"` with
+  `unknown="warn"` or `"ignore"` (a column without a rule passed unlisted), was resumed under other rules or another issue time
+  (its manifest keeps the earlier rows under `stored_under_other_rules`), was accepted unverified (`data_unverified`), or holds
+  forecasts issued outside the test period its manifest describes. Run the upstream at `availability="raise"` with the default
+  `unknown="raise"`, into a fresh `save_dir` when its information set changes.
 
-The downstream's manifest records each chained column's upstream (`chained_inputs`), and a resume refuses another upstream model,
-horizon, issue time or zone, data zone or `available`.
+The downstream's manifest records each chained column's upstream (`chained_inputs`, the upstream by its absolute path), and a resume
+refuses another upstream model, horizon, issue time or zone, data zone or `available`.
 
 ## Caching
 
 The source has no per-source cache (`get_cache_config()` returns `None`): the upstream's results grow as its pipeline runs, and a
 cache would serve stale forecasts. The single-file cache (`DataPipeline.run(..., cache="file.parquet")`) fingerprints the upstream's
-content through `content_digest()` (its manifest's digest and its results' size and modification time, or a Parquet catalog's hash),
+content through `content_digest()` (its manifest's digest and a hash of its JSONL's bytes, or of a Parquet catalog, which names its
+immutable parts),
 so it fetches again after the upstream changed and reuses the file otherwise.
 
 ## What It Refuses

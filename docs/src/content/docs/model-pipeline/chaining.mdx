@@ -41,7 +41,8 @@ report = price.run(frame, test_start="2024-01-01", test_end="2024-12-31", horizo
 ```
 
 `solar_fc_d+1` on the row of D is the forecast for D+1 issued on D at 09:30, known before the 11:45 issue; `solar_fc_d+2` would be
-the one issued on D+1, refused. A `Workflow` calls `with_source_rules` itself; outside one, pass it as above, or the column has no
+the one issued on D+1, refused. The rule is the source's whatever your rules, assumptions and patterns say (a rule naming the
+column is refused, as it would be ignored). In a `Workflow` file, the source's `path` is relative to that file. A `Workflow` calls `with_source_rules` itself; outside one, pass it as above, or the column has no
 rule (listed as `no rule` at `availability="warn"`, refused at `"raise"` with `unknown="raise"`).
 
 <Aside type="tip">
@@ -64,28 +65,41 @@ it; never an earlier one. Results with live revisions (records with `issued_at`)
 
 ## Coverage of the Training Rows
 
-Where the upstream started later than the downstream's training window reaches, or skipped days, the downstream's fits read rows
-whose chained predictor has no value, and those rows drop out of training without a word in the counts of forecasts. Before any fit
-the downstream counts them, on the rows its fits read (every planned issue day's training span, from its refit day with `refit`, for
-each horizon and window), and warns at every `availability` level, `"none"` included:
+Where the upstream started later than the downstream's training window reaches, stopped early, or skipped days, the downstream's
+fits read rows whose chained predictor has no value, and those rows drop out of training without a word in the counts of
+forecasts. Before any fit the downstream counts them, on the rows its fits read (every planned issue day's training span, from its
+refit day with `refit`, for each horizon and window, of the periods whose lists hold the predictor, every period for a model of
+day or pooled units), and warns once per chained column at every `availability` level, `"none"` included:
 
 ```text
-price_m: solar_fc_d+1 has no value on 360 of the 935 rows its fits read, from 2023-03-05 to 2023-03-19: those rows drop out of
-training. solar_fc holds the forecasts of solar_ridge (horizon 1) in runs/solar; run solar_ridge from 2023-03-05 so that they
-cover the rows the fits read.
+price_m: rows its fits read have no value of solar_fc: solar_fc_d+1 on 360 of 935 rows, from 2023-03-05 to 2023-03-19. Those rows
+drop out of training. solar_fc holds the forecasts of solar_ridge (horizon 1) in /data/runs/solar; run solar_ridge so that it
+covers the issue days 2023-03-05 to 2023-03-19.
 ```
 
 At `availability="raise"` the same is an `InformationSetError`. Rows that can't hold a value whatever the upstream does are not
 counted: a day shift that lands on the hour a spring switch skips, and the slot the upstream never plans (02:00 on the day after a
-switch at horizon 1, whose issue day has no 02:00). The counts go to the manifest, `chained_inputs[column]["coverage"]`, per
-predictor: rows read, rows without a value, the first and last of their dates and the day to run the upstream from.
+switch at horizon 1, whose issue day has no 02:00). A predictor read only in some periods (a list of `(horizon, hour)`, say, that
+reads a daylight-only solar forecast in daylight hours) is counted in those periods alone. The counts go to the manifest,
+`chained_inputs[column]["coverage"]`, per predictor: rows read, rows without a value, the first and last of their dates, and the
+upstream issue days that would cover them (`run_from`, `run_to`).
 
 ## An Upstream That Read Something Late
 
 A chain is as honest as its first stage. An upstream whose manifest lists inputs known after its own issue time or without a rule
-(its `availability="warn"` listing; for an ensemble, any member's), or that ran at `availability="none"` and so has no listing at
-all, makes every downstream use of its column `late upstream`: listed in `report.availability()` with the upstream's late inputs in
-`note` at `"warn"`, refused at `"raise"`. Run the upstream at `availability="raise"`: then its listing is empty and its column passes.
+(its `availability="warn"` listing; for an ensemble, any member's) makes every downstream use of its column `late upstream`: listed
+in `report.availability()` with the upstream's late inputs in `note` at `"warn"`, refused at `"raise"`. So does one whose listing
+doesn't vouch for every forecast it stored:
+
+- it ran at `availability="none"`, and has no listing;
+- it ran at `"raise"` with `unknown="warn"` or `"ignore"`, which lets a column without a rule through unlisted;
+- it was resumed under another information set (another issue time, other rules): its manifest lists what the current rules say
+  and keeps the earlier rows under `stored_under_other_rules`, for the records the earlier rules judged;
+- it was resumed over a mismatch or without a manifest (`data_unverified`, `training_cut` unverified);
+- it holds forecasts issued outside the test period its manifest describes, which no run it records checked.
+
+Run the upstream at `availability="raise"` with the default `unknown="raise"`, into a fresh `save_dir` whenever its information
+set changes: then its listing vouches for every forecast and its column passes.
 
 ## Results and Resuming
 
