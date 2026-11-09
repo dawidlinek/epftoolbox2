@@ -7,7 +7,9 @@ import pandas as pd
 from ._daily import as_column_list, check_index, check_new_columns, check_unique_index, parse_step, slot_of_day
 from .base import Transformer
 
-_STATS = ("mean", "dev")
+# What `stats` may name, `{column}_hour_{stat}`. The information set reads these names (`information_set._HOUR_AGGREGATE` is
+# built from them).
+STATS = ("mean", "dev")
 # The periods a statistic can be taken over, and the word of their column names.
 _PERIODS = {pd.Timedelta(hours=1): "hour"}
 
@@ -52,7 +54,7 @@ class PeriodStatsTransformer(Transformer):
         self,
         columns: str | list[str],
         period: str = "1h",
-        stats: list[str] | tuple = _STATS,
+        stats: list[str] | tuple = STATS,
         freq: str = "15min",
     ):
         self.columns = as_column_list(columns)
@@ -70,9 +72,9 @@ class PeriodStatsTransformer(Transformer):
             raise ValueError(f"freq must divide the period {period!r} into whole slots, got {freq!r}")
         self._word = _PERIODS[length]
         self._slots = int(length // self._step)
-        unknown = [s for s in self.stats if s not in _STATS]
+        unknown = [s for s in self.stats if s not in STATS]
         if unknown or not self.stats:
-            raise ValueError(f"stats must be a non-empty subset of {list(_STATS)}, got {unknown or self.stats}")
+            raise ValueError(f"stats must be a non-empty subset of {list(STATS)}, got {unknown or self.stats}")
 
     def transform(self, df: pd.DataFrame) -> pd.DataFrame:
         index = check_index(df, "PeriodStatsTransformer")  # a UTC index groups UTC hours: it warns

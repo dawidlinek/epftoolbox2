@@ -35,6 +35,8 @@ import numpy as np
 import pandas as pd
 
 from ._date_utils import daily_anchor, zone_name
+from .data.transformers.daily_stats import STATS as _DAY_STATS
+from .data.transformers.period_stats import STATS as _HOUR_STATS
 from .logging import get_logger
 
 logger = get_logger(__name__)
@@ -73,10 +75,10 @@ _SLOT_MINUTES = {"h": 60, "s": 15}
 # local day. No sign, so they never parse as a shift. `is_day_mean` and `warsaw_is_day_max` are not such columns but
 # Open-Meteo's `is_day` aggregated over locations (`_open_meteo_common.aggregated_variable_names`), whoever's rule
 # reads them, so a column named `is` or `..._is` can't be told apart and is read as a plain column.
-_DAY_AGGREGATE = re.compile(r"^(?P<column>.+)(?<!_is)(?<!^is)_day_(?:min|max|mean|last|peak)$")
+_DAY_AGGREGATE = re.compile(rf"^(?P<column>.+)(?<!_is)(?<!^is)_day_(?:{'|'.join(map(re.escape, _DAY_STATS))})$")
 # PeriodStatsTransformer's suffixes (`data.transformers.period_stats`): the column's mean over the row's hour, or the row's
 # deviation from it. No sign, so they never parse as a shift.
-_HOUR_AGGREGATE = re.compile(r"^(?P<column>.+)_hour_(?:mean|dev)$")
+_HOUR_AGGREGATE = re.compile(rf"^(?P<column>.+)_hour_(?:{'|'.join(map(re.escape, _HOUR_STATS))})$")
 
 
 # The note of a use that is late on a training row, not on the issue day's.

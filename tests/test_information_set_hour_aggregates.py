@@ -12,6 +12,8 @@ less one slot). The probe must perturb exactly the cells delivered after the iss
 rule.
 """
 
+import warnings
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -71,6 +73,36 @@ def test_hour_aggregate_names():
     for name in ["x_day_peak", "x_day_peak_d-1", "x_d-1_day_peak", "x_hour_mean_day_peak"]:
         assert info.resolve(name).day_aggregate, name
     assert not info.resolve("is_day_peak").day_aggregate  # Open-Meteo's is_day, as for the other statistics
+
+
+@pytest.mark.parametrize("freq", ["1h", "15min"])
+def test_every_name_a_daily_or_hour_transformer_emits_is_read_as_built_from_its_column(freq):
+    """The patterns are built from the transformers' own statistics (`DailyStatsTransformer`'s and `PeriodStatsTransformer`'s
+    `STATS`), so a statistic added to one is read as an aggregate: every column the profile, day and hour transformers emit,
+    with every statistic, resolves as built from the column it summarises, never as a column of its own."""
+    from epftoolbox2.data.transformers import DailyProfileTransformer
+    from epftoolbox2.data.transformers.daily_stats import STATS as DAY_STATS
+    from epftoolbox2.data.transformers.period_stats import STATS as HOUR_STATS
+
+    index = pd.date_range("2024-01-01", periods=96 * 3, freq="15min", tz="Europe/Warsaw")
+    if freq == "1h":
+        index = index[index.minute == 0]
+    data = pd.DataFrame({"load_actual": np.arange(len(index), dtype=float)}, index=index)
+    emitted = []
+    for transformer in (
+        DailyProfileTransformer("load_actual", freq=freq),
+        DailyStatsTransformer("load_actual", stats=list(DAY_STATS), freq=freq),
+        PeriodStatsTransformer("load_actual", stats=list(HOUR_STATS), freq=freq),
+    ):
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            emitted += list(transformer.transform(data).columns.drop("load_actual"))
+    assert len(emitted) == 1440 // _STEP_MINUTES[freq] + len(DAY_STATS) + len(HOUR_STATS)
+    info = InformationSet(*ISSUE, rules={"load_actual": Availability.realised("1h")})
+    for name in emitted:
+        for shift in ("", "_d-1"):
+            col = info._resolve_for(name + shift, _STEP_MINUTES[freq])
+            assert col.built_from is not None and col.series == "load_actual" and col.key == "load_actual", name + shift
 
 
 # --------------------------------------------------------------------------- the spec's oracle

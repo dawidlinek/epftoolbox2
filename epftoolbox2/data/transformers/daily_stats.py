@@ -16,8 +16,9 @@ from ._daily import (
 from .base import Transformer
 
 _STATS = ("min", "max", "mean", "last")
-# What `stats` may name: the default four, and the mean over the peak hours.
-_ALLOWED = (*_STATS, "peak")
+# What `stats` may name, `{column}_day_{stat}`: the default four, and the mean over the peak hours. The information set reads
+# these names (`information_set._DAY_AGGREGATE` is built from them).
+STATS = (*_STATS, "peak")
 
 
 class DailyStatsTransformer(Transformer):
@@ -60,9 +61,9 @@ class DailyStatsTransformer(Transformer):
         self.freq = freq
         self.peak_hours = check_peak_hours(peak_hours)
         self._step = parse_step(freq)
-        unknown = [s for s in self.stats if s not in _ALLOWED]
+        unknown = [s for s in self.stats if s not in STATS]
         if unknown or not self.stats:
-            raise ValueError(f"stats must be a non-empty subset of {list(_ALLOWED)}, got {unknown or self.stats}")
+            raise ValueError(f"stats must be a non-empty subset of {list(STATS)}, got {unknown or self.stats}")
         if "peak" not in self.stats and self.peak_hours != PEAK_HOURS:
             raise ValueError(f"peak_hours sets the block of stats=['peak']; it means nothing for stats={self.stats}")
 
