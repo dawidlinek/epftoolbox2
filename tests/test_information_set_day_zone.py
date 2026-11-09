@@ -315,13 +315,24 @@ def test_no_assumption_or_pattern_replaces_a_chained_column_s_rule(tmp_path, inf
         assert (known > np.broadcast_to(issued, known.shape))[~skipped].all(), name
 
 
-@pytest.mark.parametrize("key", ["generation_solar_forecast", "generation_solar_forecast_d+1"])
+@pytest.mark.parametrize(
+    "key",
+    [
+        "generation_solar_forecast",
+        "generation_solar_forecast_d+1",
+        "generation_solar_forecast_h05",
+        "generation_solar_forecast_day_max",
+        "generation_solar_forecast_day_max_d+1",
+        "generation_solar_forecast_d-1_h05",
+    ],
+)
 def test_a_rule_naming_a_chained_column_is_refused(tmp_path, key):
     upstream(tmp_path, "Europe/Berlin", "Europe/Brussels", name="solar_ridge")
     source = ForecastSource(tmp_path, "solar_ridge", "generation_solar_forecast")
     info = InformationSet("10:15", "Europe/Brussels", rules={key: Availability.published("08:00", 1)})
     with pytest.raises(
-        InformationSetError, match="names 'generation_solar_forecast', a column of forecasts of solar_ridge"
+        InformationSetError,
+        match="names 'generation_solar_forecast' .or a column built from it., a column of forecasts",
     ):
         info.with_source_rules([source])
     added_later = InformationSet("10:15", "Europe/Brussels").with_source_rules([source])

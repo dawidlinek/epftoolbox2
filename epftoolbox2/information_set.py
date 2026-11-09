@@ -1294,20 +1294,21 @@ class InformationSet:
         return out
 
     def refuse_rules_on_chained_columns(self) -> None:
-        """`InformationSetError` for a rule in `rules` that names a chained column exactly (`load_fc`, `load_fc_d+1`): its rule
-        is its upstream's issue time, which `resolve` puts above every rule, assumption and pattern, so such a rule would be
-        silently ignored. A pattern that matches one (`load_*`) is left alone: it holds for the other columns it matches."""
+        """`InformationSetError` for a rule in `rules` that names a chained column, through its shifts, profiles and day aggregates
+        (`load_fc`, `load_fc_d+1`, `load_fc_h05`, `load_fc_day_max_d+1`): its rule is its upstream's issue time, which `resolve`
+        puts above every rule, assumption and pattern, so such a rule would be silently ignored. A pattern that matches one
+        (`load_*`) is left alone: it holds for the other columns it matches."""
         for key in self.rules:
             if any(ch in key for ch in "*?["):
                 continue
-            for candidate, _ in parse_predictor(key):
-                chained = self._chained.get(candidate)
-                if chained is not None:
-                    raise InformationSetError(
-                        f"rules={{{key!r}: ...}} names {candidate!r}, a column of {chained.describe()}: its rule is the "
-                        f"upstream's ({self._source_rules[candidate].describe()}) and nothing replaces it. Remove the rule; "
-                        "ForecastSource(available='HH:MM') states a later time than the upstream's issue time."
-                    )
+            chained = self.chained_of(key)
+            if chained is not None:
+                raise InformationSetError(
+                    f"rules={{{key!r}: ...}} names {chained.column!r} (or a column built from it), a column of "
+                    f"{chained.describe()}: its rule is the upstream's "
+                    f"({self._source_rules[chained.column].describe()}) and nothing replaces it. Remove the rule; "
+                    "ForecastSource(available='HH:MM') states a later time than the upstream's issue time."
+                )
 
     def chained_inputs(self) -> Dict[str, ChainedInput]:
         """Column -> its upstream, for each column read from another pipeline's stored forecasts (`ForecastSource`), as
