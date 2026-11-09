@@ -405,6 +405,14 @@ def _blind_spots(checks: List[IssueDayCheck]) -> List[str]:
                 "reaching them. A forecast needs an input known at issue time and delivered or published on the day "
                 "before the issue day or later, read from the frame it is given."
             )
+        blind = sorted({name for control in controls for name in control.blind})
+        if blind:
+            days = ", ".join(check.run_day for check in checks if check.control is not None and check.control.blind)
+            lines.append(
+                f"on {days} the positive control of the series {blind} (each perturbed on its own) moved no forecast, so "
+                "what the model reads of them isn't the frame's values (a copy of its own, or a series it doesn't use): the "
+                "probe can't vouch for them."
+            )
         never = sorted(key for key in produced - moved if key[1] not in horizons)
         if never:
             lines.append(

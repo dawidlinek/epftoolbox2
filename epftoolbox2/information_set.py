@@ -2536,10 +2536,13 @@ class ControlResult:
     perturbed: Dict[str, int]  # column -> number of perturbed cells
     unchecked: List[str]  # columns without a rule, left unperturbed
     unmoved: List[Tuple[int, int]] = field(default_factory=list)  # forecasts of both runs that did not move
+    # A model that reads history: the series whose own fresh values were perturbed and moved no forecast. The probe can't vouch
+    # that what the model reads of them is the frame's (a copy of its own, a series it ignores): a blind spot.
+    blind: List[str] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
-        return bool(self.moved)
+        return bool(self.moved) and not self.blind
 
 
 def positive_control(
@@ -2572,7 +2575,11 @@ def positive_control(
     after a fall-back switch, a known issue, which trains the switch hour on D-1's row.)
 
     A model that reads history (`models._history`) reads its target's context as an input: for it the target is perturbed too, as
-    any input, and its training target, if it has one, is the context's own.
+    any input, and its training target, if it has one, is the context's own. Without `rebuild` and `span` each series of its spec
+    is perturbed on its own, the target too, one run each: `moved` is what any of them moved, and `blind` the series whose fresh
+    values were perturbed and moved nothing, which the probe can't vouch for (a series read from a copy of the model's own would
+    pass every probe). A series with no fresh value to perturb (a static rule) says nothing either way and isn't blind. Over runs
+    widened by `span` (the co-batch check's, which asks only whether they reach the model) every series is perturbed at once.
 
     With `rebuild`, days are those of the frame it returns, so a source in UTC is read in the market's zone.
 
@@ -2595,6 +2602,22 @@ def positive_control(
     history = reads_history(model() if callable(model) and not hasattr(model, "run") else model)
     if rebuild is None and not history:
         names = [name for name in names if name != target]
+    if rebuild is None and history and span is None:
+        return _history_control(
+            model,
+            data,
+            run_day,
+            information_set,
+            target,
+            horizon,
+            freq,
+            names,
+            atol,
+            seed,
+            availability,
+            span,
+            first_row_day,
+        )
     if rebuild is None:
         base = data
         perturbed, counts, unchecked = perturb_recent(
@@ -2621,6 +2644,63 @@ def positive_control(
         perturbed=counts,
         unchecked=unchecked,
         unmoved=sorted((original.keys() & other.keys()) - set(moved)),
+    )
+
+
+def _history_control(
+    model: Any,
+    data: pd.DataFrame,
+    run_day: str,
+    information_set: InformationSet,
+    target: str,
+    horizon: Dict[str, Any],
+    freq: str,
+    names: Sequence[str],
+    atol: float,
+    seed: int,
+    availability: str,
+    span: Optional[Tuple[str, str]],
+    first_row_day: int,
+) -> ControlResult:
+    """`positive_control` of a model that reads history: each series of its spec that `names` holds perturbed on its own (one run
+    each, against one unperturbed run), the moves of all of them, and the series whose own perturbation moved nothing."""
+    from .models._history import history_spec_of  # models import this module
+
+    m = model() if callable(model) and not hasattr(model, "run") else model
+    spec = history_spec_of(m, target)
+    series = [name for name in spec.names if name in names]
+    common = (run_day, target, horizon, freq, information_set, availability, span)
+    original, *_ = _issue_day_forecasts(model, data, *common)
+    moved: set = set()
+    both = set(original)
+    largest = 0.0
+    counts: Dict[str, int] = {}
+    unchecked: List[str] = []
+    blind = []
+    for name in series:
+        perturbed, found, missed = perturb_recent(
+            data, run_day, information_set, freq, [name], seed, first_row_day=first_row_day
+        )
+        counts.update(found)
+        unchecked.extend(missed)
+        if not found.get(name):
+            continue  # nothing fresh to perturb: no evidence either way
+        other, *_ = _issue_day_forecasts(model, perturbed, *common)
+        changed, change, _ = _compare_forecasts(original, other, atol)
+        moved.update(changed)
+        both &= set(other)
+        largest = max(largest, change)
+        if not changed:
+            blind.append(name)
+    return ControlResult(
+        run_day=run_day,
+        forecasts=len(original),
+        moved=sorted(moved),
+        max_abs_change=largest,
+        perturbed=counts,
+        unchecked=sorted(set(unchecked)),
+        unmoved=sorted(both - moved),
+        blind=blind,
     )
 
 
