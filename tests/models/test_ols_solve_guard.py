@@ -14,6 +14,7 @@ estimate is above `OLS_SOLVE_ERROR_MAX` back to the model path (`far_issue`). Th
 import json
 from collections import Counter
 from fractions import Fraction
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -278,17 +279,23 @@ def test_the_error_free_residual_is_exact_to_the_residuals_last_bits():
     assert np.abs(exact).max() < 1e-10 * np.abs(M).max() * np.abs(w).max()  # what a float64 residual would lose
 
 
-def test_the_guard_reads_a_vst_forecast_in_target_units_where_the_inverse_is_steeper():
-    """With a VST the estimate is in target units through the inverse's slope at the forecast where that is steeper than at
-    the training targets (`_engine_worker._steep_ok`), as Ridge's budget is: a budget the training-target slope meets, a
-    steeper one doesn't."""
+def test_a_vst_forecast_is_judged_at_the_inverses_slope_where_that_is_steeper(monkeypatch):
+    """With a VST, `_engine_worker._steep_ok` judges OLS's estimate in target units through the slope of the scaler's inverse
+    at the forecast where that is steeper than the row set's `yscale` (its largest slope at the training targets): a row whose
+    estimate times `yscale` is within `OLS_SOLVE_ERROR_MAX` but times the slope isn't goes back; at a slope no steeper than
+    `yscale` it stays. (The slope is set through `inverse_slope`; the VST slope bound itself is not what is tested.)"""
     x, y = ill_conditioned()
     mask = np.ones(x.shape[1], dtype=bool)
     stats, params, fitted = engine_fit(x, y, mask)
     z = params.transform(far_along_weakest(x, _stats.issue_metric(stats, fitted), 5.0))
-    budget = 2.0 * _stats.solve_error(fitted, stats, z) * stats.yscale
-    assert _stats.solve_error_ok(fitted, stats, z, error_max=budget)
-    assert not _stats.solve_error_ok(fitted, stats, z, scale=3.0 * stats.yscale, error_max=budget)
+    estimate = _stats.solve_error(fitted, stats, z)  # scaled units
+    budget = _stats.OLS_SOLVE_ERROR_MAX
+    yscale, steep = 0.5 * budget / estimate, 2.0 * budget / estimate
+    rowset = SimpleNamespace(scaler=None, typical=steep, yscale=yscale)  # the slope bound (3x typical) passes both
+    for slope, kept in ((yscale, True), (steep, False)):
+        monkeypatch.setattr(_engine_worker, "inverse_slope", lambda scaler, values, slope=slope: slope)
+        assert _engine_worker._steep_ok(fitted, stats, z, rowset, 0.0) is kept
+    assert _stats.solve_error_ok(fitted, stats, z, yscale) and not _stats.solve_error_ok(fitted, stats, z, steep)
 
 
 def test_only_ols_fits_carry_the_solve_error():
