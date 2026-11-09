@@ -298,13 +298,18 @@ an issue day it didn't sample.
   not to the bit, with the same counts of forecasts and skips; a fit the sums
   can't give to those digits is fitted as with `"off"`, to the bit, and so is the forecast of an issue row far outside its
   training values (more than 30 training standard deviations out for OLS and 10 for LEAR and LassoCV, along the eigenvectors of
-  the fit's Gram; for Ridge, which has no distance bound, past scikit-learn's rounding budget at the row; with a
+  the fit's Gram; for OLS, whose normal equations are refined by one step of iterative refinement, also where the error that
+  remains at the row, estimated per fit and row, is above 5e-9 EUR/MWh, 0.1 to 0.5 % more of OLS's forecasts on Lago's 247 DE
+  inputs with a 364-day window; for Ridge, which has no
+  distance bound, past scikit-learn's rounding budget at the row; with a
   variance-stabilising scaler also where its inverse is more than three times as steep as the median of its slopes at the
   training targets), a LEAR fit whose chosen columns are nearly collinear (their Gram's condition number above 1e6) and a
   LassoCV or LEAR fit with two near-copy inputs (1 − |correlation| at most 1e-5); within those bounds the largest gaps measured
-  were 8.6e-9 (OLS), 4.6e-9 (LassoCV), 6.1e-10 (Ridge) and 1.1e-9 (LEAR) EUR/MWh. Their manifests record
-  `fit_path: "engine-1"`, compared on resume, so results written with the engine on refuse a resume with it off and the other way
-  round (`allow_manifest_mismatch=True` overrides), and as provenance how many fits came from the sums. LEAR's `solver="cd"`
+  were 4.8e-9 (OLS), 4.6e-9 (LassoCV), 6.1e-10 (Ridge) and 1.1e-9 (LEAR) EUR/MWh. Their manifests record
+  `fit_path: "engine-2"`, compared on resume, so results written with the engine on refuse a resume with it off and the other way
+  round (`allow_manifest_mismatch=True` overrides), and as provenance how many fits came from the sums; `"engine-1"` results
+  of a development build (before OLS's refinement step) are refused too, for every class, although only OLS's numbers moved,
+  so for LEAR, Ridge and LassoCV `allow_manifest_mismatch=True` resumes them safely. LEAR's `solver="cd"`
   (`LEARModel.lago()`'s) is fitted as with `"off"`, to the bit. **`engine="check"`** is `"on"` with one fit in about 50 also
   fitted as `"off"` fits it: the results are `"on"`'s, the manifest records the gaps as provenance (`engine_check`: fits, largest
   absolute and relative gap, gaps that aren't finite, how many chose another kink or penalty, fits `"off"` couldn't fit), and a

@@ -613,7 +613,8 @@ def test_conditioning_sweep_every_fit_the_guards_let_through_is_within_1e_8():
 def test_a_mean_of_many_columns_in_front_is_handed_back():
     """The review's case: the DE Lago rows (Sunday dropped, an intercept, n 364, hour 0) with the daily mean of price(t-1) plus
     1e-4 of its spread in front. The pivot ratio² is 8e4 (under `GUARD`), cond(Z) 1.1e5, and the normal equations are 1.2e-8
-    off; `dpocon`'s estimate, 3.8e10, hands it back. Without the column the fit is kept (estimate 8.3e7)."""
+    off (7.8e-9 after `ols_fit`'s refinement step, still more than half the tolerance: the rounding of the equations' entries);
+    `dpocon`'s estimate, 3.8e10, hands it back. Without the column the fit is kept (estimate 8.3e7)."""
     x, y, x0 = lear_rows(0, 364, drop_sunday=True)
     rng = np.random.default_rng(0)
     full, _ = lear_design(0)
@@ -625,7 +626,11 @@ def test_a_mean_of_many_columns_in_front_is_handed_back():
     pm, _, _ = model_path(OLSModel([], fit_intercept=True), xk, y, x0k, mask)
     pivot_only = _stats.ols_fit(stats, True, condition_max=np.inf)
     assert pivot_only is not None
-    assert abs(params.inverse(float(pivot_only.predict(params.transform(x0k))[0])) - pm) > OLS_TOL
+    z = params.transform(x0k)
+    first = _stats.cholesky_solve(stats.G, stats.q, condition_max=np.inf)  # the solution before the refinement step
+    unrefined = _stats.LinearFit(first, float(stats.ybar - stats.zbar @ first))
+    assert abs(params.inverse(float(unrefined.predict(z)[0])) - pm) > OLS_TOL
+    assert abs(params.inverse(float(pivot_only.predict(z)[0])) - pm) > OLS_TOL / 2
     assert _stats.ols_fit(stats, True) is None
     plain, _ = stats_of(x, y, np.arange(364), StandardScaler.get_scalable_mask(x))
     assert _stats.ols_fit(plain, True) is not None

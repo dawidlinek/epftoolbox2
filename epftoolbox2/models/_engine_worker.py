@@ -41,8 +41,10 @@ fold, an estimator that isn't the one the statistics reproduce) or raises a Valu
 is too ill-conditioned for its class (`_ENGINE_CONDITION_MAX`, LEAR) is **handed back**: the model path fits it there, on the
 same values, to the bit. So is the forecast of an issue row too far from the fit's training rows (`far_issue`): beyond its
 model's `_ENGINE_ISSUE_Z` training standard deviations along the eigenvectors of the fit's Gram (`_stats.issue_distance`: OLS
-30, LEAR 10), or where RidgeCV's own rounding at that row exceeds its budget (`_stats.issue_rounding_ok`; with a VST, in target
-units through the slope of the scaler's inverse at the forecast), since an extrapolation multiplies the last bits in which
+30, LEAR 10), where the error OLS's refined normal equations leave at that row exceeds `_stats.OLS_SOLVE_ERROR_MAX`
+(`_stats.solve_error_ok`; with a VST, in target units through the inverse's slope where that is steeper), or where RidgeCV's
+own rounding at that row exceeds its budget (`_stats.issue_rounding_ok`; with a VST, in target units through the slope of the
+scaler's inverse at the forecast), since an extrapolation multiplies the last bits in which
 the two paths' coefficients differ; a refit unit forecasts its other rows from statistics. Each hand-back is decided from the
 fit's own rows and span, and the issue row's alone, so it is the same in any group and whichever rows a unit forecasts.
 
@@ -85,6 +87,7 @@ from ._stats import (
     issue_metric,
     issue_rounding_ok,
     near_twins,
+    solve_error_ok,
     standard_stats,
     transformed_stats,
 )
@@ -110,9 +113,11 @@ from ._worker import (
 )
 
 # The numeric path of the fits from shared statistics, as a manifest records it (`fit_path`, compared on resume): a later
-# release that changes their numbers gets another name. None runs every fit of a group on the model path (5h's plumbing, which
-# `tests/models/test_engine_groups.py` checks to the bit against engine off).
-ENGINE_FIT_PATH: Optional[str] = "engine-1"
+# release that changes their numbers gets another name. "engine-1" was step 5's; "engine-2" refines OLS's normal equations by
+# one step (`_stats.refined`), which moves its numbers within the tolerance, so results of the two never mix. None runs every
+# fit of a group on the model path (5h's plumbing, which `tests/models/test_engine_groups.py` checks to the bit against engine
+# off).
+ENGINE_FIT_PATH: Optional[str] = "engine-2"
 
 # The VSTs a row set runs the own `fit_transform` of (`_RowSet`): the library's classes exactly, whose transform is column by
 # column with the parameters `(params, mean, std)` per column (`scalers.vst._VSTScaler`); a subclass may transform otherwise.
@@ -134,7 +139,9 @@ ISSUE_Z_MAX = 10.0
 # Ridge 3.2e-10, LEAR (BIC, AIC; asinh, Invariant, npit, poly) 4.7e-10, and at most 1.3 % of the forecasts of a training row
 # went back; at 10 LEAR's reached 3.2e-9, without it OLS's 2.5e-4. With issue rows at every distance up to the bounds and the
 # near-twin bounds of 1e-5 (`sweep_dense.py`, new designs, every bound applied by this code): OLS 7.8e-9, LassoCV 4.6e-9,
-# Ridge 6.1e-10, LEAR 1.1e-9 (`ENGINE_TOLERANCE`).
+# Ridge 6.1e-10, LEAR 1.1e-9 (`ENGINE_TOLERANCE`). OLS's refinement step and its solve-error bound (`_stats.refined`,
+# `_stats.OLS_SOLVE_ERROR_MAX`, after step 5l's Lago DE miss of 1.4e-8) brought its worst kept gap to 3.2e-9 on those rows and
+# to at most 4.8e-9 in every set of `ols_issue_guard/`.
 VST_SLOPE_MAX = 3.0
 
 # `engine="check"`: the fits also run on the model path are those whose span hashes to 0 modulo this (`_sampled`).
@@ -148,7 +155,9 @@ ENGINE_TOLERANCE = {"OLSModel": 1e-8, "RidgeModel": 1e-9, "LassoCVModel": 1e-8, 
 # does); an active Gram whose condition number is above the model's `_ENGINE_CONDITION_MAX` (LEAR, `ILL_CONDITIONED`);
 # fewer than `MIN_ROWS` rows in ρ, or than the model's CV folds; sums past float64's range ("overflow", also
 # `StatsFallback`'s) or `StatsFallback`'s other reason ("cancellation"); two near-twin columns (`NEAR_TWIN`, below);
-# `_fit_stats` returned None; `_fit_stats` raised a ValueError. And per issue row: one beyond its model's bound (`FAR_ISSUE`, counted per row; the fit forecasts its other rows).
+# `_fit_stats` returned None; `_fit_stats` raised a ValueError. And per issue row: one beyond its model's bound (`FAR_ISSUE`,
+# counted per row; the fit forecasts its other rows): its distance, Ridge's rounding or OLS's solve error at the row, or a VST's
+# slope there.
 NO_COLUMNS = "no_columns"
 ILL_CONDITIONED = "ill_conditioned"
 FEW_ROWS = "few_rows"
@@ -634,7 +643,7 @@ class EngineFits:
             # decided from the fit and that row alone, so the same whichever other rows a unit forecasts.
             z = transform(fit.test[row : row + 1])
             distance = 0.0 if metric is None else issue_distance(metric, z)
-            if not (distance <= bound and issue_rounding_ok(fitted, stats, z)):
+            if not (distance <= bound and issue_rounding_ok(fitted, stats, z) and solve_error_ok(fitted, stats, z)):
                 self.counts.fallbacks[FAR_ISSUE] += 1
                 out.append(None)
                 continue
@@ -724,16 +733,20 @@ class EngineFits:
 
 def _steep_ok(fitted, stats, z: np.ndarray, rowset: _RowSet, prediction: float) -> bool:
     """Whether a VST fit's forecast (`prediction`, scaled) is where its scaler's inverse is no steeper than `VST_SLOPE_MAX`
-    times its median slope at the training targets; and for a fit that carries its model path's rounding (Ridge), whether
-    that stays within `RIDGE_ROUNDING_MAX` in target units there: its budget is in target units through `yscale`, the
-    inverse's largest slope at the training targets, so a forecast where the inverse is steeper scales it by that slope. A
-    function of the fit and the row alone."""
+    times its median slope at the training targets; and for a fit that carries its model path's rounding (Ridge) or its
+    normal equations' measured error (OLS), whether that stays within its budget in target units there: each budget is in
+    target units through `yscale`, the inverse's largest slope at the training targets, so a forecast where the inverse is
+    steeper scales it by that slope. A function of the fit and the row alone."""
     slope = inverse_slope(rowset.scaler, [prediction])
     if not slope <= VST_SLOPE_MAX * rowset.typical:
         return False
-    if getattr(fitted, "rounding", None) is None or slope <= rowset.yscale:
+    if slope <= rowset.yscale:
         return True
-    return issue_rounding_ok(fitted, stats, z, RIDGE_ROUNDING_MAX * rowset.yscale / slope)
+    if getattr(fitted, "rounding", None) is not None and not issue_rounding_ok(
+        fitted, stats, z, RIDGE_ROUNDING_MAX * rowset.yscale / slope
+    ):
+        return False
+    return solve_error_ok(fitted, stats, z, slope)
 
 
 def _other_choice(engine_fit, model_fit) -> bool:
