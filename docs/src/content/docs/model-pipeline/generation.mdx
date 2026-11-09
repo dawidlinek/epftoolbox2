@@ -69,7 +69,8 @@ refused; the benchmark above is its forecast of D, out on D-1. To score the D+1 
   and `is_night_d+{horizon}` the flag of `zero_when`.
 - **A capacity proxy.** [`RollingStatsTransformer`](/epftoolbox2/transformers/rolling-stats/) with `stat="max"` and
   `lag_days=1` gives the largest hourly generation of the year to D-1, `generation_solar_roll365max_d-1`, the renewables study's
-  proxy. It follows the capacity a year late on its way up and never down, but it is known at the issue and needs no other source.
+  proxy. It rises with the capacity when a clear hour sets a new maximum and falls only a year after the capacity does, but it
+  is known at the issue and needs no other source.
   The information set judges it at the end of D-1 by the rule of `generation_*`, and refuses the window ending on D
   (`lag_days=0`), whose last hour is out after midnight.
 - **The installed capacity.** `EntsoeSource(type=["installed_capacity"])` gives `installed_capacity_<type>`, one value a year
