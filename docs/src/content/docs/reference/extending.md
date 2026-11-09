@@ -300,9 +300,10 @@ target, accepts_missing=False, newest_target="d-1")` names the series as base co
 (`history_batches(..., horizons)` reads every horizon at once, and `arrays=False` the cuts alone):
 
 - `target` (T,): the target's last T = context × periods-per-day steps in physical time, ending at its cut: under
-  `newest_target="published"` its newest step known at the issue time by its rule, under `"d-1"` (every model's default) the
-  earlier of that and the last step of D-1, the newest target such a model trains on. T is the same on every day; a context
-  across a DST switch covers an hour more or less of local time.
+  `newest_target="published"` its newest step known at the issue time by its rule, at the latest the last step of the day before
+  the target day (so at 14:00, when D+1's prices are out, the forecast at h = 1 is still of all of D+1), under `"d-1"` (every
+  model's default) the earlier of that and the last step of D-1, the newest target such a model trains on. T is the same on
+  every day; a context across a DST switch covers an hour more or less of local time.
 - `past` {name: (T,)}: on the same steps, NaN after the series' own newest known step where the backend takes missing values
   (`accepts_missing`), else the series is late.
 - `known` {name: (T + S,)}: the same steps and the S steps ahead, to the end of the target day D + h; one not known that far is late.
@@ -318,13 +319,16 @@ probe perturbs is in a context only where a series is late, and a late series is
 `"raise"`, as a late predictor is; `report.availability()` and `explain()` show one row per series (how far it is read and its
 rule's vintage class), not one per lagged step. `HistoryBatch.batches(batch_size)` groups the items by S and pads each call to
 `batch_size` with copies of its first item, so a call's shape doesn't depend on what else a run holds. A model reads history when
-its class defines `_history_spec(target)`. `BaseModel`'s checks then take its series as inputs it reads (the manifest hashes them,
-`report.vintages()` lists them, `verify` perturbs them) and refuse a late one at `"raise"` or list it at `"warn"`; its manifest
-records every series' rule, the issue time and zone (`training_cut`, compared on resume whatever its `newest_target`) and hashes its
-known-ahead series through `test_end` plus the largest horizon (`history_ahead`). `verify` gives its runs the information set
-whatever its `newest_target` (and still perturbs the target from D on under `"d-1"`), and its co-batch check runs it on the frame
-cut after each target day D + h rather than after the issue day, whose later rows hold its known-ahead values: a forecast that
-moves there depends on where the frame ends. Such a model can't be a `ResidualModel`'s base in this release.
+its class defines `_history_spec(target)`, which must give the model's own `newest_target`. `BaseModel`'s checks then take its
+series as inputs it reads (the manifest hashes them, `report.vintages()` lists them, `verify` perturbs them) and refuse a late one at
+`"raise"` or list it at `"warn"`; its manifest records every series' rule, the issue time and zone (`training_cut`, compared on
+resume whatever its `newest_target`) and hashes what its last issue day reads after `test_end` (`history_ahead`: its known-ahead
+series through `test_end` plus the largest horizon, and its target where a late issue time reads it there). `verify` gives its runs
+the information set whatever its `newest_target` (and still perturbs the target from D on under `"d-1"`); its positive control
+perturbs the target's fresh values too, the input of a univariate model; and its co-batch check runs each forecast on the frame a
+run on D has for it (`target_day_cut`): every row up to D, and after D only what that forecast reads (its known-ahead series to the
+end of D + h), so no later day of its call keeps what a run on D couldn't have. A forecast that moves there depends on where the
+frame ends. Such a model can't be a `ResidualModel`'s base in this release.
 
 ---
 
