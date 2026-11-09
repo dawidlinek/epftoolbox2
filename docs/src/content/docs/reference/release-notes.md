@@ -328,8 +328,11 @@ an issue day it didn't sample.
   times fewer; a run's wall time is 5-14 times shorter. `NaiveModel`, a `train_on="matching"` list, a subclass with its own fit and a `forecast_only` run go through their own run as
   with `"off"`, the default, which runs nothing new. `ENGINE_MAX_MODELS` (20,000)
   and `ENGINE_MAX_COLUMNS` (4,096) bound how many models and columns a group reads at once; `verify` runs each model through the
-  engine too. YAML writes `engine` only when it is `"on"` or `"check"`. See
-  [Many Models: the Engine](/epftoolbox2/model-pipeline/forecasting/#many-models-the-engine).
+  engine too. YAML writes `engine` only when it is `"on"` or `"check"`. At scale (10,000 OLS, 1,000 Ridge, 1,000 LEAR and 200 LassoCV
+  variants of a gappy 40-column weather union, 24 periods, 7 issue days) every model's records, manifest and `epf report` tables
+  are the same bytes over 64 array tasks, at 1 and 12 processes and alone, and `binary_mask="fit"` keeps every shared forecast of
+  two test starts; the 10,000 OLS variants take 7.2 minutes on 12 cores, against about 48 with `"off"`. See
+  [The Engine](/epftoolbox2/model-pipeline/engine/), a page of its own now.
 - **`PseSource`: the Polish TSO's reports API, no key.** `PseSource(datasets=["kse-load", "csdac-pln"], columns=None, prefix="pse")` loads
   `kse-load` (`load_actual`, `load_fcst`), `his-wlk-cal` (`demand`, `wi`, `pv`, `jg` and more on request), `csdac-pln` (the SDAC price in
   PLN), `rce-pln` (the prosumer net-billing price, another series), `pdgsz` (recommended-usage code, the version stamped by

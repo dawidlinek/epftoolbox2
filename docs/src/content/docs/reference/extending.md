@@ -204,7 +204,7 @@ that defines `_predict_fitted`: a subclass that changes the estimator (`_fit_pre
 own estimator. With `refit=None` every forecast is fitted on its own, as for any model. Each row's coefficients are a flat list of
 numbers (or a 1-D numeric array, written as its list); anything else raises a `TypeError` naming the model.
 
-`ModelPipeline(engine="on")` runs a model in an [engine group](/epftoolbox2/model-pipeline/forecasting/#many-models-the-engine) only
+`ModelPipeline(engine="on")` runs a model in an [engine group](/epftoolbox2/model-pipeline/engine/) only
 if one class defines all three and `_fit_stats` (the fit from shared statistics), as the four built-in fitting models do, and keeps
 `BaseModel`'s `run`. A custom model like the one above runs on its own there, with the numbers it has with `engine="off"`; so does a
 subclass of a built-in model that overrides its fit without `_fit_stats`. A subclass of `OLSModel`, `RidgeModel` or `LEARModel` that

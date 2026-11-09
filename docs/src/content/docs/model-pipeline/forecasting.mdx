@@ -128,7 +128,10 @@ forecast = report.predictions()
 A backtest of thousands of model variants spends much of its time on what each model's run costs before and after its fits:
 starting a pool of processes, reading the data into its periods, freeing it. `ModelPipeline(engine="on")` runs the models it can
 in **engine groups** instead, one per refit rule: a group reads the data once for all its models, runs one pool whose jobs are one
-issue day (or refit block) and period of every model, and writes each model's results into its own file, as before.
+issue day (or refit block) and period of every model, and writes each model's results into its own file, as before. OLS, Ridge,
+LassoCV and LEAR (`solver="lars"`) are fitted there from exact sums shared by every model that trains on the same rows: a model's
+forecasts are the same bits alone and in any group, and within 1e-8 EUR/MWh (Ridge 1e-9) of `engine="off"`, with the same penalty
+and kink. `forecast_only=True` runs, as this page's, go through each model's own run.
 
 ```python
 from epftoolbox2.models import OLSModel
@@ -139,104 +142,13 @@ for window in range(28, 365, 7):
     pipeline.add_model(OLSModel(["price_d-1", "load_d+{horizon}"], training_window=window, name=f"ols_{window}"))
 ```
 
-- **Fits from shared statistics.** `OLSModel`, `RidgeModel`, `LassoCVModel` and `LEARModel` (with its exact `solver="lars"`, the
-  default) are fitted from exact sums of their training rows, shared by every model of the group that trains on those rows. With
-  `scaler="standard"` the sums are of the raw rows, one set per period, horizon and training span, and the scaler's map is applied
-  to them. With a variance-stabilising scaler (`"asinh"`, LEAR's default, `"npit"`, `"mlog"`, `"poly"`) the scaler is fitted on
-  the rows themselves, so the engine runs the scaler's own transform once for every set of models with the same rows (training
-  rows whose inputs are all present) and scaler, on all the columns they read, and sums the transformed columns: each
-  transformed column is the one the model would have on its own, to the bit, and models whose rows differ (a column with gaps)
-  get transforms of their own. LassoCV and LEAR's `criterion="cv"` score their penalties on the five (or `cv`) blocks of those
-  rows, cut and summed the same way. The sums are integers in disguise, so no other model, order, chunking, process, thread or
-  BLAS thread count can move a bit: a model's forecasts are the same alone and in any group. Against `engine="off"` they agree
-  within 1e-8 EUR/MWh for OLS (the normal equations against scikit-learn's SVD), LassoCV (scikit-learn's own coordinate descent
-  on the Gram) and LEAR, and 1e-9 for Ridge, with the same penalty and the same kink, not to the bit (the table below); every
-  other field of a record, and every count of forecasts and skips, is the same.
-- **What goes back to `"off"`'s fit.** A fit the statistics can't give to those digits is fitted as with `"off"`, to the bit:
-  one of no column, fewer than three training rows (or than CV folds), an OLS whose design is too ill-conditioned for the normal
-  equations or not of full rank, a LEAR whose chosen columns are nearly collinear (the condition number of their Gram above 1e6),
-  a LassoCV or a LEAR with two inputs that are near copies of each other (1 − |correlation| at most 1e-5, exact copies aside: a
-  coordinate descent, a fold's penalty or a pair both chosen follows the last bits of such a pair), a LassoCV whose folds have no
-  more rows than columns, Ridge at the smallest penalties of its grid, a column whose sums cancel or overflow. So is the forecast
-  of an issue row far outside its training values, since an extrapolation multiplies the last bits in which the two paths'
-  coefficients differ. For OLS that is more than 30 training standard deviations out, and for LEAR and LassoCV more than 10,
-  measured along the eigenvectors of the fit's own Gram (so a row out along the difference of two near-collinear inputs counts,
-  however close each is to its training values). OLS's normal equations err as the square of the inputs' condition
-  number where scikit-learn's solver errs as the number itself, and a row far out reads that error, so each OLS fit is refined
-  by one step of iterative refinement (its residual by error-free arithmetic in float64, the same on every platform), which
-  removes the factorisation's own error; and an OLS forecast goes back where the error that remains at the row,
-  estimated per fit and row (the next refinement step and the effect of the rounding of the equations' entries), is above 5e-9
-  EUR/MWh. On Lago's 247 DE inputs with a 364-day window, where every issue row is 5 to 30 training standard deviations out,
-  the guard sends back 0.1 to 0.5 % more of OLS's forecasts than the distance bound does (without the step, that bound alone
-  kept forecasts 1.4e-8 from `"off"`'s). Where a fit reads only part of its span's rows (an input with gaps, or one that
-  starts inside the window) and those rows sit far from the span's mean, the shared sums lose digits to their centring, which
-  the estimate counts: in a sweep of such fits the guard sent back none of the rows the distance bound keeps where the fit's
-  mean (in the fit's standard deviations) is within one of the span's, 8 % where it is 1 to 3 out, and half where it is 10
-  or more. Ridge has no such distance: its forecast goes back where scikit-learn's own rounding at that row exceeds the
-  budget it has at the training rows. With a variance-stabilising scaler a forecast also goes
-  back where the scaler's inverse is more than three times as steep as the median of its slopes at the training targets (a
-  forecast far from the usual prices, which an asinh scaler maps back through a sinh: on the Lago DE benchmark's first day, a
-  holiday Sunday of 1-9 EUR/MWh night prices, 5 of LEAR's 96 forecasts). Past these bounds gaps grow with the distance, to 1e-7
-  at 20,000 and 1e-4 for an asinh OLS forecast far past its prices. A refit's other forecasts of the same fit still come from the
-  sums, so a refit block with a row far out writes two coefficient vectors, the model path's for that row and the engine's for
-  the others, a few last bits apart, where engine off writes one. LEAR's `solver="cd"` (a coordinate descent that stops at a
-  tolerance, so it follows its Gram's last bits; `LEARModel.lago()`'s) is fitted as with `"off"`, to the bit.
-- **What it saves.** Ridge still reads its scaled rows for the leave-one-out leverages, so it saves the scaler and the SVD of its
-  rows, not the work on them; LEAR's path and LassoCV's descent dominate their fits, so they gain less than OLS, and a
-  variance-stabilising scaler shares its transform only between models whose rows are the same. Measured on 1,000 LEAR variants
-  (asinh, three windows) of a 40-column weather union: 1.45-1.54 times fewer core-seconds than `"off"` where the inputs have no
-  gaps, but 0.84-0.98 times its speed (2-19 % more core-seconds) where every variant's gaps give it rows of its own, so that
-  nothing is shared and the exact sums come on top of the model's own transform and fit. LassoCV, whose fit is mostly scikit-learn's own descent,
-  spends 1.64 times fewer. With one pool for all, a run's wall time is 5-14 times shorter.
-- **`engine="check"`** runs as `"on"` and also fits about one fit in 50 (those of a training span whose hash, from its period,
-  horizon and dates, is 0 modulo 50, the same in any run) the way `"off"` does, on the same values, and compares the two. The
-  results are `"on"`'s; the manifest records, as provenance, how many fits were checked, the largest absolute and relative gaps of
-  their forecasts, how many forecasts' gaps weren't finite (`nonfinite`), how many chose another kink or penalty and how many
-  fits the engine forecast that `"off"` couldn't fit (`model_path_errors`, a `fit_error` there) (`engine_check`), and a warning
-  names a model whose largest gap is above its class's tolerance (1e-8 EUR/MWh for OLS, LassoCV and LEAR, 1e-9 for Ridge), whose
-  gaps aren't all finite, or that has such fits. `"check"` costs those fits twice.
-- **Checked once.** The pipeline checks the frame's index and names once for the models that read the same days, judges each
-  column against the information set once per rule and issue days, and a group reads the binary mask of a column several of its
-  models read with one training window once per period: every check, listing and mask is what the model finds on its own. In a group of 1,000 OLS models (one test
-  day, 24 periods) a model costs about 5 ms beyond its fits, with or without an information set.
-- **Which models.** OLS, Ridge, LassoCV and LEAR. `NaiveModel`, a predictor function with a `train_on="matching"` list, a subclass
-  that overrides the fit (`_fit_predict`, `_fit_model`, `_predict_fitted`) without its own `_fit_stats`, and every
-  `forecast_only=True` run go through their own run, as with `"off"`, after the groups.
-- **Memory.** A group holds its models' columns, rows × columns × 8 bytes per period, and the mask verdicts its models share (none
-  for one model per training window, which read other rows). `ENGINE_MAX_MODELS` (default 20,000) and
-  `ENGINE_MAX_COLUMNS` (default 4,096) bound a part of a group read at once, environment variables like `MAX_PROCESSES`; where the
-  cuts fall changes no number.
-- **Saved and checked.** `engine` goes to the pipeline's YAML only when it is `"on"` or `"check"`, and `model_pipeline.engine` in a workflow
-  overrides it; in array mode each task groups the models of its block. `pipeline.verify(...)` runs each model through the engine too.
-  The manifest of a model fitted from shared statistics records `fit_path: "engine-2"` (`"engine-1"` before OLS's refinement step, which moved its numbers within the
-  tolerance), compared on resume: results written with
-  the engine on resume with it on, and those written with it off with it off (another setting raises `ManifestMismatchError`, and
-  `allow_manifest_mismatch=True` resumes anyway, into a file that then mixes the two). The step to `"engine-2"` refuses
-  `"engine-1"` results of every class, LEAR's, Ridge's and LassoCV's too, although their numbers didn't move: for those three
-  `allow_manifest_mismatch=True` resumes them safely where `fit_path` is the only difference the error names, while for OLS it
-  mixes forecasts from before and after the step. It also records, as provenance never
-  compared, what the last run that fitted anything from statistics did (`engine`: how many fits, how many fits or issue rows went
-  back to the model path and why, and how far out of its training values an issue row the engine forecast was; with `"check"`,
-  `engine_check`). Those are that run's alone: after a crash and a resume they count the resumed run's fits, not the file's.
-
-
-| Class | Tolerance against `"off"` | Distance bound | Other bounds | Worst gap kept, EUR/MWh |
-|---|---|---|---|---|
-| `OLSModel` | 1e-8 | 30 | pivots and condition of the normal equations, their error at the row after one refinement step (5e-9) | 4.8e-9 |
-| `LassoCVModel` | 1e-8 | 10 | near-copy inputs (1e-5) | 4.6e-9 |
-| `LEARModel` (`"lars"`) | 1e-8 | 10 | condition of the chosen columns (1e6), near-copy inputs (1e-5) | 1.1e-9 |
-| `RidgeModel` | 1e-9 | none | scikit-learn's rounding at the row | 6.1e-10 |
-
-The distance is in training standard deviations along the eigenvectors of the fit's Gram; every class with a
-variance-stabilising scaler also has the slope bound above (three times the median slope of its inverse at the training
-targets). The worst gaps kept come from sweeps of about 400 synthetic designs each, with near-collinear and near-copy pairs
-down to 1e-5 of a standard deviation, spiky targets and Lago's 247 DE inputs, and issue rows at every distance up to and past
-the bounds (`epftoolbox2-research/library_check_step5/engine_vst_cv/sweep_dense.py`); OLS's from those sweeps, the conditioning
-sweep and Lago DE's OLS forecasts over 61 days of 2016 and over 2017 (`library_check_step5/ols_issue_guard/`). Over 3,840 LEAR,
-LassoCV and Ridge fits rolled over the Lago DE benchmark they are at most 1.6e-11.
+[The Engine](/epftoolbox2/model-pipeline/engine/) has the rest: what groups and when, what is bitwise and what isn't, the
+tolerance per class, every fit that goes back to `"off"`'s fit and its bound, memory and the `ENGINE_*` variables,
+`engine="check"`, resuming, and the measured speed.
 
 ## See Also
 
 - [Model Pipeline Overview](/epftoolbox2/model-pipeline/overview/): full `run()` parameter reference
 - [Workflow](/epftoolbox2/workflow/overview/): YAML-based orchestration
+- [The Engine](/epftoolbox2/model-pipeline/engine/): engine groups for studies of many models
 - [examples/05_forecast_only.py](https://github.com/dawidlinek/epftoolbox2/blob/main/examples/05_forecast_only.py)

@@ -160,7 +160,7 @@ A family of your own declares its card as the class attribute `_card`; its adapt
 `epftoolbox2.models._cards.resolve_model_weights(model)` inside `epftoolbox2.models._weights.offline()` and opens each file by
 name (`resolved.path("model.safetensors")`), never the directory as a whole. A family with several sizes lists them in
 `_card_variants` (size -> card), which `epf weights fetch ... --size` picks from. A carded family sets `_engine_ok = False` too, so the
-[engine](/epftoolbox2/model-pipeline/forecasting/#many-models-the-engine) never takes it, and returns the settings that change its
+[engine](/epftoolbox2/model-pipeline/engine/) never takes it, and returns the settings that change its
 numbers from `_runtime_fields()`.
 
 ```python
