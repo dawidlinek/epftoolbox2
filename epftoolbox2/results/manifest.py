@@ -1270,6 +1270,20 @@ def _keep_windows(existing: Manifest, manifest: Manifest, allow_mismatch: bool, 
     if manifest.windows is None or existing.windows is None:
         return
     run, on_file = RunWindows.from_dict(manifest.windows), RunWindows.from_dict(existing.windows)
+    if (
+        run.validation is not None
+        and on_file.validation is not None
+        and run.validation_every != on_file.validation_every
+        and not allow_mismatch
+    ):
+        # The records on file are of the other days: kept, a report would read them as forecasts of none of its days, or of
+        # some, and a search's rungs would mix what they scored.
+        raise ManifestMismatchError(
+            f"{model_name}: the results on file issued on every {on_file.validation_every}. day of the validation window "
+            f"(validation_every={on_file.validation_every}), and this run on every {run.validation_every}. day: use a "
+            "different save_dir, or pass allow_manifest_mismatch=True to resume anyway (the days of the other setting are then "
+            "left out of every report)."
+        )
     dropped = run.would_drop(on_file)
     if dropped is not None and not allow_mismatch:
         raise ManifestMismatchError(

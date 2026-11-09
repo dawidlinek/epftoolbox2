@@ -84,7 +84,7 @@ from ..results.store import (
     check_save_format,
     read_records,
 )
-from ..results.windows import SKIP_TARGET_IN_TEST, TEST, RunWindows, to_period
+from ..results.windows import SKIP_TARGET_IN_TEST, TEST, RunWindows, check_validation_every, to_period
 from ..results.vintages import read_vintages
 from ..verification import VerifyReport, sample_issue_days, verify_model
 from ..logging import get_logger
@@ -356,6 +356,7 @@ class ModelPipeline:
         issue_days: Optional[Sequence[str]] = None,
         save_format: str = DEFAULT_SAVE_FORMAT,
         save_coefficients: bool = True,
+        validation_every: int = 1,
     ) -> EvaluationReport:
         """Run every model, compute the ensembles from what they stored, then (unless `forecast_only`) run the evaluators
         and exporters.
@@ -394,6 +395,13 @@ class ModelPipeline:
         before it (`report.windows.segments`), and adds one year at the start, tagged "validation". `validation` alone
         forecasts only those days, and nothing of the test period is computed.
 
+        `validation_every=k` issues on every k-th day of a fixed validation window alone, counted from its first day, which
+        is always one: each forecast on such a day is the one a run of every day gives it, the other days are neither
+        forecast nor planned, and the report scores the kept days. It makes a search's first looks cheap (`epftoolbox2.tune`,
+        the rungs' `every_nth_day`). The test window is never thinned. It needs `validation=(start, end)`, not with
+        `"previous_year"` or `issue_days`. The manifest records it, and a resume with another value raises
+        `ManifestMismatchError`. The default, 1, is every day.
+
         The report is on the test window, and `report.validation` on the validation window, without forecasts for the first
         test issue day or later (see `EvaluationReport.validation`). Without a test window the validation report itself
         is returned. See the docs page on validation and test.
@@ -429,6 +437,7 @@ class ModelPipeline:
                 issue_days=issue_days,
                 save_format=save_format,
                 save_coefficients=save_coefficients,
+                validation_every=validation_every,
             )
         if not self.models:
             raise ValueError("At least one model is required")
@@ -449,7 +458,10 @@ class ModelPipeline:
         if not forecast_only:
             self._check_benchmarks()
             self._check_source_columns(data)
-        windows, test_start, test_end = self._resolve_windows(validation, test, test_start, test_end, forecast_only)
+        windows, test_start, test_end = self._resolve_windows(
+            validation, test, test_start, test_end, forecast_only, validation_every=validation_every
+        )
+        self._refuse_thinned_weekdays(windows, weekdays)
         self._check_ensembles(save_dir)
         self._refuse_top_without_validation(self.ensembles, windows)
         check_save_format(save_format)
@@ -645,6 +657,7 @@ class ModelPipeline:
         issue_days: Optional[Sequence[str]],
         save_format: str,
         save_coefficients: bool,
+        validation_every: int = 1,
     ) -> PanelReport:
         """`run` over several zones (see `run`): each zone's frame checked and run as `run` checks and runs one frame, every
         model's and zone's check before any fit, then each plain model per zone, each `PooledModel` over all of them
@@ -667,7 +680,10 @@ class ModelPipeline:
             self._check_benchmarks()
             for zone in zones:
                 self._check_source_columns(frames[zone])
-        windows, test_start, test_end = self._resolve_windows(validation, test, test_start, test_end, forecast_only)
+        windows, test_start, test_end = self._resolve_windows(
+            validation, test, test_start, test_end, forecast_only, validation_every=validation_every
+        )
+        self._refuse_thinned_weekdays(windows, weekdays)
         pooled = [model for model in self.models if isinstance(model, PooledModel)]
         plain = [model for model in self.models if not isinstance(model, PooledModel)]
         if pooled and windows is not None:
@@ -887,11 +903,19 @@ class ModelPipeline:
         return PanelReport(reports, target=target)
 
     @staticmethod
-    def _resolve_windows(validation, test, test_start, test_end, forecast_only: bool, required: bool = True):
+    def _resolve_windows(
+        validation, test, test_start, test_end, forecast_only: bool, required: bool = True, validation_every: int = 1
+    ):
         """(the windows of a run with validation or None, first test day, last test day), from `run`'s arguments.
 
-        A `ValueError` if they are given twice, make no sense, or (with `required`) name no window at all.
+        A `ValueError` if they are given twice, make no sense, or (with `required`) name no window at all, and for a
+        `validation_every` other than 1 without a fixed validation window.
         """
+        if check_validation_every(validation_every) != 1 and validation is None:
+            raise ValueError(
+                f"validation_every={validation_every} thins the validation window, and this run has none: pass "
+                "validation=(start, end)"
+            )
         if test is not None and (test_start is not None or test_end is not None):
             raise ValueError("Pass the test period once: test=(start, end) or test_start and test_end, not both")
         if forecast_only and validation is not None:
@@ -903,7 +927,7 @@ class ModelPipeline:
                 raise ValueError("test_start and test_end are required unless forecast_only=True")
             test = (test_start, test_end)
         if validation is not None:
-            windows = RunWindows.resolve(validation, test)
+            windows = RunWindows.resolve(validation, test, validation_every)
             return windows, *(windows.test or (None, None))
         if test is None:
             if not required:
@@ -914,6 +938,15 @@ class ModelPipeline:
             )
         test_start, test_end = to_period(test, TEST)
         return None, test_start, test_end
+
+    @staticmethod
+    def _refuse_thinned_weekdays(windows: Optional[RunWindows], weekdays: Optional[Sequence[int]]) -> None:
+        """`validation_every` and `issue_days` both choose issue days, and a run takes one of them."""
+        if windows is not None and windows.validation_every != 1 and weekdays is not None:
+            raise ValueError(
+                f"validation_every={windows.validation_every} and issue_days={issue_day_names(weekdays)} both choose the "
+                "days a run issues on: pass one of them"
+            )
 
     @staticmethod
     def _stored_horizons(save_dir: Union[str, Path], paths: Dict[str, Path]) -> Optional[Tuple[int, ...]]:
@@ -1451,7 +1484,10 @@ class ModelPipeline:
                 f"These windows are not what the results were made with: {'; '.join(different)}. Pass the windows of the "
                 "run, or none to report what the manifests record."
             )
-        return stored if asked.validation is not None and asked.test is not None else asked
+        if asked.validation is not None and asked.test is not None:
+            return stored
+        # A window of the run alone: the validation window keeps the days it was issued on (`validation_every`).
+        return asked if asked.validation is None else replace(asked, validation_every=stored.validation_every)
 
     def verify(
         self,

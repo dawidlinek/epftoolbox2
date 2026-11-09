@@ -9,6 +9,11 @@ day, so that adding a validation period can't move a test forecast). Days betwee
 it. The run gains one year at the start, tagged "validation". The validation days of a later segment are the test days of
 the one before, and they stay tagged "test". A segment says which forecasts may serve its choices (`Segment.serves`).
 
+`validation_every=k` (`run(..., validation_every=k)`) issues on every k-th day of a fixed validation window alone, counted from its
+first day, which is always one: the days a search scores its cheap rungs on (`epftoolbox2.tune`). Each forecast on such a day is
+the one a run of every day gives it; the other days are neither forecast nor planned, nor read from a results file that holds
+them. The test window is never thinned.
+
 A manifest stores all of this (`RunWindows.to_dict`), `read_windows` in `epftoolbox2.results.manifest` reads it back, and
 `EvaluationReport.windows` gives what a report was built on.
 """
@@ -44,6 +49,13 @@ def _iso_day(value: Any, label: str) -> str:
         return datetime.date.fromisoformat(value).isoformat()
     except (TypeError, ValueError):
         raise ValueError(f"The {label} must be a date such as '2024-01-31', got {value!r}") from None
+
+
+def check_validation_every(value: Any) -> int:
+    """`validation_every` as an int of at least 1; a `ValueError` otherwise."""
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError(f"validation_every must be a whole number of at least 1, got {value!r}")
+    return int(value)
 
 
 def to_period(value: Any, label: str) -> Period:
@@ -125,16 +137,20 @@ class RunWindows:
         mode: `"fixed"`, or `"previous_year"` when `validation` was derived from `test`.
         segments: Each test period and what serves it: one for fixed windows (none with a single window), one per 12 months
             with `"previous_year"`.
+        validation_every: k: the run issues on every k-th day of the validation window alone, counted from its first day (1,
+            every day, for any run that doesn't ask for it). Only with a fixed validation window.
     """
 
     validation: Optional[Period] = None
     test: Optional[Period] = None
     mode: str = FIXED
     segments: Tuple[Segment, ...] = ()
+    validation_every: int = 1
 
     @classmethod
-    def resolve(cls, validation: Any = None, test: Any = None) -> "RunWindows":
-        """The windows `run(validation=..., test=...)` asks for; a `ValueError` if they make no sense."""
+    def resolve(cls, validation: Any = None, test: Any = None, validation_every: int = 1) -> "RunWindows":
+        """The windows `run(validation=..., test=..., validation_every=...)` asks for; a `ValueError` if they make no sense."""
+        every = check_validation_every(validation_every)
         test = None if test is None else to_period(test, TEST)
         if isinstance(validation, str):
             if validation != PREVIOUS_YEAR:
@@ -143,20 +159,29 @@ class RunWindows:
                 raise ValueError(
                     f"validation={PREVIOUS_YEAR!r} is the year before a test period: pass test=(start, end)"
                 )
+            if every != 1:
+                raise ValueError(
+                    f"validation_every={every} thins a fixed validation window, and with validation={PREVIOUS_YEAR!r} the "
+                    "later years are served by test days, which are never thinned: pass validation=(start, end)"
+                )
             return cls.of_previous_year(test)
         validation = None if validation is None else to_period(validation, VALIDATION)
         if validation is None and test is None:
             raise ValueError("No window to forecast: pass test=(start, end), validation=(start, end) or both")
-        return cls.fixed(validation, test)
+        return cls.fixed(validation, test, every)
 
     @classmethod
-    def fixed(cls, validation: Optional[Period], test: Optional[Period]) -> "RunWindows":
+    def fixed(cls, validation: Optional[Period], test: Optional[Period], validation_every: int = 1) -> "RunWindows":
         if validation is not None and test is not None and validation[1] >= test[0]:
             raise ValueError(
                 f"The validation period {validation} must end before the test period {test} starts: a test forecast must "
                 "not be chosen on its own days"
             )
-        return cls(validation, test, FIXED, () if validation is None or test is None else (Segment(validation, test),))
+        every = check_validation_every(validation_every)
+        if every != 1 and validation is None:
+            raise ValueError(f"validation_every={every} thins the validation window: pass validation=(start, end)")
+        segments = () if validation is None or test is None else (Segment(validation, test),)
+        return cls(validation, test, FIXED, segments, every)
 
     @classmethod
     def of_previous_year(cls, test: Period) -> "RunWindows":
@@ -183,24 +208,45 @@ class RunWindows:
         return None if self.test is None else self.test[0]
 
     def issue_days(self, weekdays: Optional[Sequence[int]] = None) -> List[str]:
-        """The days a run forecasts, in order: both windows, once each, and nothing between them. With `weekdays` (a run's
-        `issue_days`, as `date.weekday()` numbers) only the days of those weekdays."""
+        """The days a run forecasts, in order: both windows, once each, and nothing between them, and of the validation window
+        every `validation_every`-th day alone. With `weekdays` (a run's `issue_days`, as `date.weekday()` numbers) only the
+        days of those weekdays."""
         days: List[str] = []
         kept = None if weekdays is None else frozenset(weekdays)
-        for _, (start, end) in self.periods:
+        for name, (start, end) in self.periods:
             first, last = datetime.date.fromisoformat(start), datetime.date.fromisoformat(end)
-            for d in range((last - first).days + 1):
+            step = self.validation_every if name == VALIDATION else 1
+            for d in range(0, (last - first).days + 1, step):
                 day = first + datetime.timedelta(days=d)
                 if kept is None or day.weekday() in kept:
                     days.append(day.isoformat())
         return days
 
-    def window_of(self, run_date: str) -> Optional[str]:
-        """The window of an issue day, or None for a day in neither."""
+    def issues_on(self, run_date: Any) -> bool:
+        """Whether a day of the run's windows is an issue day by `validation_every` (weekdays aside): every day of the test
+        window, every k-th of the validation window. False for a day in neither."""
+        day = run_date.isoformat() if isinstance(run_date, datetime.date) else str(run_date)
+        window = self._period_of(day)
+        if window is None:
+            return False
+        if window != VALIDATION or self.validation_every == 1:
+            return True
+        offset = (datetime.date.fromisoformat(day) - datetime.date.fromisoformat(self.validation[0])).days
+        return offset % self.validation_every == 0
+
+    def _period_of(self, run_date: str) -> Optional[str]:
         for name, (start, end) in self.periods:
             if start <= run_date <= end:
                 return name
         return None
+
+    def window_of(self, run_date: str) -> Optional[str]:
+        """The window of an issue day, or None for a day in neither, and for a validation day `validation_every` skips: a
+        record of it is no forecast of this run."""
+        window = self._period_of(run_date)
+        if window == VALIDATION and self.validation_every != 1 and not self.issues_on(run_date):
+            return None
+        return window
 
     def would_drop(self, older: "RunWindows") -> Optional[Tuple[str, Period]]:
         """The window of `older` this run doesn't name and that can't stay next to what it names, or None."""
@@ -214,22 +260,28 @@ class RunWindows:
         so a window this run doesn't name stays recorded. What `would_drop` names isn't kept, which a run refuses unless
         it is told to go on."""
         validation, test = self.validation or older.validation, self.test or older.test
+        # The thinning of the validation window that is kept: this run's if it names one, else the one on file.
+        every = self.validation_every if self.validation is not None else older.validation_every
         if self.would_drop(older) is not None:
             validation, test = self.validation, self.test
+            every = self.validation_every
         keeps_mode = self.validation is None or (self.test is None and self.validation == older.validation)
         if (keeps_mode and older.mode or self.mode) == PREVIOUS_YEAR and test is not None:
             derived = RunWindows.of_previous_year(test)
             if derived.validation == validation:
                 return derived
-        return RunWindows.fixed(validation, test)
+        return RunWindows.fixed(validation, test, every if validation is not None else 1)
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        out = {
             VALIDATION: None if self.validation is None else list(self.validation),
             TEST: None if self.test is None else list(self.test),
             "mode": self.mode,
             "segments": [segment.to_dict() for segment in self.segments],
         }
+        if self.validation_every != 1:  # written only when set, so manifests of every other run don't move
+            out["validation_every"] = self.validation_every
+        return out
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "RunWindows":
@@ -239,6 +291,7 @@ class RunWindows:
             None if test is None else tuple(test),
             data.get("mode", FIXED),
             tuple(Segment.from_dict(segment) for segment in data.get("segments", [])),
+            int(data.get("validation_every", 1)),
         )
 
 
@@ -251,6 +304,7 @@ __all__ = [
     "RunWindows",
     "Segment",
     "add_years",
+    "check_validation_every",
     "mask_key",
     "to_period",
     "yearly_segments",
