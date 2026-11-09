@@ -107,3 +107,41 @@ def test_a_timestamp_keeps_the_instant_it_names_when_the_workflow_is_saved_and_l
     assert (loaded.model_test_start, loaded.model_test_end) == ("2023-10-01", "2023-12-31")
     assert loaded.model_validation == ["2023-06-01", "2023-09-30"]
     assert loaded.model_test == ["2023-10-01", "2023-12-31"]
+
+
+def test_an_inline_component_s_relative_path_is_read_from_the_yaml_s_directory(tmp_path, monkeypatch):
+    """Like `save_dir` and a data pipeline file, an inline source's `path` (or `file_path`) is relative to the YAML, whatever the
+    working directory: it was read from the working directory before."""
+    from pathlib import Path
+
+    from epftoolbox2.pipelines import DataPipeline
+
+    (tmp_path / "exp").mkdir()
+    (tmp_path / "elsewhere").mkdir()
+    workflow_file = tmp_path / "exp" / "wf.yaml"
+    workflow_file.write_text(
+        "data_pipeline:\n"
+        "  start: 2024-01-01\n"
+        "  end: 2024-01-10\n"
+        "  timezone: Europe/Warsaw\n"
+        "  sources:\n"
+        "  - class: ForecastSource\n"
+        "    params: {path: runs/solar, model: solar_ridge, column: solar_fc}\n"
+        "model_pipeline:\n"
+        "  save_dir: runs/price\n"
+        "  models: []\n"
+    )
+    monkeypatch.chdir(tmp_path / "elsewhere")
+    workflow = Workflow.load(workflow_file)
+    inline = workflow._build_data_pipeline().sources[0].path
+    assert Path(inline) == tmp_path / "exp" / "runs" / "solar"
+    assert workflow._save_dir() == tmp_path / "exp" / "runs" / "price"
+    (tmp_path / "exp" / "dp.yaml").write_text(
+        "sources:\n- class: ForecastSource\n  params: {path: runs/solar, model: solar_ridge, column: solar_fc}\n"
+    )
+    assert Path(DataPipeline.load(tmp_path / "exp" / "dp.yaml").sources[0].path) == Path(inline)
+    built = Workflow("2024-01-01", "2024-01-10")  # not loaded from a file: as given
+    built._dp_inline = {
+        "sources": [{"class": "ForecastSource", "params": {"path": "runs/solar", "model": "m", "column": "c"}}]
+    }
+    assert built._build_data_pipeline().sources[0].path == "runs/solar"
