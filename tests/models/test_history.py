@@ -9,11 +9,13 @@ the load forecast 10:00 on D-1, a wind forecast 18:00 on D-1, the actual load 1 
 `FakeFoundation` stands in for 6i's foundation models: a zero-shot day unit on the refit calendar whose forecast of each step
 ahead is the context's last day (persistence) plus 0.1 x the known-ahead series, through history batches instead of rows. It
 runs its units in this process, as a foundation model runs in one process per device (decision 19), with the day unit's
-blocks, records and skips. Its context is an input the rules cut, never a training target, so `verify` reads it as
-`newest_target="published"`: the rule alone is the boundary.
+blocks, records and skips. With `newest_target="d-1"`, every model's default, its target's context ends at D-1's last step and
+`verify` holds it to that boundary (the target perturbed from D on); with `"published"`, where the rule says.
 """
 
+import dataclasses
 import datetime
+import io
 import json
 import warnings
 from concurrent.futures import Future
@@ -22,19 +24,22 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pytest
+from rich.console import Console
 
+from epftoolbox2.exporters import TerminalExporter
 from epftoolbox2.information_set import (
     Availability,
     InformationSet,
     InformationSetError,
     RuleChain,
+    StepsReader,
+    cuts_after_target_day,
     cuts_at_issue_day,
-    newest_known_step,
     perturb_unknown,
     steps_known,
 )
 from epftoolbox2.models._calendar import block_days
-from epftoolbox2.models._history import HistorySpec, history_batch, history_spec_of, reads_history
+from epftoolbox2.models._history import HistorySpec, history_batch, history_batches, history_spec_of, reads_history
 from epftoolbox2.models._worker import (
     SKIP_MISSING_TEST_PREDICTORS,
     TaskInputs,
@@ -51,7 +56,7 @@ from epftoolbox2.results.availability import (
     COLUMNS,
     HISTORY_COLUMNS,
     LATE,
-    READ,
+    ON_TIME,
     history_rows,
     listing_frame,
     merge_listings,
@@ -68,8 +73,11 @@ INFO_AHEAD = InformationSet(rules={"load_forecast": Availability.published("10:0
 SPRING = [datetime.date(2023, 3, 16) + datetime.timedelta(days=i) for i in range(20)]  # 26 March is the switch
 AUTUMN = [datetime.date(2023, 10, 19) + datetime.timedelta(days=i) for i in range(20)]  # 29 October is the switch
 DAYS = SPRING + AUTUMN
-PRICE = HistorySpec(CONTEXT, ("load_forecast",), ("load_actual",), "price", accepts_missing=True)
-LOAD = HistorySpec(CONTEXT, ("load_forecast",), ("generation_wind_forecast",), "load_actual")
+# Cut where the rules say (decision 12's counts); each test of "d-1" says so.
+PRICE = HistorySpec(
+    CONTEXT, ("load_forecast",), ("load_actual",), "price", accepts_missing=True, newest_target="published"
+)
+LOAD = HistorySpec(CONTEXT, ("load_forecast",), ("generation_wind_forecast",), "load_actual", newest_target="published")
 SPECS = {"price": PRICE, "load": LOAD}
 
 
@@ -185,6 +193,8 @@ def by_hand(utc_frame, spec, day, horizon, freq):
         return back[np.flatnonzero(~unknown[name])[0]]
 
     cut = newest(spec.target)
+    if spec.newest_target == "d-1":  # at the latest D-1's last step
+        cut = min(cut, to_utc(day, 0) - step)
     ahead = int((end - cut) / step)
     context = pd.DatetimeIndex([cut - (steps - 1 - i) * step for i in range(steps)])
     later = pd.DatetimeIndex([cut + (i + 1) * step for i in range(ahead)])
@@ -245,12 +255,14 @@ def utc_of(frame):
 @pytest.mark.parametrize("freq", ["1h", "15min"])
 @pytest.mark.parametrize("which", ["price", "load"])
 @pytest.mark.parametrize("horizon", [1, 2])
-def test_the_arrays_equal_a_reference_built_by_hand_from_the_utc_frame(hourly, quarter, freq, which, horizon):
-    """40 issue days around both switches: the target's context ends at its newest step known at 11:45, the past series on the
-    same steps (NaN after the actual load's newest known step, for a backend that takes missing values), the known-ahead
-    series to the end of the target day, and each step ahead's (date, period), the repeated hour's second step forecasting it."""
+@pytest.mark.parametrize("newest", ["published", "d-1"])
+def test_the_arrays_equal_a_reference_built_by_hand_from_the_utc_frame(hourly, quarter, freq, which, horizon, newest):
+    """40 issue days around both switches: the target's context ends at its newest step known at 11:45 (with "d-1" at D-1's
+    last step at the latest), the past series on the same steps (NaN after the actual load's newest known step, for a backend
+    that takes missing values), the known-ahead series to the end of the target day, and each step ahead's (date, period), the
+    repeated hour's second step forecasting it."""
     frame = hourly if freq == "1h" else quarter
-    spec = SPECS[which]
+    spec = dataclasses.replace(SPECS[which], newest_target=newest)
     batch = history_batch(spec, frame, DAYS, INFO, freq, horizon)
     assert [item.issue_day for item in batch.items] == DAYS
     classes = {"price": "snapshot", "load_forecast": "latest_revision", "generation_wind_forecast": "latest_revision"}
@@ -277,7 +289,8 @@ def test_any_cell_known_after_the_issue_time_set_to_1e9_moves_no_array(hourly, q
     `perturb_unknown` (the probe) replaces, so the cut and `verify` agree on each."""
     frame = hourly if freq == "1h" else quarter
     days = DAYS
-    for which, spec in SPECS.items():
+    specs = list(SPECS.values()) + [dataclasses.replace(spec, newest_target="d-1") for spec in SPECS.values()]
+    for spec in specs if freq == "1h" else SPECS.values():
         for horizon in (1, 2):
             batch = history_batch(spec, frame, days, INFO, freq, horizon)
             for item in batch.items:
@@ -324,6 +337,10 @@ def test_t_is_fixed_and_s_is_counted_by_hand(hourly, quarter, freq):
             assert sum(slot is not None for slot in item.slots) == hours * per_hour - (per_hour if hours == 25 else 0)
     ordinary = history_batch(LOAD, hourly, [datetime.date(2023, 6, 14)], INFO, "1h", 1).items[0]
     assert ordinary.steps_ahead == 38 and ordinary.slots[:14] == (None,) * 14
+    # With "d-1" both targets' contexts end at D-1's last step: D's 24 steps forecast nothing, D+1's 24 do.
+    for spec in SPECS.values():
+        (item,) = history_batch(dataclasses.replace(spec, newest_target="d-1"), hourly, ["2023-06-14"], INFO).items
+        assert item.steps_ahead == 48 and item.slots[:24] == (None,) * 24 and item.newest_minutes[spec.target] == -60.0
 
 
 def test_the_repeated_hour_is_forecast_by_its_second_step_and_the_skipped_one_by_none(hourly):
@@ -331,19 +348,20 @@ def test_the_repeated_hour_is_forecast_by_its_second_step_and_the_skipped_one_by
     assert [slot[1] for slot in spring.slots] == [0, 1, *range(3, 24)]
     assert autumn.slots[2] is None and autumn.slots[3] == (datetime.date(2023, 10, 29), 2)
     assert [slot[1] for slot in autumn.slots if slot is not None] == list(range(24))
-    same(autumn.periods, [0, 1, -1, *range(2, 24)])
+    same(autumn.slot_periods, [0, 1, -1, *range(2, 24)])
 
 
 def test_a_known_ahead_series_not_known_through_the_target_day_is_late(hourly):
     """The wind forecast of D+1 is out at 18:00 on D, after the issue: late as a known-ahead series, with when it is known; as a
     past series of a price it is known as far as the target, D's last hour."""
-    spec = HistorySpec(CONTEXT, ("generation_wind_forecast", "load_forecast"), (), "price")
+    spec = HistorySpec(CONTEXT, ("generation_wind_forecast", "load_forecast"), (), "price", newest_target="published")
     (item,) = history_batch(spec, hourly, ["2023-06-14"], INFO, "1h", 1).items
     assert set(item.late) == {"generation_wind_forecast"}
     late = item.late["generation_wind_forecast"]
     assert (late.known_label, late.issue_label, late.known - late.issue) == ("D 18:00", "D 11:45", 375.0)
     assert item.newest_minutes == {"price": 1380.0, "generation_wind_forecast": 1380.0, "load_forecast": 2820.0}
-    (item,) = history_batch(HistorySpec(CONTEXT, (), ("generation_wind_forecast",)), hourly, ["2023-06-14"], INFO).items
+    past = HistorySpec(CONTEXT, (), ("generation_wind_forecast",), newest_target="published")
+    (item,) = history_batch(past, hourly, ["2023-06-14"], INFO).items
     assert not item.late and np.isfinite(item.past["generation_wind_forecast"]).all()
 
 
@@ -353,20 +371,38 @@ def test_a_past_series_ends_at_its_newest_known_step(hourly):
     (item,) = history_batch(PRICE, hourly, ["2023-06-14"], INFO, "1h", 1).items
     load = item.past["load_actual"]
     assert np.isnan(load[-14:]).all() and np.isfinite(load[:-14]).all() and not item.late and not item.missing
-    strict = HistorySpec(CONTEXT, ("load_forecast",), ("load_actual",), "price")
+    strict = dataclasses.replace(PRICE, accepts_missing=False)
     (item,) = history_batch(strict, hourly, ["2023-06-14"], INFO, "1h", 1).items
     assert np.isfinite(item.past["load_actual"]).all()
     late = item.late["load_actual"]
     assert (late.known_label, late.issue_label) == ("D+1 01:00", "D 11:45")
 
 
-def test_missing_values_of_the_data_are_listed_and_the_cut_nans_are_not(hourly):
+def test_missing_values_are_counted_and_only_what_a_backend_can_t_take_keeps_an_item_out(hourly):
+    """Two missing load forecasts in the context: counted, and the item is whole for a backend that takes missing values, not
+    for one that doesn't; one missing on the target day is a missing step ahead, for both."""
     frame = hourly.copy()
     frame.loc["2023-06-12 05:00":"2023-06-12 06:00", "load_forecast"] = np.nan
+    strict = dataclasses.replace(PRICE, accepts_missing=False, past=())
     (item,) = history_batch(PRICE, frame, ["2023-06-14"], INFO, "1h", 1).items
+    assert item.gaps["load_forecast"] == (2, 0) and item.gaps["price"] == (0, 0) and item.missing == ()
+    (item,) = history_batch(strict, frame, ["2023-06-14"], INFO, "1h", 1).items
     assert item.missing == ("load_forecast",)
+    frame.loc["2023-06-15 03:00", "load_forecast"] = np.nan
+    for spec in (PRICE, strict):
+        (item,) = history_batch(spec, frame, ["2023-06-14"], INFO, "1h", 1).items
+        assert item.gaps["load_forecast"] == (2, 1) and item.missing == ("load_forecast",)
     (item,) = history_batch(PRICE, hourly, ["2023-06-14"], INFO, "1h", 1).items
-    assert item.missing == ()
+    assert item.missing == () and set(item.gaps.values()) == {(0, 0)}
+
+
+def test_a_past_series_known_only_before_its_context_is_missing(hourly):
+    """A past series out only five days after delivery, with a context of two days: NaN on every step, so missing, whatever
+    the backend takes."""
+    slow = InformationSet(rules={"load_actual": Availability.published("10:00", -5)})
+    spec = HistorySpec(2, (), ("load_actual",), "price", accepts_missing=True, newest_target="published")
+    (item,) = history_batch(spec, hourly, ["2023-06-14"], slow, "1h", 1).items
+    assert np.isnan(item.past["load_actual"]).all() and item.missing == ("load_actual",) and not item.late
 
 
 def test_batches_group_by_s_and_are_padded_with_copies_of_their_first_item(hourly):
@@ -387,12 +423,31 @@ def test_batches_group_by_s_and_are_padded_with_copies_of_their_first_item(hourl
         seen.extend(call.items)
     assert sorted(seen) == list(range(len(DAYS)))
     assert [call.steps_ahead for call in calls] == sorted(call.steps_ahead for call in calls)
-    by_s = {call.steps_ahead for call in calls}
-    assert by_s == {23, 24, 25}
+    assert {call.steps_ahead for call in calls} == {23, 24, 25}
     (only,) = [call for call in calls if call.steps_ahead == 23]
     assert [batch.items[i].issue_day for i in only.items] == [datetime.date(2023, 3, 25)]
     assert [len(call.items) for call in batch.batches(64)] == [1, 38, 1]
     assert [call.items for call in batch.batches(64, which=[5, 3])] == [(3, 5)]
+
+
+def test_items_are_read_only_views_and_horizons_are_read_at_once(hourly):
+    """An item's arrays are read-only (a backend that writes in place raises rather than changes another item), and each
+    horizon of `history_batches` is what `history_batch` gives it alone; `arrays=False` gives the same cuts without arrays."""
+    days = DAYS[:10]
+    batches = history_batches(PRICE, hourly, days, INFO, "1h", (1, 2, 3))
+    for horizon, batch in batches.items():
+        alone = history_batch(PRICE, hourly, days, INFO, "1h", horizon)
+        cuts = history_batch(PRICE, hourly, days, INFO, "1h", horizon, arrays=False)
+        for a, b, c in zip(batch.items, alone.items, cuts.items):
+            same(a.target, b.target)
+            same(a.known["load_forecast"], b.known["load_forecast"])
+            same(a.past["load_actual"], b.past["load_actual"])
+            assert (a.slots, a.newest, a.late.keys(), a.gaps) == (b.slots, b.newest, b.late.keys(), b.gaps)
+            assert c.target is None and (c.slots, c.newest_minutes) == (a.slots, a.newest_minutes) and not c.gaps
+    with pytest.raises(ValueError):
+        batches[1].items[0].target[0] = 0.0
+    with pytest.raises(ValueError, match="cuts alone"):
+        history_batch(PRICE, hourly, days, INFO, "1h", 1, arrays=False).batches(4)
 
 
 def test_a_rule_over_time_is_read_on_every_step_the_context_holds(hourly):
@@ -410,30 +465,39 @@ def test_a_rule_over_time_is_read_on_every_step_the_context_holds(hourly):
             )
         }
     )
-    spec = HistorySpec(40, ("load_forecast",), (), "price")
+    spec = HistorySpec(40, ("load_forecast",), (), "price", newest_target="published")
     (item,) = history_batch(spec, hourly, ["2023-06-14"], rules, "1h", 1).items
     assert "load_forecast" in item.late
-    (fine,) = history_batch(HistorySpec(10, ("load_forecast",), (), "price"), hourly, ["2023-06-14"], rules).items
+    (fine,) = history_batch(dataclasses.replace(spec, context=10), hourly, ["2023-06-14"], rules).items
     assert not fine.late
-    target = HistorySpec(40, (), (), "load_forecast")
+    target = HistorySpec(40, (), (), "load_forecast", newest_target="published")
     with pytest.raises(InformationSetError, match="rules over time"):
         history_batch(target, hourly, ["2023-06-14"], rules, "1h", 1)
 
 
-def test_steps_known_is_the_probe_s_reading_including_an_as_of_value_of_a_later_row(hourly):
-    """`steps_known` calls known exactly the cells `perturb_unknown` leaves alone, column by column. An `as_of` value of a row
-    after D is that row's own run's, so unknown on D though its time of day is before the issue time."""
+def test_the_reader_is_the_probe_s_reading_on_every_day_at_once(hourly):
+    """`steps_known` calls known exactly the cells `perturb_unknown` leaves alone, column by column, an `as_of` value of a row
+    after D (that row's own run's) unknown on D though its time of day is before the issue time; and `StepsReader` reading
+    many days at once (the accessor's) gives each day's verdicts as reading it alone does."""
     rules = InformationSet(rules={"wx": Availability.as_of("09:00")})
     frame = hourly.assign(wx=hourly["price"] + 7.0)
-    for day in ("2023-03-25", "2023-03-26", "2023-06-14", "2023-10-29"):
+    days = ["2023-03-25", "2023-03-26", "2023-06-14", "2023-10-28", "2023-10-29"]
+    for day in days:
         probed, _, _ = perturb_unknown(frame, day, rules)
         for name in frame.columns:
             read = steps_known(rules, name, frame.index, day)
             same(read.known, probed[name].to_numpy() == frame[name].to_numpy())
+    reader = StepsReader(rules, frame.index, days, "1h")
+    rows = np.arange(len(frame))
+    for i, day in enumerate(days):
+        owners = np.full(len(frame), i)
+        for name in frame.columns:
+            known = ~(reader.available(name, rows, owners) > reader.issue(owners))
+            same(known, steps_known(rules, name, frame.index, day).known)
     (item,) = history_batch(HistorySpec(CONTEXT, ("wx",), (), "price"), frame, ["2023-06-14"], rules).items
     assert item.newest_minutes["wx"] == 1380.0 and "wx" in item.late
-    position = newest_known_step(rules, "price", frame.index, "2023-06-14")
-    assert frame.index[position] == pd.Timestamp("2023-06-14 23:00", tz=ZONE)
+    newest = steps_known(rules, "price", frame.index, "2023-06-14").newest()
+    assert frame.index[newest] == pd.Timestamp("2023-06-14 23:00", tz=ZONE)
 
 
 def test_what_the_accessor_refuses(hourly):
@@ -443,9 +507,13 @@ def test_what_the_accessor_refuses(hourly):
         HistorySpec(CONTEXT, ("load_forecast",), ("load_forecast",))
     with pytest.raises(ValueError, match="a list of column names"):
         HistorySpec(CONTEXT, "load_forecast")
+    with pytest.raises(ValueError, match="newest_target"):
+        HistorySpec(CONTEXT, newest_target="d")
     for bad in (0, 1.5, True):
         with pytest.raises(ValueError, match="context"):
             HistorySpec(bad)
+    with pytest.raises(InformationSetError, match="need one"):
+        history_batch(PRICE, hourly, ["2023-06-14"], None)
     with pytest.raises(ValueError, match="freq"):
         history_batch(PRICE, hourly, ["2023-06-14"], INFO, "1D")
     with pytest.raises(InformationSetError, match="no availability rule"):
@@ -453,20 +521,35 @@ def test_what_the_accessor_refuses(hourly):
     with pytest.raises(ValueError, match="no column"):
         history_batch(HistorySpec(CONTEXT, ("absent",)), hourly, ["2023-06-14"], INFO)
     off = hourly.copy()
-    off.index = off.index + pd.Timedelta(minutes=5) * (np.arange(len(off)) == 10)
+    off.index = off.index + pd.Timedelta(minutes=5) * (off.index == pd.Timestamp("2023-06-10 05:00", tz=ZONE))
     with pytest.raises(ValueError, match="off the 1h steps"):
         history_batch(PRICE, off, ["2023-06-14"], INFO)
     slow = InformationSet(rules={"price": Availability.published("13:00", -40)})
     with pytest.raises(InformationSetError, match="a rule this slow"):
         history_batch(PRICE, hourly, ["2023-06-14"], slow)
+    with pytest.raises(ValueError, match="has a zone"):
+        history_batch(PRICE, hourly.tz_localize(None), [pd.Timestamp("2023-06-14 10:00", tz="UTC")], INFO)
     assert history_batch(PRICE, hourly, [], INFO).items == ()
 
 
+def test_an_issue_day_with_a_zone_is_read_on_the_frame_s_clock(hourly):
+    """00:30 on 15 June in Warsaw is 22:30 UTC on the 14th: the issue day is the 15th, as the frame's clock reads it."""
+    stamps = [pd.Timestamp("2023-06-15 00:30", tz=ZONE).tz_convert("UTC"), "2023-06-14", datetime.date(2023, 6, 14)]
+    batch = history_batch(PRICE, hourly, stamps, INFO, "1h", 1)
+    assert [item.issue_day for item in batch.items] == [datetime.date(2023, 6, 14), datetime.date(2023, 6, 15)]
+
+
 def test_a_frame_shorter_than_the_context_holds_nan_where_it_has_no_row(hourly):
-    """T is fixed whatever the frame has: steps before its first row are NaN, and the item says the target is missing."""
+    """T is fixed whatever the frame has: steps before its first row are NaN, counted as missing values of the context, which
+    a backend that takes them can be given; and a frame of ten years costs what a call reads, not the whole frame."""
     frame = hourly.loc["2023-06-10":]
     (item,) = history_batch(PRICE, frame, ["2023-06-14"], INFO).items
-    assert len(item.target) == CONTEXT * 24 and np.isnan(item.target[:48]).all() and "price" in item.missing
+    assert len(item.target) == CONTEXT * 24 and np.isnan(item.target[:48]).all()
+    assert item.gaps["price"] == (48, 0) and "price" not in item.missing
+    (item,) = history_batch(
+        dataclasses.replace(PRICE, accepts_missing=False, past=()), frame, ["2023-06-14"], INFO
+    ).items
+    assert "price" in item.missing
 
 
 # ---------------------------------------------------------------------------------------------------------------------------
@@ -495,8 +578,6 @@ class FakeFoundation(BaseModel):
         refit="7D",
         **kw,
     ):
-        # Its context is an input the rules cut: `verify` reads such a model's boundary from the rule, as for "published".
-        kw.setdefault("newest_target", "published")
         super().__init__(kw.pop("predictors", []), kw.pop("training_window", context), name=name, refit=refit, **kw)
         self.context = context
         self.known_ahead = list(known_ahead)
@@ -521,7 +602,7 @@ class FakeFoundation(BaseModel):
         }
 
     def _history_spec(self, target):
-        return HistorySpec(self.context, self.known_ahead, self.past, target, self.accepts_missing)
+        return HistorySpec(self.context, self.known_ahead, self.past, target, self.accepts_missing, self.newest_target)
 
     def _fit_predict(self, train_x, train_y, test_x):  # BaseModel's, which a unit never calls
         raise RuntimeError("a history model fits over history batches, not rows")
@@ -552,7 +633,7 @@ class FakeFoundation(BaseModel):
     ):
         """The day unit's checks, then the series': the cut's rules kept for the run, the series as the inputs it reads (the
         manifest hashes them, `report.vintages()` lists them, the probe perturbs them), and each series late on an issue day
-        refused at "raise" or listed, one row per series, at "warn"."""
+        refused at "raise" or listed, one row per series, at "warn", from the cuts alone."""
         expanded = super()._check_inputs(
             data,
             target,
@@ -579,11 +660,13 @@ class FakeFoundation(BaseModel):
 
         def batches(start, end):
             days = [day for day in self._days_of(start, end, None) if weekdays is None or day.weekday() in weekdays]
-            return [history_batch(spec, data, days, information_set, freq, h) for h in horizons]
+            return list(history_batches(spec, data, days, information_set, freq, horizons, arrays=False).values())
 
         found = batches(test_start, test_end) if windows is None else []
-        for _, (start, end) in windows.periods if windows is not None else ():
-            found += batches(start, end)
+        by_window = {}
+        for name, (start, end) in windows.periods if windows is not None else ():
+            by_window[name] = batches(start, end)
+            found += by_window[name]
         if availability == "raise":
             late = sorted({name for batch in found for name in batch.late()})
             if late:
@@ -592,8 +675,8 @@ class FakeFoundation(BaseModel):
                 )
             return expanded
         self._availability_listing = [*self._availability_listing, *history_rows(found)]
-        for name, (start, end) in windows.periods if windows is not None else ():
-            self._window_listings[name] = [*self._window_listings.get(name, []), *history_rows(batches(start, end))]
+        for name, window in by_window.items():
+            self._window_listings[name] = [*self._window_listings.get(name, []), *history_rows(window)]
         return expanded
 
     def _run_tasks(self, tasks, state, sink):
@@ -613,8 +696,8 @@ class FakeFoundation(BaseModel):
             self._collect(state, results, skipped, sink)
 
     def _history_unit(self, unit, tasks, inputs, frame):
-        """One unit's forecasts: the call holds every day of its block that the frame has with complete series, the run's
-        tasks or not, so a forecast is the same alone, in its block and after a resume."""
+        """One unit's forecasts: the call holds every day of its block that the frame has with series the backend can take, the
+        run's tasks or not, so a forecast is the same alone, in its block and after a resume."""
         cfg = inputs.config
         outcomes, issued = _issued(inputs, tasks)
         first_ordinal = cfg["refit"]["first_ordinal"]
@@ -624,9 +707,8 @@ class FakeFoundation(BaseModel):
             for day in block_days(unit.anchor, cfg["refit"]["rules"][unit.member])
             if day.toordinal() - first_ordinal in rows
         ]
-        batch = history_batch(
-            self._history_spec(self._target), frame, days, self._history_rules, self._freq, unit.horizon
-        )
+        spec = self._history_spec(self._target)
+        batch = history_batch(spec, frame, days, self._history_rules, self._freq, unit.horizon)
         complete = [i for i, item in enumerate(batch.items) if not item.missing]
         forecasts = {}
         for call in batch.batches(self.batch_size, complete):
@@ -658,13 +740,28 @@ class FakeFoundation(BaseModel):
         return out + self.offset
 
 
+class ReadsTheFramesEnd(FakeFoundation):
+    """Adds 1e-3 x the mean over its call of each context's first value: values every item may read, but how many items a
+    call holds depends on where the frame ends."""
+
+    def _backend(self, call):
+        return super()._backend(call) + 1e-3 * float(call.target[:, 0].mean())
+
+
+class ReadsDsTarget(FakeFoundation):
+    """A "d-1" model whose series are cut as a "published" one's: its context holds D's prices."""
+
+    def _history_spec(self, target):
+        return dataclasses.replace(super()._history_spec(target), newest_target="published")
+
+
 def make(name, **params):
     return FakeFoundation(name=name, **params)
 
 
-def fake_by_hand(frame, day, horizon, freq="1h", context=CONTEXT):
+def fake_by_hand(frame, day, horizon, freq="1h", context=CONTEXT, newest_target="d-1"):
     """The fake's forecasts of one issue day, {period: value}, from the reference by hand."""
-    spec = HistorySpec(context, ("load_forecast",), (), "price", True)
+    spec = HistorySpec(context, ("load_forecast",), (), "price", True, newest_target)
     ref = by_hand(utc_of(frame), spec, day, horizon, freq)
     periods = 1440 // STEP[freq]
     steps = len(ref["target"])
@@ -689,20 +786,28 @@ def pipeline(*models, information_set=INFO, **settings):
     return out
 
 
-def test_the_fake_reads_history_and_is_never_cut(hourly):
-    """A model reads history when its class defines `_history_spec`; `verify` never runs it on the frame cut after the issue
-    day, whose next rows hold its known-ahead values. A day unit without history is cut, as before."""
+def test_the_fake_reads_history_and_is_cut_after_each_target_day(hourly):
+    """A model reads history when its class defines `_history_spec`. `verify` cuts its frame after each target day, never after
+    the issue day, whose next rows hold its known-ahead values; a day unit without history is cut after the issue day, as
+    before. Its spec carries its newest target, "d-1" by default."""
     model = make("FM")
+    assert model.newest_target == "d-1"
     assert reads_history(model) and history_spec_of(model, "price") == HistorySpec(
-        CONTEXT, ("load_forecast",), (), "price", True
+        CONTEXT, ("load_forecast",), (), "price", True, "d-1"
     )
-    assert model._predicts_together and not cuts_at_issue_day(model)
+    assert model._predicts_together and not cuts_at_issue_day(model) and cuts_after_target_day(model)
     assert not model._engine_capable()
 
     class Day(FakeFoundation):
         _history_spec = None
 
-    assert not reads_history(Day()) and cuts_at_issue_day(Day())
+    assert not reads_history(Day()) and cuts_at_issue_day(Day()) and not cuts_after_target_day(Day())
+
+    class Rows(FakeFoundation):  # history and row blocks: cut both ways
+        def _predict_block(self, fitted, rows):
+            raise RuntimeError
+
+    assert cuts_at_issue_day(Rows()) and cuts_after_target_day(Rows())
     from epftoolbox2.models import OLSModel
 
     assert not reads_history(OLSModel(["price_d-1"])) and history_spec_of(OLSModel(["price_d-1"]), "price") is None
@@ -710,10 +815,12 @@ def test_the_fake_reads_history_and_is_never_cut(hourly):
 
 @pytest.mark.filterwarnings("ignore:Availability")  # the load forecast of D+2, late at horizon 2: listed, and used
 @pytest.mark.parametrize("freq", ["1h", "15min"])
-def test_the_fake_forecasts_what_its_reference_by_hand_says(hourly, quarter, freq):
+@pytest.mark.parametrize("newest", ["d-1", "published"])
+def test_the_fake_forecasts_what_its_reference_by_hand_says(hourly, quarter, freq, newest):
+    """Under "d-1" the fake's persistence is of D-1; under "published" of D, whose prices are out at 11:45."""
     frame = hourly if freq == "1h" else quarter
     days = ["2023-03-24", "2023-03-28"] if freq == "1h" else ["2023-03-25", "2023-03-26"]
-    report = pipeline(make("FM")).run(frame, *days, horizon=2, freq=freq, forecast_only=True)
+    report = pipeline(make("FM", newest_target=newest)).run(frame, *days, horizon=2, freq=freq, forecast_only=True)
     counts = report.forecast_counts().iloc[0]
     assert counts["produced"] == counts["planned"] > 0, counts.to_dict()
     records = report.refs["FM"]._results
@@ -721,31 +828,64 @@ def test_the_fake_forecasts_what_its_reference_by_hand_says(hourly, quarter, fre
     for record in records:
         key = (datetime.date.fromisoformat(record["run_date"]), record["horizon"])
         if key not in expected:
-            expected[key] = fake_by_hand(frame, *key, freq)
+            expected[key] = fake_by_hand(frame, *key, freq, newest_target=newest)
         assert record["prediction"] == expected[key][record["hour"]], record
 
 
 @pytest.mark.filterwarnings("ignore:overflow")
-def test_verify_is_ok_with_its_control_rerun_and_co_batch(hourly):
-    """`adapter_suite.check_verify` on a block's first, middle and last days and both switches: the six other days of the
-    "7D" block named, nothing moved by noise in them, every forecast moved by the control. A fake that reads its call's other
-    rows (`by_batch`) is a leak, and so is the cut one step late."""
+def test_verify_is_ok_with_its_control_rerun_co_batch_and_cut_frames(hourly):
+    """`adapter_suite.check_verify` on a block's first, middle and last days and both switches, for the default "d-1" fake (the
+    target perturbed from D on) and a "published" one: the six other days of the "7D" block named, nothing moved by noise in
+    them, nor by the frame cut after each target day, and every forecast moved by the control."""
     days = ["2023-03-20", "2023-03-22", "2023-03-25", "2023-03-26", "2023-10-28", "2023-10-29"]
     suite.check_verify(make, hourly, INFO, days, items=6)
+    suite.check_verify(lambda name: make(name, newest_target="published"), hourly, INFO, days[1:3], items=6)
     suite.check_verify(make, hourly, INFO_AHEAD, ["2023-10-28"], horizon=2, items=6)
+    report = pipeline(make("FM")).verify(hourly, "2023-03-22", "2023-03-22", horizon=2, days=1, co_batch=True)
+    cut = report.checks[0].co_batch.cut
+    assert cut is not None and cut.ok and cut.forecasts == 48 and cut.ends == "each target day"
+
+
+@pytest.mark.filterwarnings("ignore:overflow")
+@pytest.mark.parametrize(
+    "leaky",
+    [
+        pytest.param(lambda name: make(name, by_batch=1e-3), id="reads its call's other items"),
+        pytest.param(lambda name: ReadsTheFramesEnd(name=name), id="depends on where the frame ends"),
+        pytest.param(lambda name: ReadsDsTarget(name=name), id="d-1 reading D's prices"),
+    ],
+)
+def test_verify_catches_what_a_history_model_must_not_read(hourly, leaky):
     with pytest.raises(AssertionError):
-        suite.check_verify(lambda name: make(name, by_batch=1e-3), hourly, INFO, ["2023-03-22"])
+        suite.check_verify(leaky, hourly, INFO, ["2023-06-14"])
+
+
+@pytest.mark.filterwarnings("ignore:overflow")
+def test_the_frame_cut_after_each_target_day_catches_what_the_probe_can_t(hourly):
+    """`ReadsTheFramesEnd` reads only values known at the issue time, so the probe and the control pass it; the frame cut after
+    the target day takes the block's later days out of its call, and its forecasts move."""
+    report = pipeline(ReadsTheFramesEnd(name="FM")).verify(hourly, "2023-06-14", "2023-06-14", horizon=1, days=1)
+    check = report.checks[0]
+    assert check.probe.ok and check.co_batch.probe.ok and not check.co_batch.cut.ok
+    assert "differ when the frame ends on each target day" in "\n".join(report.problems())
 
 
 @pytest.mark.filterwarnings("ignore:overflow")
 def test_verify_catches_a_cut_one_step_late(hourly, monkeypatch):
-    """With every series cut one step after its newest known one, the actual load's context ends at 10:00 on D, out at 12:00,
-    which the persistence of its last day reads: a leak."""
-    from epftoolbox2.information_set import StepsKnown
+    """With every series cut one step after its newest known one, a "published" model of the actual load reads its value of
+    10:00 on D, out at 12:00, which the persistence of the context's last day reads: a leak."""
+    from epftoolbox2.models import _history
 
-    real = StepsKnown.newest
-    monkeypatch.setattr(StepsKnown, "newest", lambda self: min(real(self) + 1, len(self.available) - 1))
-    report = pipeline(make("FM")).verify(hourly, "2023-03-22", "2023-03-22", target="load_actual", horizon=1, days=1)
+    real = _history._Cuts.__init__
+
+    def late(self, *args, **kwargs):
+        real(self, *args, **kwargs)
+        last = self.end[max(self.end)]
+        self.newest = {name: np.minimum(newest + 1, last) for name, newest in self.newest.items()}
+
+    monkeypatch.setattr(_history._Cuts, "__init__", late)
+    model = make("FM", newest_target="published")
+    report = pipeline(model).verify(hourly, "2023-03-22", "2023-03-22", target="load_actual", horizon=1, days=1)
     assert report.table().iloc[0]["changed"] > 0
     with pytest.raises(AssertionError):
         report.assert_ok()
@@ -754,6 +894,22 @@ def test_verify_catches_a_cut_one_step_late(hourly, monkeypatch):
 def test_a_1d_model_names_no_other_item_of_its_call():
     assert make("FM", refit="1D")._co_batch_items("2023-03-22") == []
     assert len(make("FM")._co_batch_items("2023-03-22")) == 6
+
+
+def test_a_backend_that_takes_missing_values_forecasts_over_a_missing_hour(hourly):
+    """An hour missing early in the context: a fake that takes missing values forecasts every period anyway, the same values as
+    without the gap (persistence reads the last day); one that doesn't skips the day's forecasts as missing inputs."""
+    frame = hourly.copy()
+    frame.loc["2023-06-09 05:00", "price"] = np.nan
+
+    def forecasts(model, data):
+        ref = pipeline(model).run(data, "2023-06-14", "2023-06-14", horizon=1, forecast_only=True).refs["FM"]
+        return {r["hour"]: r["prediction"] for r in ref._results}
+
+    whole = forecasts(make("FM"), hourly)
+    assert len(whole) == 24 and forecasts(make("FM"), frame) == whole
+    with pytest.raises(RuntimeError, match="missing_test_predictors x24"):
+        forecasts(make("FM", accepts_missing=False), frame)
 
 
 def records_of(path):
@@ -769,7 +925,7 @@ def test_alone_in_a_batch_of_64_and_resumed_are_the_same_bits(tmp_path):
     full = tmp_path / "full"
     model = make("FM", refit="3MS")
     pipeline(model).run(frame, *test, horizon=1, save_dir=full, forecast_only=True)
-    assert (24, 64) in model._calls and {23, 25} <= {s for s, _ in model._calls}, model._calls
+    assert (48, 64) in model._calls and {47, 49} <= {s for s, _ in model._calls}, model._calls
     lines = records_of(suite.results(full, "FM"))
     by_key = {}
     for line in lines:
@@ -802,7 +958,7 @@ def test_the_adapter_suite(hourly, quarter, tmp_path, monkeypatch, registered):
     test = ("2023-03-15", "2023-03-28")
     info = INFO_AHEAD  # horizon 2 reads the load forecast of D+2
     suite.check_yaml_round_trip(make, hourly, tmp_path, test, horizon=2, information_set=info)
-    variants = ({}, {"context": 5}, {"batch_size": 1, "offset": 1.0})
+    variants = ({}, {"context": 5}, {"batch_size": 1, "offset": 1.0}, {"newest_target": "published"})
     suite.check_loop_and_shards(
         make, hourly, tmp_path / "loop", test, horizon=2, variants=variants, information_set=info
     )
@@ -811,22 +967,27 @@ def test_the_adapter_suite(hourly, quarter, tmp_path, monkeypatch, registered):
     suite.check_dst_counts(make, hourly, "2023-03-26", "2023-10-29", information_set=INFO)
     suite.check_quarter_hours(make, quarter, ("2023-02-20", "2023-02-21"), information_set=INFO)
     suite.check_preflight_without_extra(make, monkeypatch, hourly, test)
-    suite.check_provenance(make, hourly, tmp_path / "provenance", test, information_set=INFO)
+    suite.check_provenance(make, hourly, tmp_path / "provenance", test, information_set=info)
 
 
 # ---------------------------------------------------------------------------------------------------------------------------
-# The listing, explain and vintages
+# The listing, the terminal, explain and vintages
 # ---------------------------------------------------------------------------------------------------------------------------
 
 
 def test_availability_has_one_row_per_series_with_its_newest_step_and_class(hourly, tmp_path):
-    """At "warn", one row per series, not per lagged step: the target to D 23:00, the actual load (NaN after it) to 09:00, the
-    load forecast to D+1 23:00, each with its rule's class; the wind forecast, late as a known-ahead series, with when it is
-    out. No warning for the series read in time; one for the late one. A report read back from the files shows the same."""
-    model = make("FM", past=["load_actual"], known_ahead=["load_forecast", "generation_wind_forecast"])
+    """At "warn", one row per series, not per lagged step: a "published" model's target to D 23:00, the actual load (NaN after
+    it) to 09:00, the load forecast to the end of each target day, each with its rule's class; the wind forecast, late as a
+    known-ahead series, with when it is out. No warning for the series read in time; one for the late one. A report read back
+    from the files shows the same. A "d-1" model's target reads to D-1 23:00."""
+
+    def model():
+        known = ["load_forecast", "generation_wind_forecast"]
+        return make("FM", past=["load_actual"], known_ahead=known, newest_target="published")
+
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        report = pipeline(model, information_set=INFO_AHEAD).run(
+        report = pipeline(model(), information_set=INFO_AHEAD).run(
             hourly, "2023-06-12", "2023-06-14", horizon=2, save_dir=tmp_path, forecast_only=True
         )
     listed = [w for w in caught if "Availability:" in str(w.message)]
@@ -838,24 +999,24 @@ def test_availability_has_one_row_per_series_with_its_newest_step_and_class(hour
     assert set(shown) == {"price", "load_actual", "load_forecast", "generation_wind_forecast"}
     assert [shown[name]["role"] for name in shown] == ["target", "past", "known_ahead", "known_ahead"]
     assert {name: (row["status"], row["newest"], row["vintage"]) for name, row in shown.items()} == {
-        "price": (READ, "D 23:00", "snapshot"),
-        "load_actual": (READ, "D 09:00", "latest_revision"),
-        "load_forecast": (READ, "D+1 23:00 / D+2 23:00", "latest_revision"),  # read to the target day's end
+        "price": (ON_TIME, "D 23:00", "snapshot"),
+        "load_actual": (ON_TIME, "D 09:00", "latest_revision"),
+        "load_forecast": (ON_TIME, "D+1 23:00 … D+2 23:00", "latest_revision"),  # read to each target day's end
         "generation_wind_forecast": (LATE, "D 23:00", "latest_revision"),
     }
     wind = shown["generation_wind_forecast"]
     assert (wind["known"], wind["issued"], wind["horizons"], wind["periods"]) == ("D+1 18:00", "D 11:45", "1-2", "0-23")
-    again = pipeline(
-        make("FM", past=["load_actual"], known_ahead=["load_forecast", "generation_wind_forecast"]),
-        information_set=INFO_AHEAD,
-    )
     with pytest.warns(UserWarning, match="generation_wind_forecast is late"):
-        read_back = again.report(tmp_path, "2023-06-12", "2023-06-14", horizon=2, forecast_only=True)
+        read_back = pipeline(model(), information_set=INFO_AHEAD).report(
+            tmp_path, "2023-06-12", "2023-06-14", horizon=2, forecast_only=True
+        )
     pd.testing.assert_frame_equal(read_back.availability(), table)
     with pytest.raises(InformationSetError, match="generation_wind_forecast"):
         pipeline(make("FM", known_ahead=["generation_wind_forecast"]), availability="raise").run(
             hourly, "2023-06-12", "2023-06-14", horizon=1, forecast_only=True
         )
+    d1 = pipeline(make("FM")).run(hourly, "2023-06-12", "2023-06-13", horizon=1, forecast_only=True).availability()
+    assert d1.set_index("predictor").loc["price", "newest"] == "D-1 23:00"
 
 
 @pytest.mark.filterwarnings("ignore:Availability")  # what it lists, the late `price_d0`
@@ -870,24 +1031,88 @@ def test_availability_of_a_model_of_predictors_keeps_its_columns(hourly):
     )
     table = report.availability()
     assert list(table.columns) == COLUMNS and len(table) and set(table["status"]) == {LATE}
-    assert not set(HISTORY_COLUMNS) & set(report.refs["OLS"].availability_listing[0])
+    (row,) = report.refs["OLS"].availability_listing
+    assert set(row) == {"predictor", "role", "status", "list", "periods", "horizons", *COLUMNS[7:], "minutes_late"}
     assert listing_frame({"m": []}).columns.tolist() == COLUMNS
 
 
-def test_merging_listings_keeps_a_series_row_s_newest_step_and_class(hourly):
-    batches = [history_batch(PRICE, hourly, ["2023-06-14"], INFO, "1h", 1)]
-    rows = history_rows(batches)
-    assert merge_listings(rows, []) == rows
-    later = history_rows([history_batch(PRICE, hourly, ["2023-06-15"], INFO, "1h", 2)])
-    merged = {(row["predictor"], row["horizons"]): row for row in merge_listings(rows, later)}
-    assert merged[("price", "1-2")]["newest"] == "D 23:00" and merged[("price", "1-2")]["vintage"] == "snapshot"
+def test_the_rows_of_two_windows_at_one_horizon_combine(hourly):
+    """A wind forecast out at 18:00 on D-1 up to March and at 20:00 from April: a July window and a February one at the same
+    horizon give one late row, latest by the July days (D 20:00), as one batch of both does, in any order."""
+    rules = InformationSet(
+        rules={
+            "generation_wind_forecast": RuleChain(
+                [
+                    Availability.published("18:00", 1).during(valid_until="2023-03-31"),
+                    Availability.published("20:00", 1).during(valid_from="2023-04-01"),
+                ]
+            )
+        }
+    )
+    spec = HistorySpec(CONTEXT, ("generation_wind_forecast",), (), "price")
+    july = history_batch(spec, hourly, ["2023-07-03", "2023-07-04"], rules, "1h", 1)
+    feb = history_batch(spec, hourly, ["2023-02-20", "2023-02-21"], rules, "1h", 1)
+    both = history_batch(spec, hourly, ["2023-02-20", "2023-02-21", "2023-07-03", "2023-07-04"], rules, "1h", 1)
+    expected = history_rows([both])
+    late = [row for row in expected if row["status"] == LATE]
+    assert [(row["predictor"], row["known"], row["minutes_late"]) for row in late] == [
+        ("generation_wind_forecast", "D 20:00", 495.0)
+    ]
+    assert history_rows([july, feb]) == expected and history_rows([feb, july]) == expected
+
+
+def test_merging_listings_spans_both_runs_newest_steps(hourly):
+    """Two runs into one directory, of other days and horizons: the merged rows hold the range of both runs' newest steps,
+    and a series late in one run and read in time in the other is late there."""
+    utc = hourly.tz_convert("UTC")
+    feb = [datetime.date(2023, 2, 20) + datetime.timedelta(days=i) for i in range(5)]
+    july = [datetime.date(2023, 7, 1) + datetime.timedelta(days=i) for i in range(5)]
+    early = history_rows([history_batch(PRICE, utc, feb, INFO, "1h", 1)])
+    later = history_rows([history_batch(PRICE, utc, feb + july, INFO, "1h", 1)])
+    fresh = {row["predictor"]: row["newest"] for row in later}
+    merged = {row["predictor"]: row["newest"] for row in merge_listings(early, later)}
+    # On a frame in UTC the Brussels delivery day ends at 21:00Z in July and 22:00Z in February: the range of both runs.
+    assert merged == fresh and fresh["price"] == "D 21:00 … D 22:00" and early[0]["newest"] != fresh["price"]
+    assert merge_listings(early, []) == early
+    h1 = history_rows([history_batch(PRICE, hourly, ["2023-06-14"], INFO_AHEAD, "1h", 1)])
+    h2 = history_rows([history_batch(PRICE, hourly, ["2023-06-14"], INFO_AHEAD, "1h", 2)])
+    both = history_rows([history_batch(PRICE, hourly, ["2023-06-14"], INFO_AHEAD, "1h", h) for h in (1, 2)])
+    newest = {(row["predictor"], row["horizons"]): row["newest"] for row in merge_listings(h1, h2)}
+    assert newest == {(row["predictor"], row["horizons"]): row["newest"] for row in both}
+    assert newest[("load_forecast", "1-2")] == "D+1 23:00 … D+2 23:00"
+    strict = dataclasses.replace(PRICE, accepts_missing=False)
+    read = history_rows([history_batch(PRICE, hourly, ["2023-06-14"], INFO, "1h", 1)])
+    late = history_rows([history_batch(strict, hourly, ["2023-06-15"], INFO, "1h", 1)])
+    status = {(row["predictor"], row["status"]): row for row in merge_listings(read, late)}
+    assert ("load_actual", ON_TIME) not in status and status[("load_actual", LATE)]["newest"] == "D 09:00"
     with warnings.catch_warnings():
         warnings.simplefilter("error")
-        warn_about({"FM": rows})  # nothing late: no warning
+        warn_about({"FM": read})  # nothing late: no warning
+
+
+def test_the_terminal_lists_late_series_as_late_and_the_others_on_their_own(hourly):
+    """The availability table holds what is late (and what has no rule); a sequence model's series read in time come in a table
+    of their own, with how far each is read. A report with nothing late prints no availability table."""
+
+    def printed(rows):
+        out = io.StringIO()
+        TerminalExporter()._print_availability(Console(file=out, width=250), listing_frame({"FM": rows}))
+        return out.getvalue()
+
+    spec = HistorySpec(CONTEXT, ("generation_wind_forecast", "load_forecast"), (), "price", newest_target="published")
+    text = printed(history_rows([history_batch(spec, hourly, ["2023-06-14"], INFO, "1h", 1)]))
+    late, _, series = text.partition("History:")
+    assert "not known to be out" in late and "generation_wind_forecast" in late and "load_forecast" not in late
+    assert "load_forecast" in series and "D+1 23:00" in series and "generation_wind" not in series
+    text = printed(history_rows([history_batch(PRICE, hourly, ["2023-06-14"], INFO, "1h", 1)]))
+    assert "not known to be out" not in text and "History:" in text
+    assert printed([]) == ""
 
 
 def test_explain_shows_one_row_per_series(hourly):
-    model = make("FM", past=["load_actual"], known_ahead=["load_forecast", "generation_wind_forecast"])
+    model = make(
+        "FM", past=["load_actual"], known_ahead=["load_forecast", "generation_wind_forecast"], newest_target="published"
+    )
     out = pipeline(model).explain(hourly, "FM", test=("2023-03-24", "2023-03-26"), horizon=1, hour=5, echo=False)
     series = out["series"].set_index("series")
     assert series.loc["price", ["role", "steps", "newest", "status", "vintage"]].tolist() == [
@@ -901,6 +1126,22 @@ def test_explain_shows_one_row_per_series(hourly):
     assert series.loc["generation_wind_forecast", "status"] == "late"
     assert series.loc["load_actual", "newest"] == "D 09:00"
     assert out["predictors"].empty
+    d1 = pipeline(make("FM")).explain(hourly, "FM", test=("2023-03-24", "2023-03-26"), horizon=1, hour=5, echo=False)
+    assert d1["series"].set_index("series").loc["price", "newest"] == "D-1 23:00"
+    assert d1["series"].set_index("series").loc["load_forecast", "steps"] == f"{CONTEXT * 24} + 47…48"
+
+
+def test_explain_shows_a_series_without_a_rule_as_a_predictor_without_one(hourly):
+    frame = hourly.assign(mystery=1.0)
+    out = pipeline(make("FM", known_ahead=["mystery", "load_forecast"])).explain(
+        frame, "FM", test=("2023-06-12", "2023-06-14"), horizon=1, hour=5, echo=False
+    )
+    status = out["series"].set_index("series")["status"]
+    assert (status["mystery"], status["load_forecast"], status["price"]) == ("no rule", "ok", "ok")
+    out = pipeline(make("FM")).explain(
+        frame.assign(price_x=frame["price"]), "FM", target="mystery", horizon=1, echo=False
+    )
+    assert set(out["series"]["status"]) == {"no rule", "not cut (the target has no rule)"}
 
 
 def test_vintages_list_the_series(hourly):
