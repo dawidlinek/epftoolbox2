@@ -288,6 +288,11 @@ class ResidualModel(BaseModel):
             raise ValueError(
                 f"{where}: the learner's predictors must be a list of names in this step (with {{horizon}})"
             )
+        if not getattr(type(learner), "_residual_learner_ok", True):
+            raise ValueError(
+                f"{where}: {type(learner).__name__} isn't supported as a learner in this step (the learner runs in the "
+                "ResidualModel's pool, without its own executor config and torch threads): use HistGBModel or a linear model"
+            )
         kind = unit_kind(learner)
         if kind == DAY:
             raise ValueError(

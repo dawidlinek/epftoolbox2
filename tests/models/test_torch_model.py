@@ -956,14 +956,20 @@ def test_one_fit_per_process_every_cpu_by_default_and_one_process_on_a_gpu(monke
     assert daily()._executor_config() == (1, 3)
 
 
-def test_a_pooled_fit_of_a_period_network_refuses_rather_than_seed_itself(market):
-    """`PooledModel` fits outside the library's fit units, so a TorchModel there has no unit to seed from: it raises at the
-    first fit (a day network is refused before, as every day unit is)."""
-    from epftoolbox2.models import PooledModel
+def test_a_network_is_refused_by_pooled_model_when_built_and_by_a_residual_model_as_its_learner(market):
+    """`PooledModel` fits outside the library's fit units, which a network's seeds come from, and a `ResidualModel` runs its
+    learner in its own pool without the network's executor config and torch threads: both refuse a network when built (a
+    network as the base is a model of its own run). The run-time guard stays for any other caller without a fit unit."""
+    from epftoolbox2.models import PooledModel, ResidualModel, RidgeModel
 
-    pipeline = ModelPipeline().add_model(PooledModel(hourly(), name="pooled"))
+    for make in (hourly, daily):
+        with pytest.raises(ValueError, match="can't be pooled over zones"):
+            PooledModel(make(), name="pooled")
+    learner = hourly(predictors=["price_d-1", "base_fc_d+{horizon}"])
+    with pytest.raises(ValueError, match="isn't supported as a learner"):
+        ResidualModel(RidgeModel(["price_d-1"], training_window=40, name="b"), learner, training_window=56, name="res")
     with pytest.raises(RuntimeError, match="not PooledModel"):
-        pipeline.run({"PL": market, "XX": market}, "2023-03-20", "2023-03-20", horizon=1)
+        hourly()._fit_model(np.zeros((3, 2)), np.zeros(3))
 
 
 def test_a_class_is_saved_by_its_import_path_only_where_its_component_lists_it():

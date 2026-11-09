@@ -300,6 +300,13 @@ class TorchModel(BaseModel):
 
     _card = TORCH_CARD
     _engine_ok = False
+    # `module` is saved by its import path (`ModelPipeline._serialize_param`); every other class-valued parameter is refused.
+    _CLASS_PARAMS = ("module",)
+    # A `PooledModel` fits outside the library's fit units, which a network's seeds come from: refused when it is built.
+    _pooled_ok = False
+    # A `ResidualModel` runs its learner in its own pool, without this class's executor config and torch pinning: refused there
+    # in this step.
+    _residual_learner_ok = False
     # `refit` is always written: its default here is "7D", not BaseModel's None, so a file without it would load another model.
     _WRITTEN_WHEN_SET = {key: value for key, value in BaseModel._WRITTEN_WHEN_SET.items() if key != "refit"}
     # A day model predicts each block in one call (`models._units`); a period model one row at a time, so neither for it.

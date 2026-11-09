@@ -98,6 +98,9 @@ inputs only, never dates or targets, and its outputs are in the scaled target sp
 - **Device, threads, TF32.** Each fit runs on one torch thread with TF32 off (unless `tf32=True`), and puts both back after the
   fit. One fit at a time per worker process: `THREADS_PER_PROCESS` is not used for these models, and `MAX_PROCESSES` (every
   usable CPU by default, one process when the device is a GPU) is how many fits run at once.
+- **Not in this step:** a network can't be pooled over the zones of a run (`PooledModel`, refused when it is built: its fits
+  come outside the units its seeds are drawn from), nor be a [ResidualModel](/epftoolbox2/models/residual/)'s learner (refused
+  when the `ResidualModel` is built).
 
 ### Day-level predictors
 
