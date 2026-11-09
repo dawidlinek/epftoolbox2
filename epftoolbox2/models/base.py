@@ -17,6 +17,8 @@ from typing import (
     Optional,
 )
 
+import contextlib
+import contextvars
 import datetime
 import gc
 import inspect
@@ -152,6 +154,23 @@ _FRAME_READERS = ("_load_periods", "_preprocess", "_shift_index_by_calendar_days
 
 # ProcessPoolExecutor refuses more workers than this on Windows.
 _WINDOWS_MAX_WORKERS = 61
+
+# How many quiet blocks (`quiet_shortfall`) the current thread or task is in: a run there reports no shortfall of forecasts, as
+# `verify`'s runs on a cut frame skip its later days by design. A depth, not a flag, so blocks may end in any order; per context,
+# so another thread's runs still report theirs.
+_QUIET_SHORTFALL: contextvars.ContextVar[int] = contextvars.ContextVar("epftoolbox2_quiet_shortfall", default=0)
+
+
+@contextlib.contextmanager
+def quiet_shortfall():
+    """Runs inside report no planned forecasts not produced (`BaseModel._report_counts`); one that produces nothing still
+    raises. For `verify`'s runs on a cut frame (`information_set.target_day_cut`), and only in this thread or task."""
+    _QUIET_SHORTFALL.set(_QUIET_SHORTFALL.get() + 1)
+    try:
+        yield
+    finally:
+        _QUIET_SHORTFALL.set(_QUIET_SHORTFALL.get() - 1)
+
 
 # Whether the models of one run share what they would each compute alike (step 5k): the frame contract of each (freq, read days,
 # target, horizon) once per `ModelPipeline.run` (`_RunChecks`), and on one set of period frames each column's binary-mask
@@ -1727,6 +1746,8 @@ class BaseModel(ABC):
         reasons = "; ".join(f"{reason} x{n} (e.g. {examples.get(reason, '?')})" for reason, n in skipped.items())
         if produced == 0 and planned > 0:
             raise RuntimeError(f"{self.name}: no forecasts produced ({planned} planned). Skipped: {reasons}")
+        if _QUIET_SHORTFALL.get() > 0:  # a cut frame's run (`quiet_shortfall`): its later days have no data by design
+            return
         logger.warning(f"{self.name}: produced {produced} of {planned} planned forecasts. Skipped: {reasons}")
 
     def _set_freq(self, freq: str) -> None:

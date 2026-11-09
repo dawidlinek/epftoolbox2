@@ -22,7 +22,6 @@ import contextlib
 import datetime
 import fnmatch
 import hashlib
-import logging
 import math
 import re
 import threading
@@ -2740,21 +2739,14 @@ def issue_day_cut(
     return CutResult(run_day, len(whole), changed, max_abs, sorted(whole.keys() ^ alone.keys()), f"on {run_day}")
 
 
-# The shortfall `BaseModel` reports of a run that skipped forecasts: a cut frame's runs skip the later days it took away.
-_SHORTFALL_LOGGER = "epftoolbox2.models.base"
-
-
 @contextlib.contextmanager
 def _without_shortfall_warnings():
     """No warning of planned forecasts not produced, for a cut frame's runs (`target_day_cut`), whose later days have no data
-    by design; a run that produces nothing still raises."""
-    log = logging.getLogger(_SHORTFALL_LOGGER)
-    level = log.level
-    log.setLevel(max(level, logging.ERROR))
-    try:
+    by design: `models.base.quiet_shortfall`, in this thread or task alone; a run that produces nothing still raises."""
+    from .models.base import quiet_shortfall  # models import this module
+
+    with quiet_shortfall():
         yield
-    finally:
-        log.setLevel(level)
 
 
 def _history_cut(
