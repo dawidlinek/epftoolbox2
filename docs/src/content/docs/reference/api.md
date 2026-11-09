@@ -784,7 +784,7 @@ class BayesSearch:
         data: pd.DataFrame,
         target: str = "price",
         horizon: Optional[int] = None,               # As in ModelPipeline.run (7 if neither is given)
-        validation: Optional[Tuple[Any, Any]] = None,  # (start, end), required; the frame is cut after its end plus the horizon
+        validation: Optional[Tuple[Any, Any]] = None,  # (start, end), required; the frame is cut after its end
         *,
         horizons: Optional[Sequence[int]] = None,
         freq: str = "1h",

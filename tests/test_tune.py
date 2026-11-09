@@ -98,11 +98,11 @@ def search(**kwargs):
 # ---------------------------------------------------------------------------------------------------------------------
 
 
-def test_no_trial_reads_past_the_validation_end_plus_the_horizon(df, monkeypatch):
-    """Rows after the cut poisoned with NaN: the same table as the clean frame, no NaN anywhere, and every trial's frame ends
-    on the cut day."""
+def test_no_trial_reads_past_the_validation_end(df, monkeypatch):
+    """Rows after the validation end poisoned with NaN: the same table as the clean frame, no NaN anywhere, and every trial's
+    frame ends on the validation end."""
     poisoned = df.copy()
-    after = poisoned.index.tz_localize(None).normalize() > pd.Timestamp("2023-04-04")  # V's end + 2 days
+    after = poisoned.index.tz_localize(None).normalize() > pd.Timestamp(V[1])
     poisoned.loc[after, :] = np.nan
     seen = []
     real = ModelPipeline.run
@@ -115,13 +115,27 @@ def test_no_trial_reads_past_the_validation_end_plus_the_horizon(df, monkeypatch
     clean = search().run(df, horizon=2, validation=V).table()
     dirty = search().run(poisoned, horizon=2, validation=V).table()
     pd.testing.assert_frame_equal(clean, dirty)
-    assert set(seen) == {pd.Timestamp("2023-04-04")}
+    assert set(seen) == {pd.Timestamp(V[1])}
     assert clean["validation_mae"].notna().all() and np.isfinite(clean["validation_mae"]).all()
+
+
+def test_the_targets_after_the_validation_end_are_never_scored(df):
+    """The price of the H days after the validation end (the test period's) poisoned with a huge finite value: the table is the
+    clean frame's, since the forecasts for those days are made and not scored."""
+    poisoned = df.copy()
+    day = poisoned.index.tz_localize(None).normalize()
+    test_days = (day > pd.Timestamp(V[1])) & (day <= pd.Timestamp(V[1]) + pd.Timedelta(days=2))
+    poisoned.loc[test_days, "price"] = 1e6
+    clean = search().run(df, horizon=2, validation=V)
+    dirty = search().run(poisoned, horizon=2, validation=V)
+    pd.testing.assert_frame_equal(clean.table(), dirty.table())
+    assert clean.table()["validation_mae"].max() < 100
+    assert clean.record["search"]["data_through"] == V[1]
 
 
 def test_the_cut_is_on_local_days():
     frame = make_market_data(start="2023-03-20", days=10, horizon=1)
-    cut = bayes.cut_frame(frame, "2023-03-24", 2)
+    cut = bayes.cut_frame(frame, "2023-03-26")
     local = cut.index.tz_localize(None)
     assert local.max() == pd.Timestamp("2023-03-26 23:00") and local.min() == pd.Timestamp("2023-03-20")
     assert len(cut) == 7 * 24 - 1  # 26 March has 23 hours in Warsaw
@@ -218,10 +232,12 @@ def test_each_score_is_the_models_validation_mae_on_the_rungs_days(df):
             pipeline.add_model(model)
             report = pipeline.run(df, horizon=1, validation=V, validation_every=every)
             records = list(report.refs["ols"].iter_records())
-            assert mae == math.fsum(abs(r_["prediction"] - r_["actual"]) for r_ in records) / len(records)  # exact
-            assert getattr(row, f"forecasts_r{r}") == len(records)
+            scored = [r_ for r_ in records if r_["target_date"] <= V[1]]  # a later target is the test period's
+            assert mae == math.fsum(abs(r_["prediction"] - r_["actual"]) for r_ in scored) / len(scored)  # exact
+            assert getattr(row, f"forecasts_r{r}") == len(scored)
     calendar = IssueCalendar("1h", df.index.tz, (1,))
-    assert table["forecasts_r1"].dropna().unique().tolist() == [calendar.count(*V)]  # every day, over the spring switch
+    # every day, over the spring switch, but for 3 April
+    assert table["forecasts_r1"].dropna().unique().tolist() == [calendar.count(*V) - 24]
     assert table["forecasts_r0"].dropna().unique().tolist() == [calendar.count(*V, 4)]  # 20, 24, 28 March and 1 April
     assert calendar.count(*V, 4) == 4 * 24 and calendar.count(*V) < 14 * 24
 
@@ -624,7 +640,7 @@ def test_save_holds_the_space_every_trial_and_the_choice_and_loads_back(df, tmp_
         "window": {"choice": [14, 28, 42]},
         "drivers": {"subset": ["load", "wind"], "min_size": 0},
     }
-    assert saved["search"]["validation"] == list(V) and saved["search"]["data_through"] == "2023-04-03"
+    assert saved["search"]["validation"] == list(V) and saved["search"]["data_through"] == V[1]
     assert [trial["trial"] for trial in saved["trials"]] == list(range(6))
     assert all(
         set(rung) >= {"rung", "every_nth_day", "validation_mae", "forecasts"}

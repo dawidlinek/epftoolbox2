@@ -2,8 +2,9 @@
 
 How a search runs (`BayesSearch.run`):
 
-1. The frame is cut after the validation end plus the largest horizon (local days), before the first trial, and `test=` is
-   refused: no trial can read the test period, whatever the model does.
+1. The frame is cut after the validation end (local days), before the first trial, and `test=` is refused: no trial can read
+   the test period, whatever the model does. The last validation days' forecasts for days after the end are made (every trial
+   makes them) and never scored: their actuals are the test period's.
 2. **Rung 0.** `n_trials` trials, each proposed by the sampler (TPE, or random) from the trials finished so far and scored on
    the first rung: `ModelPipeline.run(validation=..., validation_every=every_nth_day)` of the model `make(params)` builds, with
    the rung's `seeds` in place of the model's. The sampler of trial i is seeded from (`seed`, i), so with one worker a search
@@ -495,7 +496,8 @@ class BayesSearch:
 
         `target`, `horizon`/`horizons`, `freq` and `validation=(start, end)` are as in `ModelPipeline.run`; `information_set`
         (or `issue_time` and `issue_timezone`), `availability` and `engine` as in `ModelPipeline(...)`. Each trial runs one
-        model through a `ModelPipeline` of these on the frame cut after the validation end plus the largest horizon.
+        model through a `ModelPipeline` of these on the frame cut after the validation end, and is scored on the forecasts for
+        days up to it.
         `test=` raises: a search chooses on validation, and the test period is never read (`validation="previous_year"` too:
         run one search per year, each warm-started from the year before).
         """
@@ -530,7 +532,7 @@ class BayesSearch:
                 f"{_workers()} workers share a search's trials through storage=: pass a journal file, such as "
                 "storage='runs/search.journal'"
             )
-        frame = cut_frame(data, end, max(planned_horizons))
+        frame = cut_frame(data, end)
         run = _Run(frame, target, tuple(planned_horizons), freq, (start, end), pipeline)
         optuna = _optuna()
         with _quiet_optuna():
@@ -574,7 +576,7 @@ class BayesSearch:
             "horizons": list(run.horizons),
             "freq": run.freq,
             "validation": list(run.validation),
-            "data_through": _through(run.validation[1], max(run.horizons)),
+            "data_through": run.validation[1],
             "data_hash": hash_frame(run.frame),
             "information_set": None if info is None else info.to_dict(),
             "issue_time": run.pipeline["issue_time"],
@@ -752,7 +754,7 @@ class BayesSearch:
             validation=run.validation,
             validation_every=rung.every_nth_day,
         )
-        return score_ref(report, model.name)
+        return score_ref(report, model.name, through=run.validation[1])
 
     def _promote(self, storage: Any, r: int) -> List[int]:
         """The rung-0 trial numbers that go on from rung `r`: the best `keep` share of those it scored, at least one."""
@@ -912,22 +914,19 @@ def _rung_results(storage: Any, r: int) -> Dict[int, Tuple[Optional[float], int,
     return out
 
 
-def _through(end: str, horizon: int) -> str:
-    return (pd.Timestamp(end) + pd.Timedelta(days=horizon)).date().isoformat()
-
-
-def cut_frame(data: pd.DataFrame, validation_end: Any, horizon: int) -> pd.DataFrame:
-    """The rows of `data` on local days up to `validation_end` plus `horizon` (the last target day a validation forecast
-    has), in their order: what a search's trials read. A row after it is the test period's, or later."""
+def cut_frame(data: pd.DataFrame, validation_end: Any) -> pd.DataFrame:
+    """The rows of `data` on local days up to `validation_end`, in their order: what a search's trials read. A row after it is
+    the test period's, or later, and so is the actual of a forecast for a day after it."""
     from ..models._contract import wall_clock
 
-    through = pd.Timestamp(_through(str(pd.Timestamp(validation_end).date()), horizon))
+    through = pd.Timestamp(pd.Timestamp(validation_end).date())
     return data[np.asarray(wall_clock(data.index).normalize() <= through)]
 
 
-def score_ref(report: Any, name: str) -> _Score:
-    """The validation MAE of model `name` in `report` (the validation report of its run), over the keys with an actual, if it
-    forecast every planned key the frame has a row to issue from with a finite value; else no score, with the reason."""
+def score_ref(report: Any, name: str, through: Optional[str] = None) -> _Score:
+    """The validation MAE of model `name` in `report` (the validation report of its run), over the keys with an actual for a
+    day up to `through` (every day without it), if it forecast every planned key the frame has a row to issue from with a
+    finite value; else no score, with the reason."""
     counts = report.forecast_counts().set_index("model").loc[name]
     planned, produced = int(counts["planned"]), int(counts["produced"])
     skipped = {
@@ -936,9 +935,11 @@ def score_ref(report: Any, name: str) -> _Score:
         if reason not in ("planned", "produced", "missing") and count
     }
     predictions, actuals = [], []
-    for record in report.refs[name].iter_records(cols=["prediction", "actual"]):
+    for record in report.refs[name].iter_records(cols=["target_date", "prediction", "actual"]):
         predictions.append(record.get("prediction"))
-        actuals.append(record.get("actual"))
+        # A target after `through` is the test period's: forecast, never scored.
+        late = through is not None and record.get("target_date", "") > through
+        actuals.append(None if late else record.get("actual"))
     predicted = np.asarray([np.nan if p is None else p for p in predictions], dtype=np.float64)
     actual = np.asarray([np.nan if a is None else a for a in actuals], dtype=np.float64)
     lacking = planned - produced - skipped.get(_MISSING_TEST_ROW, 0)

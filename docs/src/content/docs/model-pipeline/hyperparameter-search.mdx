@@ -172,9 +172,11 @@ file holds (None, bools, numbers, strings, and lists or dicts of them), since th
 
 ### How a search runs
 
-1. **The cut.** Before the first trial the frame is cut after the validation end plus the largest horizon (local days): no trial
-   can read the test period, whatever the model does. `test=` raises, and so does `validation="previous_year"`: run one search
-   per year, each warm-started from the year before.
+1. **The cut.** Before the first trial the frame is cut after the validation end (local days): no trial can read the test
+   period, whatever the model does. The last validation days' forecasts for days after the end (`price_d+2` of the last day)
+   are made by every trial and never scored, their actuals being the test period's; the result records the end as
+   `data_through`. `test=` raises, and so does `validation="previous_year"`: run one search per year, each warm-started from
+   the year before.
 2. **Rung 0.** `n_trials` trials, each proposed from the trials finished so far. `"tpe"` is Optuna's `TPESampler` (random for
    the first 10 trials, then where a low validation MAE is likeliest), `"random"` draws every trial at random. A trial is
    `make(params)` run through a `ModelPipeline` with `validation_every=` the rung's `every_nth_day`, and its rung's `seeds` in

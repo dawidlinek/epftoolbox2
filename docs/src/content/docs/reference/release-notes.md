@@ -201,7 +201,7 @@ an issue day it didn't sample.
   run's, bit for bit, the other days are neither forecast nor planned, the test window is never thinned, and the manifest records it
   (only when it isn't 1) and refuses a resume with another value. `tune.BayesSearch(make, space, sampler="tpe", n_trials=100,
   seed=0, rungs=[...], keep=1/3, warm_start=None, storage=None)` proposes settings with Optuna, scores every trial on the validation
-  period alone (the frame cut after its end plus the largest horizon, `test=` refused) at rungs of fewer days and seeds, promotes the
+  period alone (the frame cut after its end, so no target of the test period is scored, `test=` refused) at rungs of fewer days and seeds, promotes the
   best share, compares trials on identical keys, and returns ordinary models (`result.best(k, seeds=)`, named `{name}_bayes_00`, ...)
   whose manifests record where they were chosen. `result.save()` is the record of a search; `epf tune search.py --workers N` runs it
   in parallel processes on a shared journal file. `report.choices()` gains `candidates`, `test_mae` and `gap` columns, and a row per
