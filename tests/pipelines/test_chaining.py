@@ -423,3 +423,36 @@ def test_a_resume_where_one_run_knew_the_chain_and_the_other_didn_t_is_refused(d
     pipeline = downstream(PREDICTORS + ["load_fc_d+1"], rules)
     with pytest.raises(ManifestMismatchError, match="chained_inputs.load_fc: 'load_up'"):
         pipeline.run(data, *TEST, horizon=1, save_dir=str(tmp_path / "down"))
+
+
+# -- a daily upstream ------------------------------------------------------------------------------------------------------
+
+
+def test_a_daily_upstream_records_its_stamp_and_its_forecasts_land_there(tmp_path):
+    hourly = make_market_data(start="2023-02-01", days=60, noise=5.0, seed=11)
+    daily = hourly.drop(columns=[name for name in hourly.columns if name.startswith("load_d+")]).at_time("12:00")
+    info = InformationSet("09:30", ZONE, rules=RULES)
+    pipeline = ModelPipeline(information_set=info).add_model(OLSModel(UPSTREAM, training_window=20, name="daily_up"))
+    pipeline.run(daily, "2023-03-10", "2023-03-31", target="load", horizon=2, freq="1D", save_dir=str(tmp_path / "up"))
+    manifest = json.loads((tmp_path / "up" / "daily_up.manifest.json").read_text())
+    assert manifest["daily_stamp"] == "12:00"
+    hourly_run = ModelPipeline(information_set=info).add_model(OLSModel(UPSTREAM, training_window=20, name="h"))
+    hourly_run.run(
+        hourly.drop(columns=[name for name in hourly.columns if name.startswith("load_d+")]),
+        "2023-03-10",
+        "2023-03-12",
+        target="load",
+        horizon=1,
+        save_dir=str(tmp_path / "h"),
+    )
+    assert "daily_stamp" not in json.loads((tmp_path / "h" / "h.manifest.json").read_text())
+    for horizon in (1, 2):
+        frame = ForecastSource(str(tmp_path / "up"), "daily_up", "load_fc", horizon=horizon).fetch(*WIDE)
+        local = frame.index.tz_convert(ZONE)
+        assert set(local.strftime("%H:%M")) == {"12:00"}
+        records = {
+            r["target_date"]: r["prediction"]
+            for r in map(json.loads, (tmp_path / "up" / "daily_up.jsonl").read_text().splitlines())
+            if r["horizon"] == horizon and r["status"] == "ok"
+        }
+        assert dict(zip(local.strftime("%Y-%m-%d"), frame["load_fc"])) == records
