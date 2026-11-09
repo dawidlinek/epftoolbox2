@@ -202,7 +202,9 @@ recorded as failed with the error. The MAE is over the keys with an actual, as a
   model's). `seeds` replaces each model's `seeds`. The choice goes into the record.
 - `result.save(path)`: the record as YAML: the search's settings and space, every trial with its settings, the rungs it reached
   and their scores and forecast counts, the trials each rung promoted, and what `best()` chose. `SearchResult.load(path, make=...)`
-  reads it back; `best()` of a loaded result needs `make`. A `best()` after `save()` adds its choice to the file.
+  reads it back; `best()` of a loaded result needs `make`, and raises if `make` builds another model from a trial's settings than
+  the one the search scored (each trial records a fingerprint of it: the class and its settings as a pipeline saves them). A
+  `best()` after `save()` adds its choice to the file.
 
 <Aside type="caution">
   With one worker and a fixed `seed` a search gives the same table twice: the sampler of trial i is seeded from (`seed`, i).
@@ -238,7 +240,8 @@ out with a warning.
 ### Parallel workers
 
 `storage=` a journal file (Optuna's `JournalFileBackend`) keeps the trials on disk: workers in other processes share them, and a
-rerun of the search resumes where it stopped. Put the search in a script that ends with `result.save(...)`, and run it in N
+rerun of the search resumes where it stopped. A rerun whose `make` builds another model from a finished trial's settings than the
+one that trial scored raises: edit `make`, start a new journal. Put the search in a script that ends with `result.save(...)`, and run it in N
 processes:
 
 ```bash

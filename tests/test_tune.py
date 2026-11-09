@@ -411,6 +411,37 @@ def test_a_rerun_on_its_journal_resumes_and_gives_the_same_result(df, monkeypatc
     pd.testing.assert_frame_equal(again.table(), fake_search(n_trials=20).run(df, horizon=1, validation=V).table())
 
 
+def test_a_resume_with_another_make_is_refused(df, tmp_path):
+    """A search stopped by an error and resumed after `make` was edited would rank trials of two models: refused, while a
+    resume with the same `make` goes on and best() of its saved result needs that make."""
+    journal = tmp_path / "s.journal"
+    calls = {"n": 0}
+
+    def crashing(params):
+        calls["n"] += 1
+        if calls["n"] == 3:
+            raise RuntimeError("worker crashed")
+        return make(params)
+
+    def edited(params):
+        return OLSModel(["load_d+{horizon}"] + FIXED, training_window=params["window"], name="ols")
+
+    settings = dict(n_trials=4, seed=0, rungs=search().rungs, keep=0.5, storage=journal, sampler="random")
+    with pytest.raises(RuntimeError, match="worker crashed"):
+        BayesSearch(crashing, SPACE, **settings).run(df, horizon=1, validation=V)
+    with pytest.raises(ValueError, match="scored with another model than make builds now"):
+        BayesSearch(edited, SPACE, **settings).run(df, horizon=1, validation=V)
+    result = search(n_trials=4, storage=journal, sampler="random").run(df, horizon=1, validation=V)
+    trials = result.record["trials"]
+    assert all(trial["model"] for trial in trials if trial["rungs"][0]["state"] == "complete")
+    assert [trial["model"] for trial in trials if "worker crashed" in str(trial["rungs"][0]["error"])] == [None]
+    result.save(tmp_path / "s.yaml")
+    loaded = SearchResult.load(tmp_path / "s.yaml")
+    assert loaded.best(1, make=make)[0].name == "ols_bayes_00"
+    with pytest.raises(ValueError, match="make builds another model"):
+        loaded.best(1, make=edited)
+
+
 @pytest.mark.parametrize(
     "change, message",
     [

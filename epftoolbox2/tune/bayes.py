@@ -32,6 +32,8 @@ slots are proposed again (rung 0) or their settings enqueued again (later rungs)
 from __future__ import annotations
 
 import contextlib
+import dataclasses
+import hashlib
 import inspect
 import json
 import math
@@ -73,6 +75,7 @@ _PARENT = "trial"
 _ERROR = "error"
 _FORECASTS = "forecasts"
 _PLANNED = "planned"
+_MODEL = "model"  # the fingerprint of the model a trial scored (`model_fingerprint`)
 # Study user attributes.
 _SETTINGS = "search"
 _READY = "ready"
@@ -351,6 +354,38 @@ class _Score:
     forecasts: int = 0
     planned: int = 0
     error: Optional[str] = None
+    model: Optional[str] = None  # `model_fingerprint` of the model `make` built
+
+
+def _described(value: Any) -> Any:
+    """A value of a model's settings as JSON can hold it, a function by its import path and the hash of its code."""
+    if callable(value) and not isinstance(value, type):
+        code = getattr(value, "__code__", None)
+        digest = hashlib.sha256(code.co_code).hexdigest()[:12] if code is not None else ""
+        return f"{getattr(value, '__module__', '')}:{getattr(value, '__qualname__', repr(value))}#{digest}"
+    if isinstance(value, type):
+        return f"{value.__module__}:{value.__qualname__}"
+    return repr(value)
+
+
+def model_fingerprint(model: Any) -> str:
+    """What a search compares to know that `make` builds the model it scored: a hash of the model's class and its settings as
+    a pipeline saves them (`ModelPipeline.to_dict`), or its public attributes where a setting can't be saved (a predictor
+    function defined in the script)."""
+    from ..pipelines.model_pipeline import ModelPipeline
+
+    try:
+        params = ModelPipeline()._serialize_component(model)["params"]
+    except (TypeError, ValueError):
+        params = {key: value for key, value in vars(model).items() if not key.startswith("_")}
+        if getattr(model, "_ctx_fn", None) is not None:
+            params["predictors"] = model._ctx_fn
+    text = json.dumps(
+        {"class": f"{type(model).__module__}:{type(model).__qualname__}", "params": params},
+        sort_keys=True,
+        default=_described,
+    )
+    return hashlib.sha256(text.encode()).hexdigest()[:16]
 
 
 def _set_seeds(model: Any, seeds: int, where: str) -> None:
@@ -543,6 +578,7 @@ class BayesSearch:
                 raise SystemExit(0)
             settings = self._settings(run)
             study = self._open(storage, STUDY, optuna.samplers.RandomSampler(seed=self.seed), settings, warm=True)
+            self._check_models(storage)
             self._work_rung0(study, run)
             for r in range(1, len(self._rungs)):
                 self._wait(lambda: self._rung_done(storage, r - 1))
@@ -715,21 +751,25 @@ class BayesSearch:
             raise
         trial.set_user_attr(_FORECASTS, score.forecasts)
         trial.set_user_attr(_PLANNED, score.planned)
+        if score.model is not None:
+            trial.set_user_attr(_MODEL, score.model)
         if score.mae is None:
             trial.set_user_attr(_ERROR, score.error)
             study.tell(trial, state=optuna.trial.TrialState.FAIL)
         else:
             study.tell(trial, score.mae)
 
-    def _model(self, values: Dict[str, Any], seeds: Optional[int], where: str) -> Any:
+    def _model(self, values: Dict[str, Any], seeds: Optional[int], where: str) -> Tuple[Any, str]:
+        """The model of these settings with `seeds` in place of its own, and the fingerprint of the model `make` built."""
         from ..models.base import BaseModel
 
         model = self.make(dict(values))
         if not isinstance(model, BaseModel):
             raise TypeError(f"make must return one model (a BaseModel), got {type(model).__name__}")
+        fingerprint = model_fingerprint(model)
         if seeds is not None:
             _set_seeds(model, seeds, where)
-        return model
+        return model, fingerprint
 
     def _score(self, values: Dict[str, Any], r: int, run: _Run) -> _Score:
         """The validation MAE of the model of these settings at rung `r`, on the rung's keys; no score if it skips any."""
@@ -739,7 +779,7 @@ class BayesSearch:
         if reason is not None:
             return _Score(None, error=reason)
         rung = self._rungs[r]
-        model = self._model(values, rung.seeds, f"rungs[{r}]")
+        model, fingerprint = self._model(values, rung.seeds, f"rungs[{r}]")
         if r == 0:  # every rung's seeds against this model, before the dear rungs run
             for i, other in enumerate(self._rungs):
                 if other.seeds is not None:
@@ -754,7 +794,29 @@ class BayesSearch:
             validation=run.validation,
             validation_every=rung.every_nth_day,
         )
-        return score_ref(report, model.name, through=run.validation[1])
+        return dataclasses.replace(score_ref(report, model.name, through=run.validation[1]), model=fingerprint)
+
+    def _check_models(self, storage: Any) -> None:
+        """A ValueError if a trial on file was scored with another model than `make` builds now from its settings (a resume
+        after `make` was edited would compare two searches' trials)."""
+        optuna = _optuna()
+        built: Dict[str, str] = {}
+        for name in optuna.get_all_study_names(storage):
+            if name != STUDY and not name.startswith(f"{STUDY}:rung"):
+                continue
+            for t in optuna.load_study(study_name=name, storage=storage).get_trials(deepcopy=False):
+                stored = t.user_attrs.get(_MODEL)
+                if stored is None or not _has_params(t, self._space):
+                    continue
+                values = self._space.decode(t.params)
+                key = _canonical(values)
+                if key not in built:
+                    built[key] = model_fingerprint(self.make(dict(values)))
+                if built[key] != stored:
+                    raise ValueError(
+                        f"Trial {t.number} of {name!r} in {self.storage} was scored with another model than make builds now "
+                        f"from its settings {values}: make was changed since. Use another storage file for this search."
+                    )
 
     def _promote(self, storage: Any, r: int) -> List[int]:
         """The rung-0 trial numbers that go on from rung `r`: the best `keep` share of those it scored, at least one."""
@@ -845,6 +907,7 @@ class BayesSearch:
                     "trial": t.number,
                     "params": _plain(self._space.decode(t.params)) if _has_params(t, self._space) else None,
                     "warm_start": bool(t.user_attrs.get(_WARM, False)),
+                    "model": t.user_attrs.get(_MODEL),  # the fingerprint of the model it scored, None if it never ran
                     "rungs": rungs,
                 }
             )
@@ -1089,6 +1152,12 @@ class SearchResult:
             model = make(self.params(number))
             if not isinstance(model, BaseModel):
                 raise TypeError(f"make must return one model (a BaseModel), got {type(model).__name__}")
+            scored = trial.get("model")
+            if scored is not None and model_fingerprint(model) != scored:
+                raise ValueError(
+                    f"best({k}): make builds another model from trial {number}'s settings {self.params(number)} than the one the "
+                    "search scored: pass the make the search ran with"
+                )
             if seeds is not None:
                 _set_seeds(model, seeds, f"best(seeds={seeds})")
             model.name = f"{model.name}_bayes_{index:02d}"
