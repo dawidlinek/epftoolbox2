@@ -436,8 +436,16 @@ from tests.synthetic import make_market_data
 from epftoolbox2.tune import BayesSearch, bayes
 
 log = {log!r}
+joined = []
 
 def logged(self, values, r, run):
+    if not joined:  # wait, once, until both workers are in: each then takes trials, however late the other started
+        with open(log + ".started", "a") as f:
+            f.write(str(os.getpid()) + "\\n")
+        deadline = time.time() + 120
+        while len(set(open(log + ".started").read().split())) < 2 and time.time() < deadline:
+            time.sleep(0.05)
+        joined.append(True)
     with open(log, "a") as f:
         f.write(json.dumps({{"pid": os.getpid(), "rung": r, "values": values}}) + "\\n")
     time.sleep(0.3)
