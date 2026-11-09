@@ -36,6 +36,80 @@ console = Console()
 #   "window"       – a training window: days, "expanding", or a comma-separated list of them (e.g. "56,84,728,expanding")
 #   "json"         – free text parsed as JSON → dict/list (e.g. {"price": [-500, 4000]})
 
+
+# The training settings every network shares (TorchModel and its presets), after each class's own fields.
+def _torch_fields(seeds: int) -> list[dict]:
+    return [
+        {
+            "name": "training_window",
+            "description": "Training window in days, 'expanding', or a list averaged inside the model (e.g. 364,728,expanding)",
+            "required": False,
+            "default": "728",
+            "kind": "window",
+        },
+        {
+            "name": "refit",
+            "description": "Refit calendar: 7D once a week (Mondays), 1MS once a month, 1D every issue day",
+            "required": False,
+            "default": "7D",
+            "kind": "text",
+        },
+        {
+            "name": "seeds",
+            "description": "Networks per fit, averaged",
+            "required": False,
+            "default": seeds,
+            "kind": "int",
+        },
+        {"name": "lr", "description": "Adam's learning rate", "required": False, "default": 3e-4, "kind": "float"},
+        {
+            "name": "max_epochs",
+            "description": "At most this many epochs",
+            "required": False,
+            "default": 300,
+            "kind": "int",
+        },
+        {
+            "name": "patience",
+            "description": "Stop after this many epochs without a better early-stopping loss",
+            "required": False,
+            "default": 20,
+            "kind": "int",
+        },
+        {
+            "name": "early_stopping",
+            "description": "Share of each fit's training days held out for early stopping (0: none)",
+            "required": False,
+            "default": 0.2,
+            "kind": "float",
+        },
+        {
+            "name": "loss",
+            "description": "Loss: l1, mse, or an elementwise function as package.module:function",
+            "required": False,
+            "default": "l1",
+            "kind": "text",
+        },
+        {
+            "name": "device",
+            "description": "auto (CUDA if it runs, else the CPU), cpu or cuda",
+            "required": False,
+            "default": "auto",
+            "kind": "select",
+            "choices": ["auto", "cpu", "cuda"],
+        },
+        {
+            "name": "newest_target",
+            "description": "Newest training target: d-1, or every target published by the issue time (needs an issue time)",
+            "required": False,
+            "default": "d-1",
+            "kind": "select",
+            "choices": ["d-1", "published"],
+        },
+        {"name": "random_state", "description": "Base seed", "required": False, "default": 0, "kind": "int"},
+    ]
+
+
 PARAM_SCHEMAS: dict[str, list[dict]] = {
     "EntsoeSource": [
         {
@@ -1094,6 +1168,101 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
             "kind": "confirm",
         },
     ],
+    "MLPDailyModel": [
+        {
+            "name": "name",
+            "description": "Model display name",
+            "required": False,
+            "default": "mlp_daily",
+            "kind": "text",
+        },
+        {
+            "name": "predictors",
+            "description": "Day-level predictor columns (one value per local day: daily profiles such as price_h05_d-1)",
+            "required": True,
+            "default": None,
+            "kind": "column_select",
+        },
+        {
+            "name": "hidden",
+            "description": "Hidden layer widths as a JSON list",
+            "required": False,
+            "default": [256, 128],
+            "kind": "json",
+        },
+        {
+            "name": "dropout",
+            "description": "Dropout rate of each hidden layer",
+            "required": False,
+            "default": 0.1,
+            "kind": "float",
+        },
+        *_torch_fields(4),
+    ],
+    "MLPHourlyModel": [
+        {
+            "name": "name",
+            "description": "Model display name",
+            "required": False,
+            "default": "mlp_hourly",
+            "kind": "text",
+        },
+        {
+            "name": "predictors",
+            "description": "Predictor column names (one network per period of the day)",
+            "required": True,
+            "default": None,
+            "kind": "column_select",
+        },
+        {
+            "name": "hidden",
+            "description": "Hidden layer widths as a JSON list",
+            "required": False,
+            "default": [64],
+            "kind": "json",
+        },
+        {
+            "name": "dropout",
+            "description": "Dropout rate of each hidden layer",
+            "required": False,
+            "default": 0.0,
+            "kind": "float",
+        },
+        *_torch_fields(3),
+    ],
+    "TorchModel": [
+        {"name": "name", "description": "Model display name", "required": False, "default": "torch", "kind": "text"},
+        {
+            "name": "module",
+            "description": "Your torch.nn.Module class as package.module:Class (importable where the pipeline runs)",
+            "required": True,
+            "default": None,
+            "kind": "text",
+        },
+        {
+            "name": "predictors",
+            "description": "Predictor column names (output 'day': day-level columns only)",
+            "required": True,
+            "default": None,
+            "kind": "column_select",
+        },
+        {
+            "name": "module_params",
+            "description": 'Keyword arguments of the module\'s __init__, as JSON, e.g. {"width": 256}',
+            "required": False,
+            "default": None,
+            "kind": "json",
+        },
+        {
+            "name": "output",
+            "description": "day: one network per horizon with an output per period; period: one per period",
+            "required": False,
+            "default": "day",
+            "kind": "select",
+            "choices": ["day", "period"],
+        },
+        *_torch_fields(4),
+    ],
     "MAEEvaluator": [],
     "RMSEEvaluator": [],
     "rMAEEvaluator": [
@@ -1523,7 +1692,16 @@ _VALIDATORS = [
     "CoverageValidator",
     "PlausibilityValidator",
 ]
-_MODELS = ["OLSModel", "LassoCVModel", "RidgeModel", "LEARModel", "NaiveModel"]
+_MODELS = [
+    "OLSModel",
+    "LassoCVModel",
+    "RidgeModel",
+    "LEARModel",
+    "NaiveModel",
+    "MLPDailyModel",
+    "MLPHourlyModel",
+    "TorchModel",
+]
 # Not offered: `PooledModel` (registered in `COMPONENT_REGISTRY`, saved and loaded from YAML) fits over the frames of
 # `ModelPipeline.run(data={zone: frame})`, and the wizard builds and runs a pipeline on one CSV.
 _EVALUATORS = [
