@@ -2662,8 +2662,13 @@ def cuts_at_issue_day(model: Any) -> bool:
     depends on which rows its call holds, not only on their values, would differ between a backtest and that run. A row of a
     later day enters such a call only as an issue row, so the cut frame takes away nothing the forecast may read; a model that
     reads a later row's known-ahead value directly (a sequence model's covariate) would lose it, and isn't cut here. A model of
-    day or pooled units (`_unit_kind`, `models._units`) predicts its blocks in one call the same way, and is cut too."""
+    day or pooled units (`_unit_kind`, `models._units`) predicts its blocks in one call the same way, and is cut too, unless it
+    reads series through the history accessor (`models._history.reads_history`): that is such a sequence model."""
+    from .models._history import reads_history  # models import this module
+
     m = model() if callable(model) and not hasattr(model, "run") else model
+    if reads_history(m):
+        return False
     blocks = getattr(type(m), "_predict_block", None) is not None or getattr(m, "_unit_kind", "period") != "period"
     return blocks and bool(getattr(m, "_predicts_together", False))
 
