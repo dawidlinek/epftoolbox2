@@ -1212,7 +1212,8 @@ class SearchResult:
         self.path: Optional[Path] = None
         self._space = _Space.from_record(record["search"]["space"])
         self._handed_out: List[Dict[str, Any]] = []  # the provenance of best()'s models, given the file when saved
-        self._saved = False  # whether this object wrote `path`: only then does a later best() add its choice to the file
+        # Whether this object wrote `path`: only then does a later best() add its choice to the file.
+        self._saved = False
 
     @property
     def name(self) -> Optional[str]:
