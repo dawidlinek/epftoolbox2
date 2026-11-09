@@ -279,6 +279,57 @@ def _build(module_factory: Callable[[], "torch.nn.Module"], member: _Member, dev
     return module
 
 
+# The library's own layers, whose state given their constructor's arguments is torch's generator's for nothing: a module of these
+# alone keeps its parameters in `nets.Linear`s (drawn again from the member's stream key) and its buffers in `nets.Dropout`s.
+_COUNTER_LAYERS = (nets.MLP, torch.nn.Sequential, nets.Linear, nets.Activation, nets.Dropout)
+# Slots whose initial weights are drawn at once (`_stacked_counters`): a bound on the integer temporaries of a large layer.
+_DRAW_SLOTS = 64
+
+
+def _counter_only(module: "torch.nn.Module") -> bool:
+    """Whether `module` is made of the library's own layers alone (`_COUNTER_LAYERS`: `nets.MLP` and its parts), so that a
+    member's state is its factory's buffers (a `Dropout`'s rate) and its counter-based values (`nets.seed_counters`), never a
+    draw of torch's generator: then a stack's state on a GPU is drawn for all its members at once (`_stacked_counters`), one
+    build per factory instead of one per slot (a stack of 256 slots built them one by one in about a second)."""
+    return all(type(sub) in _COUNTER_LAYERS for sub in module.modules())
+
+
+def _stacked_counters(first_module, factories, slots, device, dtype) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """`stack_module_state` of every slot's built module (`_build`), without building one per slot: a module of
+    `_counter_only` layers is its factory's (built once per factory, with the first slot that uses it) but for its `Linear`
+    weights and biases, each slot's drawn from its own stream key as `nets.Linear.reset_from_key` draws them (the same
+    integer hashes and float steps, element by element, for all the slots at once), and its `Dropout` seeds, its stream key.
+    `first_module` is the first slot's module."""
+    templates = {id(factories[0]): first_module}
+    for factory, member in zip(factories, slots):
+        if id(factory) not in templates:
+            templates[id(factory)] = _build(factory, member, device, dtype)
+    numbers = {id(sub): k for k, sub in enumerate(m for m in first_module.modules() if isinstance(m, nets.Linear))}
+    owners = dict(first_module.named_modules())
+    keys = torch.as_tensor([member.stream & _M32 for member in slots], dtype=torch.int64, device=device)
+    params: Dict[str, Any] = {}
+    for name, param in first_module.named_parameters():
+        owner, _, attr = name.rpartition(".")
+        layer = owners[owner]
+        tag = nets.INIT_TAG + 2 * numbers[id(layer)] + (0 if attr == "weight" else 1)
+        bound = 1.0 / math.sqrt(layer.in_features)
+        spread = torch.tensor((tag * nets._SPREAD) & _M32, dtype=torch.int64, device=device)
+        n = int(param.numel())
+        parts = []
+        for start in range(0, len(slots), _DRAW_SLOTS):
+            u = nets._stream(keys[start : start + _DRAW_SLOTS, None], spread, n, device, param.dtype)
+            parts.append((2 * u - 1) * bound)
+        stacked = torch.cat(parts).view(len(slots), *param.shape).detach()  # a leaf, as stack_module_state's
+        params[name] = stacked.requires_grad_(param.requires_grad)
+    buffers: Dict[str, Any] = {}
+    for name, _ in first_module.named_buffers():
+        if name.rpartition(".")[2] == "seed":
+            buffers[name] = keys.clone()
+        else:
+            buffers[name] = torch.stack([dict(templates[id(factory)].named_buffers())[name] for factory in factories])
+    return params, buffers
+
+
 def _cuda_devices(device) -> List[int]:
     return [device.index or 0] if device.type == "cuda" else []
 
@@ -629,14 +680,21 @@ class _StackFit:
         if len(factories) != len(chunk):
             raise ValueError(f"{len(factories)} module factories for a stack of {len(chunk)} members")
         factories += [factories[0]] * (pad - len(chunk))
-        modules = [_build(factory, member, device, s["dtype"]) for factory, member in zip(factories, slots)]
-        check_vmappable(modules[0])
-        base = copy.deepcopy(modules[0])
+        first_module = _build(factories[0], slots[0], device, s["dtype"])
+        check_vmappable(first_module)
+        base = copy.deepcopy(first_module)
         for sub in base.modules():
             if isinstance(sub, (nets.Linear, nets.Activation)):
                 sub.stacked = True
-        params, buffers = stack_module_state(modules)
-        del modules
+        if device.type != "cpu" and _counter_only(first_module):  # on a CPU slot by slot is faster (each in cache)
+            params, buffers = _stacked_counters(first_module, factories, slots, device, s["dtype"])
+        else:
+            modules = [first_module] + [
+                _build(factory, member, device, s["dtype"]) for factory, member in zip(factories[1:], slots[1:])
+            ]
+            params, buffers = stack_module_state(modules)
+            del modules
+        del first_module
         self.base, self.params, self.buffers = base, params, buffers
         step_buffers = [
             f"{name}.step" if name else "step" for name, sub in base.named_modules() if isinstance(sub, nets.Dropout)

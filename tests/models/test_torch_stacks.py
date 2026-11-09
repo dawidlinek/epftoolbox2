@@ -537,6 +537,19 @@ def test_zones_stack_per_zone(market, monkeypatch):
 def test_on_gpu_a_model_alone_equals_it_in_a_loop_and_shuffled(market, monkeypatch, tf32):
     if not runtime.cuda_probe(0)[0]:
         pytest.skip("needs a usable CUDA device")
+    from torch.func import stack_module_state
+
+    from epftoolbox2.models._torch import trainer
+
+    # A stack's state drawn at once on the GPU (`_stacked_counters`) is its slots' built one by one, to the bit.
+    device = torch.device("cuda:0")
+    factories = [lambda d=d: nets.MLP(247, 24, hidden=(256, 128), dropout=d) for d in (0.1, 0.3)] * 40
+    slots = [trainer._Member(k, trainer.stream_key(k), 1e-3, np.arange(4), np.arange(2)) for k in range(80)]
+    first = trainer._build(factories[0], slots[0], device, torch.float32)
+    fast = trainer._stacked_counters(first, factories, slots, device, torch.float32)
+    slow = stack_module_state([trainer._build(f, m, device, torch.float32) for f, m in zip(factories, slots)])
+    assert all(torch.equal(fast[i][name], slow[i][name]) for i in (0, 1) for name in slow[i])
+
     models = loop_of(12, device="cuda", tf32=tf32, pad_to=16)
     own = alone(models, market, monkeypatch)
     same(own, records(run_pipeline(models, market)))
@@ -583,6 +596,33 @@ def test_calls_share_a_stack_s_rows_only_where_inputs_targets_and_mask_are_equal
         block = np.broadcast_to(rows, (fit.slots, *rows.shape)).copy()
         stacked = fit.run_slots(torch.as_tensor(block, dtype=torch.float32))[slot]
         assert np.array_equal(alone.predict(rows)[0], stacked)
+
+
+@pytest.mark.parametrize("hidden", [(8,), (8, 4)])
+def test_a_stack_of_the_library_s_layers_is_drawn_at_once_as_its_slots_built_one_by_one(hidden):
+    """`_stacked_counters` (an MLP's stack: one build per factory, every slot's weights drawn from its key at once) against
+    `stack_module_state` of each slot's own module (`_build`), every tensor to the bit: weights, biases, dropout rates of
+    three factories, seeds, steps; a module with a layer of torch's own is built slot by slot."""
+    from torch.func import stack_module_state
+
+    from epftoolbox2.models._torch import trainer
+
+    factories = [lambda d=d: nets.MLP(7, 24, hidden=hidden, dropout=d) for d in (0.1, 0.3, 0.1)]
+    chosen = [factories[i % 3] for i in range(70)]  # more slots than one draw (`_DRAW_SLOTS`)
+    slots = [trainer._Member(k, trainer.stream_key(k), 1e-3, np.arange(4), np.arange(2)) for k in range(70)]
+    device = torch.device("cpu")
+    first = trainer._build(chosen[0], slots[0], device, torch.float32)
+    assert trainer._counter_only(first)
+    fast_params, fast_buffers = trainer._stacked_counters(first, chosen, slots, device, torch.float32)
+    modules = [trainer._build(f, m, device, torch.float32) for f, m in zip(chosen, slots)]
+    slow_params, slow_buffers = stack_module_state(modules)
+    for fast, slow in ((fast_params, slow_params), (fast_buffers, slow_buffers)):
+        assert list(fast) == list(slow)
+        for name in slow:
+            assert fast[name].dtype == slow[name].dtype and fast[name].shape == slow[name].shape, name
+            assert fast[name].requires_grad == slow[name].requires_grad and fast[name].is_leaf, name
+            assert torch.equal(fast[name], slow[name]), name
+    assert not trainer._counter_only(FlatNet(7, 24)) and not trainer._counter_only(Scaled(7, 24))
 
 
 def test_jobs_are_cut_at_whole_units_in_block_order():
