@@ -305,7 +305,8 @@ an issue day it didn't sample.
   'epftoolbox2[lightgbm]'` (or `[xgboost]`, `[catboost]`; `[gbm]` is the first two). Each fits one tree model per horizon and refit
   day over the pooled (date, hour) rows of every hour (`periods="pooled"`, the default) or one per hour (`"each"`), at the research's
   settings: absolute error, an expanding window, weekly refits. They build, save and load without their package, and the pre-flight
-  names a missing one. The manifest compares the package's version, the thread count of a fit (`threads`, 1) and XGBoost's `device`.
+  names a missing one. The manifest compares the package's version, the thread count of a fit (`threads`, 1; more than one is
+  refused where workers fork, on Linux and macOS) and XGBoost's `device`; a package's own error stops the run.
   Each is also a `ResidualModel` learner, whose learner stage now runs with its learner's processes. See
   [Gradient-Boosted Trees](/epftoolbox2/models/trees/).
 - **`TorchModel`, `MLPHourlyModel` and `MLPDailyModel`: neural networks on the library's trainer.** `TorchModel(module, ...)` trains

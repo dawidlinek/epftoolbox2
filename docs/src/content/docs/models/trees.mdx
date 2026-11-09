@@ -14,9 +14,10 @@ the linear models do. The rows, targets and calendar are those of [`HistGBModel`
 
 On LEAR-style hourly inputs plain boosting is not a strong model: on the research's recent DE_LU and AT years the LightGBM global
 model (squared error, 728-day window, refitted daily) had a test MAE of 22.89 and 18.91 EUR/MWh, 6 to 10 % worse than LEAR's window
-average (20.89, 17.78). Absolute error with an expanding window, the defaults here, was better on the test year in 5 of 5 settings
-(21.55 and 18.37). Trees do best as the learner of a [`ResidualModel`](/epftoolbox2/models/residual/), correcting a linear base's
-forecasts.
+average (20.89, 17.78). Absolute error with an expanding window, the defaults here, was better on the test year in 5 of 5 settings:
+21.55 and 18.37 refitted daily, 21.85 and 18.56 refitted every 7 days (the library's weekly refits fall on Mondays of a fixed
+calendar, not on the research's 7-day cadence from the test start, so expect differences of about that size). Trees do best as
+the learner of a [`ResidualModel`](/epftoolbox2/models/residual/), correcting a linear base's forecasts.
 
 ## Installing
 
@@ -32,9 +33,12 @@ pip install 'epftoolbox2[gbm]'         # LightGBM and XGBoost
 
 - **LightGBM** (MIT) and **XGBoost** (Apache-2.0) install on Python 3.11 to 3.15, free-threaded 3.14t included. XGBoost's releases
   from 3.3 need Python 3.12 (3.11 gets 3.2), and its Linux wheel pulls NVIDIA's NCCL (about 300 MB), which only multi-GPU training
-  uses.
-- **CatBoost** (Apache-2.0) has no wheels for Python 3.15 or the free-threaded 3.14t; there the extra installs nothing and
-  `CatBoostModel`'s pre-flight says so.
+  uses. For the CPU, `pip install epftoolbox2 xgboost-cpu` instead of the extra installs XGBoost's CPU-only build (Linux and
+  Windows, Python 3.12+, no NCCL, no `device="cuda"`): it provides the same `xgboost` module, and the manifest records its version
+  under `xgboost`. Don't install both.
+- **CatBoost** (Apache-2.0) has no wheels for Python 3.15 or for free-threaded builds (3.14t). On 3.15 the extra installs
+  nothing; on 3.14t pip tries to build CatBoost from source, which fails (no dependency marker tells a free-threaded build from
+  3.14). Use a 3.11 to 3.14 build with the GIL for `CatBoostModel`; elsewhere its pre-flight says so.
 
 ## Basic Usage
 
@@ -73,7 +77,7 @@ keyword-only.
 | `periods` | str | `"pooled"` | `"pooled"`: one fit over the (date, period) rows of every period, each period's target through its own Invariant; `"each"`: one fit per period. Fixed once the model is made |
 | `objective` | str | `"l1"` | `"l1"` (absolute error) or `"l2"` (squared error): LightGBM's `l1`/`l2`, XGBoost's `reg:absoluteerror`/`reg:squarederror`, CatBoost's `MAE`/`RMSE` |
 | `random_state` | int | `0` | The seed of every fit (row and column samples), the same in each, so a forecast doesn't depend on which other fits a run makes |
-| `threads` | int | `1` | OpenMP threads (CatBoost's `thread_count`) of one fit; recorded and compared on resume (see [Threads](#threads-and-determinism)) |
+| `threads` | int | `1` | OpenMP threads (CatBoost's `thread_count`) of one fit; more than one is refused where workers fork (Linux, macOS); recorded and compared on resume (see [Threads](#threads-and-determinism)) |
 | `scaler` | scaler spec | `INVARIANT_TARGET` | Keyword-only. The predictors as they are (a tree splits on order) and the target as epftoolbox's Invariant; a pooled fit gives each period's target its own Invariant whatever this says |
 | `newest_target`, `binary_mask` | | `"d-1"`, `None` | Keyword-only, as for every model ([Time and Calendars](/epftoolbox2/model-pipeline/time-and-calendars/)) |
 
@@ -103,7 +107,7 @@ keyword-only.
 | `colsample_bytree` | `0.5` | The share of the predictors each tree samples |
 | `min_child_weight` | `5.0` | Hessian weight per leaf at least |
 | `reg_lambda` | `1.0` | L2 penalty of the leaf values |
-| `device` | `"cpu"` | `"cpu"`, or a CUDA GPU: `"cuda"`, `"cuda:1"`. CPU and GPU forecasts differ (3.849 against 3.878 MAE on Lago's DE in the research), so the device type is recorded and compared on resume; on a GPU a run takes one process unless `MAX_PROCESSES` says otherwise. The library's checks ran on the CPU |
+| `device` | `"cpu"` | `"cpu"`, or a CUDA GPU: `"cuda"`, `"cuda:1"`. CPU and GPU forecasts differ (3.849 against 3.878 MAE on Lago's DE in the research), so the device (with the GPU's index) is compared on resume and the GPU's model name recorded; a GPU fit that XGBoost moves to the CPU stops the run; on a GPU a run takes one process unless `MAX_PROCESSES` says otherwise. The library's checks ran on the CPU |
 
 `CatBoostModel` (`name="catboost"`), CatBoost's
 [`CatBoostRegressor`](https://catboost.ai/docs/en/concepts/python-reference_catboostregressor), silent and writing no files
@@ -123,24 +127,36 @@ date), `coefficients` `[]`.
 
 A fit and its predictions run on `threads` OpenMP threads, one by default: the scope is set around the fit alone and put back
 after it, and the count is given to the package (`n_jobs`, `thread_count`). Each task of a run's pool otherwise holds OpenMP at
-one thread, which XGBoost would keep to whatever `n_jobs` says. Without `MAX_PROCESSES` a run starts as many processes as the
-usable CPUs hold fits of `threads` threads (`THREADS_PER_PROCESS` counted too), and one for XGBoost on a GPU.
+one thread, which XGBoost would keep to whatever `n_jobs` says. One thread a fit is also the fast way: a run starts one process
+per usable CPU (`MAX_PROCESSES`), each fitting its own units.
+
+`threads > 1` is refused before any fit (`ValueError`) wherever the library forks its workers, which is every run on Linux and
+macOS, `MAX_PROCESSES=1` included: GNU OpenMP can't run a parallel region on several threads in a forked child of a process that
+ran one (see the caution below). It runs where workers are spawned (Windows), with as many processes as the usable CPUs hold fits
+of `threads` threads (`THREADS_PER_PROCESS` counted too) unless `MAX_PROCESSES` says otherwise; XGBoost on a GPU takes one
+process.
 
 The seed is the same in every fit and LightGBM runs deterministic and row-wise, so with a fixed thread count a forecast is the
 same bits alone, in a loop of other models, across `models_per_task` shards, after a resume, in one worker or twelve, and in the
 process that runs the pipeline or in a forked worker; `engine="on"` runs them on their own path. The manifest's `runtime`
-records the package's version and `threads_per_fit` (and XGBoost's `device`), and a resume with another of them refuses
-(`ManifestMismatchError`; `allow_manifest_mismatch=True` overrides): a release moves a tree's numbers, and a thread count is not
-known to leave them alone. On the research's DE_LU rows the three packages gave the same bits at 8 threads as at one (408
-forecasts each), and on Lago's DE rows LightGBM at 1, 4 and 16 threads and XGBoost at 1 and 16: a thread count may be changed
-for speed, deliberately, by overriding the check.
+records the package's version and `threads_per_fit` (and XGBoost's `device` type, with the GPU's model name as `device_name`), and
+a resume with another version, thread count or device refuses (`ManifestMismatchError`, naming `model_params`, where `threads`
+and `device` are too, the GPU's index included, and the `runtime` entry; `allow_manifest_mismatch=True` overrides): a release
+moves a tree's numbers, and CPU and GPU forecasts differ. Another GPU model only warns (`runtime.device_name`), as for the
+neural networks. On the research's DE_LU rows the three packages gave the same bits at 8 threads as at one (408 forecasts each),
+and on Lago's DE rows LightGBM at 1, 4 and 16 threads and XGBoost at 1 and 16.
+
+A package's own error (`XGBoostError`, `LightGBMError`, `CatBoostError`: settings it refuses, a GPU out of memory or without
+kernels for its architecture) stops the run with a `RuntimeError`, never a `fit_error` skip that would leave windows without
+forecasts. Asked for a GPU, an XGBoost fit that XGBoost moved to the CPU (no visible GPU, a build without CUDA) stops the run too,
+so a manifest never says `cuda` for CPU forecasts.
 
 <Aside type="caution">
-  GNU OpenMP can't run a parallel region in a forked child of a process that ran one on several threads: the child hangs. The
-  library's pools fork from the process that runs the pipeline, which fits nothing, and a fit on one thread forms no team. Don't
-  fit XGBoost (or any OpenMP code) on several threads in the process that runs a pipeline before a model with `threads > 1`;
-  XGBoost forms a team even at `n_jobs=1` unless OpenMP is held at one thread. CatBoost runs its own thread pool, which forks
-  safely.
+  GNU OpenMP can't run a parallel region on several threads in a forked child of a process that ran one: the child hangs. Any
+  OpenMP code on several threads in the process that runs a pipeline sets it up: scikit-learn's `HistGradientBoostingRegressor`
+  (which ships the same OpenMP runtime as XGBoost), XGBoost (even at `n_jobs=1`, unless OpenMP is held at one thread) or LightGBM,
+  fitted in your notebook or script before the run. That is why `threads > 1` is refused where workers fork; with one thread a
+  fit forms no team and nothing hangs. CatBoost runs its own thread pool, which forks safely.
 </Aside>
 
 ## As ResidualModel learners

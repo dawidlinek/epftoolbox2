@@ -645,7 +645,7 @@ class MLPDailyModel(TorchModel):            # nets.MLP, output="day": one networ
                  name: str = "mlp_daily", module_hash: Optional[str] = None): ...
 ```
 
-`LightGBMModel`, `XGBoostModel` and `CatBoostModel` are in [Gradient-Boosted Trees](/epftoolbox2/models/trees/): they build, save and load without their package (one extra each), and a fit's `threads`, the package's version and XGBoost's `device` are compared on resume. `HistGBModel` and `ResidualModel` are in [Residual Model](/epftoolbox2/models/residual/): `INVARIANT_TARGET` is
+`LightGBMModel`, `XGBoostModel` and `CatBoostModel` are in [Gradient-Boosted Trees](/epftoolbox2/models/trees/): they build, save and load without their package (one extra each), a fit's `threads`, the package's version and XGBoost's `device` are compared on resume, and `threads > 1` is refused where workers fork (Linux, macOS). `HistGBModel` and `ResidualModel` are in [Residual Model](/epftoolbox2/models/residual/): `INVARIANT_TARGET` is
 `{"name": "asinh", "params": {"apply_to": "target", "standardise": False}}` (`epftoolbox2.models.hgb`), the predictors as they are
 and the target as epftoolbox's Invariant; `base` is a model or the name of one added to the pipeline before the `ResidualModel`.
 
