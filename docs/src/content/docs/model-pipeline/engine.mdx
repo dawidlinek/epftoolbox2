@@ -237,8 +237,9 @@ pinned to 12 cores (`taskset`, 12 processes):
 
 The target for 10,000 OLS variants on 12 cores was under 15 minutes. OLS's times are of fit path `"engine-2"`, with the
 refinement step: before it the run took 7.1 minutes and 1,863 core-seconds; the step's error-free residual is some 60 numpy
-calls a fit (about 0.1 ms at these sizes). The other classes' numbers didn't move with it, bitwise, so their times stand. The
-run before the step took 8.5 minutes on 6 cores with 2 threads each (12 processes, the shape of a 12-thread desktop) and 35
+calls a fit (about 0.1 ms at these sizes). The other classes' numbers didn't move with it, bitwise, so their times stand. On
+`"engine-2"` the gaps of every class against `"off"`, OLS's 64 array tasks, 50 models alone and the 200-model groups were
+checked again, with the same verdicts. The run before the step took 8.5 minutes on 6 cores with 2 threads each (12 processes, the shape of a 12-thread desktop) and 35
 minutes in one process, and 64 array tasks of 157 variants, run one after another as `epf run --model-index i` (each its own process, reading the 3.7 MB workflow YAML, about 8 s, and checking every
 model of the list), 19 minutes, merging in `epf report` to the bytes of the one run. A run's records, manifests (but their
 provenance) and every `epf report` table were the same bytes in all of them.
