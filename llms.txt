@@ -138,6 +138,10 @@ Rules to know before using the library:
 - [ExcelExporter](docs/src/content/docs/exporters/excel.md): formatted Excel workbook
 - [CsvExporter](docs/src/content/docs/exporters/csv.md): wide-format CSV
 
+## Reproductions
+
+- [Pooled Week-ahead Study](docs/src/content/docs/reproductions/pooled.mdx): the 20-market week-ahead study's pooled LightGBM and MLP scored from their stored forecasts through `PanelReport` (+40.2 % and +39.0 % over the TSO, 2 and 1 of 40 cells lost), why the pooled residual model isn't re-estimated yet, and what one pooled LightGBM costs
+
 ## Reference
 
 - [API Reference](docs/src/content/docs/reference/api.md): constructor and method signatures of the pipelines, `Workflow`, `EvaluationReport` and every shipped component

@@ -99,6 +99,12 @@ export default defineConfig({
                     autogenerate: { directory: 'exporters' },
                 },
                 {
+                    label: 'Reproductions',
+                    items: [
+                        { label: 'Pooled Week-ahead Study', link: '/reproductions/pooled/' },
+                    ],
+                },
+                {
                     label: 'Reference',
                     items: [
                         { label: 'API Reference', link: '/reference/api/' },
