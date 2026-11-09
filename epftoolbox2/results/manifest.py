@@ -58,6 +58,9 @@ mislabelled record on a spring switch day and a look-ahead on the days after an 
 records in the file and read them. So a manifest without this field, written before rows were chosen by date, is refused. A model
 with `newest_target="published"` adds that, the target's rule (without its note) and the issue time and zone: the information set
 is not compared, but these decide which targets train, so changing one refuses a resume, and changing only the level doesn't.
+A model that reads history (`models._history`) adds every series' rule, the issue time and zone (`training_cut["history"]`), which
+decide where its contexts end, whatever its newest target, and `history_ahead`, a hash of its known-ahead series up to `test_end`
+plus the largest horizon: the last issue day's forecasts read them to the end of its target day, after `test_end`.
 Results that may still hold such records, accepted over that refusal with `allow_manifest_mismatch=True` or resumed with no
 manifest at all, get `{"rows": "dates", "stored": "unverified"}`, which every later resume keeps and which compares equal to the
 plain one: `ModelPipeline.report()` warns about them every time. Records of a slot the clock doesn't have are left out of every
@@ -183,6 +186,13 @@ _COMPARED_FIELDS += ("unit_kind", "target_transform")
 # A `ResidualModel` (`models.residual`): the hash of its base's configuration as the base's own manifest records it
 # (`base_manifest`), since the base's forecasts are the learner's inputs and targets; None (and no key) for any other model.
 _COMPARED_FIELDS += ("residual",)
+# A model that reads history (`models._history`): {"through", "columns", "hash"}, its known-ahead series up to `test_end` plus the
+# largest horizon, which its forecasts of the last issue days read; None (and no key) for any other model. With windows it is
+# compared on the data the stored forecasts read, as `actuals` is.
+_COMPARED_FIELDS += ("history_ahead",)
+# Compared fields a configuration digest holds only when set, so that the digest of every manifest written before them (a
+# `ResidualModel`'s `residual` field records its base's) doesn't move.
+_DIGESTED_WHEN_SET = ("history_ahead",)
 
 # How a run chooses a forecast's training rows: `Manifest.training_cut`.
 TRAINING_CUT_BY_DATE = {"rows": "dates"}
@@ -345,6 +355,8 @@ class Manifest:
     # A `ResidualModel` whose base has a card: {"card", "runtime", "weights", "first_issue_day"}; None (and no key) otherwise.
     # Provenance: never compared.
     residual_base: Optional[Dict[str, Any]] = None
+    # A model that reads history: {"through": day, "columns": its known-ahead series, "hash"}; None (and no key) otherwise.
+    history_ahead: Optional[Dict[str, Any]] = None
 
     def differences(self, existing: "Manifest", skip: Sequence[str] = ()) -> List[str]:
         """Human-readable list of compared fields that disagree with `existing`; empty if compatible."""
@@ -419,6 +431,8 @@ class Manifest:
         for name in ("residual", "residual_base"):  # no ResidualModel, or a base without a card
             if out[name] is None:
                 del out[name]
+        if out["history_ahead"] is None:  # a model that reads no history
+            del out["history_ahead"]
         return out
 
     @classmethod
@@ -639,6 +653,7 @@ def build_manifest(
 
     units = unit_fields(model)  # nothing for a period model
     return Manifest(
+        history_ahead=_history_ahead(model, target, test_end, horizon, hashes),
         model_class=type(model).__name__,
         predictors=sorted(set(used_columns) - {target}),
         predictor_layout_hash=PREDICTOR_FUNCTION_LAYOUT if predictor_function else hash_predictor_layout(expanded),
@@ -683,6 +698,21 @@ def build_manifest(
         **carded,
         **units,
     )
+
+
+def _history_ahead(
+    model: Any, target: str, test_end: str, horizon: int, hashes: FrameHashes
+) -> Optional[Dict[str, Any]]:
+    """`Manifest.history_ahead` of a model that reads history: its known-ahead series up to `test_end` plus the largest horizon;
+    None for any other model, and for one with no known-ahead series."""
+    from ..models._history import history_spec_of  # the models import this module
+
+    spec = history_spec_of(model, target)
+    if spec is None or not spec.known_ahead:
+        return None
+    through = (date.fromisoformat(test_end) + timedelta(days=horizon)).isoformat()
+    columns = sorted(spec.known_ahead)
+    return {"through": through, "columns": columns, "hash": hashes.of_columns(through, columns)}
 
 
 def horizons_of(manifest: Mapping[str, Any]) -> Optional[Tuple[int, ...]]:
@@ -733,7 +763,11 @@ def is_ensemble_manifest(path: Union[str, Path]) -> bool:
 def configuration_digest(manifest: Dict[str, Any]) -> str:
     """A hash of what a resume compares of a manifest (its `_COMPARED_FIELDS`, as a dict read from its file): equal for two runs
     of one configuration on the same data over the same last day, whichever days they ran."""
-    kept = {name: manifest.get(name) for name in _COMPARED_FIELDS}
+    kept = {
+        name: manifest.get(name)
+        for name in _COMPARED_FIELDS
+        if name not in _DIGESTED_WHEN_SET or manifest.get(name) is not None
+    }
     return hashlib.sha256(json.dumps(kept, sort_keys=True, default=str).encode()).hexdigest()
 
 
@@ -891,7 +925,7 @@ def check_and_write(
     if path.exists():
         existing = _read_manifest_of_a_model(path, model_name)
         data_diffs = _compare_data(existing, manifest, frame_hashes)
-        skip = () if data_diffs is None else ("data_columns_hash",)
+        skip = () if data_diffs is None else ("data_columns_hash", "history_ahead")
         diffs = [
             *(data_diffs or []),
             *manifest.differences(existing, skip=skip),
@@ -1097,6 +1131,19 @@ def _compare_data(existing: Manifest, manifest: Manifest, frame_hashes: Optional
                 f"actuals: {existing.target} up to {existing.actuals['through']} is not what the existing results read as "
                 "`actual` (if the data has since grown, its last days had no actual then, and a fresh run would have one)"
             )
+    ahead = existing.history_ahead
+    if (ahead is None) != (manifest.history_ahead is None):
+        out.append(f"history_ahead: {ahead!r} (existing results) vs {manifest.history_ahead!r} (this run)")
+    elif ahead is not None:
+        try:
+            moved = frame_hashes.of_columns(ahead["through"], ahead["columns"]) != ahead["hash"]
+        except KeyError as exc:
+            moved, ahead = True, {**ahead, "through": f"{ahead['through']} (a column is gone: {exc})"}
+        if moved:
+            out.append(
+                f"history_ahead: the known-ahead series {ahead['columns']} up to {ahead['through']} are not what the existing "
+                "results read"
+            )
     return out
 
 
@@ -1117,6 +1164,14 @@ def _cover_both(existing: Manifest, manifest: Manifest, frame_hashes: FrameHashe
     if manifest.actuals is not None and existing.actuals is not None:
         through = max(existing.actuals["through"], manifest.actuals["through"])
         manifest.actuals = {"through": through, "hash": frame_hashes.of_columns(through, [manifest.target])}
+    if manifest.history_ahead is not None and existing.history_ahead is not None:
+        through = max(existing.history_ahead["through"], manifest.history_ahead["through"])
+        columns = manifest.history_ahead["columns"]
+        manifest.history_ahead = {
+            "through": through,
+            "columns": columns,
+            "hash": frame_hashes.of_columns(through, columns),
+        }
 
 
 def _keep_windows(existing: Manifest, manifest: Manifest, allow_mismatch: bool, model_name: str) -> None:
