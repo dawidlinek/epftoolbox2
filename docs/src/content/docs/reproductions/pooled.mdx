@@ -92,7 +92,7 @@ The 40 cells weigh the same however large the market: Czechia's minimum (a TSO M
 Keep `zone` in `by`; a cell without it would mostly score the largest markets.
 </Aside>
 
-## Re-estimating the pooled LightGBM (tier R)
+## Re-estimation (tier R): not reproduced in this version
 
 The study's pooled LightGBM is, for each Friday D and statistic:
 
@@ -105,22 +105,35 @@ The study's pooled LightGBM is, for each Friday D and statistic:
    settings, one seed.
 4. **The forecast**: the Lasso's plus the fit's target standard deviation times the LightGBM's prediction for the issue row.
 
-In this version the library can't build step 2 or pool it:
+The library can't rebuild it. `PooledModel(ResidualModel(...))` is refused by design, since a pooled fit would skip the base stage.
+The study's residuals are out-of-fold inside each window, which the library doesn't offer: a `ResidualModel` trains on its base's
+out-of-sample forecasts from a warm-up, and with a 1092-day Lasso on the study's data (from 2021-01-01) that needs the frames to start
+1114 days earlier, so even a per-market `ResidualModel` refuses before any fit.
 
-- `PooledModel` refuses a `ResidualModel`: a pooled fit reads every zone's units itself and would skip the base stage.
-- A `ResidualModel`'s residuals are its base's out-of-sample forecasts from a warm-up, never out-of-fold residuals inside each
-  window. The study's data starts on 2021-01-01, so a 1092-day Lasso forecasts with its window filled from 2024-01-14 on, after the
-  first Friday, and the run refuses before any fit: a learner window of 1092 days would need the frames to start 1114 days earlier
-  (364 days, 386 days earlier). `warmup=` would run it with shorter Lasso windows, which is another base than the study's.
+A faithful reproduction would need an in-window out-of-fold residual mode and `ResidualModel` support in `PooledModel`; once they
+exist, the run is about 12 core-hours (about 7 for the 29,120 Lasso fits with their out-of-fold refits, about 5 for the pooled
+LightGBM, measured below). Even then the library's fit would differ from the study's in a few settings:
 
-So no tier-R table is given for the pooled models yet.
+- **Market**: `zone_feature="code"` gives one numeric column, and `LightGBMModel` declares no categorical feature; the study's
+  LightGBM treats the market as a category.
+- **Horizon**: with `"horizon"` in `over` the library adds a one-hot horizon; the study gives the horizon as one number.
+- **`lambda_l1`**: `LightGBMModel` has no L1 penalty on the leaves. The study's tuned values are 1.6e-7 (2023) and 9.6e-5 (2024),
+  negligible.
+- **`periods="each"`**: `PooledModel` refuses `LightGBMModel`'s default `periods="pooled"`; on a daily frame there is one period, so
+  `"each"` fits the same rows.
+
+### Both extremes in one model
+
+There is no such gap for the LightGBM: the study's script fits one LightGBM per statistic on the same rows (each on the rows where its
+target is observed), with one tuned setting for both, as one library run per target does. Only its pooled MLP fits both statistics at
+once, as two outputs of one network, which a library run of one target can't express; the MLP isn't re-estimated here.
 
 ### What one pooled LightGBM costs
 
-`PooledModel(LightGBMModel(..., periods="each", refit=None), over=("zone", "horizon"), zone_feature="code")` with the study's tuned
-settings, its compact list and a standard scaler per member, over the 20 markets' frames issued at noon on each market's clock:
-one fit per Friday over every market and horizon. It fits the level of each member's standardised target, not the Lasso's residual,
-so it is a measure of the pooled machinery with the study's learner and row count, not the study's model.
+As information only, not the study's model: `PooledModel(LightGBMModel(..., periods="each", refit=None), over=("zone", "horizon"),
+zone_feature="code")` with the study's tuned settings, its compact list and a standard scaler per member, over the 20 markets' frames
+issued at noon on each market's clock, one fit per Friday over every market and horizon. It fits **the level** of each member's
+standardised load, not the Lasso's residual, so it measures the pooled machinery with the study's learner and row count.
 
 Measured on the study's server (128 cores, 24 processes of one thread, a load of 75 to 122 from other users), one run per year since
 the settings differ by year, 52 fits of up to 152,880 rows each and 7,280 of 7,280 forecasts per run:
@@ -133,13 +146,6 @@ the settings differ by year, 52 fits of up to 152,880 rows each and 7,280 of 7,2
 | minimum | 2025 (2024's, 431 trees) | 186.8 s | 0.93 core-h | 1.23 GB |
 
 One pooled LightGBM over the 20 markets and 104 Fridays takes about 500 s of wall time and 2.4 core-hours per statistic, about 100 s
-of one core per fit of 703 trees. As information only: its forecasts beat the TSO by +23.8 % with 7 of 40 cells lost (Czechia and
-Spain both, Finland's and France's minimum, Poland's maximum), far from the study's +40.2 %. Trees on the level of each market's
-standardised load are not the study's correction of its Lasso.
-
-## Both extremes in one model
-
-Neither this step nor the study pools the minimum and the maximum in one LightGBM: the study's script fits one LightGBM per statistic on
-the same rows (each on the rows where its target is observed), with one tuned setting for both. Only its pooled MLP fits both
-statistics at once, as two outputs of one network, which a library run of one target per run can't express; the MLP isn't
-re-estimated here.
+of one core per fit of 703 trees. This level model beats the TSO by +23.8 % with 7 of 40 cells lost (Czechia and Spain both, Finland's
+and France's minimum, Poland's maximum), far from the study's +40.2 %: trees on the level of each market's standardised load are not
+the study's correction of its Lasso.
