@@ -861,15 +861,22 @@ class BayesSearch:
             "package_version": _package_version(),
             "search": {
                 **settings,
-                "warm_start": self.warm_start
-                if isinstance(self.warm_start, (str, type(None)))
-                else str(self.warm_start),
+                "warm_start": _warm_label(self.warm_start),
                 "storage": None if self.storage is None else str(self.storage),
             },
             "trials": trials,
             "promoted": promoted,
             "chosen": [],
         }
+
+
+def _warm_label(warm: Any) -> Optional[str]:
+    """What the record says a search was warm-started from: the earlier result's file, or its name if it wasn't saved."""
+    if warm is None:
+        return None
+    if isinstance(warm, SearchResult):
+        return str(warm.path) if warm.path is not None else f"{warm.name} (not saved)"
+    return str(warm)
 
 
 def _dropped(trial: Any) -> bool:

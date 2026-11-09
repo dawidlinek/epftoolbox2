@@ -565,6 +565,7 @@ def test_warm_start_enqueues_last_years_best(df, monkeypatch, tmp_path):
         table = this_year.table()
         assert table["warm_start"].tolist() == [True] * 3 + [False] * 27
         assert [this_year.params(n) for n in range(3)] == [last_year.params(n) for n in finalists]
+        assert this_year.record["search"]["warm_start"] == str(tmp_path / "last.yaml")
 
 
 def test_warm_start_leaves_out_what_the_space_cant_hold(df, monkeypatch, tmp_path):
