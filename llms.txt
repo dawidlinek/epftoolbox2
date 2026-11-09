@@ -141,6 +141,7 @@ Rules to know before using the library:
 ## Reproductions
 
 - [Resolution Study](docs/src/content/docs/reproductions/resolution.mdx): the 15-minute, hourly and daily price and load study (DE-LU, AT) and quality Q2's daily aggregates, scored exactly from their stored forecasts (tier S) and rebuilt from library models (tier R: per-quarter-hour `LEARModel`, `RidgeModel`, `ShapeModel` on a chained hourly forecast, `NaiveModel`, `freq="1D"`, `AverageEnsemble`), each MAE cell and DM verdict against the published one on identical keys, honest and post-gate apart
+- [Pooled Week-ahead Study](docs/src/content/docs/reproductions/pooled.mdx): the 20-market week-ahead study's pooled LightGBM and MLP scored from their stored forecasts through `PanelReport` (+40.2 % and +39.0 % over the TSO, 2 and 1 of 40 cells lost), why the pooled residual model isn't re-estimated in this version (in-window out-of-fold residuals, `ResidualModel` in `PooledModel`), and what one pooled LightGBM costs
 
 ## Reference
 

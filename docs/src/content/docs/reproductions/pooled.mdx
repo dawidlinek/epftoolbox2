@@ -1,0 +1,151 @@
+---
+title: Pooled Week-ahead Study
+description: The 20-market week-ahead study's pooled LightGBM and MLP scored through PanelReport from their stored forecasts, what re-estimating them with library models needs, and what one pooled LightGBM costs
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+A published study forecasts the daily minimum and maximum load of 20 European markets for the week ahead and pools two of its
+models over all the markets. This page reproduces its numbers with the library in two tiers: **scoring** (tier S), where the study's
+stored forecasts are read as library records and the library's [panel report](/epftoolbox2/model-pipeline/zones/#the-panel-report)
+recomputes every cell, and **re-estimation** (tier R), where the models are rebuilt from library components and refitted. The
+per-market Lasso of the same study is reproduced on [Week-ahead Forecasting](/epftoolbox2/model-pipeline/week-ahead/#reproducing-the-study).
+
+## The study
+
+- **Markets**: PL, IT, FI, DE, PT, FR, ES, NL, BE, AT, CH, CZ, SK, HU, RO, BG, GR, DK, NO, IE, each on its own clock (from Lisbon
+  and Dublin to Helsinki, Bucharest, Sofia and Athens).
+- **Forecasts**: issued on Fridays at local noon, as the TSO's week-ahead forecast (ENTSO-E A31) is, for the daily minimum and maximum
+  load of D+3 to D+9 (the next Monday to Sunday), on 104 Fridays from 2024-01-05 to 2025-12-26: 728 forecasts per market and
+  statistic, 29,120 per model.
+- **Score**: the log gain over the TSO, 100 ln(MAE of the TSO / MAE of the model), averaged over the 40 cells of a market and a
+  statistic with its seven horizons pooled. A cell lost is one where the TSO's MAE is lower.
+- **Pooled models**: each market's Lasso on regional weather (1092-day window, the study's `regional_nwp` list) corrected by one
+  learner fitted over every market: a LightGBM, and an MLP. Each market's rows are standardised within that market's own fit, so
+  markets of very different size share one fit. Their settings were tuned on the year before the one they forecast (2023's for
+  the 2024 Fridays, 2024's for 2025).
+
+## Scoring the stored forecasts (tier S)
+
+The study's forecasts of every market (the actual, the TSO's forecast, the Lasso, the pooled LightGBM and the pooled MLP) were
+written as records in a folder per zone, with the zone index a [run over zones](/epftoolbox2/model-pipeline/zones/) writes, one
+`save_dir` per statistic. `ModelPipeline.report()` of each is a `PanelReport`, and the two are put together:
+
+```python
+from epftoolbox2.evaluators import MAEEvaluator
+from epftoolbox2.models import NaiveModel
+from epftoolbox2.pipelines import ModelPipeline
+from epftoolbox2.results import PanelReport
+
+pipeline = ModelPipeline().add_evaluator(MAEEvaluator())
+for name in ("tso", "lasso", "pooled_lgbm", "pooled_mlp"):
+    pipeline.add_model(NaiveModel(predictors=["unused"], name=name))  # the names of the stored models' records
+panels = []
+for statistic in ("min", "max"):
+    panel = pipeline.report(
+        f"stored/{statistic}", test=("2024-01-05", "2025-12-26"), horizons=range(3, 10), issue_days=["friday"], freq="1D"
+    )
+    panels.append(PanelReport(panel.zones, target=statistic))
+both = PanelReport.concat(panels)
+both.log_gain("tso", by=("zone", "target"))   # the study's 40 cells
+both.cells_lost("tso", by=("zone", "target"))
+```
+
+| Model | Log gain over the TSO | Cells lost of 40 | Forecasts | Published |
+|---|---|---|---|---|
+| Pooled LightGBM | +40.198 % | 2 (CZ min, FI min) | 29,120 | +40.2 %, 2 |
+| Pooled MLP | +39.049 % | 1 (CZ min) | 29,120 | +39.0 %, 1 |
+| Lasso, per market | +37.436 % | 0 | 29,120 | +37.4 %, 0 |
+
+Every model is scored on the same 29,120 keys, 728 per cell, none missing. Each cell equals the study's formula recomputed with numpy on
+the same arrays to within 1e-13, and the headline rounds to the published one. With the 280 cells of a market, a statistic and a
+horizon (104 forecasts each, the formula of the study's tuning script) the gains are +40.259 % (20 cells lost), +39.051 % (26) and
++37.377 % (23). The stored files are the ones on the study's server (equal sha256, checked again on 2026-11-09).
+
+Per market, log gain over the TSO in %, with the TSO's MAE in MW:
+
+| Market | Clock | TSO MAE min | TSO MAE max | LightGBM min | LightGBM max | MLP min | MLP max | Lasso min | Lasso max |
+|---|---|---|---|---|---|---|---|---|---|
+| PL | Warsaw | 393 | 519 | +28.0 | +23.0 | +23.1 | +18.9 | +23.6 | +20.3 |
+| IT | Rome | 651 | 1,400 | +25.3 | +38.5 | +23.2 | +37.5 | +22.4 | +38.3 |
+| FI | Helsinki | 330 | 431 | -1.1 | +16.3 | +0.7 | +18.9 | +0.6 | +17.7 |
+| DE | Berlin | 1,815 | 2,362 | +38.2 | +32.0 | +37.1 | +27.9 | +36.2 | +27.6 |
+| PT | Lisbon | 378 | 392 | +113.2 | +61.5 | +114.7 | +63.6 | +108.2 | +57.7 |
+| FR | Paris | 1,554 | 1,839 | +13.9 | +13.8 | +11.1 | +11.1 | +10.6 | +10.8 |
+| ES | Madrid | 329 | 550 | +3.5 | +3.3 | +1.7 | +0.6 | +1.7 | +1.4 |
+| NL | Amsterdam | 965 | 1,331 | +123.2 | +113.3 | +120.9 | +108.8 | +114.1 | +105.9 |
+| BE | Brussels | 219 | 357 | +4.3 | +14.3 | +3.2 | +14.0 | +4.5 | +15.2 |
+| AT | Vienna | 268 | 387 | +60.0 | +40.6 | +58.3 | +39.7 | +52.8 | +33.4 |
+| CH | Zurich | 653 | 625 | +69.7 | +38.3 | +65.9 | +38.9 | +64.8 | +32.9 |
+| CZ | Prague | 59 | 91 | -0.8 | +7.5 | -1.2 | +9.9 | +0.7 | +11.7 |
+| SK | Bratislava | 119 | 136 | +55.3 | +38.6 | +55.3 | +39.0 | +55.0 | +37.0 |
+| HU | Budapest | 176 | 204 | +14.1 | +23.9 | +9.5 | +21.9 | +12.1 | +23.9 |
+| RO | Bucharest | 210 | 193 | +10.7 | +13.5 | +9.8 | +13.0 | +6.4 | +10.5 |
+| BG | Sofia | 184 | 217 | +30.3 | +24.4 | +29.9 | +25.1 | +28.3 | +25.7 |
+| GR | Athens | 154 | 429 | +15.5 | +56.1 | +16.8 | +53.9 | +13.6 | +49.9 |
+| DK | Copenhagen | 302 | 370 | +70.2 | +49.2 | +72.1 | +49.9 | +68.3 | +46.4 |
+| NO | Oslo | 689 | 701 | +47.2 | +45.3 | +46.1 | +43.9 | +43.5 | +45.6 |
+| IE | Dublin | 323 | 306 | +131.2 | +102.7 | +128.6 | +98.5 | +123.1 | +95.1 |
+
+<Aside type="caution">
+The 40 cells weigh the same however large the market: Czechia's minimum (a TSO MAE of 59 MW) counts as much as Germany's (1,815 MW).
+Keep `zone` in `by`; a cell without it would mostly score the largest markets.
+</Aside>
+
+## Re-estimation (tier R): not reproduced in this version
+
+The study's pooled LightGBM is, for each Friday D and statistic:
+
+1. **Each market's Lasso** (`LassoCV`, 7 contiguous folds, no intercept, every column standardised, 1092 days) fitted per horizon,
+   as on [Week-ahead Forecasting](/epftoolbox2/model-pipeline/week-ahead/#reproducing-the-study), its forecast the base.
+2. **Its out-of-fold residuals** on that fit's own training rows: the penalty it chose, refitted on six of the same seven folds and
+   evaluated on the seventh, in the fit's target standard deviations.
+3. **One LightGBM over the 20 markets x 7 horizons** of those fits (up to 152,880 rows), on the 63 columns of the study's compact list
+   standardised by each fit's own scaler, the market as a categorical feature and the horizon as a number; L1, the year's tuned
+   settings, one seed.
+4. **The forecast**: the Lasso's plus the fit's target standard deviation times the LightGBM's prediction for the issue row.
+
+The library can't rebuild it. `PooledModel(ResidualModel(...))` is refused by design, since a pooled fit would skip the base stage.
+The study's residuals are out-of-fold inside each window, which the library doesn't offer: a `ResidualModel` trains on its base's
+out-of-sample forecasts from a warm-up, and with a 1092-day Lasso on the study's data (from 2021-01-01) that needs the frames to start
+1114 days earlier, so even a per-market `ResidualModel` refuses before any fit.
+
+A faithful reproduction would need an in-window out-of-fold residual mode and `ResidualModel` support in `PooledModel`; once they
+exist, the run is about 12 core-hours (about 7 for the 29,120 Lasso fits with their out-of-fold refits, about 5 for the pooled
+LightGBM, measured below). Even then the library's fit would differ from the study's in a few settings:
+
+- **Market**: `zone_feature="code"` gives one numeric column, and `LightGBMModel` declares no categorical feature; the study's
+  LightGBM treats the market as a category.
+- **Horizon**: with `"horizon"` in `over` the library adds a one-hot horizon; the study gives the horizon as one number.
+- **`lambda_l1`**: `LightGBMModel` has no L1 penalty on the leaves. The study's tuned values are 1.6e-7 (2023) and 9.6e-5 (2024),
+  negligible.
+- **`periods="each"`**: `PooledModel` refuses `LightGBMModel`'s default `periods="pooled"`; on a daily frame there is one period, so
+  `"each"` fits the same rows.
+
+### Both extremes in one model
+
+There is no such gap for the LightGBM: the study's script fits one LightGBM per statistic on the same rows (each on the rows where its
+target is observed), with one tuned setting for both, as one library run per target does. Only its pooled MLP fits both statistics at
+once, as two outputs of one network, which a library run of one target can't express; the MLP isn't re-estimated here.
+
+### What one pooled LightGBM costs
+
+As information only, not the study's model: `PooledModel(LightGBMModel(..., periods="each", refit=None), over=("zone", "horizon"),
+zone_feature="code")` with the study's tuned settings, its compact list and a standard scaler per member, over the 20 markets' frames
+issued at noon on each market's clock, one fit per Friday over every market and horizon. It fits **the level** of each member's
+standardised load, not the Lasso's residual, so it measures the pooled machinery with the study's learner and row count.
+
+Measured on the study's server (128 cores, 24 processes of one thread, a load of 75 to 122 from other users), one run per year since
+the settings differ by year, 52 fits of up to 152,880 rows each and 7,280 of 7,280 forecasts per run:
+
+| Statistic | Fridays (settings) | Pooled run | CPU | Peak RSS |
+|---|---|---|---|---|
+| maximum | 2024 (2023's, 703 trees) | 301.5 s | 1.45 core-h | 1.27 GB |
+| maximum | 2025 (2024's, 431 trees) | 194.0 s | 0.91 core-h | 1.24 GB |
+| minimum | 2024 (2023's, 703 trees) | 321.4 s | 1.57 core-h | 1.27 GB |
+| minimum | 2025 (2024's, 431 trees) | 186.8 s | 0.93 core-h | 1.23 GB |
+
+One pooled LightGBM over the 20 markets and 104 Fridays takes about 500 s of wall time and 2.4 core-hours per statistic, about 100 s
+of one core per fit of 703 trees. This level model beats the TSO by +23.8 % with 7 of 40 cells lost (Czechia and Spain both, Finland's
+and France's minimum, Poland's maximum), far from the study's +40.2 %: trees on the level of each market's standardised load are not
+the study's correction of its Lasso.

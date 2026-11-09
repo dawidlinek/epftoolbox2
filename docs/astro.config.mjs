@@ -100,7 +100,10 @@ export default defineConfig({
                 },
                 {
                     label: 'Reproductions',
-                    items: [{ label: 'Resolution Study', link: '/reproductions/resolution/' }],
+                    items: [
+                        { label: 'Resolution Study', link: '/reproductions/resolution/' },
+                        { label: 'Pooled Week-ahead Study', link: '/reproductions/pooled/' },
+                    ],
                 },
                 {
                     label: 'Reference',
