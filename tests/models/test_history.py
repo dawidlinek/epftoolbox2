@@ -1411,3 +1411,81 @@ def test_verify_s_cut_runs_report_no_shortfall(hourly):
     finally:
         log.removeHandler(handler)
     assert not [message for message in caught if "planned forecasts" in message], caught
+
+
+class ReadsACopy(FakeFoundation):
+    """Reads its load forecast from a copy of its own (the actual load, a look-ahead) instead of the frame it is given: the
+    probe can't reach it."""
+
+    copy = market("1h")["load_actual"]
+
+    def _history_unit(self, unit, tasks, inputs, frame):
+        own = frame.assign(load_forecast=self.copy.reindex(frame.index))
+        return super()._history_unit(unit, tasks, inputs, own)
+
+
+@pytest.mark.filterwarnings("ignore:overflow")
+@pytest.mark.parametrize("newest", ["d-1", "published"])
+def test_the_control_runs_per_series_and_finds_a_series_it_can_t_reach(hourly, newest):
+    """Each series is perturbed on its own: a model that reads its load forecast from a copy of its own moves under the target's
+    perturbation alone, and the load forecast's moves nothing, a blind spot: inconclusive, as before the target was perturbed.
+    The fake reading both from the frame is ok."""
+    report = pipeline(ReadsACopy(name="FM", newest_target=newest)).verify(hourly, "2023-06-14", "2023-06-14", days=1)
+    row = report.table().iloc[0]
+    assert (row["status"], row["changed"], row["control moved"]) == ("inconclusive", 0, 24)
+    assert report.checks[0].control.blind == ["load_forecast"]
+    assert "positive control of the series ['load_forecast']" in "\n".join(report.problems())
+    plain = pipeline(make("FM", newest_target=newest)).verify(hourly, "2023-06-14", "2023-06-14", days=1)
+    assert plain.table().iloc[0]["status"] == "ok" and plain.checks[0].control.blind == []
+
+
+def test_a_quiet_block_hides_this_context_s_shortfalls_alone_in_any_order():
+    """`quiet_shortfall` is a depth of this thread or task, not the logger's level: two blocks ending out of order leave runs after
+    the first one's end quiet only while the other lasts, and loud after both; a thread already running elsewhere reports its
+    runs' shortfalls all along. (A thread started inside a block inherits its context on a free-threaded build, as a run's own
+    threads should.)"""
+    import logging
+    import threading
+    from collections import Counter
+
+    from epftoolbox2.models.base import quiet_shortfall
+
+    caught = []
+
+    class Keep(logging.Handler):
+        def emit(self, record):
+            caught.append(record.getMessage())
+
+    log = logging.getLogger("epftoolbox2.models.base")
+    handler = Keep(level=logging.WARNING)
+    log.addHandler(handler)
+    model = make("FM")
+
+    def report(tag):
+        model.name = tag
+        model._report_counts(48, 24, Counter({"missing_test_predictors": 24}), {})
+
+    go = threading.Event()
+
+    def elsewhere():
+        go.wait()
+        report("another thread")
+
+    other = threading.Thread(target=elsewhere)
+    other.start()  # before any block: its context is its own
+    try:
+        first, second = quiet_shortfall(), quiet_shortfall()
+        first.__enter__()
+        second.__enter__()
+        report("inside both")
+        go.set()
+        other.join()
+        first.__exit__(None, None, None)
+        report("inside the second")
+        second.__exit__(None, None, None)
+        report("after both")
+    finally:
+        go.set()
+        log.removeHandler(handler)
+    assert [message.split(":")[0] for message in caught] == ["another thread", "after both"]
+    assert log.level == logging.INFO
