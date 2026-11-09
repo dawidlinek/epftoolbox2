@@ -11,13 +11,13 @@ Each package is an extra of its own (`[lightgbm]`, `[xgboost]`, `[catboost]`), i
 import, save and load without it, and the pre-flight of a run names a missing one before any model fits. The card records the
 package's version in the manifest's `runtime`, with the thread count of a fit (and XGBoost's device), all compared on resume.
 
-Threads: a fit runs on `threads` OpenMP threads (one by default), set for the fit and its predictions alone
-(`threadpoolctl`) and given to the package (`n_jobs`, `thread_count`): the pool's workers hold OpenMP at one thread per task, which
-XGBoost would otherwise keep to, and a fit on one thread leaves no OpenMP team behind in a process that forks later (a forked
-child of a process that ran XGBoost on more threads hangs in GNU OpenMP). The estimator is built, and its package with its
-OpenMP runtime loaded, before the scope, which limits only what is loaded. The seed (`random_state`) is the same for every fit,
-so a forecast doesn't depend on which fits a run makes. LightGBM runs with `deterministic=True` and `force_row_wise=True`
-(the research's settings, `zoo_classic/code/ztree.py`).
+Threads: a fit and its predictions run on `threads` OpenMP threads (one by default), the limit set around them alone
+(`threadpoolctl`) and the count given to the package (`n_jobs`, `thread_count`). The pool's tasks hold OpenMP at one thread,
+which XGBoost would otherwise keep to whatever `n_jobs` says; and without a limit XGBoost forms an OpenMP team even at
+`n_jobs=1`, after which a forked child that runs OpenMP on several threads hangs (GNU OpenMP), so a fit on one thread leaves a
+process safe to fork. The estimator is built, and its package with its OpenMP runtime loaded, before the scope, which limits
+only what is loaded. The seed (`random_state`) is the same for every fit, so a forecast doesn't depend on which fits a run
+makes. LightGBM runs with `deterministic=True` and `force_row_wise=True` (the research's settings, `zoo_classic/code/ztree.py`).
 """
 
 import importlib

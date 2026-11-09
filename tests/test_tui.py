@@ -119,3 +119,13 @@ def test_the_networks_can_be_built_without_fitting():
         "TorchModel", {"module": "epftoolbox2.nets:MLP", "predictors": ["a"], "module_params": {"hidden": [8]}}
     )
     assert generic.module_params == {"hidden": [8]} and generic.refit == "7D"
+
+
+def test_the_trees_can_be_built_without_their_packages():
+    """The TUI's fields build the three tree models (their packages are imported by the first fit)."""
+    lgbm = tui._instantiate("LightGBMModel", {"predictors": ["price_d-1", "period"], "threads": 2, "objective": "l2"})
+    assert (lgbm.threads, lgbm.objective, lgbm.periods, lgbm.refit) == (2, "l2", "pooled", "7D")
+    xgb = tui._instantiate("XGBoostModel", {"predictors": ["price_d-1"], "periods": "each", "device": "cuda"})
+    assert (xgb.periods, xgb.device, xgb.name) == ("each", "cuda", "xgb")
+    cat = tui._instantiate("CatBoostModel", {"predictors": ["price_d-1"], "iterations": 50})
+    assert (cat.iterations, cat.depth, cat.name) == (50, 8, "catboost")
