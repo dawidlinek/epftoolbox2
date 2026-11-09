@@ -196,6 +196,15 @@ an issue day it didn't sample.
 
 ### New
 
+- **The `[torch]` extra and `epftoolbox2.nets`.** `pip install 'epftoolbox2[torch]'` installs torch (`uv.lock` takes it from
+  PyTorch's CPU index); `epftoolbox2.nets` has `MLP(n_inputs, n_outputs, hidden=(256, 128), dropout=0.0, activation="relu")`, a
+  counter-based `Dropout(p)` (its mask a hash of the member's key, the step, the layer and the element), `Linear(in_features,
+  out_features)` and `Activation(name)`, the layers the neural-network families to come stack. Their trainer is in place: members
+  of a fit in a loop or in padded stacks, each member's numbers its own (alone, in a stack of any size or order, with other
+  learning rates), early stopping on a random share of the member's own training days with the best weights restored (a member
+  that never had a finite loss there counts as failed), TF32 off and torch's threads set for each fit and put back after it,
+  torch's threads (and its bundled MKL's) pinned in each worker process, one per worker where the pool forks. Nothing of the core imports torch, and no
+  record, manifest or table of a core model moves. See [Neural Networks](/epftoolbox2/models/neural-networks/).
 - **`verify` checks determinism and what else is in a forecast's call.** `ModelPipeline.verify(..., rerun=None, co_batch=None,
   device=None)`: the rerun runs each sampled issue day twice first, each run from other seeds of the global generators, and a
   forecast that differs at all makes the model `inconclusive` (`nondeterministic`), never `ok`; on such a day a move under the
@@ -232,6 +241,21 @@ an issue day it didn't sample.
   and that check also runs the issue day on the frame cut after its date and requires the same forecasts to the bit
   (`issue_day_cut`, `CutResult` in `epftoolbox2.information_set`): a forecast that depends on which later days its call holds
   is a `leak`. **No model of today defines it, and none of their numbers moves.** See [Extending](/epftoolbox2/reference/extending/#predicting-a-refit-block-in-one-call).
+- **Day and pooled units: one fit of every period of a day at once.** A model class sets `_unit_kind = "day"` (rows are local dates,
+  the outputs the P periods of the target day: `_fit_days(x, y, y_mask)` and `_predict_days(fitted, rows)`) or `"pooled"` (the
+  (date, period) rows of every period, one output, with `period` a feature when a list names it: `_fit_model` and `_predict_block`,
+  and `target_transform="per_period"` or `"pooled"`), for the neural networks and tree models to come. A unit is fitted on the refit
+  calendar, with dates as rows and `training_span` as for any model (under `newest_target="published"` each period on the W dates
+  of its own period unit); a slot with no target (the hour a spring switch skips, the repeated autumn hour) is masked and drops out
+  of its period alone;
+  each period's targets get their own Invariant (`epftoolbox2.scalers.target.MultiTargetAsinh`); and each unit predicts every issue
+  day of its block that the frame has in one call of the block's nominal length, so a forecast is the same alone, in its block,
+  after a resume and whatever the test start or the data's end. A day unit's predictors must hold one value per local date: a
+  column that changes with the period (`price_d-1`) raises before any fit, naming its daily profile (`price_h00_d-1 …
+  price_h23_d-1`), on every date the run's fits train on (an issue date's input is its last row's value; `verify` checks the whole
+  frame). A list may change with the horizon and the issue day, not with the period. Manifests of such models record
+  `unit_kind` and `target_transform`, compared on resume; `verify` runs the co-batch check and the cut frame on them by default.
+  **No model of today is one, and none of their numbers, records or manifests moves.** See [Extending](/epftoolbox2/reference/extending/#day-and-pooled-units).
 - **Model cards, weights and the pre-flight, for the families that need an extra or pretrained weights.** A family declares a
   `ModelCard` (licence, commercial use, revenue cap, attribution, corpus and its end, release, runtime packages with their pins, weight
   files with their sha256). `ModelPipeline.run`, each `Workflow` array task (before its data pipeline), `epf run` and `verify` (each
@@ -274,13 +298,18 @@ an issue day it didn't sample.
   not to the bit, with the same counts of forecasts and skips; a fit the sums
   can't give to those digits is fitted as with `"off"`, to the bit, and so is the forecast of an issue row far outside its
   training values (more than 30 training standard deviations out for OLS and 10 for LEAR and LassoCV, along the eigenvectors of
-  the fit's Gram; for Ridge, which has no distance bound, past scikit-learn's rounding budget at the row; with a
+  the fit's Gram; for OLS, whose normal equations are refined by one step of iterative refinement, also where the error that
+  remains at the row, estimated per fit and row, is above 5e-9 EUR/MWh, 0.1 to 0.5 % more of OLS's forecasts on Lago's 247 DE
+  inputs with a 364-day window; for Ridge, which has no
+  distance bound, past scikit-learn's rounding budget at the row; with a
   variance-stabilising scaler also where its inverse is more than three times as steep as the median of its slopes at the
   training targets), a LEAR fit whose chosen columns are nearly collinear (their Gram's condition number above 1e6) and a
   LassoCV or LEAR fit with two near-copy inputs (1 − |correlation| at most 1e-5); within those bounds the largest gaps measured
-  were 8.6e-9 (OLS), 4.6e-9 (LassoCV), 6.1e-10 (Ridge) and 1.1e-9 (LEAR) EUR/MWh. Their manifests record
-  `fit_path: "engine-1"`, compared on resume, so results written with the engine on refuse a resume with it off and the other way
-  round (`allow_manifest_mismatch=True` overrides), and as provenance how many fits came from the sums. LEAR's `solver="cd"`
+  were 4.8e-9 (OLS), 4.6e-9 (LassoCV), 6.1e-10 (Ridge) and 1.1e-9 (LEAR) EUR/MWh. Their manifests record
+  `fit_path: "engine-2"`, compared on resume, so results written with the engine on refuse a resume with it off and the other way
+  round (`allow_manifest_mismatch=True` overrides), and as provenance how many fits came from the sums; `"engine-1"` results
+  of a development build (before OLS's refinement step) are refused too, for every class, although only OLS's numbers moved,
+  so for LEAR, Ridge and LassoCV `allow_manifest_mismatch=True` resumes them safely. LEAR's `solver="cd"`
   (`LEARModel.lago()`'s) is fitted as with `"off"`, to the bit. **`engine="check"`** is `"on"` with one fit in about 50 also
   fitted as `"off"` fits it: the results are `"on"`'s, the manifest records the gaps as provenance (`engine_check`: fits, largest
   absolute and relative gap, gaps that aren't finite, how many chose another kink or penalty, fits `"off"` couldn't fit), and a

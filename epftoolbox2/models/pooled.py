@@ -63,9 +63,13 @@ class PooledModel:
         name: The name of the pooled model, which names its results in each zone; the inner model's name if not given.
 
     Refused in this step: a predictor function of `ctx`, a list of training windows, `newest_target="published"` (each zone
-    issues on its own clock, and one fit serves them all) and `NaiveModel`, which fits nothing. A shared fit is made by the
+    issues on its own clock, and one fit serves them all), `NaiveModel`, which fits nothing, and a model of day or pooled
+    units (`_unit_kind`, `models._units`), which fits every period of a day at once. A shared fit is made by the
     earliest issue instant of its day over the zones, so `ModelPipeline` judges every zone's training rows as of it.
     """
+
+    # Read by `ModelPipeline` when it saves and loads: the parameter that holds a model, saved as {class, params}.
+    _NESTED_MODELS = ("model",)
 
     def __init__(
         self,
@@ -120,9 +124,18 @@ def check_pooled_model(model: Any) -> None:
     if not isinstance(model, BaseModel):
         raise TypeError(f"PooledModel pools a model such as OLSModel, got {type(model).__name__}")
     what = f"PooledModel({type(model).__name__}({model.name!r}))"
+    if not getattr(type(model), "_pooled_ok", True):
+        raise ValueError(
+            f"{what}: {type(model).__name__} can't be pooled over zones in this step. Run it in each zone."
+        )
     if model._fits_nothing:
         raise ValueError(
             f"{what}: {type(model).__name__} fits nothing, so there is no fit to pool. Run it in each zone."
+        )
+    if getattr(model, "_unit_kind", "period") != "period":
+        raise ValueError(
+            f"{what}: {type(model).__name__} fits {model._unit_kind} units (every period of a day at once), which can't be "
+            "pooled over zones in this step. Run it in each zone."
         )
     if not type(model)._can_refit():
         raise ValueError(

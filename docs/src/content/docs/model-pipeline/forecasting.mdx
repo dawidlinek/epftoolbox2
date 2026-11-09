@@ -161,8 +161,19 @@ for window in range(28, 365, 7):
   of an issue row far outside its training values, since an extrapolation multiplies the last bits in which the two paths'
   coefficients differ. For OLS that is more than 30 training standard deviations out, and for LEAR and LassoCV more than 10,
   measured along the eigenvectors of the fit's own Gram (so a row out along the difference of two near-collinear inputs counts,
-  however close each is to its training values). Ridge has no such distance: its forecast goes back where scikit-learn's own
-  rounding at that row exceeds the budget it has at the training rows. With a variance-stabilising scaler a forecast also goes
+  however close each is to its training values). OLS's normal equations err as the square of the inputs' condition
+  number where scikit-learn's solver errs as the number itself, and a row far out reads that error, so each OLS fit is refined
+  by one step of iterative refinement (its residual by error-free arithmetic in float64, the same on every platform), which
+  removes the factorisation's own error; and an OLS forecast goes back where the error that remains at the row,
+  estimated per fit and row (the next refinement step and the effect of the rounding of the equations' entries), is above 5e-9
+  EUR/MWh. On Lago's 247 DE inputs with a 364-day window, where every issue row is 5 to 30 training standard deviations out,
+  the guard sends back 0.1 to 0.5 % more of OLS's forecasts than the distance bound does (without the step, that bound alone
+  kept forecasts 1.4e-8 from `"off"`'s). Where a fit reads only part of its span's rows (an input with gaps, or one that
+  starts inside the window) and those rows sit far from the span's mean, the shared sums lose digits to their centring, which
+  the estimate counts: in a sweep of such fits the guard sent back none of the rows the distance bound keeps where the fit's
+  mean (in the fit's standard deviations) is within one of the span's, 8 % where it is 1 to 3 out, and half where it is 10
+  or more. Ridge has no such distance: its forecast goes back where scikit-learn's own rounding at that row exceeds the
+  budget it has at the training rows. With a variance-stabilising scaler a forecast also goes
   back where the scaler's inverse is more than three times as steep as the median of its slopes at the training targets (a
   forecast far from the usual prices, which an asinh scaler maps back through a sinh: on the Lago DE benchmark's first day, a
   holiday Sunday of 1-9 EUR/MWh night prices, 5 of LEAR's 96 forecasts). Past these bounds gaps grow with the distance, to 1e-7
@@ -197,9 +208,13 @@ for window in range(28, 365, 7):
   cuts fall changes no number.
 - **Saved and checked.** `engine` goes to the pipeline's YAML only when it is `"on"` or `"check"`, and `model_pipeline.engine` in a workflow
   overrides it; in array mode each task groups the models of its block. `pipeline.verify(...)` runs each model through the engine too.
-  The manifest of a model fitted from shared statistics records `fit_path: "engine-1"`, compared on resume: results written with
+  The manifest of a model fitted from shared statistics records `fit_path: "engine-2"` (`"engine-1"` before OLS's refinement step, which moved its numbers within the
+  tolerance), compared on resume: results written with
   the engine on resume with it on, and those written with it off with it off (another setting raises `ManifestMismatchError`, and
-  `allow_manifest_mismatch=True` resumes anyway, into a file that then mixes the two). It also records, as provenance never
+  `allow_manifest_mismatch=True` resumes anyway, into a file that then mixes the two). The step to `"engine-2"` refuses
+  `"engine-1"` results of every class, LEAR's, Ridge's and LassoCV's too, although their numbers didn't move: for those three
+  `allow_manifest_mismatch=True` resumes them safely where `fit_path` is the only difference the error names, while for OLS it
+  mixes forecasts from before and after the step. It also records, as provenance never
   compared, what the last run that fitted anything from statistics did (`engine`: how many fits, how many fits or issue rows went
   back to the model path and why, and how far out of its training values an issue row the engine forecast was; with `"check"`,
   `engine_check`). Those are that run's alone: after a crash and a resume they count the resumed run's fits, not the file's.
@@ -207,7 +222,7 @@ for window in range(28, 365, 7):
 
 | Class | Tolerance against `"off"` | Distance bound | Other bounds | Worst gap kept, EUR/MWh |
 |---|---|---|---|---|
-| `OLSModel` | 1e-8 | 30 | pivots and condition of the normal equations | 8.6e-9 |
+| `OLSModel` | 1e-8 | 30 | pivots and condition of the normal equations, their error at the row after one refinement step (5e-9) | 4.8e-9 |
 | `LassoCVModel` | 1e-8 | 10 | near-copy inputs (1e-5) | 4.6e-9 |
 | `LEARModel` (`"lars"`) | 1e-8 | 10 | condition of the chosen columns (1e6), near-copy inputs (1e-5) | 1.1e-9 |
 | `RidgeModel` | 1e-9 | none | scikit-learn's rounding at the row | 6.1e-10 |
@@ -216,8 +231,9 @@ The distance is in training standard deviations along the eigenvectors of the fi
 variance-stabilising scaler also has the slope bound above (three times the median slope of its inverse at the training
 targets). The worst gaps kept come from sweeps of about 400 synthetic designs each, with near-collinear and near-copy pairs
 down to 1e-5 of a standard deviation, spiky targets and Lago's 247 DE inputs, and issue rows at every distance up to and past
-the bounds (`epftoolbox2-research/library_check_step5/engine_vst_cv/sweep_dense.py`; OLS's from a review's sweep of the same
-kind). Over 3,840 fits rolled over the Lago DE benchmark they are at most 1.6e-11.
+the bounds (`epftoolbox2-research/library_check_step5/engine_vst_cv/sweep_dense.py`); OLS's from those sweeps, the conditioning
+sweep and Lago DE's OLS forecasts over 61 days of 2016 and over 2017 (`library_check_step5/ols_issue_guard/`). Over 3,840 LEAR,
+LassoCV and Ridge fits rolled over the Lago DE benchmark they are at most 1.6e-11.
 
 ## See Also
 

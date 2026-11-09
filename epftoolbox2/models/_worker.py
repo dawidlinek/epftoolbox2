@@ -15,6 +15,7 @@ from threadpoolctl import ThreadpoolController
 from ..results.store import with_status
 from ..scalers.registry import make_scaler
 from ..scalers.standard import StandardScaler
+from ..scalers.target import MultiTargetAsinh
 from ._calendar import (
     MASK_FIT,
     FitUnit,
@@ -24,6 +25,7 @@ from ._calendar import (
     refit_anchor,
     training_span,
 )
+from ._units import DAY, PER_PERIOD, PERIOD, POOLED, day_arrays, kind_of, pooled_values
 
 # What `_worker_init` loads into a pool's worker: the default `TaskInputs` of every task function (`_pool_inputs`).
 _W_HOUR_ARRAYS: Dict = {}
@@ -174,8 +176,22 @@ def task_inputs(hour_arrays, expanded_preds, config, model_cls, model_kwargs) ->
 
 
 def _pool_init(hour_arrays, expanded_preds, config, model_cls, model_kwargs):
-    """Initialiser of the worker pool: limit native threads, then load the data and the model."""
+    """Initialiser of the worker pool: limit native threads, then load the data and the model.
+
+    A torch family's config sets `torch_threads`: torch's intra-op threads (OpenMP and its bundled MKL) are pinned to it and its
+    inter-op threads to 1 (`_torch.runtime.pin_torch_threads`) before the BLAS and OpenMP limits, and again after them (which
+    set torch's OpenMP to one thread too). A thread count changes a torch fit's numbers, a forked worker inherits the parent's
+    count whatever the environment says, and its bundled MKL left at the parent's count hangs on the first product after the
+    parent's parallel work. More than one thread is refused where the pool forks (`check_torch_threads`). Without the setting
+    nothing imports torch."""
+    torch_threads = config.get("torch_threads")
+    if torch_threads:
+        from ._torch.runtime import pin_torch_threads
+
+        pin_torch_threads(torch_threads, forked=not _POOLS_SPAWN)
     _limit_native_threads()
+    if torch_threads:
+        pin_torch_threads(torch_threads, forked=not _POOLS_SPAWN)
     _worker_init(hour_arrays, expanded_preds, config, model_cls, model_kwargs)
 
 
@@ -706,12 +722,13 @@ def _run_day(tasks: list, inputs: Optional[TaskInputs] = None) -> Tuple[List[Dic
 def _unit_of(cfg: Dict, task: tuple, member: int = 0) -> FitUnit:
     """The fit a task of a model with `refit` forecasts from: its period and horizon, the anchor of its issue day under its
     member's rule (`config["refit"]["rules"]`, each member's with `"auto"`), its list, and the index of its training window among
-    the model's (0 with one window)."""
+    the model's (0 with one window). A day or pooled unit (`config["units"]`) fits every period at once: its period is None."""
     hour, hz, day_in_test = task
     task_lists = cfg.get("task_lists")
     list_id = None if task_lists is None else int(task_lists[(hour, hz)][task_place(cfg, day_in_test)[2]])
     run_date = datetime.date.fromisoformat(cfg["test_start"]) + datetime.timedelta(days=day_in_test)
-    return FitUnit(hour, hz, refit_anchor(run_date, cfg["refit"]["rules"][member]), list_id, member)
+    period = hour if cfg.get("units") is None else None
+    return FitUnit(period, hz, refit_anchor(run_date, cfg["refit"]["rules"][member]), list_id, member)
 
 
 def _units_of(cfg: Dict, task: tuple) -> List[FitUnit]:
@@ -874,6 +891,8 @@ def block_calls(model) -> bool:
     cls = type(model)
     if getattr(cls, "_predict_block", None) is None or getattr(model, "refit", None) is None:
         return False
+    if getattr(model, "_unit_kind", PERIOD) != PERIOD:
+        return False  # a day or pooled unit always predicts its block in one call, on its own path (`_run_unit`)
     owners = {
         next(klass for klass in cls.__mro__ if name in vars(klass)) for name in ("_predict_block", "_predict_fitted")
     }
@@ -979,8 +998,18 @@ def _described(coefs: Any) -> str:
 def _run_unit(
     unit: FitUnit, tasks: List[tuple], inputs: Optional[TaskInputs] = None, engine: Optional[StatsFitter] = None
 ) -> List[Tuple[tuple, Union[Dict, str]]]:
+    """(task, record or skip reason, member) of each of a unit's tasks, from the fit of its kind (`config["units"]`): a period
+    unit's `_fit_unit`, a day unit's `_fit_day_unit`, a pooled unit's `_fit_pooled_unit`. Any exception is a TaskFailed naming
+    the unit."""
     try:
-        return [(task, outcome, unit.member) for task, outcome in _fit_unit(unit, tasks, inputs, engine)]
+        kind = kind_of(_inputs_of(inputs).config)
+        if kind == DAY:
+            outcomes = _fit_day_unit(unit, tasks, inputs)
+        elif kind == POOLED:
+            outcomes = _fit_pooled_unit(unit, tasks, inputs)
+        else:
+            outcomes = _fit_unit(unit, tasks, inputs, engine)
+        return [(task, outcome, unit.member) for task, outcome in outcomes]
     except Exception as exc:
         raise TaskFailed(
             f"fit unit (period={unit.period}, horizon={unit.horizon}, anchor={unit.anchor}, list={unit.list_id}, "
@@ -1013,8 +1042,8 @@ def _run_block(tasks: list, inputs: Optional[TaskInputs] = None) -> Tuple[List[D
 
 def block_units(cfg: Dict, tasks: List[tuple]) -> Dict[FitUnit, List[tuple]]:
     """The units of a refit block's tasks (`_units_of`: one per task, or one per member), each with the tasks it forecasts, in
-    the order of `tasks`. A unit's tasks are all of its period, so a job that holds a block's tasks of one period holds each of
-    its units whole."""
+    the order of `tasks`. A unit's tasks are all of its period (of every period for a day or pooled unit, whose period is None),
+    so a job that holds a block's tasks of one period (or of every period) holds each of its units whole."""
     units: Dict[FitUnit, List[tuple]] = {}
     for task in tasks:
         for unit in _units_of(cfg, task):
@@ -1063,3 +1092,324 @@ def _across_members(records: List[Dict], block_rule: str) -> Dict:
     if "newest_target_day" in first:
         out["newest_target_day"] = max(record["newest_target_day"] for record in records)
     return out
+
+
+# ---------------------------------------------------------------------------------------------------------------------------
+# Day and pooled units (`models._units`): one fit of every period of a day at once
+# ---------------------------------------------------------------------------------------------------------------------------
+
+
+def unit_list(cfg: Dict, expanded: Dict, unit: FitUnit) -> List[str]:
+    """The names a day or pooled unit fits on: with a predictor function the plan's list `unit.list_id`, the only place a
+    worker reads them from (nn_api found a day model given an empty list when lists came from two places), else the fixed list
+    of its horizon, which is every period's (`_units.check_lists_by_period`)."""
+    if cfg.get("task_lists") is not None:
+        if unit.list_id is None:
+            raise RuntimeError(f"a unit of a predictor function's plan has no list: {unit}")
+        return list(expanded[unit.list_id])
+    return list(expanded[(0, unit.horizon)])
+
+
+def _unit_width(cfg: Dict, unit: FitUnit, anchor: int) -> int:
+    """The int window of `training_span` of a unit anchored on day id `anchor`: the model's, or its member's."""
+    members = cfg.get("members")
+    return member_window(cfg["training_window"] if members is None else members[unit.member], anchor)
+
+
+def _unit_newest(cfg: Dict, unit: FitUnit, periods: int) -> Optional[np.ndarray]:
+    """k of each period on the unit's anchor, the newest target relative to it known by its issue time
+    (`newest_target="published"`, read on the anchors, `config["refit"]["newest"]`); None with "d-1"."""
+    newest_targets = cfg["refit"]["newest"]
+    if newest_targets is None:
+        return None
+    ordinal = unit.anchor.toordinal()
+    return np.array([int(newest_targets.at(period, ordinal)) for period in range(periods)], dtype=np.int64)
+
+
+def _issued(inputs: TaskInputs, tasks: List[tuple]) -> Tuple[List[Tuple[tuple, str]], List[Tuple[tuple, int]]]:
+    """(the tasks with no issue row, as `missing_test_row`; (task, its period's issue row) of the others), in task order."""
+    outcomes, issued = [], []
+    for task in tasks:
+        test = issue_row(inputs.hour_arrays[task[0]]["days"], inputs.config["offset"] + task[2])
+        if test is None:
+            outcomes.append((task, SKIP_MISSING_TEST_ROW))
+        else:
+            issued.append((task, test))
+    return outcomes, issued
+
+
+def _unit_record(
+    inputs: TaskInputs, unit: FitUnit, task: tuple, test: int, prediction: float, coefs: list, newest: Any
+) -> Dict:
+    """The record of one forecast of a day or pooled unit, as `_fit_unit` writes a period unit's: the key, the prediction in
+    target units, the `actual` of the period's issue row, the coefficients, `refit_anchor`, and with `newest_target="published"`
+    the newest target day of the period's slots, anchor + min(k, h - 1)."""
+    cfg = inputs.config
+    period, hz, day_in_test = task
+    window, day_in_window, _ = task_place(cfg, day_in_test)
+    run_date = datetime.date.fromisoformat(cfg["test_start"]) + datetime.timedelta(days=day_in_test)
+    return forecast_record(
+        run_date,
+        period,
+        hz,
+        day_in_window,
+        prediction,
+        float(inputs.hour_arrays[period]["y"][test, hz - 1]),
+        coefs,
+        cfg.get("freq", "1h"),
+        _list_hash_of(cfg, inputs.expanded, period, hz, unit.list_id),
+        window=window,
+        predictor_list=None if unit.list_id is None else cfg["list_hashes"][unit.list_id],
+        newest_target_day=None
+        if newest is None
+        else (unit.anchor + datetime.timedelta(days=min(int(newest[period]), hz - 1))).isoformat(),
+        refit_anchor=unit.anchor.isoformat(),
+    )
+
+
+def _fit_day_unit(
+    unit: FitUnit, tasks: List[tuple], inputs: Optional[TaskInputs] = None
+) -> List[Tuple[tuple, Union[Dict, str]]]:
+    """Fit one day unit (`FitUnit(None, h, anchor, list, member)`) and forecast each of `tasks`, every period of its horizon
+    issued in its block, from one call. Returns (task, record or skip reason) of each.
+
+    Rows are the local dates of `training_span(anchor, W, h)`. Under `newest_target="published"` each period p has the W dates of
+    its own period unit, `training_span(anchor, W, h, k(p))` with k(p) read on the anchor, and the rows are every date of any of
+    them: a slot of p outside its own span is masked, so p trains on the dates its period unit would (the hour a spring switch
+    skips counts as known, so its k can be another period's plus one, and a span of the largest k would cost every other
+    period a date). A slot with no target is masked too (`_units.day_arrays`: the hour a spring switch skips, the repeated
+    autumn hour, a missing value). X is each date's value of the list's day-level columns; a date with a missing input, or with no target to train on,
+    drops out. The binary-column mask is read from the span's dates before any filter, the scaler (`config["scaler"]`) fitted on
+    the training dates and applied to the call's rows value by value, and the targets go through `MultiTargetAsinh`, each
+    period's Invariant fitted on its own training slots.
+
+    One `_fit_days(x, y, y_mask)` and one `_predict_days(fitted, rows)` over the issue dates of every day of the block that the
+    frame has with finite inputs, the run's tasks or not, in date order, padded to the rule's nominal length with copies of the
+    first: the call has one shape and the same rows whatever the run, a resume, `test_start` or `issue_days` hold. Each forecast
+    of (p, h, D) is column p of D's row, mapped back with p's Invariant. A task without its period's row on D is
+    `missing_test_row`; a period with no training target `no_finite_training_rows`; a day with a missing input
+    `missing_test_predictors`; a fit raising ValueError is each forecast's `fit_error`."""
+    inputs = _inputs_of(inputs)
+    cfg, model = inputs.config, inputs.model
+    periods = cfg["units"]["periods"]
+    hz = unit.horizon
+    refit = cfg["refit"]
+    first_ordinal = refit["first_ordinal"]
+    anchor = unit.anchor.toordinal() - first_ordinal
+    newest = _unit_newest(cfg, unit, periods)
+    width = _unit_width(cfg, unit, anchor)
+    if newest is None:
+        first, last = training_span(anchor, width, hz)
+    else:
+        # Each period's own span, the W dates of its period unit; the rows are every date of any of them.
+        firsts, lasts = training_span(anchor, width, hz, newest)
+        first, last = firsts.min(), lasts.max()
+    first, last = int(first), int(last)
+    predictors = unit_list(cfg, inputs.expanded, unit)
+    has_row, train_x, train_y = day_arrays(inputs.hour_arrays, periods, predictors, first, last, hz)
+
+    outcomes, issued = _issued(inputs, tasks)
+
+    def skip_all(reason: str) -> List[Tuple[tuple, Union[Dict, str]]]:
+        return outcomes + [(task, reason) for task, _ in issued]
+
+    if not has_row.any():
+        return skip_all(SKIP_TOO_FEW_ROWS)
+    # Which columns are binary: from the span's dates, before any filter, as a period unit reads it from its rows.
+    scalable_mask = StandardScaler.get_scalable_mask(train_x[has_row])
+    valid = np.isfinite(train_y)
+    if newest is not None:
+        dates = np.arange(first, last + 1, dtype=np.int64)[:, None]
+        valid &= (dates >= firsts[None, :]) & (dates <= lasts[None, :])
+    keep = has_row & valid.any(axis=1)
+    if train_x.shape[1]:
+        keep &= np.isfinite(train_x).all(axis=1)
+    if not keep.any():
+        return skip_all(SKIP_NO_FINITE_TRAINING_ROWS)
+    train_x, train_y, valid = train_x[keep], train_y[keep], valid[keep]
+    trained = valid.any(axis=0)
+
+    rule = refit["rules"][unit.member]
+    block = block_days(unit.anchor, rule)
+    block_first = block[0].toordinal() - first_ordinal
+    has_day, block_x, _ = day_arrays(inputs.hour_arrays, periods, predictors, block_first, block_first + len(block) - 1)
+    in_call = has_day & (np.isfinite(block_x).all(axis=1) if block_x.shape[1] else True)
+
+    forecast = []
+    for task, test in issued:
+        place = cfg["offset"] + task[2] - block_first
+        if not trained[task[0]]:
+            outcomes.append((task, SKIP_NO_FINITE_TRAINING_ROWS))
+        elif not in_call[place]:
+            outcomes.append((task, SKIP_MISSING_TEST_PREDICTORS))
+        else:
+            forecast.append((task, test, place))
+    if not forecast:
+        return outcomes
+
+    rows = [int(day) for day in np.flatnonzero(in_call)]
+    length = nominal_block_length(rule)
+    if len(rows) > length:
+        raise RuntimeError(f"a block call of {len(rows)} days for a nominal length of {length}")
+    call = rows + [rows[0]] * (length - len(rows))
+    position = {row: i for i, row in enumerate(rows)}
+    scaler = make_scaler(cfg.get("scaler", "standard"))
+    # The scaler's inputs only: the targets go through each period's Invariant below.
+    fit_x, _, call_x = scaler.fit_transform(
+        train_x.copy(), np.zeros(len(train_x)), block_x[call].copy(), scalable_mask=scalable_mask, columns=predictors
+    )
+    target = MultiTargetAsinh().fit(train_y, valid)
+    fit_y = np.where(valid, target.transform(train_y), np.nan)
+    try:
+        fitted = model._fit_days(fit_x, fit_y, valid.copy())
+    except ValueError as exc:
+        return outcomes + [(task, f"{SKIP_FIT_ERROR}: {exc}") for task, _, _ in forecast]
+    predicted = np.asarray(model._predict_days(fitted, call_x), dtype=np.float64)
+    if predicted.shape != (length, periods):
+        raise RuntimeError(
+            f"{type(model).__name__}._predict_days returned an array of shape {predicted.shape} for a call of {length} rows "
+            f"and {periods} periods: one row of {periods} per row of the call"
+        )
+    for task, test, place in forecast:
+        period = task[0]
+        prediction = float(target.inverse(predicted[position[place], period], period))
+        outcomes.append((task, _unit_record(inputs, unit, task, test, prediction, [], newest)))
+    return outcomes
+
+
+def _fit_pooled_unit(
+    unit: FitUnit, tasks: List[tuple], inputs: Optional[TaskInputs] = None
+) -> List[Tuple[tuple, Union[Dict, str]]]:
+    """Fit one pooled unit (`FitUnit(None, h, anchor, list, member)`) and forecast each of `tasks`, every period of its horizon
+    issued in its block, from one call. Returns (task, record or skip reason) of each.
+
+    Rows are every period's rows of `training_span(anchor, W, h, k(p))`, each period's as its period unit reads them (both rows
+    of a repeated autumn hour, k(p) on the anchor under `newest_target="published"`), stacked by date, then period. Each
+    predictor is read on its period's own row, and the virtual `period` is the row's period. Rows with a missing input or
+    target drop out; the binary-column mask is read from the stacked rows before any filter, and the scaler
+    (`config["scaler"]`) is fitted on the kept rows. The targets go through `MultiTargetAsinh`: each period's own Invariant
+    (`target_transform="per_period"`) or one over every row (`"pooled"`).
+
+    One `_fit_model` and one `_predict_block` over the issue row (the second of a repeated hour) of each period on each day of
+    the block that the frame has with finite inputs, the run's tasks or not, by date then period, padded to the rule's nominal
+    length times the periods of a day with copies of the first: one shape and the same rows whatever the run holds. A forecast is
+    its own row's, mapped back with its period's Invariant (or the pooled one). Skips as for a day unit."""
+    inputs = _inputs_of(inputs)
+    cfg, model = inputs.config, inputs.model
+    units = cfg["units"]
+    periods = units["periods"]
+    hz = unit.horizon
+    refit = cfg["refit"]
+    first_ordinal = refit["first_ordinal"]
+    anchor = unit.anchor.toordinal() - first_ordinal
+    newest = _unit_newest(cfg, unit, periods)
+    width = _unit_width(cfg, unit, anchor)
+    predictors = unit_list(cfg, inputs.expanded, unit)
+
+    # The stacked rows exist once (W = 728 days of 96 periods and 200 columns are 107 MB a copy): a first pass reads each
+    # period's rows, which of them are kept (every input and the target finite) and which columns are binary, and lets go of
+    # them; a second places each period's kept rows straight into the stack. Which columns are binary is read from every row
+    # before any filter, as a period unit reads it: a column is binary in the stack exactly when it is in each period's rows.
+    spans, kept_rows, keys = [], [], []
+    scalable_mask = np.zeros(len(predictors), dtype=bool)
+    total = 0
+    for period in range(periods):
+        arrays = inputs.hour_arrays[period]
+        days = arrays["days"]
+        if newest is None:
+            rows = training_rows(days, anchor, width, hz)
+        else:
+            rows = training_rows(days, anchor, width, hz, int(newest[period]))
+        values = pooled_values(arrays, predictors, rows, period)
+        kept = finite_rows(values, arrays["y"][rows][:, hz - 1])
+        scalable_mask |= StandardScaler.get_scalable_mask(values)
+        total += len(values)
+        del values
+        spans.append(rows)
+        kept_rows.append(kept)
+        keys.append(days[rows][kept].astype(np.int64) * periods + period)
+
+    outcomes, issued = _issued(inputs, tasks)
+
+    def skip_all(reason: str) -> List[Tuple[tuple, Union[Dict, str]]]:
+        return outcomes + [(task, reason) for task, _ in issued]
+
+    if total == 0:
+        return skip_all(SKIP_TOO_FEW_ROWS)
+    keys = np.concatenate(keys)
+    if not len(keys):
+        return skip_all(SKIP_NO_FINITE_TRAINING_ROWS)
+    # By date, then period; a repeated hour's two rows in their order (a stable sort).
+    order = np.argsort(keys, kind="stable")
+    position = np.empty(len(keys), dtype=np.int64)
+    position[order] = np.arange(len(keys))
+    train_x = np.empty((len(keys), len(predictors)))
+    train_y = np.empty(len(keys))
+    start = 0
+    for period, (rows, kept) in enumerate(zip(spans, kept_rows)):
+        arrays = inputs.hour_arrays[period]
+        at = position[start : start + int(kept.sum())]
+        train_x[at] = pooled_values(arrays, predictors, rows, period)[kept]
+        train_y[at] = arrays["y"][rows][kept, hz - 1]
+        start += len(at)
+    groups = (keys[order] % periods).astype(np.int64)
+    per_period = units["target_transform"] == PER_PERIOD
+    # A period with no training row is skipped whatever the transform, so the forecast keys don't depend on it.
+    trained = np.isin(np.arange(periods), groups)
+
+    rule = refit["rules"][unit.member]
+    call_rows: List[Tuple[int, int]] = []  # (period, issue row) of each block day's period the frame has, inputs finite
+    values: List[np.ndarray] = []
+    for day in block_days(unit.anchor, rule):
+        day_id = day.toordinal() - first_ordinal
+        for period in range(periods):
+            arrays = inputs.hour_arrays[period]
+            row = issue_row(arrays["days"], day_id)
+            if row is None:
+                continue
+            found = pooled_values(arrays, predictors, [row], period)
+            if np.isfinite(found).all():
+                call_rows.append((period, row))
+                values.append(found)
+
+    place = {key: i for i, key in enumerate(call_rows)}
+    forecast = []
+    for task, test in issued:
+        if not trained[task[0]]:
+            outcomes.append((task, SKIP_NO_FINITE_TRAINING_ROWS))
+        elif (task[0], test) not in place:
+            outcomes.append((task, SKIP_MISSING_TEST_PREDICTORS))
+        else:
+            forecast.append((task, test))
+    if not forecast:
+        return outcomes
+
+    length = nominal_block_length(rule) * periods
+    if len(call_rows) > length:
+        raise RuntimeError(f"a block call of {len(call_rows)} rows for a nominal length of {length}")
+    call = np.vstack(values + [values[0]] * (length - len(values)))
+    scaler = make_scaler(cfg.get("scaler", "standard"))
+    # Every scaler copies its input, which isn't read again: let go of it as soon as the scaled copy exists.
+    fit_x, _, call_x = scaler.fit_transform(
+        train_x, np.zeros(len(train_x)), call, scalable_mask=scalable_mask, columns=predictors
+    )
+    del train_x
+    target_groups = groups if per_period else np.zeros(len(groups), dtype=np.int64)
+    target = MultiTargetAsinh().fit_groups(train_y, target_groups, periods if per_period else 1)
+    try:
+        fitted = model._fit_model(fit_x, target.transform(train_y, target_groups))
+    except ValueError as exc:
+        return outcomes + [(task, f"{SKIP_FIT_ERROR}: {exc}") for task, _ in forecast]
+    predictions, coefficients = model._predict_block(fitted, call_x)
+    predictions = np.asarray(predictions, dtype=np.float64)
+    if predictions.shape != (length,) or len(coefficients) != length:
+        raise RuntimeError(
+            f"{type(model).__name__}._predict_block returned {predictions.shape} predictions and {len(coefficients)} "
+            f"coefficient lists for a call of {length} rows: one of each per row"
+        )
+    for task, test in forecast:
+        i = place[(task[0], test)]
+        prediction = float(target.inverse(predictions[i], task[0] if per_period else 0))
+        coefs = flat_coefficients(coefficients[i], model, "_predict_block")
+        outcomes.append((task, _unit_record(inputs, unit, task, test, prediction, coefs, newest)))
+    return outcomes

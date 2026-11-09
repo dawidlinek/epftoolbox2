@@ -35,6 +35,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[4]
 sys.path.insert(0, str(ROOT))
 
+from epftoolbox2._extras import MissingExtraError  # noqa: E402  (after the path above)
+
 DOCS_DIR = ROOT / "docs" / "src" / "content" / "docs"
 LLMS = ROOT / "llms.txt"
 README = ROOT / "README.md"
@@ -377,6 +379,8 @@ def check_imports() -> list[Finding]:
                 location = f"{rel(path)}:{start + offset}"
                 try:
                     module = importlib.import_module(module_name)
+                except MissingExtraError:
+                    continue  # a module of an extra this environment lacks: its job checks it (as tests/test_docs_code.py)
                 except ImportError as exc:
                     findings.append(
                         Finding("imports", "error", module_name, f"module doesn't import ({exc})", location)
@@ -386,6 +390,8 @@ def check_imports() -> list[Finding]:
                     continue
                 try:
                     importlib.import_module(f"{module_name}.{name}")
+                except MissingExtraError:
+                    continue
                 except ImportError:
                     findings.append(
                         Finding("imports", "error", f"{module_name}.{name}", "name doesn't exist", location)

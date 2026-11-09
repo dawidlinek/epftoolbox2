@@ -82,6 +82,9 @@ of any runtime entry or of a weight file's hash refuses a resume (`allow_manifes
 were found doesn't, as that differs between machines that hold the same files. A core model has none of the three keys, so its
 manifests are as before.
 
+A model of day or pooled units (`models._units`) adds `unit_kind` ("day" or "pooled") and `target_transform` ("per_period" or
+"pooled"), both compared: a change of either moves every forecast. A period model, every core model, has neither key.
+
 An ensemble's file has a manifest of its own shape (`"kind": "ensemble"`, written by `epftoolbox2.ensembles._compute`). It says
 which results it was computed from and is never compared, as the file is recomputed from them every time. No model may
 resume into it.
@@ -141,6 +144,9 @@ _PROVENANCE_FIELDS += ("card",)
 # `weights_history`: every set of weight file hashes a results file's forecasts were made with, in the order first used, once a
 # resume accepted other weights (`allow_manifest_mismatch=True`); a resume warns while the file mixes them (`_weights_on_file`).
 _PROVENANCE_FIELDS += ("weights_history",)
+# `residual_base`: a `ResidualModel`'s base's card, runtime and weights, with its first issue day (the warm-up's), for
+# `report.provenance()`; the base's own manifest compares them, and this one's `residual` field its configuration.
+_PROVENANCE_FIELDS += ("residual_base",)
 
 # Compared to decide whether an existing manifest is compatible with the current run. Order is the
 # order differences are reported in.
@@ -161,8 +167,9 @@ _COMPARED_FIELDS = (
 # False for results written with `save_coefficients=False` (no key otherwise): a resume with the other setting would mix records
 # with and without coefficients, and an empty list can't be told from a training window list's.
 _COMPARED_FIELDS += ("save_coefficients",)
-# The numeric path of the fits, "engine-1" for an engine group's fits from shared statistics (`models._engine_worker`), no key
-# for the model path: the two agree within the engine's tolerances, not to the bit, so one file never mixes them.
+# The numeric path of the fits, `models._engine_worker.ENGINE_FIT_PATH` ("engine-2"; "engine-1" before OLS's refinement step)
+# for an engine group's fits from shared statistics, no key for the model path: the two agree within the engine's tolerances,
+# not to the bit, so one file never mixes them, nor two engine paths.
 _COMPARED_FIELDS += ("fit_path",)
 # A `PooledModel`'s zone (`models._pooled`): the zones of the fit in stack order, `over`, `zone_feature`, `missing` and the other zones'
 # data hashes, since another zone's data moves this zone's forecasts. None (and no key) for a model fitted on one zone's rows.
@@ -171,6 +178,12 @@ _COMPARED_FIELDS += ("pooled",)
 # dtype, threads per fit, ...) and its weights (each file's sha256; where they were found is recorded, not compared): either can
 # move every forecast (t0 0.5.0 against its git head moved single hours by up to 161 EUR/MWh). No key for a core model.
 _COMPARED_FIELDS += ("runtime", "weights")
+# What one fit of a model of day or pooled units holds (`models._units`): `unit_kind` "day" or "pooled", and how its targets
+# are transformed, "per_period" or "pooled"; no key for a period model. Either changes every forecast.
+_COMPARED_FIELDS += ("unit_kind", "target_transform")
+# A `ResidualModel` (`models.residual`): the hash of its base's configuration as the base's own manifest records it
+# (`base_manifest`), since the base's forecasts are the learner's inputs and targets; None (and no key) for any other model.
+_COMPARED_FIELDS += ("residual",)
 
 # How a run chooses a forecast's training rows: `Manifest.training_cut`.
 TRAINING_CUT_BY_DATE = {"rows": "dates"}
@@ -300,8 +313,9 @@ class Manifest:
     # False for records written with `save_coefficients=False` (`coefficients: []`); None (and no key) with their coefficients.
     # Compared on resume.
     save_coefficients: Optional[bool] = None
-    # "engine-1" for fits from shared statistics in an engine group (`ModelPipeline(engine="on")`), None (and no key) for the
-    # model path. Compared on resume: switching refuses (`allow_manifest_mismatch=True` overrides).
+    # `ENGINE_FIT_PATH` ("engine-2") for fits from shared statistics in an engine group (`ModelPipeline(engine="on")`), None
+    # (and no key) for the model path. Compared on resume: switching refuses, as does "engine-1" (before OLS's refinement
+    # step) against "engine-2" (`allow_manifest_mismatch=True` overrides).
     fit_path: Optional[str] = None
     # Provenance of the fits from shared statistics of the last run that made any (`models._engine_worker.EngineCounts`):
     # {"fits", "fallbacks": {reason: count}, "max_issue_z"}; None (and no key) otherwise. Never compared.
@@ -323,6 +337,16 @@ class Manifest:
     # Every set of weight file hashes ({file: sha256}) the file's forecasts were made with, once there are two or more (a resume
     # over other weights, allowed); None (and no key) while there is one. Provenance: never compared, and a resume warns.
     weights_history: Optional[List[Dict[str, str]]] = None
+    # A model of day or pooled units (`models._units`): "day" or "pooled", and its targets' transform, "per_period" (each period's
+    # own Invariant) or "pooled"; None (and no key) for a period model. Compared on resume.
+    unit_kind: Optional[str] = None
+    target_transform: Optional[str] = None
+    # A `ResidualModel`: {"base_manifest": the hash of its base's configuration (`configuration_digest` of the base's own
+    # manifest)}, or {} for a run of a base held in memory; None (and no key) for any other model. Compared on resume.
+    residual: Optional[Dict[str, Any]] = None
+    # A `ResidualModel` whose base has a card: {"card", "runtime", "weights", "first_issue_day"}; None (and no key) otherwise.
+    # Provenance: never compared.
+    residual_base: Optional[Dict[str, Any]] = None
 
     def differences(self, existing: "Manifest", skip: Sequence[str] = ()) -> List[str]:
         """Human-readable list of compared fields that disagree with `existing`; empty if compatible."""
@@ -342,8 +366,9 @@ class Manifest:
                     note = " (None: records with their coefficients; False: written with save_coefficients=False)"
                 if name == "fit_path":
                     note = (
-                        " (None: the model path, engine off or a model the engine fits on it; 'engine-1': fits from shared "
-                        "statistics, ModelPipeline(engine='on'); they agree within the engine's tolerances, not to the bit)"
+                        " (None: the model path, engine off or a model the engine fits on it; 'engine-2': fits from shared "
+                        "statistics, ModelPipeline(engine='on'), 'engine-1' the same before OLS's refinement step, which "
+                        "moved OLS's numbers alone; they agree within the engine's tolerances, not to the bit)"
                     )
                 out.append(f"{name}: {theirs!r} (existing results) vs {mine!r} (this run){note}")
         return out
@@ -389,6 +414,12 @@ class Manifest:
         if out["pooled"] is None:  # fitted on one zone's rows
             del out["pooled"]
         for name in ("card", "runtime", "weights", "weights_history"):  # a core model, or one set of weights
+            if out[name] is None:
+                del out[name]
+        for name in ("unit_kind", "target_transform"):  # a period model
+            if out[name] is None:
+                del out[name]
+        for name in ("residual", "residual_base"):  # no ResidualModel, or a base without a card
             if out[name] is None:
                 del out[name]
         return out
@@ -531,8 +562,9 @@ def _package_version() -> str:
 def _block_params(model: Any) -> Dict[str, bool]:
     """`{"block_predict": ...}` for a model whose class defines `_predict_block`: whether its refit units predict their blocks
     in one call (`models._worker.block_calls`), so that a resume refuses a switch, since a call of a block and one row at a time
-    needn't agree to the bit. Nothing for any other model, whose manifest stays as it was."""
-    if getattr(type(model), "_predict_block", None) is None:
+    needn't agree to the bit. Nothing for any other model, whose manifest stays as it was, nor for a pooled model, whose units
+    always predict their blocks in one call (`unit_kind` says so)."""
+    if getattr(type(model), "_predict_block", None) is None or getattr(model, "_unit_kind", "period") != "period":
         return {}
     from ..models._worker import block_calls  # the models import this module
 
@@ -596,7 +628,7 @@ def build_manifest(
     `issue_days` are the weekdays issued on (`date.weekday()` numbers), recorded by name, and only when they aren't every day.
     `vintages` are the rows of `results.vintages.vintage_rows`, recorded as they are. `kernels` is the backend of the LEAR
     kernels the model fits with (`BaseModel._kernel_backend`), None for a model without them. `fit_path` is the numeric path of
-    the fits ("engine-1" in an engine group whose fits come from shared statistics, None for the model path).
+    the fits ("engine-2" in an engine group whose fits come from shared statistics, None for the model path).
     """
     now = datetime.now(timezone.utc).isoformat()
     hashes = FrameHashes(data) if frame_hashes is None else frame_hashes
@@ -606,6 +638,9 @@ def build_manifest(
         through = (date.fromisoformat(test_end) + timedelta(days=horizon)).isoformat()
         actuals = {"through": through, "hash": hashes.of_columns(through, [target])}
     carded = manifest_fields(model, window_starts(windows, test_start))  # nothing for a core model
+    from ..models._units import manifest_fields as unit_fields  # the models import this module
+
+    units = unit_fields(model)  # nothing for a period model
     return Manifest(
         model_class=type(model).__name__,
         predictors=sorted(set(used_columns) - {target}),
@@ -646,7 +681,10 @@ def build_manifest(
         record_schema=RECORD_SCHEMA,
         fit_path=fit_path,
         pooled=getattr(model, "_pooled", None),  # a PooledModel's member (`models._pooled.member_of`)
+        residual=getattr(model, "_residual", None),  # a ResidualModel's base (`models.residual`)
+        residual_base=getattr(model, "_residual_base", None),
         **carded,
+        **units,
     )
 
 
@@ -693,6 +731,13 @@ def is_ensemble_manifest(path: Union[str, Path]) -> bool:
     """Whether the manifest at `path` exists and is an ensemble's."""
     path = Path(path)
     return path.exists() and json.loads(path.read_text()).get("kind") == ENSEMBLE_KIND
+
+
+def configuration_digest(manifest: Dict[str, Any]) -> str:
+    """A hash of what a resume compares of a manifest (its `_COMPARED_FIELDS`, as a dict read from its file): equal for two runs
+    of one configuration on the same data over the same last day, whichever days they ran."""
+    kept = {name: manifest.get(name) for name in _COMPARED_FIELDS}
+    return hashlib.sha256(json.dumps(kept, sort_keys=True, default=str).encode()).hexdigest()
 
 
 def manifest_digest(manifest: Dict[str, Any]) -> str:
@@ -871,6 +916,7 @@ def check_and_write(
         manifest.kernels = _kernels_on_file(existing, manifest, model_name, path, has_existing_results)
         manifest.weights_history = _weights_on_file(existing, manifest, model_name, path, has_existing_results)
         manifest.created_at = existing.created_at  # keep the first run's provenance
+        manifest.residual_base = _earliest_base(existing.residual_base, manifest.residual_base)
         manifest.skipped = existing.skipped  # until this run finishes and says otherwise: it may not
         manifest.engine = existing.engine  # the same: until this run's fits from shared statistics are counted
         manifest.engine_check = existing.engine_check
@@ -910,6 +956,16 @@ def check_and_write(
         manifest.data_unverified = True
         _mark_rows_unverified(manifest, model_name, path, "they have no manifest")
     manifest.write(path)
+
+
+def _earliest_base(existing: Optional[Dict[str, Any]], mine: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """A `ResidualModel`'s `residual_base` after a resume: this run's card, with the earliest first issue day of the base over
+    the runs into the file, since its records' learners trained on base forecasts from then on (a later start would judge a
+    contaminated base clean over them)."""
+    if not existing or not mine:
+        return mine
+    days = [day for day in (existing.get("first_issue_day"), mine.get("first_issue_day")) if day]
+    return {**mine, "first_issue_day": min(days)} if days else mine
 
 
 def _kernels_on_file(

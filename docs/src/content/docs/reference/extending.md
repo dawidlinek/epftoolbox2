@@ -214,6 +214,83 @@ frames itself (`_preprocess`) is a group of its own, which reads its own frames,
 `_preprocess` reads (a lag, say) is that instance's; so is a model with such a method set on the instance itself, and one with
 its own `run`, `_run_tasks` or `_build_hour_arrays` (on the class or the instance) runs on its own.
 
+### Day and pooled units
+
+Every model above fits one period of the day at a time: a unit is the rows of one period and one target. A class can set
+`_unit_kind` to fit every period of a day at once instead, on the [refit calendar](/epftoolbox2/model-pipeline/time-and-calendars/#refitting-on-a-calendar)
+(so it needs `refit`; `"1D"` fits every issue day):
+
+- **`_unit_kind = "day"`**: the rows are local dates and the outputs the P periods of the target day (24, 96 at 15 minutes). Define
+  `_fit_days(x, y, y_mask)`, which gets the scaled inputs of the training dates (dates, inputs), the targets (dates, P) and which of
+  them train, and `_predict_days(fitted, rows)`, which returns (rows, P). Every predictor must hold one value per local date, such
+  as a daily profile (`price_h05_d-1` from [`DailyProfileTransformer`](/epftoolbox2/transformers/daily-profile/)) or a calendar
+  flag (`is_monday_d+{horizon}`): a column that changes with the period, such as `price_d-1`, raises before any fit, naming its
+  profile names (`price_h00_d-1 … price_h23_d-1`). A date with a value on some rows and NaN on others is fine. The check reads
+  the dates the run's fits train on, not the issue dates (the probes of `verify` perturb an issue date's cells one by one); a
+  date's input is the value on its last row, in period order, that has one, so a plain run reads that row's value of a column
+  that changes with the period only on dates no fit trains on. `verify` checks every date of the frame first. A slot with no
+  target is masked and drops out of its own period's fit alone, never shifted to another period: the hour a spring switch skips,
+  the repeated autumn hour, a missing value. With `newest_target="published"` each period trains on the W dates its own period
+  unit would, up to its own newest target known by the anchor's issue time, and its slots outside them are masked. Masked slots of
+  `y` are NaN.
+- **`_unit_kind = "pooled"`**: the rows are the (date, period) rows of every period, by date then period, with one output: each
+  predictor is read on its period's own row (`price_d-1` is that hour's price, `price_h05_d-1` the date's 05:00 price), and the
+  name `period` in a list adds the row's period (0 to P-1) as a feature. Define `_fit_model(train_x, train_y)` and
+  `_predict_block(fitted, rows)` as above, and a `target_transform` attribute: `"per_period"` (each period's own Invariant) or
+  `"pooled"` (one over every row). A period with no training row is skipped (`no_finite_training_rows`) with either, so the
+  forecasts a run makes don't depend on the transform.
+
+Both units scale the inputs with the model's `scaler` (its input part; binary 0/1 columns are kept) and transform the targets with
+each period's Invariant, asinh of the median and MAD of its training targets (`epftoolbox2.scalers.target.MultiTargetAsinh`,
+`AsinhScaler(apply_to="target", standardise=False)` per column); a forecast of period p is mapped back with p's. Each unit predicts
+every issue day of its block that the frame has in one call of the block's nominal length (7 days for `"7D"`, times P rows for a
+pooled unit), padded with copies of the first, so a forecast is the same alone, in its block, after a resume and whatever the run's
+`test_start` or the data's end; a row's forecasts must not depend on the call's other rows, which `verify`'s co-batch check runs on
+by default. Records are those of every planned (period, horizon, issue day), keyed as any model's; a day unit's have no
+coefficients. A list may change with the horizon and, for a predictor function of `ctx`, with the issue day, never with the period of
+one issue day. The manifest records `unit_kind` and `target_transform`, and a resume with another refuses. Not in this release: the
+engine, `PooledModel`, `train_on="matching"` and `period` in a predictor function's list.
+
+```python
+import numpy as np
+from epftoolbox2.models.base import BaseModel
+
+
+class DailyRidge(BaseModel):
+    """A ridge per period of the day, all fitted from one call on the dates of a unit."""
+
+    _unit_kind = "day"
+
+    def __init__(self, predictors, training_window=728, alpha=1.0, refit="7D", **kwargs):
+        super().__init__(predictors, training_window, refit=refit, **kwargs)
+        self.alpha = alpha
+
+    @property
+    def _model_kwargs(self):
+        return {"alpha": self.alpha}
+
+    def _fit_predict(self, train_x, train_y, test_x):
+        raise NotImplementedError("fits day units")
+
+    def _fit_days(self, x, y, y_mask):
+        coefs, intercepts = np.zeros((x.shape[1], y.shape[1])), np.zeros(y.shape[1])
+        for period in range(y.shape[1]):
+            rows = y_mask[:, period]
+            if rows.any():
+                xc, yc = x[rows] - x[rows].mean(axis=0), y[rows, period] - y[rows, period].mean()
+                coefs[:, period] = np.linalg.solve(xc.T @ xc + self.alpha * np.eye(x.shape[1]), xc.T @ yc)
+                intercepts[period] = y[rows, period].mean() - x[rows].mean(axis=0) @ coefs[:, period]
+        return coefs, intercepts
+
+    def _predict_days(self, fitted, rows):
+        coefs, intercepts = fitted
+        return np.array([row @ coefs + intercepts for row in rows])
+
+
+profiles = [f"price_h{hour:02d}_d-1" for hour in range(24)] + ["is_weekend_d+{horizon}"]
+model = DailyRidge(profiles, training_window=364, name="daily_ridge")
+```
+
 ---
 
 ## Custom Evaluator

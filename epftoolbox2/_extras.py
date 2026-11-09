@@ -11,6 +11,7 @@ from typing import Dict, List, Optional, Tuple
 # Each extra in pyproject.toml's [project.optional-dependencies] that code asks for, with the modules it installs.
 EXTRAS: Dict[str, Tuple[str, ...]] = {
     "fast": ("numba",),
+    "torch": ("torch",),
 }
 
 

@@ -416,7 +416,7 @@ def test_lear_on_the_lago_fixture(kind, window, tmp_path, every_fit_checked):
     pipeline.run(data, day, day, horizon=1, save_dir=str(tmp_path))
     stored = manifest(tmp_path, kind)
     engine, check = stored["engine"], stored["engine_check"]
-    assert stored["fit_path"] == "engine-1" and engine == {
+    assert stored["fit_path"] == "engine-2" and engine == {
         "fits": 24,
         "fallbacks": {},
         "max_issue_z": engine["max_issue_z"],
@@ -800,7 +800,7 @@ def test_a_zone_run_checks_its_engine_fits(tmp_path, monkeypatch, every_fit_chec
         pipeline.run(frames, test=test_pooled.HOURLY_TEST, horizon=1, save_dir=str(tmp_path / engine))
     for zone in test_pooled.ZONES:
         stored = manifest(tmp_path / "check" / zone, "lear")
-        assert stored["fit_path"] == "engine-1" and stored["engine_check"]["fits"] == stored["engine"]["fits"] > 0, zone
+        assert stored["fit_path"] == "engine-2" and stored["engine_check"]["fits"] == stored["engine"]["fits"] > 0, zone
         assert lines(tmp_path / "on" / zone / "lear.jsonl") == lines(tmp_path / "check" / zone / "lear.jsonl"), zone
 
 
