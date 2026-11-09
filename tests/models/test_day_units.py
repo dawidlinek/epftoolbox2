@@ -1102,17 +1102,25 @@ def test_a_resume_with_another_target_transform_refuses_and_the_same_resumes(mar
         assert len(lines(save)) == 7 * 24 - 2
 
 
-def test_what_target_transform_a_unit_refuses(market):
+def test_what_target_transform_a_unit_refuses(market, tmp_path):
     """A value outside per_period, pooled and none; "pooled" for a day unit (one transform over every period's rows is a pooled
-    unit's): each raises when the run starts, before any fit. A network (`TorchModel`, the MLP presets) trains on each period's
-    Invariant, so it takes no other transform: not a parameter, and setting another value raises."""
+    unit's): each raises when the run starts, before any fit, and in a pipeline when it checks its models, before the first
+    model runs. A network (`TorchModel`, the MLP presets) trains on each period's Invariant, so it takes no other transform:
+    not a parameter, and setting another value raises."""
     from epftoolbox2.models import MLPDailyModel, MLPHourlyModel, TorchModel
+    from epftoolbox2.pipelines import ModelPipeline
 
     with pytest.raises(ValueError, match=r"target_transform must be one of \['per_period', 'pooled', 'none'\]"):
         PooledOLS(target_transform="raw").run(market, *WEEK, horizon=1)
     with pytest.raises(ValueError, match="a day unit fits each period of the day as an output of its own"):
         DayRidge(target_transform="pooled").run(market, *WEEK, horizon=1)
     assert DayRidge.calls == [] and PooledOLS.calls == []
+    pipeline = ModelPipeline().add_model(OLSModel(POOLED_PREDICTORS[:-1], WINDOW, name="ols"))
+    pipeline.add_model(DayRidge(target_transform="pooled", name="day"))
+    save = tmp_path / "run"
+    with pytest.raises(ValueError, match="a day unit fits each period of the day as an output of its own"):
+        pipeline.run(market, *WEEK, horizon=1, save_dir=str(save))
+    assert not save.exists() or not any(save.iterdir())  # the OLS model before it didn't run
     networks = (
         MLPDailyModel(PRICE),
         MLPHourlyModel(["price_d-1"]),
