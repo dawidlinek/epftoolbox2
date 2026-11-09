@@ -2315,6 +2315,7 @@ def leakage_probe(
     availability: str = "raise",
     horizons: Optional[Sequence[int]] = None,
     span: Optional[Tuple[str, str]] = None,
+    flip: bool = False,
 ) -> ProbeResult:
     """Perturb every value not known at issue time on `run_day` and check that the forecasts don't change.
 
@@ -2359,6 +2360,10 @@ def leakage_probe(
     compared, since a fit serves every issue day of its block and a leak can need the later ones in the run to show. `span`
     (first, last), ISO dates, widens the runs to cover them too, as `co_batch_probe` does with the other items of a call: the
     perturbation is the same, every cell unknown at `run_day`'s issue time on every row.
+
+    `flip` turns each unknown value v of `columns` into 1 - v instead of noise (`perturb_unknown`): the probe of a 0/1 flag such
+    as a model's `zero_when` column, which noise would only ever make "not 1", so a flag that is 0 on the issue day would move
+    nothing.
     """
     run_day = str(pd.Timestamp(run_day).date())
     horizon = _horizon_arguments(horizon, horizons, 1)
@@ -2369,8 +2374,12 @@ def leakage_probe(
             "model the target's rule is the boundary, and the probe perturbs what it calls unknown. Leave it False."
         )
     target_from_issue = target if check_target_boundary else None
-    perturbed, counts, unchecked = perturb_unknown(
-        data, run_day, information_set, freq, columns, seed, target_from_issue=target_from_issue
+    perturbed, counts, unchecked = (
+        perturb_unknown(
+            data, run_day, information_set, freq, columns, seed, target_from_issue=target_from_issue, flip=True
+        )
+        if flip
+        else perturb_unknown(data, run_day, information_set, freq, columns, seed, target_from_issue=target_from_issue)
     )
     base = data
     if rebuild is not None:
@@ -2413,6 +2422,7 @@ def _issue_day_forecasts(
     information_set: InformationSet,
     availability: str = "raise",
     span: Optional[Tuple[str, str]] = None,
+    zeros: Optional[set] = None,
 ) -> Tuple[Dict[Tuple[int, int], float], Dict[Tuple[Any, ...], Tuple[np.ndarray, np.ndarray]], List[Violation]]:
     """The model's forecasts issued on `run_day` from `frame`, by (period, horizon), the cells a predictor function of
     `ctx` read (see `PredictorPlan.read_cells`), and its reads of values known only later (`PredictorPlan.late_reads`).
@@ -2466,6 +2476,8 @@ def _issue_day_forecasts(
     late = [] if plan is None else plan.late_reads()
     ref = m.run(frame, test_start=first_day, test_end=last_day, target=target, freq=freq, **horizon, **extra)
     issued = [r for r in ref._results if r["run_date"] == run_day]
+    if zeros is not None:  # the forecasts of 0 a `zero_when` made without a fit (`models._row_target`)
+        zeros.update((r["hour"], r["horizon"]) for r in issued if r.get("detail") == "zero_when")
     return {(r["hour"], r["horizon"]): r["prediction"] for r in issued}, read, late
 
 
@@ -2539,6 +2551,9 @@ class ControlResult:
     # A model that reads history: the series whose own fresh values were perturbed and moved no forecast. The probe can't vouch
     # that what the model reads of them is the frame's (a copy of its own, a series it ignores): a blind spot.
     blind: List[str] = field(default_factory=list)
+    # Forecasts of 0 a `zero_when` made without a fit in both runs (`models._row_target`), kept out of `unmoved`: they read their
+    # flag alone, which `verify` probes by flipping it, so not moving under the control is no blind spot.
+    exempt: List[Tuple[int, int]] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
@@ -2633,9 +2648,12 @@ def positive_control(
             base, rebuild(perturbed), run_day, None if history else target, first_row_day
         )
     common = (run_day, target, horizon, freq, information_set, availability, span)
-    original, *_ = _issue_day_forecasts(model, base, *common)
-    other, *_ = _issue_day_forecasts(model, perturbed, *common)
+    zeros_before: set = set()
+    zeros_after: set = set()
+    original, *_ = _issue_day_forecasts(model, base, *common, zeros=zeros_before)
+    other, *_ = _issue_day_forecasts(model, perturbed, *common, zeros=zeros_after)
     moved, max_abs_change, _ = _compare_forecasts(original, other, atol)
+    exempt = (zeros_before & zeros_after) - set(moved)
     return ControlResult(
         run_day=run_day,
         forecasts=len(original),
@@ -2643,7 +2661,8 @@ def positive_control(
         max_abs_change=max_abs_change,
         perturbed=counts,
         unchecked=unchecked,
-        unmoved=sorted((original.keys() & other.keys()) - set(moved)),
+        unmoved=sorted((original.keys() & other.keys()) - set(moved) - exempt),
+        exempt=sorted(exempt),
     )
 
 
@@ -3052,8 +3071,12 @@ def perturb_unknown(
     columns: Optional[Sequence[str]] = None,
     seed: int = 0,
     target_from_issue: Optional[str] = None,
+    flip: bool = False,
 ) -> Tuple[pd.DataFrame, Dict[str, int], List[str]]:
     """Copy of `data` where every numeric value not known at issue time on `run_day` is replaced by noise.
+
+    `flip` replaces each such value v by 1 - v instead (a missing one stays missing): the perturbation of a 0/1 flag, whose
+    every value noise would make "not 1" (a model's `zero_when`, `models._row_target`).
 
     Each row is read as of its own issue day where that is later than `run_day`: an `as_of` or `weather_cutoff` value on a row
     after D comes from that row's own run, so it is unknown at D's issue time (rows up to D are read on D). Every other kind
@@ -3091,7 +3114,10 @@ def perturb_unknown(
             mask = mask | (day >= 0)
         if mask.any():
             values = out[name].to_numpy(dtype=float, copy=True)
-            values[mask] = 1e6 + rng.normal(0.0, 1e4, int(mask.sum()))
+            if flip:
+                values[mask] = 1.0 - values[mask]
+            else:
+                values[mask] = 1e6 + rng.normal(0.0, 1e4, int(mask.sum()))
             out[name] = values
             counts[name] = int(mask.sum())
     _report_unchecked(unchecked, information_set)

@@ -64,6 +64,7 @@ from .models._calendar import every_horizon, horizon_arguments, resolve_horizons
 from .models._cards import preflight
 from .models._engine import ENGINE_OFF, EngineAlone, check_engine
 from .models._contract import wall_clock
+from .models._row_target import zero_columns
 from .results.availability import LATE
 
 LEAK = "leak"
@@ -393,7 +394,9 @@ def _blind_spots(checks: List[IssueDayCheck]) -> List[str]:
     if controls:
         produced = {key for control in controls for key in [*control.moved, *control.unmoved]}
         moved = {key for control in controls for key in control.moved}
-        absent = [h for h in checks[0].planned_horizons if h not in {horizon for _, horizon in produced}]
+        # A forecast of 0 a `zero_when` made reads its flag alone, which the flip probe covers: made, but not asked to move.
+        made = produced | {key for control in controls for key in control.exempt}
+        absent = [h for h in checks[0].planned_horizons if h not in {horizon for _, horizon in made}]
         if absent:
             lines.append(f"no forecast of horizon(s) {absent} on any sampled issue day, so nothing checked them.")
         unreached = [check for check in checks if check.unreached_horizons]
@@ -563,6 +566,10 @@ def verify_model(
         copied = copy.deepcopy(model)
         if on_device is not None:
             copied.device = on_device
+        if getattr(copied, "bounds", None) is not None:
+            # Probed unclipped: the clip only follows the forecast times the issue row's scale, which can then move freely,
+            # and a control's noise clipped back onto the forecast it moved would look like a forecast the probe can't reach.
+            copied.bounds = None
         return copied
 
     def probed():
@@ -588,6 +595,9 @@ def verify_model(
     revised_reads = _revised_training_reads(plan, information_set, freq)  # before the check lets go of what it read
     checked._check_inputs(built, target, horizon, freq, plan=plan, cut_rules=information_set, horizons=horizons)
     used = sorted({*checked._used_predictors, *plan.queried}) if plan is not None else list(checked._used_predictors)
+    # A `zero_when` flag is probed by flipping its unknown cells (below), never by noise, which only ever makes it "not 1" and
+    # which the run refuses as a flag on an issue row; nor by the control, whose forecasts of 0 read the flag alone.
+    flags = zero_columns(checked, horizons)
     not_sampled: List[str] = []
     late_in_period: List[str] = []
     if plan is not None and test_period is not None:
@@ -616,7 +626,11 @@ def verify_model(
     if features is None:
         data = built = _booleans_as_numbers(data, [target, *used])
         columns = _probe_columns(data, information_set, target, used)
+        if flags:
+            columns = [name for name in columns if name not in flags]
     else:
+        if flags:
+            columns = [name for name in data.columns if name not in flags]
         not_from_frame = _inputs_not_from_frame(data, built, features, used, information_set, seed)
 
     # A forecast of D+1 may read today's published price, so a model can list its target as an input. What it reads as an
@@ -675,6 +689,12 @@ def verify_model(
                 **common,
             )
             probe = _merge(probe, boundary)
+        if flags:
+            # The unknown cells of the flag turned 0 to 1 and 1 to 0, on the frame the model runs on.
+            flipped = leakage_probe(
+                probed, with_label(built), run_day, label_rules, label, columns=flags, flip=True, span=span, **common
+            )
+            probe = _merge(probe, flipped)
         result = None
         if control:
             frame = with_label(data) if features is None else data
