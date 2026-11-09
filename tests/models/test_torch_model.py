@@ -1070,6 +1070,26 @@ def test_a_predictor_function_s_forecasts_are_the_same_whatever_days_the_run_hol
     assert fridays and all(fridays[k] == whole[k] for k in fridays)
 
 
+def period_switch(ctx):
+    return PERIOD if ctx.issue_day < datetime.date(2023, 3, 22) else PERIOD[:-1]
+
+
+@pytest.mark.parametrize("refit", [None, "7D"])
+def test_a_period_network_s_predictor_function_seeds_by_content_too(market, refit):
+    """The same for a period network, a fit per forecast (`_fit_member`) and per refit unit (`_fit_unit`): a later start and
+    Fridays only give the common forecasts to the bit."""
+
+    def model():
+        return hourly(predictors=period_switch, refit=refit, seeds=2, max_epochs=3)
+
+    whole = keyed(run(model(), market, test=("2023-03-20", "2023-03-24"))._results)
+    later = keyed(run(model(), market, test=("2023-03-22", "2023-03-24"))._results)
+    fridays = keyed(run(model(), market, test=("2023-03-20", "2023-03-24"), issue_days=["friday"])._results)
+    common = set(whole) & set(later)
+    assert len(common) >= 60 and all(whole[k] == later[k] for k in common)
+    assert fridays and all(fridays[k] == whole[k] for k in fridays)
+
+
 def test_a_refit_none_fit_of_a_window_list_seeds_each_window_as_its_own_member(market, monkeypatch):
     keys = []
     real = trainer.train_members
@@ -1091,9 +1111,11 @@ def autumn():
     return frame(start="2023-09-01", days=70, seed=4)
 
 
-def test_early_stopping_holds_out_dates_and_a_repeated_hour_s_rows_together(autumn, monkeypatch):
-    """A period unit whose span holds the autumn switch has two rows of period 2 on 29 October: the early-stopping share is of
-    dates, and both rows fall on one side; on other periods (a row a date) the split is the rows' as before."""
+@pytest.mark.parametrize("refit", ["7D", None])
+def test_early_stopping_holds_out_dates_and_a_repeated_hour_s_rows_together(autumn, monkeypatch, refit):
+    """A period fit (a refit unit, or a forecast's own with refit=None) whose span holds the autumn switch has two rows of period 2
+    on 29 October: the early-stopping share is of dates, and both rows fall on one side; on other periods (a row a date) the
+    split is the rows' as before."""
     splits = []
     real_split = trainer.member_split
 
@@ -1103,7 +1125,7 @@ def test_early_stopping_holds_out_dates_and_a_repeated_hour_s_rows_together(autu
         return fit, val
 
     monkeypatch.setattr(trainer, "member_split", spy)
-    run(hourly(predictors=PERIOD[:3], seeds=4), autumn, test=("2023-11-06", "2023-11-06"))  # its span holds 29 October
+    run(hourly(predictors=PERIOD[:3], seeds=4, refit=refit), autumn, test=("2023-11-06", "2023-11-06"))  # spans 29 Oct
     doubled = [s for s in splits if len(np.unique(s[0])) < len(s[0])]
     assert len(doubled) == 4  # period 2's unit, one split per seed
     for groups, fit, val, _ in doubled:
