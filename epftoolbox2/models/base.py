@@ -2128,7 +2128,7 @@ class BaseModel(ABC):
         except (TypeError, ValueError):  # `read_days` says what it can't read
             return start
 
-    def _fit_days(self, days: Any) -> Any:
+    def _fitted_days(self, days: Any) -> Any:
         """The day id each of these issue day ids is fitted on: itself, or with `refit` its anchor (a matching list, which
         reads this, has one int window, so one rule)."""
         if self.refit is None:
@@ -2465,7 +2465,7 @@ class BaseModel(ABC):
 
     def _matching_days_of(self, plan: PredictorPlan, period: int, horizon: int, run_date: str, list_id: int) -> str:
         """The record's `matching_days` of a forecast: the worker's own cut and filter, on the rows the worker has."""
-        day = self._fit_days(datetime.date.fromisoformat(run_date).toordinal() - self._first_ordinal)
+        day = self._fitted_days(datetime.date.fromisoformat(run_date).toordinal() - self._first_ordinal)
         rows = training_row_days(
             self._hour_days[period], day, self.training_window, horizon, self._newest_of(period, day)
         )
@@ -2483,7 +2483,7 @@ class BaseModel(ABC):
         """
         absent = set(absent)
         # The days the forecasts are fitted on: the issue days, or with `refit` their anchors.
-        issue_days = self._fit_days(
+        issue_days = self._fitted_days(
             np.array([day.toordinal() - self._first_ordinal for day in plan.issue_days], dtype=np.int64)
         )
         start = self._grid_start(plan)
