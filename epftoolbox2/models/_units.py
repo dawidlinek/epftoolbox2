@@ -220,9 +220,11 @@ def check_day_level(
     (`price_d-1`) would silently give it one period's. A NaN row holds no value for its date: a date with a value on some rows
     and NaN on others is fine. The error names the column, a date and its profile names, the fix.
 
-    A run checks the dates its fits train on (`BaseModel._day_check_span`): the probes of `verify` perturb what is unknown, or
+    A run checks the dates its fits train on (`BaseModel._check_day_level`): the probes of `verify` perturb what is unknown, or
     fresh, at the issue time cell by cell, which a later date's or the issue date's rows hold, while the dates a fit trains on
-    stay as they are. A check with no test period (`verify` checks each model so first) reads the whole frame."""
+    stay as they are. So a plain run reads the last row's value (`day_arrays`) of a column that changes with the period only on
+    dates no fit trains on, such as an issue date. A check with no test period (`verify` checks each model so first) reads the
+    whole frame."""
     if periods_per_day(freq) == 1 or not len(names):
         return
     dates = _contract.wall_clock(data.index).normalize()

@@ -236,13 +236,15 @@ an issue day it didn't sample.
   the outputs the P periods of the target day: `_fit_days(x, y, y_mask)` and `_predict_days(fitted, rows)`) or `"pooled"` (the
   (date, period) rows of every period, one output, with `period` a feature when a list names it: `_fit_model` and `_predict_block`,
   and `target_transform="per_period"` or `"pooled"`), for the neural networks and tree models to come. A unit is fitted on the refit
-  calendar, with dates as rows and `training_span` as for any model; a slot with no target (the hour a spring switch skips, the
-  repeated autumn hour, a target not yet published under `newest_target="published"`) is masked and drops out of its period alone;
+  calendar, with dates as rows and `training_span` as for any model (under `newest_target="published"` each period on the W dates
+  of its own period unit); a slot with no target (the hour a spring switch skips, the repeated autumn hour) is masked and drops out
+  of its period alone;
   each period's targets get their own Invariant (`epftoolbox2.scalers.target.MultiTargetAsinh`); and each unit predicts every issue
   day of its block that the frame has in one call of the block's nominal length, so a forecast is the same alone, in its block,
   after a resume and whatever the test start or the data's end. A day unit's predictors must hold one value per local date: a
   column that changes with the period (`price_d-1`) raises before any fit, naming its daily profile (`price_h00_d-1 …
-  price_h23_d-1`). A list may change with the horizon and the issue day, not with the period. Manifests of such models record
+  price_h23_d-1`), on every date the run's fits train on (an issue date's input is its last row's value; `verify` checks the whole
+  frame). A list may change with the horizon and the issue day, not with the period. Manifests of such models record
   `unit_kind` and `target_transform`, compared on resume; `verify` runs the co-batch check and the cut frame on them by default.
   **No model of today is one, and none of their numbers, records or manifests moves.** See [Extending](/epftoolbox2/reference/extending/#day-and-pooled-units).
 - **Model cards, weights and the pre-flight, for the families that need an extra or pretrained weights.** A family declares a

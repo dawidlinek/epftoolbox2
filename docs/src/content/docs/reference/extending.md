@@ -225,15 +225,20 @@ Every model above fits one period of the day at a time: a unit is the rows of on
   them train, and `_predict_days(fitted, rows)`, which returns (rows, P). Every predictor must hold one value per local date, such
   as a daily profile (`price_h05_d-1` from [`DailyProfileTransformer`](/epftoolbox2/transformers/daily-profile/)) or a calendar
   flag (`is_monday_d+{horizon}`): a column that changes with the period, such as `price_d-1`, raises before any fit, naming its
-  profile names (`price_h00_d-1 … price_h23_d-1`). A date with a value on some rows and NaN on others is fine. A slot with no
+  profile names (`price_h00_d-1 … price_h23_d-1`). A date with a value on some rows and NaN on others is fine. The check reads
+  the dates the run's fits train on, not the issue dates (the probes of `verify` perturb an issue date's cells one by one); a
+  date's input is the value on its last row, in period order, that has one, so a plain run reads that row's value of a column
+  that changes with the period only on dates no fit trains on. `verify` checks every date of the frame first. A slot with no
   target is masked and drops out of its own period's fit alone, never shifted to another period: the hour a spring switch skips,
-  the repeated autumn hour, a missing value, and with `newest_target="published"` the newest date's periods whose target isn't
-  known by the anchor's issue time. Masked slots of `y` are NaN.
+  the repeated autumn hour, a missing value. With `newest_target="published"` each period trains on the W dates its own period
+  unit would, up to its own newest target known by the anchor's issue time, and its slots outside them are masked. Masked slots of
+  `y` are NaN.
 - **`_unit_kind = "pooled"`**: the rows are the (date, period) rows of every period, by date then period, with one output: each
   predictor is read on its period's own row (`price_d-1` is that hour's price, `price_h05_d-1` the date's 05:00 price), and the
   name `period` in a list adds the row's period (0 to P-1) as a feature. Define `_fit_model(train_x, train_y)` and
   `_predict_block(fitted, rows)` as above, and a `target_transform` attribute: `"per_period"` (each period's own Invariant) or
-  `"pooled"` (one over every row).
+  `"pooled"` (one over every row). A period with no training row is skipped (`no_finite_training_rows`) with either, so the
+  forecasts a run makes don't depend on the transform.
 
 Both units scale the inputs with the model's `scaler` (its input part; binary 0/1 columns are kept) and transform the targets with
 each period's Invariant, asinh of the median and MAD of its training targets (`epftoolbox2.scalers.target.MultiTargetAsinh`,
