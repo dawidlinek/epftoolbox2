@@ -176,15 +176,20 @@ def task_inputs(hour_arrays, expanded_preds, config, model_cls, model_kwargs) ->
 def _pool_init(hour_arrays, expanded_preds, config, model_cls, model_kwargs):
     """Initialiser of the worker pool: limit native threads, then load the data and the model.
 
-    A torch family's config sets `torch_threads`: torch's intra-op threads are pinned to it and its inter-op threads to 1
-    (`_torch.runtime.pin_torch_threads`), after the BLAS and OpenMP limits, which reach torch's own OpenMP too. A thread count
-    changes a torch fit's numbers, and a forked worker inherits the parent's count, whatever the environment says. Without
-    it nothing imports torch."""
-    _limit_native_threads()
-    if config.get("torch_threads"):
+    A torch family's config sets `torch_threads`: torch's intra-op threads (OpenMP and its bundled MKL) are pinned to it and its
+    inter-op threads to 1 (`_torch.runtime.pin_torch_threads`) before the BLAS and OpenMP limits, and again after them (which
+    set torch's OpenMP to one thread too). A thread count changes a torch fit's numbers, a forked worker inherits the parent's
+    count whatever the environment says, and its bundled MKL left at the parent's count hangs on the first product after the
+    parent's parallel work. More than one thread is refused where the pool forks (`check_torch_threads`). Without the setting
+    nothing imports torch."""
+    torch_threads = config.get("torch_threads")
+    if torch_threads:
         from ._torch.runtime import pin_torch_threads
 
-        pin_torch_threads(config["torch_threads"])
+        pin_torch_threads(torch_threads, forked=not _POOLS_SPAWN)
+    _limit_native_threads()
+    if torch_threads:
+        pin_torch_threads(torch_threads, forked=not _POOLS_SPAWN)
     _worker_init(hour_arrays, expanded_preds, config, model_cls, model_kwargs)
 
 

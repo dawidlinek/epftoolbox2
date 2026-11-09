@@ -10,9 +10,11 @@
   flags above and, from torch 2.9, the `fp32_precision` attributes, which torch keeps separately), so a later reader of either
   sees what it saw before.
 - `pin_torch_threads(n)` is the pool initialiser's (`_worker._pool_init` with `config["torch_threads"]`): environment variables set
-  after a fork are too late, a forked worker inherits the parent's thread count.
+  after a fork are too late, a forked worker inherits the parent's thread count, and only `torch.set_num_threads` reaches the
+  MKL torch bundles. `check_torch_threads` refuses more than one thread where the pool forks (GNU OpenMP hangs there): a torch
+  family's parent calls it before it starts a pool (`_pool_init` refuses too, but a failed initialiser only breaks the pool).
 - `runtime_fields(...)` are the settings that change a torch family's numbers, for `BaseModel._runtime_fields`: the manifest
-  records them and a resume with other values is refused.
+  records them and a resume with other values is refused. `device_name` (the GPU's or the CPU's model) is for a warning.
 """
 
 import contextlib
@@ -107,12 +109,27 @@ def resolve_device(device: Any = "auto"):
     return resolved
 
 
+def cpu_name() -> str:
+    """This machine's CPU model ("model name" in /proc/cpuinfo where there is one, else what `platform` says)."""
+    import platform
+
+    try:
+        with open("/proc/cpuinfo") as f:
+            for line in f:
+                if line.startswith("model name"):
+                    return line.split(":", 1)[1].strip()
+    except OSError:
+        pass
+    return platform.processor() or platform.machine() or "cpu"
+
+
 def device_name(device: Any) -> str:
-    """ "cpu", or the GPU's name: recorded where a change only warns (bits are not known to hold across GPU types)."""
+    """The GPU's name, or for a CPU fit the CPU's model: recorded where a change only warns (bits are not known to hold across
+    GPU types; on CPUs of one capability, `runtime_fields`' `cpu_capability`, they are not known to differ)."""
     resolved = resolve_device(device)
-    if resolved.type != "cuda":
-        return resolved.type
-    return cuda_probe(resolved.index or 0)[1] or "cuda"
+    if resolved.type == "cuda":
+        return cuda_probe(resolved.index or 0)[1] or "cuda"
+    return cpu_name() if resolved.type == "cpu" else resolved.type
 
 
 def resolve_stack(stack: str, device) -> str:
@@ -144,14 +161,18 @@ def runtime_fields(
     stack: str = "auto",
     pad_to: Optional[int] = None,
 ) -> Dict[str, Any]:
-    """The settings of a torch fit that change its numbers, resolved, for the manifest's `runtime` (compared on resume): the
-    device type, dtype, `tf32`, torch's thread count per fit, the stack ("loop" or "vmap") and its size. The GPU's name is not
-    among them (`device_name`): a different GPU should warn, not refuse."""
+    """The settings of a torch fit that change its numbers, resolved, for the manifest's `runtime` (compared on resume): torch's
+    version, the device type, dtype, `tf32`, torch's thread count per fit, the stack ("loop" or "vmap") and its size, and for a
+    CPU fit the CPU kernels torch runs (`torch.backends.cpu.get_cpu_capability()`: "AVX512", "AVX2", "DEFAULT", ...; the same
+    fit moved by 1e-6 between AVX2 and the generic kernels, and torch picks the best one the machine has). The GPU's and the
+    CPU's model names are not among them (`device_name`): a different model of the same kind should warn, not refuse."""
     if dtype not in DTYPES:
         raise ValueError(f"dtype={dtype!r}: use one of {DTYPES}")
+    torch = _torch()
     resolved = resolve_device(device)
     kind = resolve_stack(stack, resolved)
-    return {
+    fields = {
+        "torch": torch.__version__,
         "device": resolved.type,
         "dtype": dtype,
         "tf32": bool(tf32),
@@ -159,18 +180,40 @@ def runtime_fields(
         "stack": kind,
         "pad_to": resolve_pad(kind, pad_to),
     }
+    if resolved.type == "cpu":
+        fields["cpu_capability"] = torch.backends.cpu.get_cpu_capability()
+    return fields
 
 
-def pin_torch_threads(threads: int) -> None:
-    """torch's intra-op threads to `threads` and its inter-op threads to 1 in this process (a pool worker). The inter-op count
-    can be set once per process, before any inter-op work: a worker forked from a parent that set it or used it keeps the
-    parent's (torch raises, and this leaves it)."""
-    torch = _torch()
+def check_torch_threads(threads: int, forked: bool) -> int:
+    """`threads` as an int, refused when it isn't a positive count, or is more than one in a worker pool that forks (Linux and
+    macOS: `_worker._POOLS_SPAWN` is False). GNU OpenMP, which torch's CPU wheels use, keeps its thread pool's state across a
+    fork without the threads, so a forked worker running torch on two or more threads after its parent ran any parallel torch
+    work hangs on its first parallel operation. One thread per worker is also the fast way on a CPU (a pool of single-thread
+    fits beat one process with 8 threads 4 times over): raise the number of processes (`MAX_PROCESSES`) instead."""
     threads = int(threads)
     if threads < 1:
         raise ValueError(f"torch threads must be at least 1, got {threads}")
-    if torch.get_num_threads() != threads:
-        torch.set_num_threads(threads)
+    if threads > 1 and forked:
+        raise ValueError(
+            f"torch_threads={threads}: a worker pool that forks its workers can run torch on one thread only (GNU OpenMP in a "
+            "forked process hangs once the parent has run parallel torch work). Use one thread per fit and more processes "
+            "(MAX_PROCESSES) instead."
+        )
+    return threads
+
+
+def pin_torch_threads(threads: int, forked: bool = False) -> None:
+    """torch's intra-op threads (OpenMP and the MKL torch bundles) to `threads` and its inter-op threads to 1 in this process,
+    a pool worker. `torch.set_num_threads` is called whatever `torch.get_num_threads()` says: that reads OpenMP alone, which
+    the BLAS limits (`_worker._limit_native_threads`) may already have set, while the call is the only thing that reaches the
+    bundled MKL (threadpoolctl can't see it), which a forked worker otherwise keeps at the parent's count, with other numbers
+    and, after the parent's parallel work, a hang on the first product. `forked`: refuse more than one thread
+    (`check_torch_threads`). The inter-op count can be set once per process, before any inter-op work: a worker forked from a
+    parent that set it or used it keeps the parent's (torch raises, and this leaves it)."""
+    threads = check_torch_threads(threads, forked)
+    torch = _torch()
+    torch.set_num_threads(threads)
     try:
         torch.set_num_interop_threads(1)
     except RuntimeError:
@@ -254,10 +297,10 @@ def torch_scope(device: Any = "auto", tf32: bool = False, threads: Optional[int]
     saved_threads = torch.get_num_threads()
     try:
         _set_tf32(bool(tf32), saved["legacy"] is not None)
-        if threads is not None and int(threads) != saved_threads:
+        if threads is not None:  # always: get_num_threads() reads OpenMP alone, the call sets the bundled MKL too
             torch.set_num_threads(int(threads))
         yield resolved
     finally:
         _restore_precision(saved)
-        if torch.get_num_threads() != saved_threads:
+        if threads is not None:
             torch.set_num_threads(saved_threads)
