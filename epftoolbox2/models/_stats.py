@@ -48,13 +48,26 @@ The fits (`LinearFit` for OLS and Ridge; LEAR's `LearFit` from `ScaledStats.gram
   estimate between 1e9 and 1e10 reach 8.0e-9 and those between 1e10 and 1e11 1.2e-7. Every fit with cond(Z) below 316 is kept
   (the pivot ratio is at most cond(Z)², the estimate at most p·cond(Z)²), and so is every plain Lago row (ratios up to 1.2e4,
   estimates up to 1.2e8).
-  **Refinement.** The normal equations err as eps·cond(Z)² where the model path's SVD errs as eps·cond(Z), and an issue row
-  far out reads that error: on Lago's DE inputs (W 364, 247 inputs, every issue row 5 to 30 training sds out) step 5's fits
-  (fit path "engine-1") were up to 1.4e-8 from `LinearRegression`, the model path within 1e-11 of a long-double solution. So
-  `ols_fit` refines its solution by one step, w + M⁻¹(b - M w) with the fit's own Cholesky factor and the residual well below
-  float64's rounding (`refined`; in long double where `EXTENDED`, else by error-free transformations), which removes the
-  factorisation's error and leaves the rounding of M's and b's entries from the sums (`ols_issue_guard/` in the research
-  folder: Lago DE's worst gap within the distance bound 1.4e-8 -> 3.3e-9 over 61 days of 2016, 1.35e-8 -> 5.9e-9 over 2017).
+  **Refinement and the issue-row guard.** The normal equations err as eps·cond(Z)² where the model path's SVD errs as
+  eps·cond(Z), and an issue row far out reads that error: on Lago's DE inputs (W 364, 247 inputs, every issue row 5 to 30
+  training sds out) step 5's fits (fit path "engine-1") were up to 1.4e-8 from `LinearRegression`, the model path within
+  1e-11 of a long-double solution. So `ols_fit` refines its solution by one step, w + M⁻¹(b - M w) with the fit's own
+  Cholesky factor and the residual well below float64's rounding (`refined`; in long double where `EXTENDED`, else by
+  error-free transformations), which removes the factorisation's error and leaves the rounding of M's and b's entries from
+  the sums. Per issue row the error that remains is estimated (`solve_error`, from `LinearFit.solve`):
+  sqrt((δw·(z - c))² + eps² Σ_i g_i² h_i), δw the next refinement step (measured), g = M⁻¹(z - c) and h_i = Σ_j M_ij² w_j² +
+  (M w)_i² (the first-order effect of the entries' rounding, each of random sign, which no refinement against those entries can
+  see). A row whose estimate times `yscale` (target units) exceeds `OLS_SOLVE_ERROR_MAX` (5e-9) is forecast on the model path
+  (the engine's `far_issue`), besides OLS's distance bound of 30 training sds. The calibration
+  (`epftoolbox2-research/library_check_step5/ols_issue_guard/`: the dense, VST and re-review sweeps on two sets of seeds,
+  `guard_sweep2.py`'s designs, every n-364 window of the DE fixture, Lago DE over the experiment-check's 61 days of 2016 and over
+  2017): with the step alone the worst gaps within the distance bound were 8.1e-9 (dense) and 5.9e-9 (Lago 2017), every other
+  set under 5e-9; with the guard at 5e-9 the worst kept is 4.8e-9 (Lago 2017; dense 3.9e-9, the fixture 1.4e-9), and it
+  hands back at most 0.5 % more rows than the distance bound (Lago DE 2.6 % and 0.9 % of OLS's forecasts against 2.5 % and
+  0.4 %). Any budget up to 5.8e-9 holds 5e-9 in every set. Without the step's accurate residual (a float64 one) the guard
+  measures noise and kept forecasts 1.2e-8 off: hence the error-free path. The step and the guard's terms cost one accurate
+  residual and two triangular solves per fit, O(p²) (with long double 0.6 ms at p 247 against 0.66 ms for the factorisation,
+  the error-free path about four times that), and a triangular solve per issue row.
 - **Ridge**, n > p (scikit-learn's `svd` mode): `RidgeCV(alphas, fit_intercept, cv=None)`'s leave-one-out error, computed from
   the eigendecomposition G = VΛV' (or of A) and the scaled rows (`ScaledStats.rows`, which Ridge alone needs): with U = Z_c V,
   the fit at α is U(V'q/(λ + α)), each row's leverage Σ_k U_ik²/(λ_k + α) plus 1/n for the unpenalised intercept, and its
@@ -112,6 +125,11 @@ RIDGE_ROUNDING_MAX = 1e-10
 """Ridge hands a fit back when scikit-learn's own rounding at the chosen penalty, `ridgecv_rounding`/α in target units, exceeds
 this: the gap to `RidgeCV` was at most 8.7 times that measure where it mattered, so no fit kept is more than about 9e-10 from
 the model path, however exact the engine (see the module)."""
+
+OLS_SOLVE_ERROR_MAX = 5e-9
+"""OLS hands an issue row back (the engine's `far_issue`) when the normal equations' own error in its forecast, measured by one
+step of iterative refinement (`LinearFit.correction`, `solve_error_ok`), exceeds this in target units: the model path's SVD is
+far closer to the exact least-squares fit there (see the module)."""
 
 MIN_ROWS = 3
 """Fewer rows in ρ go to the model path for every model (the engine's fallback table)."""
@@ -527,10 +545,12 @@ class LinearFit:
     """A linear fit from statistics: `predict(X) = X @ coef_ + intercept_`, as the scikit-learn estimators it stands for.
 
     `alpha_` is the chosen penalty of a Ridge fit (None for OLS). `rounding` (Ridge) holds per column the scale of the model
-    path's own rounding at α* in target units per unit of |z - z̄| of a row (`issue_rounding_ok`), None for OLS. `centred`:
-    whether the fit has an intercept, so that a row is measured from the training means (`issue_metric`), not from 0."""
+    path's own rounding at α* in target units per unit of |z - z̄| of a row (`issue_rounding_ok`), None for OLS. `solve`
+    (OLS) holds what `solve_error` needs to estimate the normal equations' error at any row (`SolveError`), None for Ridge.
+    `centred`: whether the fit has an intercept, so that a row is measured from the training means (`issue_metric`), not from
+    0."""
 
-    __slots__ = ("coef_", "intercept_", "alpha_", "rounding", "centred")
+    __slots__ = ("coef_", "intercept_", "alpha_", "rounding", "centred", "solve")
 
     def __init__(
         self,
@@ -539,12 +559,14 @@ class LinearFit:
         alpha: Optional[float] = None,
         rounding: Optional[np.ndarray] = None,
         centred: bool = True,
+        solve: Optional["SolveError"] = None,
     ):
         self.coef_ = np.asarray(coef, dtype=np.float64)
         self.intercept_ = float(intercept)
         self.alpha_ = alpha
         self.rounding = rounding
         self.centred = bool(centred)
+        self.solve = solve
 
     def predict(self, X) -> np.ndarray:
         X = np.asarray(X, dtype=np.float64)
@@ -605,6 +627,18 @@ def _cholesky_solve(M: np.ndarray, b: np.ndarray, guard: float, condition_max: f
     return w, L, live
 
 
+class SolveError(NamedTuple):
+    """What an OLS fit from the normal equations needs to estimate their error at any issue row (`solve_error`): the live
+    columns, the Cholesky factor of their block of M, the refinement step that remains, δw = M⁻¹(b - M w) over them
+    (`correction`, the error left in w, measured; `refined`) and h_i = Σ_j M_ij² w_j² + (M w)_i² (the size of the rounding of
+    row i of M and of b)."""
+
+    live: np.ndarray
+    factor: np.ndarray
+    correction: np.ndarray
+    h: np.ndarray
+
+
 def _live_block(M: np.ndarray, b: np.ndarray, live: np.ndarray):
     full = live.size == b.size
     return (M if full else M[np.ix_(live, live)]), (b if full else b[live])
@@ -646,21 +680,54 @@ def _residual_exact(M: np.ndarray, b: np.ndarray, w: np.ndarray) -> np.ndarray:
     return terms[:, 0] + carried
 
 
-def refined(M: np.ndarray, b: np.ndarray, w: np.ndarray, L: Optional[np.ndarray], live: np.ndarray) -> np.ndarray:
+def refined(
+    M: np.ndarray, b: np.ndarray, w: np.ndarray, L: Optional[np.ndarray], live: np.ndarray
+) -> Tuple[np.ndarray, Optional[SolveError]]:
     """The solution `w` of M w = b (over the live columns, with the factor `L` the fit used) after one step of iterative
-    refinement: w + M⁻¹(b - M w), the residual well below float64's rounding (`_residual`), solved with `L` (one accurate
-    residual and a triangular solve, O(p²) beside the factorisation's O(p³)). It removes the factorisation's own error, the
-    normal equations' eps·cond(Z)² against the model path's eps·cond(Z), and leaves the rounding of M's and b's entries from
-    the sums. A failed or non-finite step leaves w as it was. A function of M, b and w, so of the fit's sums alone."""
+    refinement, and its `SolveError`.
+
+    The step is w + M⁻¹(b - M w), the residual well below float64's rounding (`_residual`), solved with `L`: it removes the
+    factorisation's own error, the normal equations' eps·cond(Z)² against the model path's eps·cond(Z), and leaves the
+    rounding of M's and b's entries from the sums. `SolveError.correction` is the next step, M⁻¹(b - M w'), the error that
+    remains in w' (its residual is the first one minus M (w' - w), a product that needs no extra precision since w' - w is
+    that small: one accurate residual per fit, O(p²) beside the factorisation's O(p³)). A failed or non-finite step leaves w
+    as it was. A function of M, b and w, so of the fit's sums alone. (w, None) for no live column."""
     if live.size == 0 or L is None:
-        return w
+        return w, None
     Ml, bl = _live_block(M, b, live)
-    step, info = dpotrs(L, np.ascontiguousarray(_residual(Ml, bl, w[live]), dtype=np.float64), lower=1)
-    if info != 0 or not np.isfinite(step).all():
-        return w
+    wl = w[live]
+    residual = _residual(Ml, bl, wl)
+    step, info = dpotrs(L, np.ascontiguousarray(residual, dtype=np.float64), lower=1)
+    if info == 0 and np.isfinite(step).all():
+        moved = wl + step
+        residual = residual - Ml @ (moved - wl)
+        wl = moved
+    correction, info = dpotrs(L, np.ascontiguousarray(residual, dtype=np.float64), lower=1)
+    if info != 0:
+        correction = np.full(live.size, np.inf)
+    Mw = Ml @ wl
     out = w.copy()
-    out[live] = w[live] + step
-    return out
+    out[live] = wl
+    return out, SolveError(live, L, correction, (Ml * Ml) @ (wl * wl) + Mw * Mw)
+
+
+def solve_error(fitted, stats: "ScaledStats", z: np.ndarray) -> float:
+    """The scale of the error left in an OLS forecast at an issue row `z` (scaled as the fit's rows), in scaled target units:
+    sqrt((δw·(z - c))² + eps² Σ_i g_i² h_i), g = M⁻¹(z - c), c the training means with an intercept and 0 without. δw is the
+    refinement step that remains (`refined`: after the one taken, small); the second term the first-order effect of the rounding of M's and b's entries, each of random sign, which no refinement
+    against those entries can see. 0.0 for a fit without `SolveError` (no live column). A function of the fit and the row
+    alone."""
+    terms = getattr(fitted, "solve", None)
+    if terms is None:
+        return 0.0
+    row = np.asarray(z, dtype=np.float64).reshape(-1)[terms.live]
+    if getattr(fitted, "centred", True):
+        row = row - stats.zbar[terms.live]
+    g, info = dpotrs(terms.factor, np.ascontiguousarray(row), lower=1)
+    if info != 0:
+        return math.inf
+    measured = float(terms.correction @ row)
+    return math.sqrt(measured * measured + EPS * EPS * float((g * g) @ terms.h))
 
 
 def ols_fit(
@@ -678,9 +745,9 @@ def ols_fit(
     solved = _cholesky_solve(M, b, guard, condition_max)
     if solved is None:
         return None
-    w = refined(M, b, *solved)
+    w, solve = refined(M, b, *solved)
     intercept = float(stats.ybar - stats.zbar @ w) if fit_intercept else 0.0
-    return LinearFit(w, intercept, centred=fit_intercept)
+    return LinearFit(w, intercept, centred=fit_intercept, solve=solve)
 
 
 class IssueMetric(NamedTuple):
@@ -778,6 +845,21 @@ def issue_rounding_ok(fitted, stats: ScaledStats, z: np.ndarray, rounding_max: f
     return bool(float(rounding @ np.abs(row - stats.zbar)) <= rounding_max)
 
 
+def solve_error_ok(
+    fitted, stats: ScaledStats, z: np.ndarray, scale: Optional[float] = None, error_max: float = OLS_SOLVE_ERROR_MAX
+) -> bool:
+    """Whether the normal equations' error in a forecast at an issue row stays within `error_max` (target units): for a fit
+    that carries `solve` (OLS's `LinearFit`), `solve_error` times `scale` (target units per scaled unit: `stats.yscale` by
+    default, a VST's inverse slope at the forecast where that is steeper) at most `error_max`; any other fit, True. A function
+    of the fit and the row alone; without a scale, False."""
+    if getattr(fitted, "solve", None) is None:
+        return True
+    scale = stats.yscale if scale is None else scale
+    if scale is None:
+        return False
+    return bool(solve_error(fitted, stats, z) * float(scale) <= error_max)  # NaN or inf hands back
+
+
 def ridgecv_rounding(Zc: np.ndarray, yc: np.ndarray) -> float:
     """The scale of `RidgeCV`'s own rounding at penalty α, times α, in scaled target units: eps · max_i Σ_j |Zc_ij| Σ_k |Zc_kj|
     |yc_k| on the rows it fits (centred with an intercept). Its dual route forms c = U(w∘U'y) + y/α, two terms of about |y|/α
@@ -856,11 +938,15 @@ __all__ = [
     "issue_distance",
     "issue_metric",
     "issue_rounding_ok",
+    "OLS_SOLVE_ERROR_MAX",
     "ols_fit",
     "ridge_fit",
     "ridgecv_rounding",
     "EXTENDED",
+    "SolveError",
     "refined",
+    "solve_error",
+    "solve_error_ok",
     "standard_stats",
     "transformed_stats",
 ]
