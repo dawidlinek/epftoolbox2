@@ -56,6 +56,12 @@ Issues = "https://github.com/dawidlinek/epftoolbox2/issues"
 fast = [
     "numba>=0.65; python_version < '3.15'",
 ]
+# torch for the neural-network families and their trainer (epftoolbox2/nets.py, epftoolbox2/models/_torch/). uv.lock takes it
+# from PyTorch's CPU index (below): a 200 MB wheel instead of PyPI's CUDA build, which also fails on older GPUs. For a CUDA
+# install see the docs (models/neural-networks).
+torch = [
+    "torch>=2.9",
+]
 dev = [
     "pytest>=7.4.0",
     "pytest-cov>=4.1.0",
@@ -65,6 +71,15 @@ dev = [
 
 [project.scripts]
 epf = "epftoolbox2.cli:main"
+
+# torch comes from PyTorch's CPU index; `explicit` keeps every other package on PyPI.
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu" }]
 
 [tool.hatch.build.targets.wheel]
 packages = ["epftoolbox2"]
@@ -81,6 +96,7 @@ tmp_path_retention_count = 1
 markers = [
     "integration: Integration tests that require real API keys and use real connections",
     "examples: Runs examples/*.py and the documentation quick start against the live APIs (also marked integration)",
+    "gpu: Needs a CUDA GPU (also marked integration, so the fast suite never runs it)",
 ]
 filterwarnings = [
     "ignore::DeprecationWarning",

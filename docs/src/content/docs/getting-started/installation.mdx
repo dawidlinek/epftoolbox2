@@ -65,6 +65,17 @@ there. `EPFTOOLBOX2_KERNELS` chooses: `auto` (the default) uses numba when it im
 for when), and a run's manifest records which ran. numba compiles on its first use (some 20 s, then cached on disk) in the process that starts the pool, before any worker
 forks. The extra is for Python 3.11 to 3.14, free-threaded 3.14t included.
 
+### The `[torch]` extra
+
+```bash
+pip install 'epftoolbox2[torch]'
+```
+
+installs torch, for the networks of `epftoolbox2.nets` and the neural-network families. On Linux PyPI's torch is the CUDA build;
+for a machine without a GPU install the CPU wheel first (`pip install torch --index-url https://download.pytorch.org/whl/cpu`).
+See [Neural Networks](/epftoolbox2/models/neural-networks/#installing-torch) for GPUs. The extra is for Python 3.11 to 3.15,
+free-threaded 3.14t included.
+
 ---
 
 ## Parallel Model Training
