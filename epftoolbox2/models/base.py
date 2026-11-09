@@ -1536,9 +1536,7 @@ class BaseModel(ABC):
         windows: RunWindows, first_day: datetime.date, weekdays: Optional[Sequence[int]] = None
     ) -> Dict[int, Tuple[str, int, int]]:
         """Each issue day of the run, counted from `first_day` -> (its window, calendar days since the window's start, place
-        among the days the run plans on, which a plan and the newest targets are indexed by). With `weekdays` only the days of
-        those weekdays are issue days, and planned. Of the validation window every `validation_every`-th day alone is an issue
-        day, and every day is planned (`RunWindows.calendar_days`), so a kept day keeps the place it has in a run of every day."""
+        among the run's issue days). With `weekdays` only the days of those weekdays are issue days."""
         days = {}
         position = 0
         for name, (start, end) in windows.periods:
@@ -1547,8 +1545,7 @@ class BaseModel(ABC):
             for day in range(first, last + 1):
                 if weekdays is not None and (first_day + datetime.timedelta(days=day)).weekday() not in weekdays:
                     continue
-                if name == TEST or (day - first) % windows.validation_every == 0:
-                    days[day] = (name, day - first, position)
+                days[day] = (name, day - first, position)
                 position += 1
         return days
 
