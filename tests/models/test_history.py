@@ -253,6 +253,9 @@ def test_the_arrays_equal_a_reference_built_by_hand_from_the_utc_frame(hourly, q
     spec = SPECS[which]
     batch = history_batch(spec, frame, DAYS, INFO, freq, horizon)
     assert [item.issue_day for item in batch.items] == DAYS
+    classes = {"price": "snapshot", "load_forecast": "latest_revision", "generation_wind_forecast": "latest_revision"}
+    classes["load_actual"] = "latest_revision"
+    assert {series.name: series.vintage for series in batch.series} == {name: classes[name] for name in spec.names}
     utc = utc_of(frame)
     for item in batch.items:
         assert_item_is(item, by_hand(utc, spec, item.issue_day, horizon, freq))
