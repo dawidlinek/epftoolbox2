@@ -1290,7 +1290,24 @@ class InformationSet:
         out._source_rules = {**self._source_rules, **{k: _as_rule(v) for k, v in source_rules(sources).items()}}
         out._source_zones = {**self._source_zones, **_source_market_zones(sources)}
         out._chained = {**self._chained, **chained_sources(sources)}
+        out.refuse_rules_on_chained_columns()
         return out
+
+    def refuse_rules_on_chained_columns(self) -> None:
+        """`InformationSetError` for a rule in `rules` that names a chained column exactly (`load_fc`, `load_fc_d+1`): its rule
+        is its upstream's issue time, which `resolve` puts above every rule, assumption and pattern, so such a rule would be
+        silently ignored. A pattern that matches one (`load_*`) is left alone: it holds for the other columns it matches."""
+        for key in self.rules:
+            if any(ch in key for ch in "*?["):
+                continue
+            for candidate, _ in parse_predictor(key):
+                chained = self._chained.get(candidate)
+                if chained is not None:
+                    raise InformationSetError(
+                        f"rules={{{key!r}: ...}} names {candidate!r}, a column of {chained.describe()}: its rule is the "
+                        f"upstream's ({self._source_rules[candidate].describe()}) and nothing replaces it. Remove the rule; "
+                        "ForecastSource(available='HH:MM') states a later time than the upstream's issue time."
+                    )
 
     def chained_inputs(self) -> Dict[str, ChainedInput]:
         """Column -> its upstream, for each column read from another pipeline's stored forecasts (`ForecastSource`), as
@@ -1364,6 +1381,10 @@ class InformationSet:
         """Find the rule for a column: exact names from the full name down to the base, then glob patterns
         from the base up; layers in order rules > accepted assumptions > sources > defaults.
 
+        A column read from another pipeline's forecasts (`chained_inputs`), shifted or built from, takes its source's rule
+        before any layer: its availability is its upstream's issue time, which no rule, assumption or pattern can replace
+        (`refuse_rules_on_chained_columns` refuses a rule that names one).
+
         A DailyProfileTransformer or DailyStatsTransformer column first looks for a user's rule on its own name, which
         describes the series it was built from; otherwise it takes the whole resolution of the column it was built from,
         so `generation_solar_forecast_day_max` is judged by `generation_*_forecast`, not caught by `generation_*`. Either
@@ -1372,6 +1393,9 @@ class InformationSet:
         """
         chain = parse_predictor(name)
         base, shifts = chain[-1]
+        chained = self._chained_rule(name, chain)
+        if chained is not None:
+            return chained
         column = _built_from_name(base)
         if column is None:
             for layer, rules in self._layers():
@@ -1379,12 +1403,25 @@ class InformationSet:
                 if found is not None:
                     return found
             return ResolvedColumn(name, base, shifts, None)
+        if self._chained and self.chained_of(column) is not None:
+            # A profile or day aggregate of a chained column: its source's rule, read at its slot; no rule of its own.
+            source = self.resolve(column)
+            return ResolvedColumn(name, base, shifts, source.rule, source.key, source.layer, source)
         user = _find_rule(name, chain, self.rules, "rules")
         if user is not None and user.base != base:
             return user
         source = self.resolve(column)
         ruling = source if user is None else user
         return ResolvedColumn(name, base, shifts, ruling.rule, ruling.key, ruling.layer, source)
+
+    def _chained_rule(self, name: str, chain: List[Tuple[str, Tuple[Shift, ...]]]) -> Optional[ResolvedColumn]:
+        """The source rule of the chained column `name` reads through its shifts (the full name down to the base), or None."""
+        if not self._chained:
+            return None
+        for candidate, shifts in chain:
+            if candidate in self._chained and candidate in self._source_rules:
+                return ResolvedColumn(name, candidate, shifts, self._source_rules[candidate], candidate, "sources")
+        return None
 
     def _resolve_for(self, name: str, step: int) -> ResolvedColumn:
         """`resolve` for data with slots of `step` minutes.
@@ -3868,6 +3905,7 @@ __all__ = [
     "ASSUMPTIONS",
     "AVAILABILITY_LEVELS",
     "Availability",
+    "ChainedInput",
     "CoBatchResult",
     "ControlResult",
     "CutResult",

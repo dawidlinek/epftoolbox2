@@ -22,7 +22,7 @@ import pytest
 
 from epftoolbox2._date_utils import shift_calendar_days
 from epftoolbox2.data.sources import ForecastSource
-from epftoolbox2.information_set import _STEP_MINUTES, Availability, InformationSet, RuleChain
+from epftoolbox2.information_set import _STEP_MINUTES, Availability, InformationSet, InformationSetError, RuleChain
 from epftoolbox2.models._calendar import periods_per_day
 from epftoolbox2.pipelines import ModelPipeline
 
@@ -33,7 +33,7 @@ NAMES = {"col": 0, "col_d+1": 1, "col_d+2": 2, "col_d-1": -1}
 ISSUE = "09:30"
 
 
-def upstream(tmp_path, data_zone: str, issue_zone: str, freq: str = "1h", name: str = "up") -> None:
+def upstream(tmp_path, data_zone: str, issue_zone: str, freq: str = "1h", name: str = "up", issue: str = ISSUE) -> None:
     """An upstream manifest (and one record) written by hand: what `ForecastSource` reads to state its rule."""
     tmp_path.mkdir(parents=True, exist_ok=True)
     record = {"run_date": "2024-01-01", "target_date": "2024-01-02", "hour": 0, "horizon": 1, "prediction": 1.0}
@@ -42,7 +42,7 @@ def upstream(tmp_path, data_zone: str, issue_zone: str, freq: str = "1h", name: 
         "freq": freq,
         "horizon": 2,
         "data_timezone": data_zone,
-        "information_set": {"issue_time": ISSUE, "issue_timezone": issue_zone},
+        "information_set": {"issue_time": issue, "issue_timezone": issue_zone},
         "availability": {"level": "raise", "times": "instants", "listing": []},
     }
     (tmp_path / f"{name}.manifest.json").write_text(json.dumps(manifest))
@@ -283,3 +283,49 @@ def test_a_validity_period_of_the_data_s_dates_holds_in_both_readings_on_a_frame
     known = info._issue_clock(days, index, "1h").available(info._resolve_for("col", 60), np.arange(24), 60)
     assert np.isinf(known[:, 0]).all()  # 25 October in UTC: before the period in one reading at least
     assert np.isfinite(known[:, 1]).all()  # 26 October in UTC is 26 or 27 October in Helsinki: in both
+
+
+@pytest.mark.parametrize(
+    "info",
+    [
+        InformationSet("10:15", "Europe/Brussels"),
+        InformationSet("10:15", "Europe/Brussels", assumptions=["entsoe_a69_by_10"]),
+        InformationSet("10:15", "Europe/Brussels", rules={"generation_*": Availability.published("10:00", 1)}),
+        InformationSet("10:15", "Europe/Brussels", rules={"generation_solar_*": Availability.static()}),
+    ],
+    ids=["sources", "assumption", "user glob", "static glob"],
+)
+def test_no_assumption_or_pattern_replaces_a_chained_column_s_rule(tmp_path, info):
+    """An upstream issued at 10:30 under a name an assumption (`generation_*_forecast`, 10:00 on D-1) or a user's pattern
+    matches: its forecast for D+1 is still out at 10:30 on D, after a 10:15 issue, through its shifts, profiles and day
+    aggregates, in the check and in the probes alike (both read `resolve`)."""
+    upstream(tmp_path, "Europe/Berlin", "Europe/Brussels", name="solar_ridge", issue="10:30")
+    source = ForecastSource(tmp_path, "solar_ridge", "generation_solar_forecast")
+    info = info.with_source_rules([source])
+    for name in (
+        "generation_solar_forecast_d+1",
+        "generation_solar_forecast_h12_d+1",
+        "generation_solar_forecast_d+1_day_max",
+    ):
+        col = info.resolve(name)
+        assert (col.layer, col.key, col.rule) == ("sources", "generation_solar_forecast", source.availability()), name
+        known, issued, skipped, _ = library_known(
+            info, name, frame_index("Europe/Berlin", "1h", "spring"), "1h", "spring"
+        )
+        assert (known > np.broadcast_to(issued, known.shape))[~skipped].all(), name
+
+
+@pytest.mark.parametrize("key", ["generation_solar_forecast", "generation_solar_forecast_d+1"])
+def test_a_rule_naming_a_chained_column_is_refused(tmp_path, key):
+    upstream(tmp_path, "Europe/Berlin", "Europe/Brussels", name="solar_ridge")
+    source = ForecastSource(tmp_path, "solar_ridge", "generation_solar_forecast")
+    info = InformationSet("10:15", "Europe/Brussels", rules={key: Availability.published("08:00", 1)})
+    with pytest.raises(
+        InformationSetError, match="names 'generation_solar_forecast', a column of forecasts of solar_ridge"
+    ):
+        info.with_source_rules([source])
+    added_later = InformationSet("10:15", "Europe/Brussels").with_source_rules([source])
+    added_later.rules[key] = Availability.published("08:00", 1)
+    with pytest.raises(InformationSetError, match="nothing replaces it"):
+        added_later.refuse_rules_on_chained_columns()
+    assert added_later.resolve("generation_solar_forecast_d+1").layer == "sources"  # and ignored meanwhile

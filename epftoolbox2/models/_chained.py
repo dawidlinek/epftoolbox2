@@ -75,6 +75,7 @@ def check(
     frame `data`, for a run issued on `issue_days` (None: no coverage can be told) whose fits read `rows`."""
     if information_set is None or not information_set.chained_inputs():
         return ChainedCheck()
+    information_set.refuse_rules_on_chained_columns()  # a rule added after `with_source_rules` would be ignored
     uses: Dict[str, _Use] = {}
     resolved: Dict[str, Optional[ChainedInput]] = {}  # each name once, however many lists hold it
     for (period, hz), names in lists.items():
