@@ -605,8 +605,11 @@ def test_each_seed_is_the_unit_s_hash_and_never_the_model_s_name(market, monkeyp
     assert keyed(run(daily(name="other", seeds=3), market, test=("2023-03-21", "2023-03-21"))._results) == first
     assert keyed(run(daily(seeds=3, random_state=1), market, test=("2023-03-21", "2023-03-21"))._results) != first
     keys.clear()
-    run(hourly(refit=None, seeds=1), market, test=("2023-03-21", "2023-03-21"))
-    assert keys[0] == [unit_seed(0, FitUnit(0, 1, datetime.date(2023, 3, 21), None, 0), 0)]
+    run(hourly(refit=None, seeds=1), market, test=("2023-03-21", "2023-03-22"))
+    days = (datetime.date(2023, 3, 21), datetime.date(2023, 3, 22))
+    assert sorted(k for (k,) in keys) == sorted(
+        unit_seed(0, FitUnit(p, 1, d, None, 0), 0) for d in days for p in range(24)
+    )
 
 
 class TwoMembers(BaseModel):
@@ -820,3 +823,19 @@ def test_a_period_network_trains_on_its_target_s_invariant(market, monkeypatch):
     median = np.median(targets)
     mad = np.median(np.abs(targets - median)) / 0.6744897501960817
     np.testing.assert_allclose(np.sort(seen[0]), np.sort(np.arcsinh((targets - median) / mad)), rtol=0, atol=1e-12)
+
+
+def test_a_period_forecast_is_its_seeds_mean_in_target_units():
+    """Each seed's output mapped back by the target's Invariant, then their mean: not the Invariant of their mean."""
+    from epftoolbox2.scalers.target import MultiTargetAsinh
+
+    class Members:
+        def predict(self, rows):
+            return np.array([[[-1.0]], [[2.0]]])
+
+    target = MultiTargetAsinh().fit(np.arange(10.0)[:, None])
+    fitted = tm._Fitted(Members(), "cpu", target)
+    prediction, coefficients = hourly()._predict_fitted(fitted, np.zeros((1, 3)))
+    expected = math.fsum(float(target.inverse(np.array(z), 0)) for z in (-1.0, 2.0)) / 2
+    assert prediction == expected and coefficients == []
+    assert prediction != float(target.inverse(np.array(0.5), 0))
