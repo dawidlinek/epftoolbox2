@@ -36,7 +36,7 @@ from ..scalers.standard import StandardScaler
 from ..scalers.registry import ScalerSpec, scaler_spec
 from ..results.store import ResultStore, StoreWriter, open_store
 from ..results.ref import ModelResultRef, split_by_window, warn_off_the_clock
-from ..results.availability import LISTING_TIMES, history_rows, listing_rows, warn_about
+from ..results.availability import LISTING_TIMES, history_rows, listing_rows, sort_rows, warn_about
 from ..results.matching import training_day_rows, warn_about_thin
 from ..results.manifest import (
     PAST_THE_FRAME,
@@ -199,6 +199,17 @@ def _days_back(names: Iterable[str]) -> Tuple[int, Optional[str]]:
         if days > deepest:
             deepest, which = days, name
     return deepest, which
+
+
+def _without_repeats(rows: List[Dict], more: List[Dict]) -> List[Dict]:
+    """`rows` with each row of `more` they don't hold already, equal in every field but the list's hash (a column judged both
+    in a predictor function's plan, by list, and as a per-row target's), in listing order (`sort_rows`)."""
+
+    def plain(row: Dict) -> Dict:
+        return {key: value for key, value in row.items() if key != "list"}
+
+    held = [plain(row) for row in rows]
+    return sort_rows([*rows, *(row for row in more if plain(row) not in held)])
 
 
 def _names_of(lists: Dict[Any, List[str]]) -> List[str]:
@@ -564,14 +575,15 @@ class BaseModel(ABC):
 
         `normalise_by`, `bounds` and `zero_when` are a per-row target (`models._row_target`, the docs page Common Parameters):
         `normalise_by="<column>"` divides each training row's target by that row's value of the column and multiplies the forecast
-        by the issue row's (a missing or non-positive value drops a training row, and skips a forecast as
-        `missing_test_predictors`); `bounds=(low, high)` clips the forecast after it is scaled back, in multiples of the scale
-        with `normalise_by` and in target units without, either side None for none; `zero_when="<column>"` makes a forecast 0
-        with no fit where the issue row's value is 1, leaving the training rows as they are. `{horizon}` may stand in either
-        name. The columns are inputs the model reads (checked by the information set, hashed, perturbed by `verify`), not
-        regressors; a model with any of them set runs on the model path, never in an engine group. Periods and pooled units
-        take them; day units, models that read history, `ResidualModel` and `PooledModel` refuse them. All None, the default,
-        changes nothing."""
+        by the issue row's (a missing or non-positive value drops a training row; on the issue row a missing one skips the
+        forecast as `missing_test_predictors`, one not positive as `non_positive_scale`); `bounds=(low, high)` clips the
+        forecast after it is scaled back, in multiples of the scale with `normalise_by` and in target units without, either
+        side None for none; `zero_when="<column>"` makes a forecast 0 with no fit where the issue row's 0/1 value is 1, leaving
+        the training rows as they are. `{horizon}` may stand in either name. The columns are inputs the model reads (checked by
+        the information set, `zero_when`'s on the issue row alone, hashed, perturbed by `verify`), not regressors; a model with
+        any of them set runs on the model path, never in an engine group. Periods and pooled units take them; day units, models
+        that read history and models that fit nothing (bar `bounds`) refuse them, and `ResidualModel` and `PooledModel` don't
+        support them. All None, the default, changes nothing."""
         # A function of `ctx` is planned per forecast (epftoolbox2.models.context); a `(horizon)` or `(horizon, hour)`
         # function gives one list per (period, horizon).
         self._ctx_fn: Optional[Callable] = predictors if callable(predictors) and takes_ctx(predictors) else None
@@ -1863,9 +1875,9 @@ class BaseModel(ABC):
             if kind != PERIOD:
                 check_unit_settings(self, data, fixed.values())
                 check_lists_by_period(self.name, horizons, self._periods_per_day, fixed=fixed)
-            # A per-row target's columns are read on the training rows too (`_row_target.with_columns`: the lists themselves
-            # without one).
-            reads = _names_of(_row_target.with_columns(self, fixed))
+            # `normalise_by`'s column is read on the training rows too (`_row_target.with_columns`: the lists themselves
+            # without it); `zero_when`'s on the issue row alone.
+            reads = _names_of(_row_target.with_columns(self, fixed, _row_target.SCALE))
             self._check_reaches_back(data, test_start, test_end, windows, weekdays, horizons, newest, reads)
         # A model that fits nothing has no training target to check.
         check_target = self.newest_target == "d-1" and not self._fits_nothing
@@ -1893,10 +1905,13 @@ class BaseModel(ABC):
                 check_plan_for_units(self, plan)
                 check_lists_by_period(self.name, horizons, self._periods_per_day, plan=plan)
             # A per-row target's columns are inputs the model reads, never a list's (`_row_target.with_columns`: the lists
-            # themselves without one).
-            reads = _row_target.with_columns(self, expanded)
-            self._check_reaches_back(data, test_start, test_end, windows, weekdays, horizons, newest, _names_of(reads))
-            self._used_predictors = _contract.check_predictors(data, reads, target, horizon)
+            # themselves without one); `normalise_by`'s alone is read on the training rows.
+            back = _row_target.with_columns(self, expanded, _row_target.SCALE)
+            self._check_reaches_back(data, test_start, test_end, windows, weekdays, horizons, newest, _names_of(back))
+            self._used_predictors = _contract.check_predictors(
+                data, _row_target.with_columns(self, expanded), target, horizon
+            )
+            self._check_zero_values(data, horizons, issued, weekdays)
             _contract.warn_about_a_midnight_stamp(
                 data.index,
                 freq,
@@ -1913,28 +1928,21 @@ class BaseModel(ABC):
                 self._availability_listing = plan.listing(target, self.name)
                 if windows is not None:
                     self._window_listings = self._plan_window_listings(plan, target, windows)
-            row_lists = _row_target.column_lists(self, self._periods_per_day, horizons)
-            if row_lists:
-                # The plan judges its lists; a per-row target's columns are judged as a fixed list's are.
-                found, by_window = self._judge_lists(
-                    row_lists,
-                    data,
-                    target,
-                    freq,
-                    information_set,
-                    test_start,
-                    test_end,
-                    availability,
-                    windows,
-                    weekdays,
-                    newest,
-                    issued,
-                    check_target=False,
-                )
-                if found is not None:
-                    self._availability_listing = [*self._availability_listing, *found]
-                    for name, rows in by_window.items():
-                        self._window_listings[name] = [*self._window_listings.get(name, []), *rows]
+            # The plan judges its lists; a per-row target's columns are judged beside it, as a fixed list's are.
+            self._judge_row_targets(
+                data,
+                target,
+                freq,
+                information_set,
+                test_start,
+                test_end,
+                availability,
+                windows,
+                weekdays,
+                newest,
+                issued,
+                horizons,
+            )
             plan.release()
             self._check_history(
                 data, target, horizons, freq, information_set, test_start, test_end, availability, windows, weekdays
@@ -1942,10 +1950,14 @@ class BaseModel(ABC):
             return expanded
         self._check_frame(data, target, horizon, freq, test_start, test_end, windows, newest, shared)
         expanded = fixed
-        # A per-row target's columns are checked as the lists' names are, on the issue row and the training rows, and read as
-        # inputs (`_used_predictors`), never as regressors: `expanded` stays the lists.
-        checked = _row_target.with_columns(self, self._checked_lists(expanded))
-        self._used_predictors = _contract.check_predictors(data, checked, target, horizon)
+        # `normalise_by`'s column is checked as the lists' names are, on the issue row and the training rows, and both per-row
+        # target columns are read as inputs (`_used_predictors`), never as regressors: `expanded` stays the lists. `zero_when`'s
+        # is judged on the issue row alone (`_judge_row_targets`).
+        checked = _row_target.with_columns(self, self._checked_lists(expanded), _row_target.SCALE)
+        self._used_predictors = _contract.check_predictors(
+            data, _row_target.with_columns(self, checked, _row_target.ZERO), target, horizon
+        )
+        self._check_zero_values(data, horizons, issued, weekdays)
         _contract.warn_about_a_midnight_stamp(
             data.index,
             freq,
@@ -1974,6 +1986,21 @@ class BaseModel(ABC):
         if found is not None:
             self._availability_listing = found
             self._window_listings = by_window
+        self._judge_row_targets(
+            data,
+            target,
+            freq,
+            information_set,
+            test_start,
+            test_end,
+            availability,
+            windows,
+            weekdays,
+            newest,
+            issued,
+            horizons,
+            judged=checked,
+        )
         self._check_history(
             data, target, horizons, freq, information_set, test_start, test_end, availability, windows, weekdays
         )
@@ -1994,12 +2021,14 @@ class BaseModel(ABC):
         newest: Optional[NewestTargets],
         issued: Optional[Sequence[datetime.date]],
         check_target: bool,
+        issue_row_only: bool = False,
     ) -> Tuple[Optional[List[Dict]], Dict[str, List[Dict]]]:
         """The information set's verdict on fixed lists `checked` (period, horizon) -> names, as `_check_inputs` reads a model's
         own: on the run's issue days (those of `weekdays`), each name on the issue row and, for a rule that changes over time,
         on the training rows (`_training_rows`), and with `check_target` the newest training target, on the anchors with
         `refit`. At "raise" a late name raises; at "warn" it returns (the run's listing, each window's); otherwise (None, {}).
-        A predictor function's plan judges its own lists; this judges a per-row target's columns beside it."""
+        A predictor function's plan judges its own lists; this judges a per-row target's columns beside it. `issue_row_only`
+        judges the names on the issue row alone, whatever their rules (`zero_when`'s column, which no training row reads)."""
         days = None if windows is None else windows.issue_days(weekdays)
         if days is None and weekdays is not None and test_start is not None and test_end is not None:
             days = [day.isoformat() for day in listed_days(_test_days(test_start, test_end), weekdays)]
@@ -2007,74 +2036,152 @@ class BaseModel(ABC):
         on_anchors = check_target and self.refit is not None
         check_target = check_target and self.refit is None
         window = self._reach_window(data, issued)
-        rows = self._training_rows(newest, window, frame_first_day(data.index))
+        rows = None if issue_row_only else self._training_rows(newest, window, frame_first_day(data.index))
         if information_set is not None:
             check, late_uses = self._issue_time_checks(information_set)
-        if information_set is not None and availability == "raise":
-            check(
-                checked,
-                target,
-                freq,
-                data.index,
-                test_start,
-                test_end,
-                model_name=self.name,
-                issue_days=days,
-                check_target=check_target,
-                training_rows=rows,
-            )
-            if on_anchors:
-                self._target_on_anchors(
-                    information_set.check, checked, target, freq, data.index, test_start, test_end, days, window
-                )
-        elif information_set is not None and availability == "warn":
-            uses = late_uses(
-                checked,
-                target,
-                freq,
-                data.index,
-                test_start,
-                test_end,
-                model_name=self.name,
-                issue_days=days,
-                check_target=check_target,
-                training_rows=rows,
-            )
-            if on_anchors:
-                uses += self._target_on_anchors(
-                    information_set.late_uses, checked, target, freq, data.index, test_start, test_end, days, window
-                )
-            by_window: Dict[str, List[Dict]] = {}
-            for name, (start, end) in windows.periods if windows is not None else ():
-                listed = None if weekdays is None else RunWindows.fixed(None, (start, end)).issue_days(weekdays)
-                window_uses = late_uses(
+        # On the issue row alone by design, whatever the rules over time: the check's warning that it judged no more is no news.
+        quiet = warnings.catch_warnings() if issue_row_only else contextlib.nullcontext()
+        with quiet:
+            if issue_row_only:
+                warnings.filterwarnings("ignore", message=r"The rules of .* change over time", category=UserWarning)
+            if information_set is not None and availability == "raise":
+                check(
                     checked,
                     target,
                     freq,
                     data.index,
-                    start,
-                    end,
+                    test_start,
+                    test_end,
                     model_name=self.name,
+                    issue_days=days,
                     check_target=check_target,
                     training_rows=rows,
-                    **({} if listed is None else {"issue_days": listed}),
                 )
                 if on_anchors:
-                    window_uses += self._target_on_anchors(
-                        information_set.late_uses, checked, target, freq, data.index, start, end, listed, window
+                    self._target_on_anchors(
+                        information_set.check, checked, target, freq, data.index, test_start, test_end, days, window
                     )
-                by_window[name] = listing_rows(window_uses)
-            return listing_rows(uses), by_window
-        return None, {}
+            elif information_set is not None and availability == "warn":
+                uses = late_uses(
+                    checked,
+                    target,
+                    freq,
+                    data.index,
+                    test_start,
+                    test_end,
+                    model_name=self.name,
+                    issue_days=days,
+                    check_target=check_target,
+                    training_rows=rows,
+                )
+                if on_anchors:
+                    uses += self._target_on_anchors(
+                        information_set.late_uses, checked, target, freq, data.index, test_start, test_end, days, window
+                    )
+                by_window: Dict[str, List[Dict]] = {}
+                for name, (start, end) in windows.periods if windows is not None else ():
+                    listed = None if weekdays is None else RunWindows.fixed(None, (start, end)).issue_days(weekdays)
+                    window_uses = late_uses(
+                        checked,
+                        target,
+                        freq,
+                        data.index,
+                        start,
+                        end,
+                        model_name=self.name,
+                        check_target=check_target,
+                        training_rows=rows,
+                        **({} if listed is None else {"issue_days": listed}),
+                    )
+                    if on_anchors:
+                        window_uses += self._target_on_anchors(
+                            information_set.late_uses, checked, target, freq, data.index, start, end, listed, window
+                        )
+                    by_window[name] = listing_rows(window_uses)
+                return listing_rows(uses), by_window
+            return None, {}
+
+    def _judge_row_targets(
+        self,
+        data: pd.DataFrame,
+        target: str,
+        freq: str,
+        information_set: Optional["InformationSet"],
+        test_start: Optional[str],
+        test_end: Optional[str],
+        availability: str,
+        windows: Optional[RunWindows],
+        weekdays: Optional[Sequence[int]],
+        newest: Optional[NewestTargets],
+        issued: Optional[Sequence[datetime.date]],
+        horizons: Sequence[int],
+        judged: Optional[Dict[Tuple[int, int], List[str]]] = None,
+    ) -> None:
+        """Judge the per-row target's columns (`_judge_lists`) beside lists judged already, and add what "warn" lists to the
+        model's listings, less the rows they hold already: `normalise_by`'s on the issue row and the training rows, unless
+        `judged` (a fixed path's lists, which hold it) is given; `zero_when`'s on the issue row alone, where `judged` doesn't
+        hold it at that (period, horizon) (judged there as a predictor or scale is judged, on the training rows too)."""
+        periods = self._periods_per_day
+        groups = []
+        if judged is None:
+            groups.append((_row_target.column_lists(self, periods, horizons, _row_target.SCALE), False))
+        zero = _row_target.column_lists(self, periods, horizons, _row_target.ZERO)
+        if judged is not None:
+            zero = {key: [name for name in names if name not in judged.get(key, ())] for key, names in zero.items()}
+        groups.append((zero, True))
+        for lists, issue_row_only in groups:
+            if not any(lists.values()):
+                continue
+            found, by_window = self._judge_lists(
+                lists,
+                data,
+                target,
+                freq,
+                information_set,
+                test_start,
+                test_end,
+                availability,
+                windows,
+                weekdays,
+                newest,
+                issued,
+                check_target=False,
+                issue_row_only=issue_row_only,
+            )
+            if found is not None:
+                self._availability_listing = _without_repeats(self._availability_listing, found)
+                for name, rows in by_window.items():
+                    self._window_listings[name] = _without_repeats(self._window_listings.get(name, []), rows)
+
+    def _check_zero_values(
+        self,
+        data: pd.DataFrame,
+        horizons: Sequence[int],
+        issued: Optional[Sequence[datetime.date]],
+        weekdays: Optional[Sequence[int]],
+    ) -> None:
+        """A ValueError (`_row_target.check_zero_values`) if `zero_when`'s column holds a value other than 0, 1 or missing on a
+        row of the run's issue days (of `weekdays`); nothing without `zero_when` or without issue days."""
+        columns = _row_target.zero_columns(self, horizons)
+        if not columns or issued is None:
+            return
+        days = [day for day in issued if weekdays is None or day.weekday() in weekdays]
+        _row_target.check_zero_values(self.name, data, columns, days)
 
     def _check_row_target_support(self, kind: str) -> None:
         """A ValueError where the model's per-row target (`normalise_by`, `bounds`, `zero_when`, `models._row_target`) has no
         seam to go through: a model of day units (one fit of every period's target of a date, from day-level rows, whose targets
-        aren't one row's), and a model that reads history (`models._history`: its fits read series, not rows). Nothing without
+        aren't one row's), a model that reads history (`models._history`: its fits read series, not rows), and a model that fits
+        nothing (`_fits_nothing`) has no target to divide and no fit to replace, so it takes `bounds` alone. Nothing without
         one. `ResidualModel` and `PooledModel` refuse them when they are built."""
         given = [key for key in _row_target.PARAMETERS if getattr(self, key, None) is not None]
         if not given:
             return
+        if self._fits_nothing and set(given) - {"bounds"}:
+            raise ValueError(
+                f"{self.name}: {', '.join(key for key in given if key != 'bounds')} divides a fit's training targets or replaces "
+                f"its fit, and {type(self).__name__} fits nothing: it takes bounds alone"
+            )
         if kind == DAY:
             raise ValueError(
                 f"{self.name}: {', '.join(given)} isn't supported for a model of day units in this step ({type(self).__name__} "

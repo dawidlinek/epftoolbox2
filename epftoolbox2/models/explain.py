@@ -162,11 +162,21 @@ def row_target_table(
     training_rows: Optional[TrainingRows] = None,
 ) -> Optional[pd.DataFrame]:
     """One row per column of the model's per-row target at `horizon`: its role (`normalise_by`, `zero_when`, or both), then what
-    `predictor_table` says of it; None for a model without such a column."""
+    `predictor_table` says of it, judged as the run judges it: `normalise_by`'s on the training rows too, `zero_when`'s alone
+    on the issue row; None for a model without such a column."""
     names = _row_target.columns_at(model, horizon)
     if not names:
         return None
-    table = predictor_table(names, data, info, horizon, period, freq, clock, used, training_rows)
+    scales = set(_row_target.columns_at(model, horizon, _row_target.SCALE))
+    table = pd.concat(
+        [
+            predictor_table(
+                [name], data, info, horizon, period, freq, clock, used, training_rows if name in scales else None
+            )
+            for name in names
+        ],
+        ignore_index=True,
+    )
     roles = []
     for name in names:
         roles.append(

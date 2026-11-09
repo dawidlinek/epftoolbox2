@@ -2,13 +2,16 @@
 
 - `normalise_by="<column>"`: each training row's target is divided by that row's value of the column, and the forecast is
   multiplied by the issue row's value. A training row whose value is missing or not positive drops out, as a row with a missing
-  input does; on the issue row such a value is a `missing_test_predictors` skip.
+  input does; on the issue row a missing value is a `missing_test_predictors` skip and one not positive a `non_positive_scale`
+  skip.
 - `bounds=(low, high)`: the forecast is clipped after it is scaled back, in multiples of the issue row's scale with
   `normalise_by` (a capacity factor's `(0, 1.05)`), in target units without. Either side may be None.
 - `zero_when="<column>"`: where the issue row's value is 1 the forecast is 0, with no fit (`coefficients: []`, `detail:
-  "zero_when"`, status ok). It is decided where the fit would be, after every skip of the forecast, so a model forecasts the keys
-  it forecasts without it; training rows are untouched. A missing value on the issue row is a `missing_test_predictors` skip, and
-  any value other than 1 forecasts as usual.
+  "zero_when"`, status ok); a missing value is a `missing_test_predictors` skip, and the run refuses any other value on an issue
+  row before any fit (`check_zero_values`). It is decided after the skips of the training rows and of the issue row's inputs, and
+  before the issue row's scale and the fit, so a forecast of 0 is made where the scale is missing or not positive (a clear-sky
+  night) and where the fit would fail (`fit_error`): the two places where a model's keys differ from the model's without it.
+  Training rows are untouched, and the column is judged by the information set on the issue row alone.
 
 `{horizon}` is the only placeholder in either name, as in a predictor. So the learner sees (y - o) / s on its training rows and the
 forecast is o + s * y_hat, clipped, with s and o the issue row's; o is 0 here (a model with an offset of its own, 7f's
@@ -16,10 +19,13 @@ forecast is o + s * y_hat, clipped, with s and o the issue row's; o is 0 here (a
 normalised targets. Each training window of a list is scaled back and clipped on its own, so a member's forecast is that of the
 model with its window alone, and the forecast is their mean.
 
-The columns are inputs the model reads (`BaseModel._used_predictors`: loaded, hashed in the manifest, judged by the information set
-on the issue row and, for a rule that changes over time, on the training rows, and perturbed by `verify`), never regressors. A
-model with any of the three set is not engine-capable: its targets differ per row from its group's. Periods and pooled units
-take them; day units and models that read history refuse them (`BaseModel._check_row_target_support`).
+The columns are inputs the model reads (`BaseModel._used_predictors`: loaded and hashed in the manifest), never regressors.
+`normalise_by`'s is judged by the information set on the issue row and, for a rule that changes over time, on the training rows;
+`zero_when`'s on the issue row alone, which is all it reads. `verify` perturbs the scale as a predictor and flips the unknown
+cells of `zero_when`'s column (0 to 1 and back), runs its copies without `bounds` (the clip follows the unclipped forecast), and
+doesn't ask a forecast of 0 to move under its control. A model with any of the three set is not engine-capable: its targets
+differ per row from its group's. Periods and pooled units take them; day units, models that read history and models that fit
+nothing (bar `bounds`) refuse them (`BaseModel._check_row_target_support`).
 """
 
 import math
@@ -33,6 +39,8 @@ ZERO_WHEN = "zero_when"
 PARAMETERS = ("normalise_by", "bounds", "zero_when")
 # The columns' parameters, and their keys in a worker's `config["row_target"]`.
 _COLUMNS = {"normalise_by": "scale", "zero_when": "zero"}
+# What `columns_at`, `column_lists` and `with_columns` read: both columns, or one of them.
+BOTH, SCALE, ZERO = ("normalise_by", "zero_when"), ("normalise_by",), ("zero_when",)
 
 
 def check_column(key: str, value: Any) -> Optional[str]:
@@ -90,27 +98,60 @@ def is_set(model: Any) -> bool:
     return any(getattr(model, key, None) is not None for key in PARAMETERS)
 
 
-def columns_at(model: Any, horizon: int) -> List[str]:
-    """The columns `model`'s per-row target reads at `horizon`, `normalise_by`'s then `zero_when`'s, each once."""
-    names = [getattr(model, key, None) for key in _COLUMNS]
+def columns_at(model: Any, horizon: int, keys: Sequence[str] = BOTH) -> List[str]:
+    """The columns `model`'s per-row target reads at `horizon` for the parameters `keys` (both: `normalise_by`'s, then
+    `zero_when`'s), each once."""
+    names = [getattr(model, key, None) for key in keys]
     return list(dict.fromkeys(expand(name, horizon) for name in names if name is not None))
 
 
-def column_lists(model: Any, periods: int, horizons: Iterable[int]) -> Dict[Tuple[int, int], List[str]]:
-    """(period, horizon) -> the columns the per-row target reads there, for a check that reads lists (`_contract.check_predictors`,
-    `InformationSet.check`, `late_uses`); empty without a column."""
+def column_lists(
+    model: Any, periods: int, horizons: Iterable[int], keys: Sequence[str] = BOTH
+) -> Dict[Tuple[int, int], List[str]]:
+    """(period, horizon) -> the columns the per-row target reads there for the parameters `keys`, for a check that reads lists
+    (`_contract.check_predictors`, `InformationSet.check`, `late_uses`); empty without such a column."""
     horizons = list(horizons)
-    if not any(getattr(model, key, None) is not None for key in _COLUMNS):
+    if not any(getattr(model, key, None) is not None for key in keys):
         return {}
-    return {(period, hz): columns_at(model, hz) for period in range(periods) for hz in horizons}
+    return {(period, hz): columns_at(model, hz, keys) for period in range(periods) for hz in horizons}
 
 
-def with_columns(model: Any, lists: Dict[Tuple[int, int], List[str]]) -> Dict[Tuple[int, int], List[str]]:
-    """`lists` with the per-row target's columns of each (period, horizon) after the list's own names, each once; `lists`
-    itself (the same object) without a column."""
-    if not any(getattr(model, key, None) is not None for key in _COLUMNS):
+def with_columns(
+    model: Any, lists: Dict[Tuple[int, int], List[str]], keys: Sequence[str] = BOTH
+) -> Dict[Tuple[int, int], List[str]]:
+    """`lists` with the per-row target's columns of the parameters `keys` of each (period, horizon) after the list's own names,
+    each once; `lists` itself (the same object) without such a column."""
+    if not any(getattr(model, key, None) is not None for key in keys):
         return lists
-    return {key: list(dict.fromkeys([*names, *columns_at(model, key[1])])) for key, names in lists.items()}
+    return {key: list(dict.fromkeys([*names, *columns_at(model, key[1], keys)])) for key, names in lists.items()}
+
+
+def zero_columns(model: Any, horizons: Iterable[int]) -> List[str]:
+    """`zero_when`'s column at each of `horizons`, each once; empty without it."""
+    return list(dict.fromkeys(name for hz in horizons for name in columns_at(model, hz, ZERO)))
+
+
+def check_zero_values(name: str, data: Any, columns: Iterable[str], issue_days: Optional[Sequence[Any]]) -> None:
+    """A ValueError if a `zero_when` column of `columns` holds a finite value other than 0 or 1 on a row of the frame `data`
+    dated on one of `issue_days` (local dates, ISO text or dates), the rows forecasts are issued from; nothing without
+    `issue_days` (a check with no test period: its runs check theirs). A missing value stays allowed: it skips its forecast as
+    `missing_test_predictors`."""
+    columns = list(columns)
+    if issue_days is None or not columns:
+        return
+    index = data.index
+    wall = index.tz_localize(None) if getattr(index, "tz", None) is not None else index
+    days = np.array([np.datetime64(str(day)[:10], "D") for day in issue_days])
+    on = np.isin(np.asarray(wall.normalize(), dtype="datetime64[D]"), days)
+    for column in columns:
+        values = data[column].to_numpy(dtype=np.float64)[on]
+        odd = np.isfinite(values) & (values != 0.0) & (values != 1.0)
+        if odd.any():
+            shown = ", ".join(f"{value:g}" for value in np.unique(values[odd])[:3])
+            raise ValueError(
+                f"{name}: zero_when={column!r} holds {shown} on an issue row; it must be 0 (forecast as usual), 1 (a forecast "
+                "of 0, with no fit) or missing (no forecast). Turn the column into a 0/1 flag first"
+            )
 
 
 def manifest_params(model: Any) -> Dict[str, Any]:
@@ -182,8 +223,3 @@ def scaled_back(row_target: Dict, prediction: float, scale: Optional[float]) -> 
         if high is not None and value > high:
             value = high
     return value
-
-
-def scaled_values(row_target: Dict, predictions: Sequence[float], scales: Sequence[Optional[float]]) -> List[float]:
-    """`scaled_back` of each forecast, with its own issue row's scale."""
-    return [scaled_back(row_target, prediction, scale) for prediction, scale in zip(predictions, scales)]
