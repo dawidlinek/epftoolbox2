@@ -770,20 +770,23 @@ def _models_in(save_dir: Path, model: Optional[str]) -> List[str]:
 
 def _refuse_residual_models(save_dir: Path, stems: List[str]) -> None:
     """A ValueError, before anything is converted, where a model of `stems` is a `ResidualModel` (its manifest's
-    `model_class`): its records hold `base_prediction`, which the Parquet schema has no column for, and its base's results
-    (`<name>.base.jsonl`) are read as JSONL."""
+    `model_class`) or the base of one in `save_dir` (`<name>.base`): the residual's records hold `base_prediction`, which the
+    Parquet schema has no column for, and it reads its base's results as JSONL."""
     from .manifest import manifest_path
 
-    found = []
-    for stem in stems:
+    residual = []
+    for stem in _models_in(save_dir, None):
         path = manifest_path(save_dir / f"{stem}.jsonl")
         if path.is_file() and json.loads(path.read_text()).get("model_class") == "ResidualModel":
-            found.append(stem)
+            residual.append(stem)
+    kept = set(residual) | {f"{stem}.base" for stem in residual}
+    found = [stem for stem in stems if stem in kept]
     if found:
         raise ValueError(
-            f"{save_dir}: {', '.join(found)} are ResidualModel results, whose records hold `base_prediction`, which the Parquet "
-            "results schema has no column for: nothing was converted. Convert the other models one by one (model=...), or keep "
-            "the directory as JSONL"
+            f"{save_dir}: {', '.join(found)} are a ResidualModel's results or its base's (<name>.base), which stay JSONL: the "
+            "residual model's records hold `base_prediction`, which the Parquet results schema has no column for, and it reads "
+            "its base's results as JSONL. Nothing was converted. Convert the other models one by one (model=...), or keep the "
+            "directory as JSONL"
         )
 
 

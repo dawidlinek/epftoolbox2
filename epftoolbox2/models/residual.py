@@ -526,7 +526,7 @@ class ResidualModel(BaseModel):
         if self.training_window == EXPANDING:
             if full > first_issue:
                 raise ValueError(
-                    f"{self.name}: the base forecasts with a full training window from {full} on, after the first issue day "
+                    f"{self.name}: the base forecasts with its largest window filled from {full} on, after the first issue day "
                     f"{first_issue}, so the learner would have no residual to train on: start the frame earlier, the test "
                     "later, or give warmup= days of base forecasts to train on"
                 )
@@ -538,7 +538,7 @@ class ResidualModel(BaseModel):
         if start < full:
             raise ValueError(
                 f"{self.name}: the learner's first fit (refit day {anchor}, training window {self.training_window}) trains on "
-                f"rows from {start}, but the base forecasts with a full training window only from {full} on: start the frame "
+                f"rows from {start}, but the base forecasts with its largest window filled only from {full} on: start the frame "
                 f"{(full - start).days} days earlier, the test later, or give warmup= to accept shorter base windows"
             )
         return start
@@ -688,7 +688,9 @@ class ResidualModel(BaseModel):
         largest, planned = resolve_horizons(horizon, horizons, 7)
         self._set_freq(freq)
         rules = self._cut_rules(information_set, cut_rules)
-        base, base_check = self._base_check if self._base_check is not None else (self._base_model(), None)
+        base, base_check = self._base_model(), None
+        if self._base_check is not None and self._base_check[0]._check_settings() == base._check_settings():
+            base, base_check = self._base_check  # the copy `_check_inputs` checked, for this base as it is now
         self._base_check = None
         start = self._warmup_start(base, data, target, largest, planned, freq, rules, span)
         if save_to is not None and not allow_manifest_mismatch:
@@ -769,6 +771,15 @@ class ResidualModel(BaseModel):
         ours = None if self.warmup is None else start.isoformat()
         if theirs != ours:
             diffs.append(f"residual.base_start: {theirs!r} (existing results) vs {ours!r} (this run)")
+        # The learner's own window and refit rule, which the manifest records outside `model_params`.
+        window = json.loads(json.dumps(self.training_window))
+        if existing.get("training_window") != window:
+            diffs.append(
+                f"training_window: {existing.get('training_window')!r} (existing results) vs {window!r} (this run)"
+            )
+        refit = (existing.get("training_cut") or {}).get("refit")
+        if refit != self.refit:
+            diffs.append(f"training_cut.refit: {refit!r} (existing results) vs {self.refit!r} (this run)")
         if diffs:
             raise ManifestMismatchError(
                 f"{self.name}: the results in {path.parent} were produced with a different configuration than this run "
@@ -810,8 +821,10 @@ class ResidualModel(BaseModel):
 
     def _finish_run(self, state: Any) -> Any:
         ref = super()._finish_run(state)
-        if self._residual_base is not None:
-            ref.provenance = {**(ref.provenance or {}), "base": dict(self._residual_base)}
+        # The manifest's after a resume (the earliest first issue day of the base over the file's runs), else this run's.
+        base = getattr(state.manifest, "residual_base", None) or self._residual_base
+        if base is not None:
+            ref.provenance = {**(ref.provenance or {}), "base": dict(base)}
         return ref
 
     @staticmethod

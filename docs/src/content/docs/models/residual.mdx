@@ -152,8 +152,9 @@ co-batch and cut-frame checks too.
 ## Resume and what refuses
 
 The base resumes from `<name>.base.jsonl` and the learner from `<name>.jsonl`, each to the bits of a fresh run. Before the base
-runs, the residual model's own manifest is compared: its `model_params` describe the base and the learner, and with `warmup=` its
-`residual` field the base's start, so another base, learner or start refuses with nothing written. The base's own manifest then
+runs, the residual model's own manifest is compared: its `model_params` describe the base and the learner, its `training_window`
+and `training_cut` the learner's window and refit rule, and with `warmup=` its `residual` field the base's start, so another
+base, learner, window, refit rule or start refuses with nothing written. The base's own manifest then
 refuses a changed base whose results are on file, and the residual's `residual` field holds the hash of the base's configuration
 as its manifest recorded it. The base is a plain run over the warm-up and the run's days, so a resume over another last day
 refuses as a plain run's does.
@@ -161,7 +162,7 @@ refuses as a plain run's does.
 In this step a `ResidualModel` refuses: `refit=None`, a list of training windows, a learner of day units or of a predictor
 function, a base with a predictor function of `ctx`, a `PooledModel` as its base and `PooledModel(ResidualModel(...))`, an expanding
 base without `warmup=`, and Parquet results (its records hold `base_prediction`, which the Parquet schema has no column for:
-`save_format="jsonl"`; `epf results convert --to parquet` refuses a directory that holds one, before converting anything). A
+`save_format="jsonl"`; `epf results convert --to parquet` refuses its results and its base's, before converting anything). A
 `Workflow` refuses Parquet and a `base="name"` that names no earlier model before its data pipeline runs, also in an array task
 whose slice holds the base alone; an array task's ResidualModel runs a base that is another task's model, resolved on the whole
 list. With `ModelPipeline(engine="on")` it runs on its own path, as with `"off"`, its base too. `verify` of a model whose base has
@@ -170,7 +171,8 @@ reads it.
 
 `report.provenance()` shows the learner's card (`HistGBModel`'s: scikit-learn's version) as the residual model's row and a carded
 base's as a row of its own, `<name>.base`, its contamination verdict judged from the base's first issue day: the learner trains on
-its forecasts from the warm-up on.
+its forecasts from the warm-up on. A resume from a later start keeps the earliest first issue day of the runs into the file, whose
+records stay in it.
 
 ## HistGBModel
 

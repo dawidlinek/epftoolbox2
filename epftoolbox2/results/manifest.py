@@ -913,6 +913,7 @@ def check_and_write(
         manifest.kernels = _kernels_on_file(existing, manifest, model_name, path, has_existing_results)
         manifest.weights_history = _weights_on_file(existing, manifest, model_name, path, has_existing_results)
         manifest.created_at = existing.created_at  # keep the first run's provenance
+        manifest.residual_base = _earliest_base(existing.residual_base, manifest.residual_base)
         manifest.skipped = existing.skipped  # until this run finishes and says otherwise: it may not
         manifest.engine = existing.engine  # the same: until this run's fits from shared statistics are counted
         manifest.engine_check = existing.engine_check
@@ -952,6 +953,16 @@ def check_and_write(
         manifest.data_unverified = True
         _mark_rows_unverified(manifest, model_name, path, "they have no manifest")
     manifest.write(path)
+
+
+def _earliest_base(existing: Optional[Dict[str, Any]], mine: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """A `ResidualModel`'s `residual_base` after a resume: this run's card, with the earliest first issue day of the base over
+    the runs into the file, since its records' learners trained on base forecasts from then on (a later start would judge a
+    contaminated base clean over them)."""
+    if not existing or not mine:
+        return mine
+    days = [day for day in (existing.get("first_issue_day"), mine.get("first_issue_day")) if day]
+    return {**mine, "first_issue_day": min(days)} if days else mine
 
 
 def _kernels_on_file(
