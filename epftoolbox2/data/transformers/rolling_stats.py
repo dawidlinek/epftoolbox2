@@ -1,6 +1,7 @@
 """A statistic of a column's day statistics over a window of local days ending some days before the row's."""
 
 import numbers
+from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -28,8 +29,10 @@ class RollingStatsTransformer(Transformer):
 
     Adds `{column}_roll{W}{stat}_d-{lag}`: on every row of local day D, the `stat` over days D - lag - W + 1 to D - lag of
     the `stat` of `column` over each day. A day counts only when it is complete, every slot it has (23, 24 or 25 hours on a
-    time-zone-aware index) holding a value, as in `DailyStatsTransformer`; an incomplete or missing day is left out of the
-    windows it falls in. The value is NaN until the frame reaches back over the whole window, and where no day of it counts.
+    time-zone-aware index) holding a value, as in `DailyStatsTransformer`. A window with fewer than `min_days` days that count
+    is NaN: by default every day of it must, so a window that reaches back before the frame's first day, or holds a missing or
+    incomplete day, has no value (and a model skips, and counts, the forecasts that read it) rather than a "365-day" maximum
+    of a few days. A smaller `min_days` leaves such days out of the windows they fall in.
 
     The renewables study's capacity proxy, the largest hourly generation over the 365 days ending D-1, is
     `RollingStatsTransformer("generation_solar", window_days=365, stat="max", lag_days=1)`, which adds
@@ -43,13 +46,23 @@ class RollingStatsTransformer(Transformer):
         window_days: Local days in the window, at least 1. Default 365.
         stat: "min", "max" (default) or "mean", taken over each day and then over the window's days.
         lag_days: Days from the row's day back to the window's newest day, 0 or more. Default 1.
+        min_days: The fewest complete days a window needs for a value, 1 to `window_days`; None (default) is `window_days`.
+            The renewables study's proxy took 60 (pandas' `min_periods`).
         freq: Slot length of the data, which decides when a day is complete. Default "1h".
 
     Example:
         >>> df = RollingStatsTransformer("generation_solar", window_days=365, stat="max", lag_days=1).transform(df)
     """
 
-    def __init__(self, column: str, window_days: int = 365, stat: str = "max", lag_days: int = 1, freq: str = "1h"):
+    def __init__(
+        self,
+        column: str,
+        window_days: int = 365,
+        stat: str = "max",
+        lag_days: int = 1,
+        min_days: Optional[int] = None,
+        freq: str = "1h",
+    ):
         if not isinstance(column, str) or not column:
             raise ValueError(f"column must be a column name, got {column!r}")
         self.column = column
@@ -58,6 +71,11 @@ class RollingStatsTransformer(Transformer):
             raise ValueError(f"stat must be one of {list(STATS)}, got {stat!r}")
         self.stat = stat
         self.lag_days = _whole(lag_days, "lag_days", 0)
+        if min_days is not None:
+            min_days = _whole(min_days, "min_days", 1)
+            if min_days > self.window_days:
+                raise ValueError(f"min_days can't be more than window_days ({self.window_days}), got {min_days}")
+        self.min_days = min_days
         self.freq = freq
         self._step = parse_step(freq)
 
@@ -84,7 +102,8 @@ class RollingStatsTransformer(Transformer):
             per_day = getattr(groups, self.stat)().where(complete)
             calendar = pd.date_range(per_day.index.min(), per_day.index.max(), freq="D")
             daily = per_day.reindex(calendar)
-            window = getattr(daily.rolling(self.window_days, min_periods=1), self.stat)()
-            window.iloc[: self.window_days - 1] = np.nan  # the window reaches back before the frame's first day
+            # Days before the frame's first, missing or incomplete are NaN: a window counts only the days that hold a value.
+            least = self.window_days if self.min_days is None else self.min_days
+            window = getattr(daily.rolling(self.window_days, min_periods=least), self.stat)()
             out = window.shift(self.lag_days).reindex(days).to_numpy()
         return pd.concat([df, pd.DataFrame({self.output_column: out}, index=df.index)], axis=1)

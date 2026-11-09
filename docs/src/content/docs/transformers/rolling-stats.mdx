@@ -28,16 +28,28 @@ df = RollingStatsTransformer("generation_solar", window_days=365, stat="max", la
 | `window_days` | int | `365` | Local days in the window, at least 1 |
 | `stat` | str | `"max"` | `"min"`, `"max"` or `"mean"`, taken over each day and then over the window's days |
 | `lag_days` | int | `1` | Days from the row's day back to the window's newest day, 0 or more. With 0 the name has no `_d-0` |
+| `min_days` | int or None | `None` | The fewest complete days a window needs for a value, 1 to `window_days`; `None` is `window_days`, every day of it |
 | `freq` | str | `"1h"` | Slot length of the data, which decides when a day is complete |
 
 ## Complete Days, Whole Windows
 
 A day counts only when every slot it has holds a value, 23, 24 or 25 hours (92, 96 or 100 quarter-hours) on a
-time-zone-aware index, as in [`DailyStatsTransformer`](/epftoolbox2/transformers/daily-stats/): a day with a missing
-value, or with no rows, is left out of the windows it falls in, and a window none of whose days counts is NaN. The column is
-NaN until the frame reaches back over the whole window: with `window_days=365, lag_days=1` the first 365 days of the frame
-have no value, so start the data a year before the first training row. Windows are of local calendar days, so the
-statistic of a day after a clock change is that of its 23 or 25 hours.
+time-zone-aware index, one row on a daily frame, as in [`DailyStatsTransformer`](/epftoolbox2/transformers/daily-stats/).
+A window needs `min_days` days that count, by default all of them: a window that reaches back before the frame's first day,
+or holds a day with a missing value or with no rows, is NaN, and a model skips the forecasts that read it, counted as
+`missing_test_predictors` (or drops the training rows). So with `window_days=365, lag_days=1` the first 365 days of the frame
+have no value (start the data a year before the first training row), and one missing hour takes the value of the 365 windows
+it falls in rather than giving a "365-day" maximum of what is left. A smaller `min_days` leaves the missing days out of the
+windows they fall in: the renewables study's proxy took `min_days=60` (pandas' `min_periods`), so it had a value 60 days
+into its data. Windows are of local calendar days, so the statistic of a day after a clock change is that of its 23 or 25
+hours.
+
+```python
+from epftoolbox2.data.transformers import RollingStatsTransformer
+
+# The study's proxy, to reproduce it: a value from 60 complete days on, missing days left out
+df = RollingStatsTransformer("generation_solar", window_days=365, stat="max", lag_days=1, min_days=60).transform(df)
+```
 
 ## Information Set
 

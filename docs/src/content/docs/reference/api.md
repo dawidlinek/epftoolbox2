@@ -504,7 +504,9 @@ class SolarGeometryTransformer(Transformer):
 class RollingStatsTransformer(Transformer):
     def __init__(self, column: str, window_days: int = 365,
                  stat: str = "max",  # "min" | "max" | "mean"
-                 lag_days: int = 1, freq: str = "1h"): ...  # {column}_roll{W}{stat}_d-{lag}
+                 lag_days: int = 1,
+                 min_days: Optional[int] = None,  # None = window_days: every day of the window complete
+                 freq: str = "1h"): ...  # {column}_roll{W}{stat}_d-{lag}
     def transform(self, df: pd.DataFrame) -> pd.DataFrame: ...
 
 class ImputeTransformer(Transformer):

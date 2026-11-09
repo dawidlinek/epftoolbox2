@@ -966,6 +966,13 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
             "default": 1,
             "kind": "int",
         },
+        {
+            "name": "min_days",
+            "description": "Fewest complete days a window needs (blank = every day of it)",
+            "required": False,
+            "default": None,
+            "kind": "int",
+        },
         {"name": "freq", "description": "Slot length of the data", "required": False, "default": "1h", "kind": "text"},
     ],
     "EdaValidator": [
