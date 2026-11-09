@@ -350,6 +350,9 @@ def test_a_module_reloaded_since_builds_its_new_class_and_the_old_model_its_old(
     assert old.module_hash != new.module_hash
     built = {m.name: TorchModel(predictors=[], **m._model_kwargs)._module_class()(3, 1).version for m in (new, old)}
     assert built == {"new": 2, "old": 1}
+    # Only `<unsaved>` keys read the registry: a class registered under an import path never stands in for what it imports.
+    monkeypatch.setitem(tm._UNIMPORTABLE, "epftoolbox2.nets:MLP", FlatNet)
+    assert tm._resolve_module("epftoolbox2.nets:MLP", "test") is nets.MLP
 
 
 def test_a_notebook_cell_run_again_resumes(market, tmp_path):

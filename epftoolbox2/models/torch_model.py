@@ -433,9 +433,7 @@ class TorchModel(BaseModel):
         where = f"{type(self).__name__}({name!r})"
         if output not in OUTPUTS:
             raise ValueError(f"{where}: output must be one of {list(OUTPUTS)}, got {output!r}")
-        if output == "day" and base.get("refit", "7D") is None:
-            raise ValueError(f"{where}: {_DAY_NEEDS_REFIT}")
-        # Before BaseModel's refit check, which reads the unit kind.
+        # Before BaseModel's refit check, which reads the unit kind (and `__setattr__`'s, which refuses a day model refit=None).
         self._unit_kind = DAY if output == "day" else PERIOD
         spec = scaler_spec(scaler)
         if output == "period" and spec != "standard":
@@ -502,7 +500,7 @@ class TorchModel(BaseModel):
                 raise ValueError(_DAY_NEEDS_REFIT)
             super().__setattr__("_unit_kind", DAY if value == "day" else PERIOD)
         elif key == "refit" and value is None and self.__dict__.get("_unit_kind") == DAY:
-            raise ValueError(_DAY_NEEDS_REFIT)
+            raise ValueError(_DAY_NEEDS_REFIT)  # when built (BaseModel sets refit) or set later
         super().__setattr__(key, value)
 
     @staticmethod
