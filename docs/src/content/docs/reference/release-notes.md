@@ -203,7 +203,8 @@ an issue day it didn't sample.
   each step ahead forecasts. The cut reads every value through the per-cell rule `verify`'s probe perturbs by, and `verify` runs
   such a model on the frame cut after each target day. Its `report.availability()` has one row per series it reads, with how far
   it is read and the series' vintage class in two more columns, `newest` and `vintage`, which only such a model's rows bring; the
-  terminal exporter shows its series read in time in a table of their own. Nothing of a model of predictors moves. See [Extending](/epftoolbox2/reference/extending/#sequence-models-series-instead-of-rows-internal).
+  terminal exporter shows its series read in time in a table of their own. A resume compares every series' rule, the issue time
+  and zone, and the known-ahead series through the last target day. Nothing of a model of predictors moves. See [Extending](/epftoolbox2/reference/extending/#sequence-models-series-instead-of-rows-internal).
 - **The `[torch]` extra and `epftoolbox2.nets`.** `pip install 'epftoolbox2[torch]'` installs torch (`uv.lock` takes it from
   PyTorch's CPU index); `epftoolbox2.nets` has `MLP(n_inputs, n_outputs, hidden=(256, 128), dropout=0.0, activation="relu")`, a
   counter-based `Dropout(p)` (its mask a hash of the member's key, the step, the layer and the element), `Linear(in_features,

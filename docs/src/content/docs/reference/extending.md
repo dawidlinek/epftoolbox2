@@ -318,9 +318,13 @@ probe perturbs is in a context only where a series is late, and a late series is
 `"raise"`, as a late predictor is; `report.availability()` and `explain()` show one row per series (how far it is read and its
 rule's vintage class), not one per lagged step. `HistoryBatch.batches(batch_size)` groups the items by S and pads each call to
 `batch_size` with copies of its first item, so a call's shape doesn't depend on what else a run holds. A model reads history when
-its class defines `_history_spec(target)`. `verify` then gives its runs the information set whatever its `newest_target` (and still
-perturbs the target from D on under `"d-1"`), and its co-batch check runs it on the frame cut after each target day D + h rather
-than after the issue day, whose later rows hold its known-ahead values: a forecast that moves there depends on where the frame ends.
+its class defines `_history_spec(target)`. `BaseModel`'s checks then take its series as inputs it reads (the manifest hashes them,
+`report.vintages()` lists them, `verify` perturbs them) and refuse a late one at `"raise"` or list it at `"warn"`; its manifest
+records every series' rule, the issue time and zone (`training_cut`, compared on resume whatever its `newest_target`) and hashes its
+known-ahead series through `test_end` plus the largest horizon (`history_ahead`). `verify` gives its runs the information set
+whatever its `newest_target` (and still perturbs the target from D on under `"d-1"`), and its co-batch check runs it on the frame
+cut after each target day D + h rather than after the issue day, whose later rows hold its known-ahead values: a forecast that
+moves there depends on where the frame ends. Such a model can't be a `ResidualModel`'s base in this release.
 
 ---
 
