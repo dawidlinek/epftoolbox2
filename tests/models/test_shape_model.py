@@ -367,6 +367,12 @@ def test_the_hour_mean_is_period_stats_mean_at_the_target_date(frame):
         found = processed[hour_mean_column("price", h)].to_numpy()
         assert np.array_equal(found, expected, equal_nan=True), h
     assert np.array_equal(hour_means(frame["price"], 4), frame["price_hour_mean"].to_numpy(), equal_nan=True)
+    # An hour with a quarter-hour missing has no mean, on any of its rows: its other three don't train.
+    holed = frame["price"].copy()
+    holed.iloc[4 * 24 * 40 + 4 * 10 + 2] = np.nan  # 10:30 on the 41st date
+    means = hour_means(holed, 4)
+    assert np.isnan(means[4 * 24 * 40 + 4 * 10 : 4 * 24 * 40 + 4 * 11]).all()
+    assert np.isfinite(means[4 * 24 * 40 + 4 * 9 : 4 * 24 * 40 + 4 * 10]).all()
 
 
 # -- both switches ---------------------------------------------------------------------------------------------------------

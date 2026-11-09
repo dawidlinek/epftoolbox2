@@ -771,9 +771,8 @@ def _row_value(hour: int, hz: int, day_in_test: int, inputs: Optional[TaskInputs
     row_target = cfg.get("row_target")
     if row_target is not None:
         if row_target["scale"] is not None or row_target["zero"] is not None or has_offset(row_target):
-            raise RuntimeError(
-                "a model that fits nothing takes bounds alone of a per-row target"
-            )  # refused before any task
+            # Refused before any task runs.
+            raise RuntimeError("a model that fits nothing takes bounds alone of a per-row target")
         value = scaled_back(row_target, value, None)
 
     run_date = datetime.date.fromisoformat(cfg["test_start"]) + datetime.timedelta(days=day_in_test)
@@ -926,9 +925,8 @@ def _fit_unit(
     scalable_mask = StandardScaler.get_scalable_mask(train_x)
     row_target = cfg.get("row_target")
     if has_offset(row_target):
-        train_y = learner_targets(
-            arrays, row_target, hz, train, train_y
-        )  # y less each row's offset, as `_fit_member`'s
+        # y less each row's offset, as `_fit_member`'s.
+        train_y = learner_targets(arrays, row_target, hz, train, train_y)
     scale_at = scale_column(arrays, row_target, hz)
     train_s = None if scale_at is None else arrays["x"][train, scale_at]
 
