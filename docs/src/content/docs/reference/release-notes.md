@@ -112,6 +112,11 @@ an issue day it didn't sample.
 
 ### Fixed
 
+- **A chained column's hour lag is no coverage hole on the spring switch.** `x_d+1_h-1` (the hour before, as `LagTransformer`
+  builds it, a ramp's regressor) on 03:00 of the day before a spring switch reads the forecast for 02:00 of the switch day, which
+  doesn't exist; the coverage check let off such rows for day shifts alone, so a complete upstream warned at every level and was
+  refused at `availability="raise"` every spring. Shifts by elapsed time are now followed as the transformer applies them, and such
+  a row counts as `let_off`. Nothing else moves: plain day shifts are read as before.
 - **`DailyStatsTransformer(freq="1D")` on a daily frame keeps the day of the spring switch.** A frame of one row a day counted its
   slots in hours, so the 23-hour day had none, its one row read as an incomplete day and got NaN in every statistic (and
   `DailyProfileTransformer(freq="1D")` warned of it). A slot of a day or more is now one per date, whatever its length. Hourly and
