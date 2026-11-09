@@ -790,6 +790,26 @@ def with_day_statistic(df, source):
     return data
 
 
+@pytest.mark.parametrize("which", ["up", "mid"])
+def test_a_run_gives_each_target_date_one_run_date_per_horizon(shared, which):
+    """What a chained day statistic's rule rests on, read from the records a run stored: at each horizon every forecast of a
+    target date was issued on one day, `horizon` days before it, so the statistic of the date's forecasts is known at that one
+    issue instant (`test_a_chained_day_statistic_is_known_exactly_when_the_latest_of_its_forecasts_is` takes it from here)."""
+    import datetime
+
+    issued = {}
+    for line in (shared["root"] / which / "load_up.jsonl").read_text().splitlines():
+        record = json.loads(line)
+        if record.get("status", "ok") == "ok":
+            issued.setdefault((record["target_date"], record["horizon"]), set()).add(record["run_date"])
+    assert len(issued) > 60 and {horizon for _, horizon in issued} == {1, 2}
+    assert all(len(days) == 1 for days in issued.values())
+    for (target, horizon), (run,) in issued.items():
+        assert datetime.date.fromisoformat(target) - datetime.date.fromisoformat(run) == datetime.timedelta(
+            days=horizon
+        )
+
+
 def test_a_day_statistic_misses_the_day_after_a_spring_switch_without_a_coverage_warning(df, shared, tmp_path):
     """No forecast of 02:00 on 2023-03-27 is planned at horizon 1 (the switch day, its issue day, has no 02:00), so that date is
     never whole: its maximum is NaN on every row, which no rerun of the upstream fills. The downstream's fits read it (the rows

@@ -360,8 +360,9 @@ def test_a_chained_day_statistic_is_known_exactly_when_the_latest_of_its_forecas
 ):
     """`ForecastSource(agg="max")`: read at instant u, `col_day_max` holds the maximum of the forecasts for every slot of u's
     date in the upstream's data zone. Each of them is the forecast for its slot issued `horizon` days before that date at the
-    issue time, so the latest of them is that one instant, and the check reads exactly it on every cell, whatever the three
-    zones: the plain column's oracle. On a frame in the upstream's zone, `col_day_max_d+2` of a horizon-1 source is late on
+    issue time (a run's records give each target date one run date per horizon: `test_a_run_gives_each_target_date_one_run_date_
+    per_horizon` in `tests/pipelines/test_chaining.py`), so the latest of them is that one instant, and the check reads exactly
+    it on every cell, whatever the three zones: the plain column's oracle. On a frame in the upstream's zone, `col_day_max_d+2` of a horizon-1 source is late on
     every cell (refused at raise), and the verdicts equal those of `col_day_max` made by `DailyStatsTransformer` from the plain
     chained column."""
     upstream(tmp_path, data_zone, issue_zone)
