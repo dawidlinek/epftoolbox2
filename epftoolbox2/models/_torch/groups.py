@@ -7,23 +7,25 @@ the other models; a model whose key no other model of the run has runs alone, as
 **Who stacks.** A `TorchModel` (the MLP presets too) whose fits are vmap stacks on its device (`stack="vmap"`, or `"auto"` on a
 GPU: a loop's arithmetic is not a stack's, so a CPU's default loop runs alone), that reads its period frames and fits as
 `TorchModel` does (no method of its own or of its instance in `_KEPT`), in a run that isn't `forecast_only`. The key: the
-module's import path (or a session class's token key) and hash, `module_params` without `dropout`, `output`, the training
-window(s), `refit`, the loss, batch size, epochs, patience, early-stopping share, weight decay, the device, `tf32`, the stack
-size (`pad_to`) and the named blocks' sizes.
+module's import path (or a session class's token key) and hash, `module_params` without `dropout` (the class's defaults
+filled in), `output`, the training window(s), `refit`, the loss, batch size, epochs, patience, early-stopping share, weight
+decay, the device, `tf32`, the stack size (`pad_to`) and the named blocks' sizes.
 
 **What runs together.** A group runs like an engine group (`models/_engine.py`): chunks of `ENGINE_MAX_MODELS` models and
 `ENGINE_MAX_COLUMNS` union columns, one read of the period frames per chunk, each model's `_prepare_run` on them (its store on
 the group's one `StoreWriter`), one set of period arrays over the union, one pool of `TorchModel._executor_config()`'s processes
-(one on a GPU). A **job** is one or more consecutive refit blocks (issue days with `refit=None`) holding every pending task of
-every model there, at least `TORCH_STACK_MEMBERS` members (by default the stack size, up to four stacks, fewer where that
-leaves processes idle). In a job each fit unit (each task with `refit=None`) runs the worker's own function (`_run_unit`,
-`_run_task`) on its model's own inputs, in a thread of its own, up to the model's fit: `TorchModel._fit_rows` hands the call to
-the job's session (`stack_session`) and waits. Once every unit waits or is done, the session trains the waiting calls'
-members together in **stacks** of the key's size (`_train`): members of one structure (`_structure`: the module's layers, their
-attributes but a `nets.Dropout`'s rate, parameter and buffer shapes) and of the same shapes (`trainer._Shapes`: nominal rows,
-early-stopping rows, steps per epoch, batch), each with its own rows (its unit's arrays, gathered from the stack's blocks), seed
-streams, learning rate and dropout rate, padded with dummies; then the units go on, and their predictions are served the same
-way, each in its stack (`_predict`). Records go to each model's store as the job comes back.
+(one on a GPU). A **job** holds fit units of every model (the tasks of one with `refit=None`; a block's whole with a list of
+training windows, whose task records need every window's unit), in the order block, unit, model (`_pieces`, `_jobs`), at least
+`TORCH_STACK_MEMBERS` members (by default the stack size, up to four stacks, fewer where that leaves processes idle) and at
+most `MAX_JOB_ITEMS` units. In a job each unit (or task) runs the worker's own function (`_run_unit`, `_run_task`) on its
+model's own inputs, in a thread of its own, up to the model's fit: `TorchModel._fit_rows` hands the call to the job's session
+(`stack_session`) and waits. Once every unit waits or is done, the session trains the waiting calls' members together in
+**stacks** of the key's size (`_train`): members of one structure (`_structure`: the module's layers, their attributes but a
+`nets.Dropout`'s rate, parameter and buffer shapes) and of the same shapes (`trainer._Shapes`: nominal rows, early-stopping
+rows, steps per epoch, batch), by learning rate (a stack trains until its last member stops), each with its own rows (its
+unit's arrays, gathered from the stack's blocks), seed streams, learning rate and dropout rate, padded with dummies; then the
+units go on, and their predictions are served the same way, each in its stack (`_predict`). Records go to each model's store
+as the job comes back.
 
 **Why the bits hold.** A member's numbers depend on its own inputs, key, learning rate, buffers and on the stack's shapes alone
 (`trainer` module docstring): on the CPU each slot's products are its own (`nets._per_slot_linear`, one thread), on a GPU one
