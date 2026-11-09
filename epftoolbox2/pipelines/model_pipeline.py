@@ -182,6 +182,9 @@ COMPONENT_REGISTRY = {
         "LEARModel": "epftoolbox2.models.lear",
         "NaiveModel": "epftoolbox2.models.naive",
         "PooledModel": "epftoolbox2.models.pooled",
+        "TorchModel": "epftoolbox2.models.torch_model",
+        "MLPHourlyModel": "epftoolbox2.models.mlp",
+        "MLPDailyModel": "epftoolbox2.models.mlp",
     },
     "ensembles": {
         "AverageEnsemble": "epftoolbox2.ensembles.average",
