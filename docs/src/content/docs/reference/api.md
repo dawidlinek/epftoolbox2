@@ -586,6 +586,31 @@ class HistGBModel(BaseModel):               # scikit-learn's HistGradientBoostin
                  name: str = "hgb", *, scaler: Any = INVARIANT_TARGET, newest_target: str = "d-1",
                  binary_mask: Optional[str] = None): ...
 
+class LightGBMModel(BaseModel):             # LightGBM's LGBMRegressor, pooled over periods by default ([lightgbm])
+    def __init__(self, predictors: List[str], training_window: Union[int, str] = "expanding",
+                 refit: Optional[str] = "7D", periods: str = "pooled", objective: str = "l1", n_estimators: int = 500,
+                 learning_rate: float = 0.05, num_leaves: int = 31, min_child_samples: int = 20,
+                 subsample: float = 0.8, subsample_freq: int = 1, colsample_bytree: float = 0.5,
+                 reg_lambda: float = 1.0, random_state: int = 0, threads: int = 1, name: str = "lgbm", *,
+                 scaler: Any = INVARIANT_TARGET, newest_target: str = "d-1",
+                 binary_mask: Optional[str] = None): ...
+
+class XGBoostModel(BaseModel):              # XGBoost's XGBRegressor (tree_method="hist") ([xgboost])
+    def __init__(self, predictors: List[str], training_window: Union[int, str] = "expanding",
+                 refit: Optional[str] = "7D", periods: str = "pooled", objective: str = "l1", n_estimators: int = 500,
+                 learning_rate: float = 0.05, max_depth: int = 6, subsample: float = 0.8,
+                 colsample_bytree: float = 0.5, min_child_weight: float = 5.0, reg_lambda: float = 1.0,
+                 random_state: int = 0, threads: int = 1, device: str = "cpu", name: str = "xgb", *,
+                 scaler: Any = INVARIANT_TARGET, newest_target: str = "d-1",
+                 binary_mask: Optional[str] = None): ...
+
+class CatBoostModel(BaseModel):             # CatBoost's CatBoostRegressor ([catboost])
+    def __init__(self, predictors: List[str], training_window: Union[int, str] = "expanding",
+                 refit: Optional[str] = "7D", periods: str = "pooled", objective: str = "l1", iterations: int = 1000,
+                 learning_rate: float = 0.05, depth: int = 8, l2_leaf_reg: float = 5.0, random_state: int = 0,
+                 threads: int = 1, name: str = "catboost", *, scaler: Any = INVARIANT_TARGET,
+                 newest_target: str = "d-1", binary_mask: Optional[str] = None): ...
+
 class ResidualModel(BaseModel):             # a base's out-of-sample forecasts + a learner fitted on their residuals
     def __init__(self, base: Union[BaseModel, str], learner: BaseModel,
                  training_window: Union[int, str] = "expanding", refit: Optional[str] = "7D",
@@ -620,7 +645,7 @@ class MLPDailyModel(TorchModel):            # nets.MLP, output="day": one networ
                  name: str = "mlp_daily", module_hash: Optional[str] = None): ...
 ```
 
-`HistGBModel` and `ResidualModel` are in [Residual Model](/epftoolbox2/models/residual/): `INVARIANT_TARGET` is
+`LightGBMModel`, `XGBoostModel` and `CatBoostModel` are in [Gradient-Boosted Trees](/epftoolbox2/models/trees/): they build, save and load without their package (one extra each), and a fit's `threads`, the package's version and XGBoost's `device` are compared on resume. `HistGBModel` and `ResidualModel` are in [Residual Model](/epftoolbox2/models/residual/): `INVARIANT_TARGET` is
 `{"name": "asinh", "params": {"apply_to": "target", "standardise": False}}` (`epftoolbox2.models.hgb`), the predictors as they are
 and the target as epftoolbox's Invariant; `base` is a model or the name of one added to the pipeline before the `ResidualModel`.
 

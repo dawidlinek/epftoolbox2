@@ -301,6 +301,13 @@ an issue day it didn't sample.
   `base_fc_hHH_d+{horizon}`), and `presets.tree_predictors` gives the research's inputs. On the research's DE_LU and AT years a LEAR-BIC
   base with boosted residuals was about 4 % below LEAR's window average. A base that is a `ResidualModel`, a `PooledModel` or reads
   series is refused. Nothing of a model without it moves. See [Residual Model](/epftoolbox2/models/residual/).
+- **`LightGBMModel`, `XGBoostModel` and `CatBoostModel`: gradient-boosted trees, one extra each.** `pip install
+  'epftoolbox2[lightgbm]'` (or `[xgboost]`, `[catboost]`; `[gbm]` is the first two). Each fits one tree model per horizon and refit
+  day over the pooled (date, hour) rows of every hour (`periods="pooled"`, the default) or one per hour (`"each"`), at the research's
+  settings: absolute error, an expanding window, weekly refits. They build, save and load without their package, and the pre-flight
+  names a missing one. The manifest compares the package's version, the thread count of a fit (`threads`, 1) and XGBoost's `device`.
+  Each is also a `ResidualModel` learner, whose learner stage now runs with its learner's processes. See
+  [Gradient-Boosted Trees](/epftoolbox2/models/trees/).
 - **`TorchModel`, `MLPHourlyModel` and `MLPDailyModel`: neural networks on the library's trainer.** `TorchModel(module, ...)` trains
   a `torch.nn.Module` class of your own (flat predictors or named blocks), with one output per period (`output="period"`) or a day of
   outputs on day-level predictors (`output="day"`); `MLPHourlyModel` and `MLPDailyModel` are its presets with `epftoolbox2.nets.MLP`.
