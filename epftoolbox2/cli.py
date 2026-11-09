@@ -254,6 +254,43 @@ def cmd_verify(args: argparse.Namespace) -> None:
     console.print("[green]Verification passed.[/green]")
 
 
+def cmd_tune(args: argparse.Namespace) -> None:
+    """Run a search script (`epftoolbox2.tune.BayesSearch` with `storage=`) in `--workers` processes that share its trials."""
+    import os
+    import subprocess
+
+    from .models.base import _usable_cpu_count
+    from .tune.bayes import ENV_REQUEUE, ENV_WORKER, ENV_WORKERS
+
+    script = Path(args.script)
+    if not script.is_file():
+        console.print(f"[red]No such script:[/red] {escape(str(script))}")
+        sys.exit(2)
+    if args.workers < 1:
+        console.print("[red]--workers must be at least 1[/red]")
+        sys.exit(2)
+    command = [sys.executable, str(script)]
+    base = dict(os.environ)
+    if args.requeue:
+        # One process, before any worker runs: the search marks the trials left running as interrupted and exits.
+        result = subprocess.run(command, env={**base, ENV_REQUEUE: "1", ENV_WORKERS: "1", ENV_WORKER: "0"})
+        sys.exit(result.returncode)
+    # The workers' model runs share the CPUs: each pool gets a share, unless MAX_PROCESSES says otherwise.
+    if "MAX_PROCESSES" not in base:
+        base["MAX_PROCESSES"] = str(max(1, _usable_cpu_count() // args.workers))
+    workers = [
+        subprocess.Popen(command, env={**base, ENV_WORKERS: str(args.workers), ENV_WORKER: str(index)})
+        for index in range(args.workers)
+    ]
+    codes = [worker.wait() for worker in workers]
+    failed = [index for index, code in enumerate(codes) if code != 0]
+    plain = {"markup": False, "highlight": False, "soft_wrap": True}
+    if failed:
+        console.print(f"Worker(s) {failed} of {args.workers} failed (exit codes {[codes[i] for i in failed]})", **plain)
+        sys.exit(1)
+    console.print(f"{args.workers} worker(s) finished {script}", **plain)
+
+
 def cmd_results(args: argparse.Namespace) -> None:
     """`epf results convert|compact|verify SAVE_DIR`: what is on disk in a save_dir, in either results format."""
     from .results import parquet_store
@@ -783,6 +820,24 @@ def build_parser() -> argparse.ArgumentParser:
         "verify", help="Re-hash every file in the cache against its fetch record (exit 1 on a change)"
     )
 
+    # -- tune --
+    tune_p = sub.add_parser(
+        "tune",
+        help="Run a hyper-parameter search script (BayesSearch with storage=) in parallel worker processes",
+        description=(
+            "Start the script in N processes that share its BayesSearch's trials through the journal file of storage=. "
+            "Each process runs the whole script: the search, then whatever follows (result.save writes the same file "
+            "from each). MAX_PROCESSES, if not set, is the usable CPUs divided by N for each worker's model runs."
+        ),
+    )
+    tune_p.add_argument("script", metavar="search.py", help="Python script that runs a BayesSearch with storage=")
+    tune_p.add_argument("--workers", type=int, default=1, metavar="N", help="Processes sharing the search (default 1)")
+    tune_p.add_argument(
+        "--requeue",
+        action="store_true",
+        help="With no worker running: mark the trials a killed worker left running as interrupted, so a rerun redoes them",
+    )
+
     # -- validate --
     val_p = sub.add_parser("validate", help="Validate a pipeline or workflow YAML")
     val_p.add_argument("yaml", metavar="pipeline.yaml", help="Path to YAML file to validate")
@@ -811,6 +866,7 @@ def main() -> None:
         "verify": cmd_verify,
         "results": cmd_results,
         "weights": cmd_weights,
+        "tune": cmd_tune,
         "validate": cmd_validate,
         "init": cmd_init,
     }
