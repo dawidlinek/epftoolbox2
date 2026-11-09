@@ -186,8 +186,9 @@ _COMPARED_FIELDS += ("unit_kind", "target_transform")
 # A `ResidualModel` (`models.residual`): the hash of its base's configuration as the base's own manifest records it
 # (`base_manifest`), since the base's forecasts are the learner's inputs and targets; None (and no key) for any other model.
 _COMPARED_FIELDS += ("residual",)
-# A model that reads history (`models._history`): {"through", "columns", "hash"}, its known-ahead series up to `test_end` plus the
-# largest horizon, which its forecasts of the last issue days read; None (and no key) for any other model. With windows it is
+# A model that reads history (`models._history`): [{"through", "columns", "hash"}], what its forecasts of the last issue days read
+# after `test_end`: its known-ahead series up to `test_end` plus the largest horizon, and its target and past series up to the
+# target's cut where a late issue time puts it after `test_end`; None (and no key) for any other model. With windows it is
 # compared on the data the stored forecasts read, as `actuals` is.
 _COMPARED_FIELDS += ("history_ahead",)
 # Compared fields a configuration digest holds only when set, so that the digest of every manifest written before them (a
@@ -355,8 +356,9 @@ class Manifest:
     # A `ResidualModel` whose base has a card: {"card", "runtime", "weights", "first_issue_day"}; None (and no key) otherwise.
     # Provenance: never compared.
     residual_base: Optional[Dict[str, Any]] = None
-    # A model that reads history: {"through": day, "columns": its known-ahead series, "hash"}; None (and no key) otherwise.
-    history_ahead: Optional[Dict[str, Any]] = None
+    # A model that reads history: [{"through": day, "columns", "hash"}] of what it reads after `test_end`; None (and no key)
+    # otherwise.
+    history_ahead: Optional[List[Dict[str, Any]]] = None
 
     def differences(self, existing: "Manifest", skip: Sequence[str] = ()) -> List[str]:
         """Human-readable list of compared fields that disagree with `existing`; empty if compatible."""
@@ -653,7 +655,7 @@ def build_manifest(
 
     units = unit_fields(model)  # nothing for a period model
     return Manifest(
-        history_ahead=_history_ahead(model, target, test_end, horizon, hashes),
+        history_ahead=_history_ahead(model, data, target, test_end, horizon, horizons, freq, information_set, hashes),
         model_class=type(model).__name__,
         predictors=sorted(set(used_columns) - {target}),
         predictor_layout_hash=PREDICTOR_FUNCTION_LAYOUT if predictor_function else hash_predictor_layout(expanded),
@@ -701,18 +703,45 @@ def build_manifest(
 
 
 def _history_ahead(
-    model: Any, target: str, test_end: str, horizon: int, hashes: FrameHashes
-) -> Optional[Dict[str, Any]]:
-    """`Manifest.history_ahead` of a model that reads history: its known-ahead series up to `test_end` plus the largest horizon;
-    None for any other model, and for one with no known-ahead series."""
-    from ..models._history import history_spec_of  # the models import this module
+    model: Any,
+    data: pd.DataFrame,
+    target: str,
+    test_end: str,
+    horizon: int,
+    horizons: Optional[Sequence[int]],
+    freq: str,
+    information_set: Optional[Any],
+    hashes: FrameHashes,
+) -> Optional[List[Dict[str, Any]]]:
+    """`Manifest.history_ahead` of a model that reads history: what its forecasts of the last issue day read after `test_end`,
+    which `data_columns_hash` doesn't cover. Its known-ahead series up to `test_end` plus the largest horizon, and its target and
+    past series up to the target's cut on that day where it is after `test_end` (an issue time after the target's publication
+    under `newest_target="published"`), read from the information set. None for any other model, and for one that reads
+    nothing after `test_end`."""
+    from ..models._history import history_batches, history_spec_of  # the models import this module
 
     spec = history_spec_of(model, target)
-    if spec is None or not spec.known_ahead:
+    if spec is None:
         return None
-    through = (date.fromisoformat(test_end) + timedelta(days=horizon)).isoformat()
-    columns = sorted(spec.known_ahead)
-    return {"through": through, "columns": columns, "hash": hashes.of_columns(through, columns)}
+    out = []
+    if spec.known_ahead:
+        through = (date.fromisoformat(test_end) + timedelta(days=horizon)).isoformat()
+        columns = sorted(spec.known_ahead)
+        out.append({"through": through, "columns": columns, "hash": hashes.of_columns(through, columns)})
+    if information_set is not None:
+        planned = tuple(range(1, horizon + 1)) if horizons is None else tuple(horizons)
+        batches = history_batches(spec, data, [test_end], information_set, freq, planned, arrays=False)
+        reach = max(batch.items[0].newest[spec.target].date() for batch in batches.values())
+        if reach > date.fromisoformat(test_end):
+            columns = sorted([target, *spec.past])
+            out.append(
+                {
+                    "through": reach.isoformat(),
+                    "columns": columns,
+                    "hash": hashes.of_columns(reach.isoformat(), columns),
+                }
+            )
+    return out or None
 
 
 def horizons_of(manifest: Mapping[str, Any]) -> Optional[Tuple[int, ...]]:
@@ -1131,18 +1160,18 @@ def _compare_data(existing: Manifest, manifest: Manifest, frame_hashes: Optional
                 f"actuals: {existing.target} up to {existing.actuals['through']} is not what the existing results read as "
                 "`actual` (if the data has since grown, its last days had no actual then, and a fresh run would have one)"
             )
-    ahead = existing.history_ahead
-    if (ahead is None) != (manifest.history_ahead is None):
-        out.append(f"history_ahead: {ahead!r} (existing results) vs {manifest.history_ahead!r} (this run)")
-    elif ahead is not None:
+    if (existing.history_ahead is None) != (manifest.history_ahead is None):
+        out.append(
+            f"history_ahead: {existing.history_ahead!r} (existing results) vs {manifest.history_ahead!r} (this run)"
+        )
+    for ahead in existing.history_ahead or ():
         try:
             moved = frame_hashes.of_columns(ahead["through"], ahead["columns"]) != ahead["hash"]
         except KeyError as exc:
             moved, ahead = True, {**ahead, "through": f"{ahead['through']} (a column is gone: {exc})"}
         if moved:
             out.append(
-                f"history_ahead: the known-ahead series {ahead['columns']} up to {ahead['through']} are not what the existing "
-                "results read"
+                f"history_ahead: the series {ahead['columns']} up to {ahead['through']} are not what the existing results read"
             )
     return out
 
@@ -1165,13 +1194,15 @@ def _cover_both(existing: Manifest, manifest: Manifest, frame_hashes: FrameHashe
         through = max(existing.actuals["through"], manifest.actuals["through"])
         manifest.actuals = {"through": through, "hash": frame_hashes.of_columns(through, [manifest.target])}
     if manifest.history_ahead is not None and existing.history_ahead is not None:
-        through = max(existing.history_ahead["through"], manifest.history_ahead["through"])
-        columns = manifest.history_ahead["columns"]
-        manifest.history_ahead = {
-            "through": through,
-            "columns": columns,
-            "hash": frame_hashes.of_columns(through, columns),
-        }
+        # Each set of columns through the later of both runs' days: what the stored forecasts of both read.
+        through: Dict[Tuple[str, ...], str] = {}
+        for ahead in [*existing.history_ahead, *manifest.history_ahead]:
+            key = tuple(ahead["columns"])
+            through[key] = max(through.get(key, ahead["through"]), ahead["through"])
+        manifest.history_ahead = [
+            {"through": day, "columns": list(columns), "hash": frame_hashes.of_columns(day, list(columns))}
+            for columns, day in through.items()
+        ]
 
 
 def _keep_windows(existing: Manifest, manifest: Manifest, allow_mismatch: bool, model_name: str) -> None:
