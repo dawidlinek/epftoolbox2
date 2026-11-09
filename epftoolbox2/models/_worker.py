@@ -26,6 +26,7 @@ from ._calendar import (
     refit_anchor,
     training_span,
 )
+from ._row_target import ZERO_WHEN, scale_column, scaled_back, usable_scale, zero_outcome
 from ._units import DAY, PER_PERIOD, PERIOD, POOLED, day_arrays, kind_of, pooled_values
 
 # What `_worker_init` loads into a pool's worker: the default `TaskInputs` of every task function (`_pool_inputs`).
@@ -65,6 +66,9 @@ SKIP_MISSING_TEST_ROW = "missing_test_row"
 # A model that forecasts a published value (`NaiveModel`, `known_only`) whose value its rule puts after the issue time: the
 # forecast didn't exist yet. Decided in the parent, before any task runs (`BaseModel._unpublished`).
 SKIP_NOT_PUBLISHED = "not_published"
+# A model with `normalise_by` whose issue row's scale is zero or negative: nothing to multiply the forecast by
+# (`models._row_target`); a missing one is `missing_test_predictors`.
+SKIP_NON_POSITIVE_SCALE = "non_positive_scale"
 
 # In `PredictorPlan.day_lists`, next to list ids: a day no matching forecast of that (period, horizon) reads, and a day
 # the function returned a list on that no forecast uses, which matches nothing.
@@ -420,12 +424,14 @@ def forecast_record(
     newest_target_day: Optional[str] = None,
     refit_anchor: Optional[str] = None,
     extra: Optional[Dict] = None,
+    detail: Optional[str] = None,
 ) -> Dict:
     """The record of a forecast, keys in their order: the key fields, `prediction`, `actual` (the issue row's target),
     `coefficients`, `freq`; a refit unit's `refit_anchor`; `newest_target_day` with `newest_target="published"`; a predictor
     function's `predictor_list`; a matching list's `extra` (`training_days`, `matching_days`); `window` in a run with windows;
     then D4's keys (`with_status`): `status` "ok", `list_hash`, `refit_anchor` (the issue day where the record has none: each
-    forecast of a refit=None model is its own fit) and `revision`. `_combined` makes a list of training windows' from it."""
+    forecast of a refit=None model is its own fit), `revision`, and `detail` where one is given (`"zero_when"`: a forecast of 0
+    made without a fit, `_row_target`). `_combined` makes a list of training windows' from it."""
     record = {
         "run_date": run_date.isoformat(),
         "target_date": (run_date + datetime.timedelta(days=hz)).isoformat(),
@@ -448,6 +454,8 @@ def forecast_record(
         record.update(extra)
     if window is not None:
         record["window"] = window
+    if detail is not None:
+        return with_status(record, list_hash=list_hash, refit_anchor=record["run_date"], detail=detail)
     return with_status(record, list_hash=list_hash, refit_anchor=record["run_date"])
 
 
@@ -495,7 +503,7 @@ def _fit_one_numpy(
         fitted = fit(cfg["training_window"], task_mask(cfg, window, mask_of))
         if isinstance(fitted, str):
             return fitted
-        prediction, coefs, extra = fitted
+        prediction, coefs, extra, detail = fitted
     else:
         outcomes = []
         for member in members:
@@ -503,7 +511,8 @@ def _fit_one_numpy(
             if isinstance(fitted, str):
                 return _tagged(fitted, member)
             outcomes.append(fitted)
-        prediction, coefs, extra = None, [], {}
+        # `zero_when` reads the issue row alone, so it says the same for every member.
+        prediction, coefs, extra, detail = None, [], {}, outcomes[0][3]
 
     run_date = datetime.date.fromisoformat(cfg["test_start"]) + datetime.timedelta(days=day_in_test)
     record = forecast_record(
@@ -524,10 +533,21 @@ def _fit_one_numpy(
         if cfg.get("newest") is None
         else (run_date + datetime.timedelta(days=min(newest, hz - 1))).isoformat(),
         extra=extra,
+        detail=detail,
     )
     if members is not None:
-        return _combined(record, [prediction for prediction, _, _ in outcomes])
+        return _combined(record, [prediction for prediction, _, _, _ in outcomes])
     return record
+
+
+def _scale_skip(value: float) -> Optional[str]:
+    """The skip reason of an issue row whose `normalise_by` value is `value`: `missing_test_predictors` for a missing (or
+    infinite) one, `non_positive_scale` for one at or below 0; None for a usable one."""
+    if not np.isfinite(value):
+        return SKIP_MISSING_TEST_PREDICTORS
+    if value <= 0:
+        return SKIP_NON_POSITIVE_SCALE
+    return None
 
 
 def _list_hash_of(cfg: Dict, expanded: Dict, hour: int, hz: int, list_id: Optional[int]) -> str:
@@ -558,11 +578,18 @@ def _fit_member(
     scalable_mask,
     model,
     engine: Optional[StatsFitter] = None,
-) -> Union[Tuple[float, list, Dict], str]:
+) -> Union[Tuple[float, list, Dict, Optional[str]], str]:
     """One training window's forecast of the task (`hour`, `hz`, day id `day`) issued from row `test`: (the prediction in target
-    units, the coefficients, a matching list's record fields), or a skip reason. Its rows are `member_rows`: those of
-    `training_span` with the member's window (`member_window`: `"expanding"` from the frame's first date), with the task's newest
-    target. `model` fits it (`_fit_predict`): the task's own, from its inputs, never one of the process's.
+    units, the coefficients, a matching list's record fields, the record's `detail`), or a skip reason. Its rows are
+    `member_rows`: those of `training_span` with the member's window (`member_window`: `"expanding"` from the frame's first date),
+    with the task's newest target. `model` fits it (`_fit_predict`): the task's own, from its inputs, never one of the process's.
+
+    A per-row target (`config["row_target"]`, `models._row_target`) divides each training row's target by its `normalise_by`
+    value, drops a row whose value is missing or not positive with the rows of missing values, and multiplies the forecast by
+    the issue row's value, then clips it to `bounds`. After the skips of the training rows and of the issue row's inputs,
+    `zero_when`'s 1 on the issue row is a forecast of 0 with no fit (detail `"zero_when"`) and a missing value
+    `missing_test_predictors`; then an issue row's scale that is missing is `missing_test_predictors` and one not positive
+    `non_positive_scale`. Without one every step is as it was.
 
     `scalable_mask` None (`binary_mask="fit"`) is read here from those rows in the list's columns, before the matching and the
     finite filters, as `_fit_unit` reads a refit unit's: which columns are binary is then a function of this fit's span alone.
@@ -587,6 +614,10 @@ def _fit_member(
         scalable_mask = StandardScaler.get_scalable_mask(train_x)
 
     test_x = arrays["x"][test : test + 1][:, col_idx]
+    # A per-row target's scale: each training row's `normalise_by` value (None without one).
+    row_target = cfg.get("row_target")
+    scale_at = scale_column(arrays, row_target, hz)
+    train_s = None if scale_at is None else arrays["x"][train, scale_at]
 
     # train_on="matching" filters what the span holds, so the set can't reach past it. The plan evaluated the function on these
     # days, so nothing about it is computed here.
@@ -597,14 +628,20 @@ def _fit_member(
         train_days = days[train]
         same = matching_rows(train_days, matching["lists"][(hour, hz)], matching["start"], list_id)
         train_x, train_y, train_days = train_x[same], train_y[same], train_days[same]
+        if train_s is not None:
+            train_s = train_s[same]
         if train_days.size == 0:
             return SKIP_NO_MATCHING_DAYS
         matching_days = matching_digest(train_days, matching["first_ordinal"])
 
     # Drop rows with NaN/inf in either predictors or target to avoid model fit failures.
     finite = finite_rows(train_x, train_y)
+    if train_s is not None:
+        finite &= usable_scale(train_s)  # a row with no positive scale drops out, as one with a missing input
     train_x = train_x[finite]
     train_y = train_y[finite]
+    if train_s is not None:
+        train_y = train_y / train_s[finite]  # the learner's target, (y - 0) / s of each row
 
     if train_x.shape[0] == 0:
         return SKIP_NO_FINITE_TRAINING_ROWS
@@ -616,11 +653,25 @@ def _fit_member(
     if matching_days is not None:
         extra["training_days"] = int(np.unique(train_days[finite]).size)
         extra["matching_days"] = matching_days
+    issue_scale = None
+    if row_target is not None:
+        zero = zero_outcome(arrays, row_target, hz, test)
+        if zero is None:
+            return SKIP_MISSING_TEST_PREDICTORS
+        if zero:
+            return 0.0, [], extra, ZERO_WHEN  # no fit: `zero_when` says the forecast is 0, whatever its scale
+        if scale_at is not None:
+            issue_scale = float(arrays["x"][test, scale_at])
+            skipped = _scale_skip(issue_scale)
+            if skipped is not None:
+                return skipped
+        if engine is not None:
+            raise RuntimeError("a model with a per-row target runs on the model path: no engine fits it")
     if engine is not None:
         fitted = engine(StatsFit(hour, hz, train, col_idx, finite, train_x, train_y, scalable_mask, test_x))
         if fitted is not None and fitted[0] is not None:
             ((prediction, coefs),) = fitted
-            return prediction, coefs, extra
+            return prediction, coefs, extra, None
 
     scaler = make_scaler(cfg.get("scaler", "standard"))
     train_x, train_y, test_x = scaler.fit_transform(
@@ -641,7 +692,9 @@ def _fit_member(
     except ValueError as exc:
         # scikit-learn raises ValueError on degenerate input (e.g. fewer rows than CV folds); counted, not fatal.
         return f"{SKIP_FIT_ERROR}: {exc}"
-    return scaler.inverse(float(pred)), coefs, extra
+    if row_target is not None:
+        return scaled_back(row_target, scaler.inverse(float(pred)), issue_scale), coefs, extra, None
+    return scaler.inverse(float(pred)), coefs, extra, None
 
 
 def member_mean(values: Any) -> float:
@@ -683,7 +736,8 @@ def _combined(record: Dict, predictions: List[float]) -> Dict:
 def _row_value(hour: int, hz: int, day_in_test: int, inputs: Optional[TaskInputs] = None) -> Union[Dict, str]:
     """Forecast one task of a model that fits nothing (`NaiveModel`): its one predictor's value on the row the forecast is
     issued from, the last row dated on the issue day, as it stands. No training row, scaler or mask is read, so a task needs
-    no history. Returns the record, with no coefficients, or a skip reason, as `_fit_one_numpy` does."""
+    no history. Returns the record, with no coefficients, or a skip reason, as `_fit_one_numpy` does. With `bounds`
+    (`config["row_target"]`, the only per-row target such a model takes) the value is clipped to them."""
     inputs = _inputs_of(inputs)
     arrays = inputs.hour_arrays[hour]
     cfg = inputs.config
@@ -696,6 +750,11 @@ def _row_value(hour: int, hz: int, day_in_test: int, inputs: Optional[TaskInputs
     value = float(arrays["x"][test, arrays["col_index"][name]])
     if not np.isfinite(value):
         return SKIP_MISSING_TEST_PREDICTORS
+    row_target = cfg.get("row_target")
+    if row_target is not None:
+        if row_target["scale"] is not None or row_target["zero"] is not None:  # refused before any task runs
+            raise RuntimeError("a model that fits nothing takes bounds alone of a per-row target")
+        value = scaled_back(row_target, value, None)
 
     run_date = datetime.date.fromisoformat(cfg["test_start"]) + datetime.timedelta(days=day_in_test)
     return forecast_record(
@@ -824,6 +883,11 @@ def _fit_unit(
     nominal length with copies of the first (`_block_forecasts`), and each task's forecast is its own row's: still the same
     whichever others are run with it, since the call's rows and shape don't depend on them. Tasks without a row or with a
     missing input are skipped as one at a time.
+
+    A per-row target (`models._row_target`) is applied as `_fit_member` applies it: the training rows' targets divided by their
+    scale, each forecast's `zero_when` (a forecast of 0, or a missing value's skip) and then its scale's skips (missing or not
+    positive) decided per task, the others fitted together, scaled back by their own issue row's value and clipped; a unit
+    whose forecasts are all 0 makes no fit, so a fit that would fail leaves them 0.
     """
     inputs = _inputs_of(inputs)
     cfg = inputs.config
@@ -839,6 +903,9 @@ def _fit_unit(
     train_x = arrays["x"][train][:, col_idx]
     train_y = arrays["y"][train][:, hz - 1]
     scalable_mask = StandardScaler.get_scalable_mask(train_x)
+    row_target = cfg.get("row_target")
+    scale_at = scale_column(arrays, row_target, hz)
+    train_s = None if scale_at is None else arrays["x"][train, scale_at]
 
     outcomes: List[Tuple[tuple, Union[Dict, str]]] = []
     issued = []
@@ -862,22 +929,75 @@ def _fit_unit(
         train_days = days[train]
         same = matching_rows(train_days, matching["lists"][(hour, hz)], matching["start"], unit.list_id)
         train_x, train_y, train_days = train_x[same], train_y[same], train_days[same]
+        if train_s is not None:
+            train_s = train_s[same]
         if train_days.size == 0:
             return skip_all(SKIP_NO_MATCHING_DAYS)
         matching_days = matching_digest(train_days, matching["first_ordinal"])
 
     finite = finite_rows(train_x, train_y)
+    if train_s is not None:
+        finite &= usable_scale(train_s)  # a row with no positive scale drops out, as one with a missing input
     train_x = train_x[finite]
     train_y = train_y[finite]
+    if train_s is not None:
+        train_y = train_y / train_s[finite]  # the learner's target, (y - 0) / s of each row
     if train_x.shape[0] == 0:
         return skip_all(SKIP_NO_FINITE_TRAINING_ROWS)
 
     forecast = []
+    zeros = []  # (task, issue row) of the forecasts `zero_when` makes 0
+    scales = {}  # issue row -> its scale, with `normalise_by`
     for task, test in issued:
-        if np.isfinite(arrays["x"][test, col_idx]).all():
+        if not np.isfinite(arrays["x"][test, col_idx]).all():
+            outcomes.append((task, SKIP_MISSING_TEST_PREDICTORS))
+        elif row_target is None:
             forecast.append((task, test))
         else:
-            outcomes.append((task, SKIP_MISSING_TEST_PREDICTORS))
+            zero = zero_outcome(arrays, row_target, hz, test)
+            if zero is None:
+                outcomes.append((task, SKIP_MISSING_TEST_PREDICTORS))
+                continue
+            if zero:  # a forecast of 0, whatever its scale
+                zeros.append((task, test))
+                continue
+            if scale_at is not None:
+                scales[test] = float(arrays["x"][test, scale_at])
+                skipped = _scale_skip(scales[test])
+                if skipped is not None:
+                    outcomes.append((task, skipped))
+                    continue
+            forecast.append((task, test))
+    extra = None
+    if matching_days is not None:
+        extra = {"training_days": int(np.unique(train_days[finite]).size), "matching_days": matching_days}
+
+    def record_of(task: tuple, test: int, prediction: float, coefs: list, detail: Optional[str] = None) -> Dict:
+        window, day_in_window, _ = task_place(cfg, task[2])
+        run_date = datetime.date.fromisoformat(cfg["test_start"]) + datetime.timedelta(days=task[2])
+        return forecast_record(
+            run_date,
+            hour,
+            hz,
+            day_in_window,
+            prediction,
+            float(arrays["y"][test, hz - 1]),
+            coefs,
+            cfg.get("freq", "1h"),
+            _list_hash_of(cfg, inputs.expanded, hour, hz, unit.list_id),
+            window=window,
+            predictor_list=None if unit.list_id is None else cfg["list_hashes"][unit.list_id],
+            # The newest target date of the unit's span, anchor + min(k, h-1), as `_fit_one_numpy` writes it for its day.
+            newest_target_day=None
+            if cfg["refit"]["newest"] is None
+            else (unit.anchor + datetime.timedelta(days=min(newest, hz - 1))).isoformat(),
+            refit_anchor=unit.anchor.isoformat(),
+            extra=extra,
+            detail=detail,
+        )
+
+    # No fit: `zero_when` says these forecasts are 0.
+    outcomes.extend((task, record_of(task, test, 0.0, [], ZERO_WHEN)) for task, test in zeros)
     if not forecast:
         return outcomes
 
@@ -892,6 +1012,8 @@ def _fit_unit(
         if isinstance(predicted, str):  # the fit refused: every forecast's fit_error, as one at a time
             return outcomes + [(task, predicted) for task, _ in forecast]
     elif engine is not None:
+        if row_target is not None:
+            raise RuntimeError("a model with a per-row target runs on the model path: no engine fits it")
         predicted = engine(StatsFit(hour, hz, train, col_idx, finite, train_x, train_y, scalable_mask, test_rows))
     if predicted is None or any(row is None for row in predicted):
         # The whole unit, or the rows the engine left to the model path (each row's forecast is its own: scaled value by
@@ -920,32 +1042,10 @@ def _fit_unit(
             pred, coefs = model._predict_fitted(fitted, test_x[row : row + 1])
             predicted.append((scaler.inverse(float(pred)), flat_coefficients(coefs, model, "_predict_fitted")))
 
-    extra = None
-    if matching_days is not None:
-        extra = {"training_days": int(np.unique(train_days[finite]).size), "matching_days": matching_days}
     for (task, test), (prediction, coefs) in zip(forecast, predicted):
-        window, day_in_window, _ = task_place(cfg, task[2])
-        run_date = datetime.date.fromisoformat(cfg["test_start"]) + datetime.timedelta(days=task[2])
-        record = forecast_record(
-            run_date,
-            hour,
-            hz,
-            day_in_window,
-            prediction,
-            float(arrays["y"][test, hz - 1]),
-            coefs,
-            cfg.get("freq", "1h"),
-            _list_hash_of(cfg, inputs.expanded, hour, hz, unit.list_id),
-            window=window,
-            predictor_list=None if unit.list_id is None else cfg["list_hashes"][unit.list_id],
-            # The newest target date of the unit's span, anchor + min(k, h-1), as `_fit_one_numpy` writes it for its day.
-            newest_target_day=None
-            if cfg["refit"]["newest"] is None
-            else (unit.anchor + datetime.timedelta(days=min(newest, hz - 1))).isoformat(),
-            refit_anchor=unit.anchor.isoformat(),
-            extra=extra,
-        )
-        outcomes.append((task, record))
+        if row_target is not None:
+            prediction = scaled_back(row_target, prediction, scales.get(test))
+        outcomes.append((task, record_of(task, test, prediction, coefs)))
     return outcomes
 
 
@@ -1209,11 +1309,18 @@ def _issued(inputs: TaskInputs, tasks: List[tuple]) -> Tuple[List[Tuple[tuple, s
 
 
 def _unit_record(
-    inputs: TaskInputs, unit: FitUnit, task: tuple, test: int, prediction: float, coefs: list, newest: Any
+    inputs: TaskInputs,
+    unit: FitUnit,
+    task: tuple,
+    test: int,
+    prediction: float,
+    coefs: list,
+    newest: Any,
+    detail: Optional[str] = None,
 ) -> Dict:
     """The record of one forecast of a day or pooled unit, as `_fit_unit` writes a period unit's: the key, the prediction in
-    target units, the `actual` of the period's issue row, the coefficients, `refit_anchor`, and with `newest_target="published"`
-    the newest target day of the period's slots, anchor + min(k, h - 1)."""
+    target units, the `actual` of the period's issue row, the coefficients, `refit_anchor`, with `newest_target="published"`
+    the newest target day of the period's slots, anchor + min(k, h - 1), and a `detail` where one is given (`"zero_when"`)."""
     cfg = inputs.config
     period, hz, day_in_test = task
     window, day_in_window, _ = task_place(cfg, day_in_test)
@@ -1234,6 +1341,7 @@ def _unit_record(
         if newest is None
         else (unit.anchor + datetime.timedelta(days=min(int(newest[period]), hz - 1))).isoformat(),
         refit_anchor=unit.anchor.isoformat(),
+        detail=detail,
     )
 
 
@@ -1262,6 +1370,8 @@ def _fit_day_unit(
     `missing_test_predictors`; a fit raising ValueError is each forecast's `fit_error`."""
     inputs = _inputs_of(inputs)
     cfg, model = inputs.config, inputs.model
+    if cfg.get("row_target") is not None:  # refused before any fit (`BaseModel._check_row_target_support`)
+        raise RuntimeError("a day unit takes no per-row target (normalise_by, bounds, zero_when)")
     periods = cfg["units"]["periods"]
     hz = unit.horizon
     refit = cfg["refit"]
@@ -1371,7 +1481,12 @@ def _fit_pooled_unit(
     One `_fit_model` and one `_predict_block` over the issue row (the second of a repeated hour) of each period on each day of
     the block that the frame has with finite inputs, the run's tasks or not, by date then period, padded to the rule's nominal
     length times the periods of a day with copies of the first: one shape and the same rows whatever the run holds. A forecast is
-    its own row's, mapped back with its period's Invariant (or the pooled one). Skips as for a day unit."""
+    its own row's, mapped back with its period's Invariant (or the pooled one). Skips as for a day unit.
+
+    A per-row target (`models._row_target`) as in `_fit_unit`: each stacked row's target divided by its own period row's
+    `normalise_by` value (a row without a positive one drops out), each forecast's scale and `zero_when` read on its own issue row,
+    a forecast mapped back with its period's Invariant, then multiplied by its issue row's scale and clipped; a unit whose
+    forecasts are all 0 makes no fit."""
     inputs = _inputs_of(inputs)
     cfg, model = inputs.config, inputs.model
     units = cfg["units"]
@@ -1383,6 +1498,7 @@ def _fit_pooled_unit(
     newest = _unit_newest(cfg, unit, periods)
     width = _unit_width(cfg, unit, anchor)
     predictors = unit_list(cfg, inputs.expanded, unit)
+    row_target = cfg.get("row_target")
 
     # The stacked rows exist once (W = 728 days of 96 periods and 200 columns are 107 MB a copy): a first pass reads each
     # period's rows, which of them are kept (every input and the target finite) and which columns are binary, and lets go of
@@ -1400,6 +1516,9 @@ def _fit_pooled_unit(
             rows = training_rows(days, anchor, width, hz, int(newest[period]))
         values = pooled_values(arrays, predictors, rows, period)
         kept = finite_rows(values, arrays["y"][rows][:, hz - 1])
+        scale_at = scale_column(arrays, row_target, hz)
+        if scale_at is not None:
+            kept &= usable_scale(arrays["x"][rows, scale_at])  # a row with no positive scale drops out
         scalable_mask |= StandardScaler.get_scalable_mask(values)
         total += len(values)
         del values
@@ -1429,6 +1548,9 @@ def _fit_pooled_unit(
         at = position[start : start + int(kept.sum())]
         train_x[at] = pooled_values(arrays, predictors, rows, period)[kept]
         train_y[at] = arrays["y"][rows][kept, hz - 1]
+        scale_at = scale_column(arrays, row_target, hz)
+        if scale_at is not None:
+            train_y[at] = train_y[at] / arrays["x"][rows, scale_at][kept]  # (y - 0) / s of each row
         start += len(at)
     groups = (keys[order] % periods).astype(np.int64)
     per_period = units["target_transform"] == PER_PERIOD
@@ -1452,12 +1574,30 @@ def _fit_pooled_unit(
 
     place = {key: i for i, key in enumerate(call_rows)}
     forecast = []
+    scales = {}  # (period, issue row) -> its scale, with `normalise_by`
     for task, test in issued:
         if not trained[task[0]]:
             outcomes.append((task, SKIP_NO_FINITE_TRAINING_ROWS))
         elif (task[0], test) not in place:
             outcomes.append((task, SKIP_MISSING_TEST_PREDICTORS))
+        elif row_target is None:
+            forecast.append((task, test))
         else:
+            own = inputs.hour_arrays[task[0]]
+            zero = zero_outcome(own, row_target, hz, test)
+            if zero is None:
+                outcomes.append((task, SKIP_MISSING_TEST_PREDICTORS))
+                continue
+            if zero:  # no fit: `zero_when` says the forecast is 0, whatever its scale
+                outcomes.append((task, _unit_record(inputs, unit, task, test, 0.0, [], newest, ZERO_WHEN)))
+                continue
+            scale_at = scale_column(own, row_target, hz)
+            if scale_at is not None:
+                scales[(task[0], test)] = float(own["x"][test, scale_at])
+                skipped = _scale_skip(scales[(task[0], test)])
+                if skipped is not None:
+                    outcomes.append((task, skipped))
+                    continue
             forecast.append((task, test))
     if not forecast:
         return outcomes
@@ -1489,6 +1629,8 @@ def _fit_pooled_unit(
     for task, test in forecast:
         i = place[(task[0], test)]
         prediction = float(target.inverse(predictions[i], task[0] if per_period else 0))
+        if row_target is not None:
+            prediction = scaled_back(row_target, prediction, scales.get((task[0], test)))
         coefs = flat_coefficients(coefficients[i], model, "_predict_block")
         outcomes.append((task, _unit_record(inputs, unit, task, test, prediction, coefs, newest)))
     return outcomes

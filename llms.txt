@@ -97,6 +97,7 @@ Rules to know before using the library:
 
 ## Models
 
+- [Common Parameters](docs/src/content/docs/models/common-parameters.mdx): the parameters every model shares, and generation targets: `normalise_by` (targets divided by a column such as a capacity, the forecast multiplied by the issue row's), `bounds` (clipped after scaling back) and `zero_when` (0 with no fit where a column is 1), columns checked as inputs, not regressors
 - [OLSModel](docs/src/content/docs/models/ols.mdx): ordinary least squares
 - [LassoCVModel](docs/src/content/docs/models/lasso.mdx): Lasso with cross-validated regularization
 - [RidgeModel](docs/src/content/docs/models/ridge.mdx): ridge regression whose penalty is chosen on every fit by leave-one-out from a grid
