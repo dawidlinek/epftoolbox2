@@ -154,6 +154,10 @@ _PROVENANCE_FIELDS += ("weights_history",)
 # `residual_base`: a `ResidualModel`'s base's card, runtime and weights, with its first issue day (the warm-up's), for
 # `report.provenance()`; the base's own manifest compares them, and this one's `residual` field its configuration.
 _PROVENANCE_FIELDS += ("residual_base",)
+# `search`: a model of `tune.SearchResult.best()`: the search it came from (its name and saved file, the trial, its rank, the
+# number of candidates, the rung, validation period and validation MAE it was chosen on), for `report.choices()`. The model's
+# settings are the compared fields; where they were chosen says nothing about the forecasts.
+_PROVENANCE_FIELDS += ("search",)
 
 # Compared to decide whether an existing manifest is compatible with the current run. Order is the
 # order differences are reported in.
@@ -399,6 +403,8 @@ class Manifest:
     # A model that reads history: [{"through": day, "columns", "hash"}] of what it reads after `test_end`; None (and no key)
     # otherwise.
     history_ahead: Optional[List[Dict[str, Any]]] = None
+    # A model of `tune.SearchResult.best()`: where it was chosen (`_search`); None (and no key) otherwise. Provenance.
+    search: Optional[Dict[str, Any]] = None
 
     def differences(self, existing: "Manifest", skip: Sequence[str] = ()) -> List[str]:
         """Human-readable list of compared fields that disagree with `existing`; empty if compatible."""
@@ -480,6 +486,8 @@ class Manifest:
                 del out[name]
         if out["history_ahead"] is None:  # a model that reads no history
             del out["history_ahead"]
+        if out["search"] is None:  # a model no search chose
+            del out["search"]
         return out
 
     @classmethod
@@ -746,9 +754,16 @@ def build_manifest(
         pooled=getattr(model, "_pooled", None),  # a PooledModel's member (`models._pooled.member_of`)
         residual=getattr(model, "_residual", None),  # a ResidualModel's base (`models.residual`)
         residual_base=getattr(model, "_residual_base", None),
+        search=_search_of(model),
         **carded,
         **units,
     )
+
+
+def _search_of(model: Any) -> Optional[Dict[str, Any]]:
+    """A copy of where a model of `tune.SearchResult.best()` was chosen, or None."""
+    search = getattr(model, "_search", None)
+    return None if search is None else dict(search)
 
 
 def _history_ahead(

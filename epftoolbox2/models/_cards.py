@@ -646,7 +646,16 @@ def manifest_fields(model: Any, starts: Mapping[str, Optional[str]]) -> Dict[str
 
 def run_provenance(model: Any, manifest: Any, windows: Any, test_start: Optional[str]) -> Optional[Dict[str, Any]]:
     """What a run's ref holds for `EvaluationReport.provenance()`: the manifest's `card`, `runtime` and `weights` when the run
-    wrote one, else the model's own; None for a model without a card."""
+    wrote one, else the model's own; None for a model without a card. A model a search chose (`tune.SearchResult.best`) adds
+    `search`, for `EvaluationReport.choices()`."""
+    out = _card_provenance(model, manifest, windows, test_start)
+    search = getattr(model, "_search", None)
+    if search is None:
+        return out
+    return {**(out or {}), "search": dict(search)}
+
+
+def _card_provenance(model: Any, manifest: Any, windows: Any, test_start: Optional[str]) -> Optional[Dict[str, Any]]:
     if getattr(model, "_card", None) is None:
         return None
     if manifest is not None and getattr(manifest, "card", None) is not None:
@@ -665,14 +674,15 @@ def read_provenance(stored: Union[str, "os.PathLike", Mapping[str, Any]]) -> Opt
             return None
         stored = json.loads(path.read_text())
     base = stored.get("residual_base")  # a ResidualModel's carded base
+    search = {"search": stored["search"]} if stored.get("search") else {}  # a model a search chose
     if not stored.get("card"):
-        return None if not base else {"base": base}
+        return {**({"base": base} if base else {}), **search} or None
     out = {"card": stored["card"], "runtime": stored.get("runtime"), "weights": stored.get("weights")}
     if stored.get("weights_history"):
         out["weights_history"] = stored["weights_history"]
     if base:
         out["base"] = base
-    return out
+    return {**out, **search}
 
 
 def _short_hashes(weights: Optional[Mapping[str, Any]]) -> str:
