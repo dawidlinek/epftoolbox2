@@ -218,7 +218,7 @@ def test_each_score_is_the_models_validation_mae_on_the_rungs_days(df):
             pipeline.add_model(model)
             report = pipeline.run(df, horizon=1, validation=V, validation_every=every)
             records = list(report.refs["ols"].iter_records())
-            assert mae == float(np.mean([abs(r_["prediction"] - r_["actual"]) for r_ in records]))
+            assert mae == math.fsum(abs(r_["prediction"] - r_["actual"]) for r_ in records) / len(records)  # exact
             assert getattr(row, f"forecasts_r{r}") == len(records)
     calendar = IssueCalendar("1h", df.index.tz, (1,))
     assert table["forecasts_r1"].dropna().unique().tolist() == [calendar.count(*V)]  # every day, over the spring switch
