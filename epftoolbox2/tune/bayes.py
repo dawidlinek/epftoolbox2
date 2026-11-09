@@ -69,6 +69,9 @@ ENV_POLL = "EPF_TUNE_POLL"
 # process must have stopped; and seconds between two notes naming the trials a rung still waits for.
 ENV_SETUP_TIMEOUT = "EPF_TUNE_SETUP_TIMEOUT"
 ENV_WAIT_NOTE = "EPF_TUNE_WAIT_NOTE"
+# Seconds a worker waits for a rung's other trials before it raises TimeoutError; unset, it waits as long as they take (a trial
+# can take hours). The tests set it, so that a trial nobody will finish fails them instead of hanging them.
+ENV_WAIT_TIMEOUT = "EPF_TUNE_WAIT_TIMEOUT"
 
 # Trial user attributes.
 _WARM = "warm_start"
@@ -896,8 +899,14 @@ class BayesSearch:
         """Wait until every trial of rung `r` has finished, naming the ones still running now and then: a worker killed
         during a trial leaves it running, and only `epf tune --requeue` (with no worker running) puts it back."""
         every = _seconds(ENV_WAIT_NOTE, 900.0)
-        noted = time.monotonic()
+        limit = _seconds(ENV_WAIT_TIMEOUT, 0.0) if os.environ.get(ENV_WAIT_TIMEOUT) else None
+        noted = started = time.monotonic()
         while not self._rung_done(storage, r):
+            if limit is not None and time.monotonic() - started > limit:
+                raise TimeoutError(
+                    f"Waited {limit:.0f} s ({ENV_WAIT_TIMEOUT}) for trial(s) {_running(storage, r)} of rung {r} in "
+                    f"{self.storage}: if no worker runs them, run `epf tune --requeue {self.storage}`."
+                )
             if time.monotonic() - noted > every:
                 noted = time.monotonic()
                 warnings.warn(

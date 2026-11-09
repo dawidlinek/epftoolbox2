@@ -68,6 +68,7 @@ def single_process(monkeypatch):
     monkeypatch.setenv("MAX_PROCESSES", "1")
     monkeypatch.setenv("THREADS_PER_PROCESS", "1")
     monkeypatch.setenv(bayes.ENV_POLL, "0.05")
+    monkeypatch.setenv(bayes.ENV_WAIT_TIMEOUT, "120")  # a trial nobody finishes fails a test instead of hanging it
     monkeypatch.delenv(bayes.ENV_WORKERS, raising=False)
     monkeypatch.setattr("epftoolbox2.models.base.ProcessPoolExecutor", InProcessPool)
     with threadpool_limits(limits=1):  # what a pool's worker runs on: a fit's bits depend on its BLAS threads
@@ -652,7 +653,15 @@ def run_cli(*args, env=None, timeout=300):
 
 def worker_env(tmp_path):
     env = {key: value for key, value in os.environ.items() if not key.startswith("EPF_TUNE")}
-    env.update({bayes.ENV_POLL: "0.05", "MAX_PROCESSES": "1", "THREADS_PER_PROCESS": "1", "PYTHONPATH": str(ROOT)})
+    env.update(
+        {
+            bayes.ENV_POLL: "0.05",
+            bayes.ENV_WAIT_TIMEOUT: "120",
+            "MAX_PROCESSES": "1",
+            "THREADS_PER_PROCESS": "1",
+            "PYTHONPATH": str(ROOT),
+        }
+    )
     return env
 
 
@@ -813,6 +822,20 @@ def test_a_worker_waiting_on_a_rung_names_the_trials_it_waits_for(df, monkeypatc
         UserWarning, match=rf"Still waiting for trial\(s\) \[{stuck.number}\] of rung 0 .*epf tune --requeue"
     ):
         searcher._wait_for_rung(storage, 0)
+
+
+def test_a_worker_waiting_past_its_timeout_raises(df, monkeypatch, tmp_path):
+    import optuna
+
+    monkeypatch.setattr(BayesSearch, "_score", fake_score)
+    monkeypatch.setenv(bayes.ENV_WAIT_TIMEOUT, "0.2")
+    journal = tmp_path / "s.journal"
+    searcher = fake_search(n_trials=3, storage=journal, rungs=None)
+    searcher.run(df, horizon=1, validation=V)
+    stuck = optuna.load_study(study_name=bayes.STUDY, storage=searcher._storage()).ask()
+    monkeypatch.setattr(BayesSearch, "_rung_done", lambda self, storage, r: False)
+    with pytest.raises(TimeoutError, match=rf"for trial\(s\) \[{stuck.number}\] of rung 0 .*epf tune --requeue"):
+        searcher._wait_for_rung(searcher._storage(), 0)
 
 
 def test_epf_tune_requeue_reads_journals_alone(df, monkeypatch, tmp_path, capsys):

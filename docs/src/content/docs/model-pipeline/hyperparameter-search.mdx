@@ -275,7 +275,8 @@ every 15 minutes (`EPF_TUNE_WAIT_NOTE` seconds) they warn with the trials they w
 running is marked interrupted and put back, a later rung's with its parent's settings, a warm-start trial with its own, and any
 other rung-0 slot is proposed again. A trial stopped by Ctrl-C puts itself back. A worker killed while it set up a later rung
 leaves the others waiting for it: after 2 minutes (`EPF_TUNE_SETUP_TIMEOUT`) they stop and say so, and `--requeue` finishes the
-setup. Rung 0 never set up means no trial ran: remove the journal and start again.
+setup. Rung 0 never set up means no trial ran: remove the journal and start again. `EPF_TUNE_WAIT_TIMEOUT` (seconds, unset by
+default since a trial can take hours) makes a waiting worker raise instead.
 
 ## Smarter than random search
 
