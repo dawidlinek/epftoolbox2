@@ -32,12 +32,18 @@ class LEARModel(BaseModel):
     # their conditions reach 2.4e5), against the engine's 1e-9.
     _ENGINE_ISSUE_Z = 10.0
     _ENGINE_CONDITION_MAX = 1e6
-    # `criterion="cv"` (`__setattr__`: 1e-6, else None): a fit two of whose columns are near twins, 1 - |cos| at most this but
+    # With `criterion="cv"` (`_ENGINE_NEAR_TWIN`, below): a fit two of whose columns are near twins, 1 - |cos| at most this but
     # not exact twins, goes back to the model path (`near_twin`): its penalty is a kink of a fold's path, which such a pair makes
     # follow the Gram's last bits, and its coefficients are the path there, with no refit (1e-8 EUR/MWh apart at ordinary rows
-    # with a pair 1e-5 of a standard deviation apart). Within it the worst kept gap is 4.0e-10 (`engine_vst_cv/sweep.py`, the
-    # out-of-sample run; 8.1e-10 at 1e-8 with a pair at 7e-7).
-    _ENGINE_NEAR_TWIN = None
+    # with a pair 1e-5 of a standard deviation apart; `engine_vst_cv/sweep.py`).
+    _ENGINE_NEAR_TWIN_CV = 1e-6
+
+    @property
+    def _ENGINE_NEAR_TWIN(self) -> Optional[float]:
+        """The near-twin bound of the engine's fits (`_stats.near_twins`): `_ENGINE_NEAR_TWIN_CV` with `criterion="cv"`, else
+        None (an information criterion refits on its active columns, whose Gram has its own bound). A property, so a subclass
+        that sets `_ENGINE_NEAR_TWIN` on its class overrides it for every criterion, as it would LassoCV's."""
+        return self._ENGINE_NEAR_TWIN_CV if self.criterion == "cv" else None
 
     @property
     def _ENGINE_FROM_STATS(self) -> bool:
@@ -115,7 +121,6 @@ class LEARModel(BaseModel):
         if key == "criterion":
             # Starts with "_", so YAML and the manifest never see it.
             super().__setattr__("_ENGINE_NEEDS", frozenset({"blocks"}) if value == "cv" else frozenset())
-            super().__setattr__("_ENGINE_NEAR_TWIN", 1e-6 if value == "cv" else None)
 
     @classmethod
     def lago(
