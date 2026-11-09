@@ -410,6 +410,25 @@ def test_min_native_days_lets_fits_with_enough_native_days_train(frame, tmp_path
     assert ref.produced + ref.skipped["too_few_native_days"] == 6 * 96 and ref.produced > 0
 
 
+def test_native_days_are_counted_from_the_frame_s_first_row(autumn, tmp_path):
+    """The autumn frame is native from its first date, 2023-10-01, so its rows are dated from then and a target date of the
+    window before 2023-10-01 + h has no row. Issued 2023-10-04 at horizon 2, a 14-day window's targets 2023-09-20 to 10-03 hold one
+    row's, of 2023-10-03: skipped with `min_native_days=3`, though three of the window's dates are native."""
+    learner = OLSModel(REGRESSORS, training_window=14, fit_intercept=True)
+    model = ShapeModel(BASE, learner, min_native_days=3, name="floor")
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message=f".*({NOT_CHAINED}|{SHORT}|produced)", category=UserWarning)
+        model.run(autumn, "2023-10-04", "2023-10-06", horizon=2, freq="15min", save_to=str(tmp_path / "f.jsonl"))
+    records = [json.loads(line) for line in (tmp_path / "f.jsonl").read_text().splitlines()]
+    by_day = {}
+    for record in records:
+        by_day.setdefault((record["run_date"], record["horizon"]), set()).add((record["status"], record.get("detail")))
+    assert by_day[("2023-10-04", 2)] == {("too_few_native_days", "window 14: 1 of 3 native days")}
+    assert by_day[("2023-10-04", 1)] == {("too_few_native_days", "window 14: 2 of 3 native days")}
+    assert by_day[("2023-10-05", 2)] == {("too_few_native_days", "window 14: 2 of 3 native days")}
+    assert by_day[("2023-10-05", 1)] == by_day[("2023-10-06", 2)] == {("ok", None)}
+
+
 def test_an_expanding_learner_has_no_native_minimum_unless_given(frame):
     """An `"expanding"` window has no length to fill: it trains on the native days it has, without a warning, unless given
     `min_native_days`."""
