@@ -64,7 +64,7 @@ model = TorchModel(module=MLP, module_params={"hidden": [256, 128], "dropout": 0
 | `binary_mask` | `None` | Which rows decide the binary 0/1 inputs left unscaled; with `refit`, each fit's own |
 | `scaler` | `"standard"` | How the inputs are scaled; `output="day"` takes any scaler (the Invariant, `{"name": "asinh", "params": {"standardise": False}}`, did much better on price inputs, see [the research's recipe](#the-researchs-recipe-reproduced)), `output="period"` only `"standard"` |
 | `name` | `"torch"` | The model's name |
-| `module_hash` | `None` | Set by a saved file: the hash of the module's file and its package's version when it was saved (see [Saving and loading](#saving-and-loading)) |
+| `module_hash` | `None` | Set by a saved file: the hash of the module's file and its package's version (for a class with no module file, a `session-` token) when it was saved (see [Saving and loading](#saving-and-loading)) |
 
 `stack`, `pad_to`, `tf32`, `device`, the loss and the learning rate change the numbers and are compared when a run resumes.
 

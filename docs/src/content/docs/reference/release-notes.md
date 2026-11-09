@@ -293,6 +293,23 @@ an issue day it didn't sample.
   for bit as before. They reproduce the resolution study's R1 table (MAE15, MAEh, shape MAE, the error split), its DM list and R3's
   derived daily rows, and the renewables study's price and generation tables, from the studies' stored forecasts
   (`tests/reproductions/`). See [Working with Results](/epftoolbox2/model-pipeline/results/#hourly-aggregates-shape-and-the-error-split).
+- **`ResidualModel` and `HistGBModel`: a base model's forecasts corrected by gradient boosting.** `ResidualModel(base, learner,
+  training_window="expanding", refit="7D", warmup=None, name="residual")` runs its own copy of a base model (a model, or the name of
+  one added to the pipeline before it) over a warm-up, stores its out-of-sample forecasts in `<name>.base.jsonl`, and fits the
+  learner, `HistGBModel` by default (scikit-learn's histogram gradient boosting over the pooled (date, hour) rows, with the
+  research's defaults), on their residuals; the learner's predictors may name the base's forecasts (`base_fc_d+{horizon}`,
+  `base_fc_hHH_d+{horizon}`), and `presets.tree_predictors` gives the research's inputs. On the research's DE_LU and AT years a LEAR-BIC
+  base with boosted residuals was about 4 % below LEAR's window average. A base that is a `ResidualModel`, a `PooledModel` or reads
+  series is refused. Nothing of a model without it moves. See [Residual Model](/epftoolbox2/models/residual/).
+- **`TorchModel`, `MLPHourlyModel` and `MLPDailyModel`: neural networks on the library's trainer.** `TorchModel(module, ...)` trains
+  a `torch.nn.Module` class of your own (flat predictors or named blocks), with one output per period (`output="period"`) or a day of
+  outputs on day-level predictors (`output="day"`); `MLPHourlyModel` and `MLPDailyModel` are its presets with `epftoolbox2.nets.MLP`.
+  A forecast is the mean of `seeds` members in target units, and is the same alone, in a loop, in a stack and after a resume. They
+  build, save and load without torch and need the `[torch]` extra to fit (the pre-flight names it). The manifest compares the torch
+  version, device, dtype, `tf32`, threads per fit, `stack` and `pad_to`. A module is saved by its import path and `module_hash`, a
+  hash of its source file and its package's version; a network defined in a notebook, by `exec`, in a function or in the script being
+  run has a `session-` token instead and resumes only within its session (`save()` raises for one from `__main__` or a function).
+  `examples/mlp_search.py` is the default search. See [Neural Networks](/epftoolbox2/models/neural-networks/).
 - **`ModelPipeline(engine="on")`: engine groups for studies of many models.** With `engine="on"` (`model_pipeline.engine: on` in a
   workflow) the models the engine takes, OLS, Ridge, LassoCV and LEAR, run in groups, one per refit rule: each group reads the
   data once for all its models, runs one pool of processes whose jobs are one day (or refit block) and period of every model, and
