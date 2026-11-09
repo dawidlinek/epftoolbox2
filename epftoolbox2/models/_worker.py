@@ -1,6 +1,7 @@
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List, NamedTuple, Optional, Tuple, Union
 import contextlib
+import contextvars
 import datetime
 import hashlib
 import math
@@ -73,6 +74,42 @@ OTHER_LIST = -2
 
 class TaskFailed(RuntimeError):
     """An unexpected exception inside a worker task; carries the task identity and the worker's traceback."""
+
+
+class FitContext(NamedTuple):
+    """What a model's fit call (`_fit_predict`, `_fit_model`, `_fit_days`) is fitting, for a model whose fit draws random
+    numbers (`TorchModel`: its seeds are `_calendar.unit_seed` of the unit, its shapes from the window): the unit, and the
+    member's training window as the model has it (an int or `"expanding"`). A refit unit's own `FitUnit`; a fit of one
+    forecast (refit=None) is `FitUnit(period, horizon, issue date, list id, member index)`."""
+
+    unit: FitUnit
+    window: Any
+
+
+# The fit in progress in this thread (`fit_scope`), None outside one: a context variable, so each task thread of a pool's
+# process (`THREADS_PER_PROCESS`) sees its own.
+_FIT: contextvars.ContextVar = contextvars.ContextVar("epftoolbox2_fit", default=None)
+
+
+def current_fit() -> Optional[FitContext]:
+    """The `FitContext` of the fit call in progress in this thread, None outside one."""
+    return _FIT.get()
+
+
+@contextlib.contextmanager
+def fit_scope(unit: FitUnit, window: Any):
+    """Make `FitContext(unit, window)` the fit in progress around a model's fit call, and put back what was there after."""
+    token = _FIT.set(FitContext(unit, window))
+    try:
+        yield
+    finally:
+        _FIT.reset(token)
+
+
+def _window_of(cfg: Dict, unit: FitUnit) -> Any:
+    """A refit unit's training window as the model has it: the model's, or with a list of them the unit's member's."""
+    members = cfg.get("members")
+    return cfg["training_window"] if members is None else members[unit.member]
 
 
 def _limit_native_threads() -> None:
@@ -437,9 +474,22 @@ def _fit_one_numpy(
         return SKIP_MISSING_TEST_ROW
     list_id, predictors, mask_of = task_list(cfg, inputs.expanded, hour, hz, position)
 
-    def fit(member, scalable_mask):
+    def fit(member, scalable_mask, index=0):
         return _fit_member(
-            arrays, cfg, hour, hz, day, member, newest, test, list_id, predictors, scalable_mask, inputs.model, engine
+            arrays,
+            cfg,
+            hour,
+            hz,
+            day,
+            member,
+            newest,
+            test,
+            list_id,
+            predictors,
+            scalable_mask,
+            inputs.model,
+            engine,
+            member_index=index,
         )
 
     members = cfg.get("members")
@@ -450,8 +500,8 @@ def _fit_one_numpy(
         prediction, coefs, extra = fitted
     else:
         outcomes = []
-        for member in members:
-            fitted = fit(member, task_mask(cfg, window, mask_of, member))
+        for index, member in enumerate(members):
+            fitted = fit(member, task_mask(cfg, window, mask_of, member), index)
             if isinstance(fitted, str):
                 return _tagged(fitted, member)
             outcomes.append(fitted)
@@ -510,6 +560,7 @@ def _fit_member(
     scalable_mask,
     model,
     engine: Optional[StatsFitter] = None,
+    member_index: int = 0,
 ) -> Union[Tuple[float, list, Dict], str]:
     """One training window's forecast of the task (`hour`, `hz`, day id `day`) issued from row `test`: (the prediction in target
     units, the coefficients, a matching list's record fields), or a skip reason. Its rows are `member_rows`: those of
@@ -521,7 +572,8 @@ def _fit_member(
 
     `engine` (the engine's, `_engine_worker.EngineFits`) is handed the fit as selected here (`StatsFit`: the rows, filters, mask
     and skips are this function's) and fits it from shared statistics; where it hands the fit back (None), the scaler and
-    `_fit_predict` below fit it, on the same values, as without it."""
+    `_fit_predict` below fit it, on the same values, as without it. `_fit_predict` runs in `fit_scope` of
+    `FitUnit(hour, hz, the issue date, list_id, member_index)` and `member`."""
     days = arrays["days"]
     train = member_rows(days, day, member, hz, newest)
 
@@ -580,12 +632,25 @@ def _fit_member(
         scalable_mask=scalable_mask,
         columns=predictors,
     )
+    issue_date = datetime.date.fromisoformat(cfg["test_start"]) + datetime.timedelta(days=day - cfg["offset"])
     try:
-        pred, coefs = model._fit_predict(train_x, train_y, test_x)
+        with fit_scope(FitUnit(hour, hz, issue_date, list_id, member_index), member):
+            pred, coefs = model._fit_predict(train_x, train_y, test_x)
     except ValueError as exc:
         # scikit-learn raises ValueError on degenerate input (e.g. fewer rows than CV folds); counted, not fatal.
         return f"{SKIP_FIT_ERROR}: {exc}"
     return scaler.inverse(float(pred)), coefs, extra
+
+
+def member_mean(values: Any) -> float:
+    """The mean of a forecast's members (seeds) in target units: `math.fsum` divided by their number, exactly rounded so their
+    order can't change a bit; with an infinite member (an overflow, as `verify`'s control can cause) numpy's mean, NaN or
+    infinite, where `fsum` would raise."""
+    values = [float(value) for value in np.ravel(values)]
+    try:
+        return math.fsum(values) / len(values)
+    except (ValueError, OverflowError):
+        return float(np.mean(values))
 
 
 def _tagged(reason: str, member) -> str:
@@ -839,7 +904,8 @@ def _fit_unit(
             columns=predictors,
         )
         try:
-            fitted = model._fit_model(train_x, train_y)
+            with fit_scope(unit, _window_of(cfg, unit)):
+                fitted = model._fit_model(train_x, train_y)
         except ValueError as exc:
             return outcomes + [(task, f"{SKIP_FIT_ERROR}: {exc}") for task, _ in forecast]
         predicted = []
@@ -947,7 +1013,8 @@ def _block_forecasts(
         columns=predictors,
     )
     try:
-        fitted = model._fit_model(train_x, train_y)
+        with fit_scope(unit, _window_of(cfg, unit)):
+            fitted = model._fit_model(train_x, train_y)
     except ValueError as exc:
         return f"{SKIP_FIT_ERROR}: {exc}"
     predictions, coefficients = model._predict_block(fitted, call_x)
@@ -1186,7 +1253,8 @@ def _fit_day_unit(
     One `_fit_days(x, y, y_mask)` and one `_predict_days(fitted, rows)` over the issue dates of every day of the block that the
     frame has with finite inputs, the run's tasks or not, in date order, padded to the rule's nominal length with copies of the
     first: the call has one shape and the same rows whatever the run, a resume, `test_start` or `issue_days` hold. Each forecast
-    of (p, h, D) is column p of D's row, mapped back with p's Invariant. A task without its period's row on D is
+    of (p, h, D) is column p of D's row, mapped back with p's Invariant; a model of several members (`TorchModel`'s seeds)
+    returns (members, rows, P), and the forecast is the members' mean after each is mapped back (`math.fsum`). A task without its period's row on D is
     `missing_test_row`; a period with no training target `no_finite_training_rows`; a day with a missing input
     `missing_test_predictors`; a fit raising ValueError is each forecast's `fit_error`."""
     inputs = _inputs_of(inputs)
@@ -1261,18 +1329,24 @@ def _fit_day_unit(
     target = MultiTargetAsinh().fit(train_y, valid)
     fit_y = np.where(valid, target.transform(train_y), np.nan)
     try:
-        fitted = model._fit_days(fit_x, fit_y, valid.copy())
+        with fit_scope(unit, _window_of(cfg, unit)):
+            fitted = model._fit_days(fit_x, fit_y, valid.copy())
     except ValueError as exc:
         return outcomes + [(task, f"{SKIP_FIT_ERROR}: {exc}") for task, _, _ in forecast]
     predicted = np.asarray(model._predict_days(fitted, call_x), dtype=np.float64)
-    if predicted.shape != (length, periods):
+    # (rows, P), or (members, rows, P) for a fit of several members (seeds) whose forecast is their mean in target units.
+    if predicted.shape[-2:] != (length, periods) or predicted.ndim not in (2, 3) or not predicted.shape[0]:
         raise RuntimeError(
             f"{type(model).__name__}._predict_days returned an array of shape {predicted.shape} for a call of {length} rows "
-            f"and {periods} periods: one row of {periods} per row of the call"
+            f"and {periods} periods: one row of {periods} per row of the call (and per member, before them)"
         )
     for task, test, place in forecast:
         period = task[0]
-        prediction = float(target.inverse(predicted[position[place], period], period))
+        if predicted.ndim == 3:
+            # Each member mapped back with the period's Invariant, then their mean, exactly rounded (`_combined`'s rule).
+            prediction = member_mean(target.inverse(predicted[:, position[place], period], period))
+        else:
+            prediction = float(target.inverse(predicted[position[place], period], period))
         outcomes.append((task, _unit_record(inputs, unit, task, test, prediction, [], newest)))
     return outcomes
 
@@ -1397,7 +1471,8 @@ def _fit_pooled_unit(
     target_groups = groups if per_period else np.zeros(len(groups), dtype=np.int64)
     target = MultiTargetAsinh().fit_groups(train_y, target_groups, periods if per_period else 1)
     try:
-        fitted = model._fit_model(fit_x, target.transform(train_y, target_groups))
+        with fit_scope(unit, _window_of(cfg, unit)):
+            fitted = model._fit_model(fit_x, target.transform(train_y, target_groups))
     except ValueError as exc:
         return outcomes + [(task, f"{SKIP_FIT_ERROR}: {exc}") for task, _ in forecast]
     predictions, coefficients = model._predict_block(fitted, call_x)
