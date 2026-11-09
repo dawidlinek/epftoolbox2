@@ -5,12 +5,14 @@ The engine fits OLS by the normal equations, which err as eps·cond(Z)² where t
 issue row far out reads that error times its distance: on Lago's DE inputs (n 364, p 247, every issue row 5 to 30 training
 standard deviations out) engine-1 kept forecasts 1.4e-8 EUR/MWh from engine off, the model path itself within 1e-11 of a
 long-double solution. One step of iterative refinement (the residual well below float64's rounding, by error-free
-transformations) removes the factorisation's error; what it can't remove, the rounding of the equations' entries,
-the guard estimates per row and sends a row whose estimate is above `OLS_SOLVE_ERROR_MAX` back to the model path
-(`far_issue`). The calibration is in `epftoolbox2-research/library_check_step5/ols_issue_guard/`.
+transformations) removes the factorisation's error; what it can't remove, the rounding of the equations' entries (larger where
+the centring of the sums cancelled, the fit's rows away from its span's mean), the guard estimates per row and sends a row whose
+estimate is above `OLS_SOLVE_ERROR_MAX` back to the model path (`far_issue`). The calibration is in
+`epftoolbox2-research/library_check_step5/ols_issue_guard/`.
 """
 
 import json
+from collections import Counter
 from fractions import Fraction
 
 import numpy as np
@@ -20,6 +22,7 @@ from threadpoolctl import threadpool_limits
 
 from epftoolbox2.models import OLSModel, RidgeModel, _engine_worker, _stats
 from epftoolbox2.models._sums import SpanSums
+from epftoolbox2.models._worker import StatsFit, TaskInputs
 from epftoolbox2.pipelines import ModelPipeline
 from epftoolbox2.results.manifest import ManifestMismatchError
 from epftoolbox2.scalers.standard import StandardScaler
@@ -149,6 +152,88 @@ def test_the_guard_sends_back_a_row_whose_entries_rounding_the_refinement_cant_r
     out, counts, _ = engine_on_arrays(OLSModel([], 28), x, y, mask, np.vstack([near, far]))
     assert out[1] is None and counts.fallbacks["far_issue"] == 1, counts.fallbacks
     assert abs(out[0][0] - model_path(x, y, mask, near)[0]) <= 1e-9
+
+
+def gappy_span(seed, level, n=120, lead=50, ratio=3e-3):
+    """The review's design: `market_pair`'s columns over a span of n rows whose first `lead` rows lack one column (a feed that
+    starts inside the window: NaN there, so the fit's rows ρ are the rest) and sit `level` higher in load. The span's shifts
+    come from all its rows, so the centring of the fit's sums cancels: κ = S/(S - u²/r) about 20 at a level of 1,600."""
+    rng = np.random.default_rng(seed)
+    load = rng.normal(1000, 200, n)
+    load[:lead] += level
+    wind = rng.gamma(2.0, 50.0, n)
+    weekend = (rng.random(n) < 2 / 7).astype(float)
+    y = 20 + 0.08 * load - 0.15 * wind + 10 * weekend + rng.normal(0, 5, n)
+    lag = np.roll(y, 1) + rng.normal(0, 3, n)
+    sd = ratio * 200
+    e = rng.normal(0, sd, n)
+    y = y + 3.0 * e / sd
+    extra = rng.normal(0, 1, n)
+    extra[:lead] = np.nan
+    x = np.column_stack([load, wind, weekend, 1 - weekend, lag, extra, load + e])
+    mask = np.ones(x.shape[1], dtype=bool)
+    mask[2:4] = False
+    return x, y, mask, sd
+
+
+def engine_on_span(model, x, y, mask, tests):
+    """`EngineFits` on one span of rows `x`, `y` with gaps: ρ the rows whose every column is finite, the span's sums over all
+    rows (so their shifts come from rows the fit doesn't read), as an engine group builds them."""
+    n, p = x.shape
+    arrays = {
+        0: {
+            "x": np.vstack([x, tests]),
+            "y": np.r_[y, np.full(len(tests), np.nan)][:, None],
+            "days": np.arange(n + len(tests)),
+            "col_index": {f"c{j}": j for j in range(p)},
+        }
+    }
+    inputs = _engine_worker.ModelInputs("m", TaskInputs(arrays, {}, {"scaler": model.scaler}, model), False)
+    counts = _engine_worker.EngineCounts()
+    fits = _engine_worker.EngineFits(
+        _engine_worker._Spans(arrays, {(0, 1, 0, n): np.arange(p)}, Counter()), inputs, counts
+    )
+    finite = np.isfinite(y) & np.isfinite(x).all(axis=1)
+    out = fits(StatsFit(0, 1, slice(0, n), list(range(p)), finite, x[finite], y[finite], mask, tests))
+    return out, counts
+
+
+@pytest.mark.parametrize("level, seed", [(800.0, 39), (1600.0, 42)])
+def test_a_fit_whose_rows_sit_away_from_its_spans_mean_counts_the_centrings_rounding(level, seed):
+    """The review's case: a span whose first 50 of 120 rows lack a column and sit higher in load, a near-copy pair 3e-3 sd apart
+    and an issue row 20 of the difference's sds out along it. The sums over ρ are about the span's shifts, so G = (S - uu'/r)
+    / (σσ') cancels (κ 4.8 and 21), and its entries' rounding is eps (|S| + |uu'|/r) / (σσ'), not eps |G|: an estimate from |M|
+    kept the row although even the refined forecast is 7.6e-9 and 4.7e-8 off. With the entries' scale from the sums
+    (`ScaledStats.entries`) the row goes back."""
+    x, y, mask, sd = gappy_span(seed, level)
+    finite = np.isfinite(x).all(axis=1)
+    xr, yr = x[finite], y[finite]
+    far = xr[len(xr) // 2].copy()
+    far[-1] = far[0] + (xr[:, -1] - xr[:, 0]).mean() + 20 * sd
+    far = far[None, :]
+    raw = SpanSums(x, y).over(finite, np.arange(x.shape[1]))
+    kappa = np.diag(raw.S) / (np.diag(raw.S) - raw.u**2 / raw.n)
+    assert kappa.max() > 4  # 4.8 at a level of 800, 21 at 1,600
+    stats, params = _stats.standard_stats(raw, (xr, yr), mask, False)
+    fitted = _stats.ols_fit(stats, False)
+    z = params.transform(far)
+    (off,) = model_path(xr, yr, mask, far)
+    assert abs(params.inverse(float(fitted.predict(z)[0])) - off) > _stats.OLS_SOLVE_ERROR_MAX  # 7.6e-9 and 4.7e-8
+    plain = stats._replace(entries=None)  # the scale of |M| and |b|, as before
+    assert _stats.solve_error_ok(_stats.ols_fit(plain, False), plain, z)
+    assert not _stats.solve_error_ok(fitted, stats, z)
+    out, counts = engine_on_span(OLSModel([], 120), x, y, mask, far)
+    assert out is None and counts.fallbacks["far_issue"] == 1, counts.fallbacks
+
+
+def test_the_entries_scale_is_the_gram_itself_where_nothing_cancels():
+    """Where the fit's rows are the whole span (κ = 1) the entries' scale is |G| and |q| up to rounding, so the guard reads what
+    it read before the scale was carried."""
+    x, y = ill_conditioned()
+    stats, _, _ = engine_fit(x, y, np.ones(x.shape[1], dtype=bool))
+    E, Eq = stats.entries
+    assert np.allclose(E, np.abs(stats.G), rtol=1e-9, atol=1e-9 * np.abs(stats.G).max())
+    assert np.allclose(Eq, np.abs(stats.q), rtol=1e-9, atol=1e-9 * np.abs(stats.q).max())
 
 
 def lago_rows(hour, end, n=364):

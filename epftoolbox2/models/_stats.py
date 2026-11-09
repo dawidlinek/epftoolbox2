@@ -52,24 +52,31 @@ The fits (`LinearFit` for OLS and Ridge; LEAR's `LearFit` from `ScaledStats.gram
   eps·cond(Z), and an issue row far out reads that error: on Lago's DE inputs (W 364, 247 inputs, every issue row 5 to 30
   training sds out) step 5's fits (fit path "engine-1") were up to 1.4e-8 from `LinearRegression`, the model path within
   1e-11 of a long-double solution. So `ols_fit` refines its solution by one step, w + M⁻¹(b - M w) with the fit's own
-  Cholesky factor and the residual well below float64's rounding (`refined`, by error-free transformations in float64, the
-  same on every platform), which removes the factorisation's error and leaves the rounding of M's and b's entries from
-  the sums. Per issue row the error that remains is estimated (`solve_error`, from `LinearFit.solve`):
-  sqrt((δw·(z - c))² + eps² Σ_i g_i² h_i), δw the next refinement step (measured), g = M⁻¹(z - c) and h_i = Σ_j M_ij² w_j² +
-  (M w)_i² (the first-order effect of the entries' rounding, each of random sign, which no refinement against those entries can
-  see). A row whose estimate times `yscale` (target units) exceeds `OLS_SOLVE_ERROR_MAX` (5e-9) is forecast on the model path
-  (the engine's `far_issue`), besides OLS's distance bound of 30 training sds. The calibration
-  (`epftoolbox2-research/library_check_step5/ols_issue_guard/`: the dense, VST and re-review sweeps on two sets of seeds,
-  `guard_sweep2.py`'s designs, every n-364 window of the DE fixture, Lago DE over the experiment-check's 61 days of 2016 and over
-  2017): with the step alone the worst gaps within the distance bound were 8.1e-9 (dense) and 5.9e-9 (Lago 2017), every other
-  set under 5e-9; with the guard at 5e-9 the worst kept is 4.8e-9 (Lago 2017; dense 3.9e-9, the fixture 1.4e-9), and it
-  hands back at most 0.5 % more rows than the distance bound (Lago DE 2.6 % and 0.9 % of OLS's forecasts against 2.5 % and
-  0.4 %). Any budget up to 5.8e-9 holds 5e-9 in every set. Without the step's accurate residual (a float64 one) the guard
-  measures noise and kept forecasts 1.2e-8 off: hence the error-free path. The step and the guard's terms cost one accurate
-  residual and two triangular solves per fit, O(p²) in operations but about the factorisation's own time, since the
-  long-double product isn't BLAS (0.6 to 1.0 ms at p 247 against 0.7 ms; 25 to 30 us at p 13 to 30, where the 10,000 OLS
-  variants of step 5l took 0.5 % more core-seconds), the error-free residual some more (2.3 against 1.9 ms per fit at p 247),
-  and a triangular solve per issue row.
+  Cholesky factor and the residual well below float64's rounding by error-free transformations in float64 (`refined`,
+  `_residual_exact`: the same on every platform, as `np.longdouble` is not), which removes the factorisation's error and
+  leaves the rounding of M's and b's entries from the sums. Per issue row the error that remains is estimated (`solve_error`,
+  from `LinearFit.solve`): sqrt((δw·(z - c))² + eps² Σ_i g_i² h_i), δw the next refinement step (measured), g = M⁻¹(z - c) and
+  h_i = Σ_j E_ij² w_j² + E_b,i², the first-order effect of the entries' rounding, each of random sign, which no refinement
+  against those entries can see. E and E_b are the scale of that rounding as the sums formed the entries
+  (`ScaledStats.entries`, `entry_scale`): (|S| + |uu'|/r)/(σσ') and (|v| + |u Σ(y - c_y)|/r)/(σ σ_y), plus n|z̄z̄'| and n|z̄ȳ|
+  without an intercept. Where the fit's rows ρ are its whole span they are |M| and |b| to within rounding; where ρ is a strict
+  subset away from the span's mean the centring cancels (κ > 1) and E_jj is (2κ - 1)·M_jj, which an estimate from |M| misses:
+  it kept forecasts 4.7e-8 off at κ 21. A row whose estimate times `yscale` (target units; with a VST the inverse's slope where
+  steeper) exceeds `OLS_SOLVE_ERROR_MAX` (5e-9) is forecast on the model path (the engine's `far_issue`), besides OLS's distance
+  bound of 30 training sds. The calibration (`epftoolbox2-research/library_check_step5/ols_issue_guard/`: the dense, VST and
+  re-review sweeps on two sets of seeds, `guard_sweep2.py`'s designs, every n-364 window of the DE fixture, Lago DE over the
+  experiment-check's 61 days of 2016 and over 2017, and fits whose rows are a strict subset of their span at κ from 1 to
+  `CANCELLATION_MAX`, `gappy_sweep.py`): with the step alone the worst gaps within the distance bound were 8.1e-9 (dense),
+  5.9e-9 (Lago 2017) and up to 1.8e-5 (the gappy fits, growing with κ), every other set under 5e-9; with the guard at 5e-9 the
+  worst kept is 4.8e-9 (Lago 2017; dense 3.9e-9, the fixture 1.4e-9, the gappy fits 3.4e-9), and wherever a kept gap is above
+  1e-9 it is at most 1.6 times the estimate. Where κ = 1 the guard hands back at most 0.5 % more rows than the distance bound
+  (Lago DE 2.6 % and 0.9 % of OLS's forecasts against 2.5 % and 0.4 %), of the gappy fits 51 % against 30 % (two thirds at κ
+  above 100). Any budget up to 5.8e-9 holds 5e-9 in every set. Without the step's accurate residual (a float64 one) the guard
+  measures noise and kept forecasts 1.2e-8 off. The step and the guard's terms cost one accurate residual and two triangular
+  solves per fit, O(p²) in operations but more than the factorisation's own time, since the error-free product is some 60
+  numpy calls and isn't BLAS (S02 at load 10: 97 to 121 us at p 13 to 30 against the factorisation's 29 to 37, 1.1 ms against
+  0.5 at p 247; the 10,000 OLS variants of step 5l took 13 % more core-seconds than engine-1), and a triangular solve per
+  issue row.
 - **Ridge**, n > p (scikit-learn's `svd` mode): `RidgeCV(alphas, fit_intercept, cv=None)`'s leave-one-out error, computed from
   the eigendecomposition G = VΛV' (or of A) and the scaled rows (`ScaledStats.rows`, which Ridge alone needs): with U = Z_c V,
   the fit at α is U(V'q/(λ + α)), each row's leverage Σ_k U_ik²/(λ_k + α) plus 1/n for the unpenalised intercept, and its
@@ -193,7 +200,10 @@ class ScaledStats(NamedTuple):
     Σ(z - z̄)(z - z̄)', Σ(z - z̄)(y - ȳ), Σ(y - ȳ)²; `blocks`: the five CV blocks (step 5e), else None; `rows`: a callable giving
     the scaled (Z, y) of the fit's rows, for the models that need them (`_ENGINE_NEEDS`), else None; `yscale`: what a scaled
     target unit is in target units (the scaler's divisor), for a fit that bounds an error in target units: Ridge hands back
-    a fit whose `yscale` is None (a builder that didn't set it), so a forgotten one can't loosen its budget.
+    a fit whose `yscale` is None (a builder that didn't set it), so a forgotten one can't loosen its budget. `entries`: (E,
+    E_q), the scale of the rounding in each entry of G and q as the builder formed them, eps times it the error: (|S| + |uu'|/r)
+    / (σσ') and (|v| + |u Σ(y - c_y)|/r) / (σ σ_y) from the sums (`standard_stats`), so that a centring that cancels (the fit's
+    rows away from the span's mean, κ > 1) counts; OLS's issue-row guard reads it (`refined`). None from other builders.
     """
 
     n: int
@@ -205,6 +215,7 @@ class ScaledStats(NamedTuple):
     blocks: Optional[Tuple["ScaledStats", ...]] = None
     rows: Optional[Callable[[], Tuple[np.ndarray, np.ndarray]]] = None
     yscale: Optional[float] = None
+    entries: Optional[Tuple[np.ndarray, np.ndarray]] = None
 
     def gram(self) -> GramStats:
         """LEAR's seam (`_lars.GramStats`): the same sums under its names."""
@@ -216,6 +227,18 @@ class ScaledStats(NamedTuple):
         A = self.G + n * np.outer(self.zbar, self.zbar)
         b = self.q + (n * self.ybar) * self.zbar
         return A, b, float(self.yy + n * self.ybar * self.ybar)
+
+    def entry_scale(self, centred: bool) -> Optional[Tuple[np.ndarray, np.ndarray]]:
+        """`entries` for the normal equations a fit solves: (E, E_q) with an intercept (G, q), (E + n|z̄z̄'|, E_q + n|z̄ȳ|)
+        without (A, b: the addition rounds too). None where the builder gave none."""
+        if self.entries is None:
+            return None
+        E, Eq = self.entries
+        if centred:
+            return E, Eq
+        n = float(self.n)
+        zbar = np.abs(self.zbar)
+        return E + n * np.outer(zbar, zbar), Eq + (n * abs(float(self.ybar))) * zbar
 
 
 Values = Union[Callable[[Optional[int]], np.ndarray], Tuple[np.ndarray, np.ndarray]]
@@ -371,10 +394,19 @@ def standard_stats(
         q = cq / (sigma * ystd)
         yy = cyy / (ystd * ystd)
     zbar = np.where(scaled, 0.0, mean)
+    # The rounding scale of each entry as formed here: S - uu'/r and v - u·sy/r subtract terms of sizes |S| and |uu'|/r, which
+    # cancel where the fit's rows sit away from the span's shift (κ = S/(S - u²/r) > 1), so their rounding is eps times the
+    # terms, not the result.
+    with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+        E = (np.abs(S) + np.abs(np.outer(u, u)) / r) / np.outer(sigma, sigma)
+        Eq = (np.abs(v) + np.abs(u * (sy / r))) / (sigma * ystd)
     if constant.any():
         G[constant, :] = 0.0
         G[:, constant] = 0.0
         q[constant] = 0.0
+        E[constant, :] = 0.0
+        E[:, constant] = 0.0
+        Eq[constant] = 0.0
     if not (
         np.isfinite(G).all()
         and np.isfinite(q).all()
@@ -391,7 +423,9 @@ def standard_stats(
         z = params.transform_training(x) if p else np.zeros((r, 0))
         return z, params.transform_target(y)
 
-    stats = ScaledStats(n=r, zbar=zbar, ybar=0.0, G=G, q=q, yy=float(yy), blocks=None, rows=scaled_rows, yscale=ystd)
+    stats = ScaledStats(
+        n=r, zbar=zbar, ybar=0.0, G=G, q=q, yy=float(yy), blocks=None, rows=scaled_rows, yscale=ystd, entries=(E, Eq)
+    )
     return stats, params
 
 
@@ -444,7 +478,11 @@ def transformed_stats(
         shift=zeros,
         offset=zeros,
     )
-    stats = ScaledStats(n=r, zbar=zbar, ybar=ybar, G=G, q=q, yy=float(yy), blocks=None, rows=rows, yscale=yscale)
+    with np.errstate(over="ignore", invalid="ignore"):
+        entries = (np.abs(S) + np.abs(np.outer(u, u)) / r, np.abs(v) + np.abs(u * (sy / r)))
+    stats = ScaledStats(
+        n=r, zbar=zbar, ybar=ybar, G=G, q=q, yy=float(yy), blocks=None, rows=rows, yscale=yscale, entries=entries
+    )
     return stats, params
 
 
@@ -625,8 +663,8 @@ def _cholesky_solve(M: np.ndarray, b: np.ndarray, guard: float, condition_max: f
 class SolveError(NamedTuple):
     """What an OLS fit from the normal equations needs to estimate their error at any issue row (`solve_error`): the live
     columns, the Cholesky factor of their block of M, the refinement step that remains, δw = M⁻¹(b - M w) over them
-    (`correction`, the error left in w, measured; `refined`) and h_i = Σ_j M_ij² w_j² + (M w)_i² (the size of the rounding of
-    row i of M and of b)."""
+    (`correction`, the error left in w, measured; `refined`) and h_i = Σ_j E_ij² w_j² + E_b,i² (the size of the rounding of
+    row i of M and of b, E and E_b the scale of their entries' rounding: `ScaledStats.entry_scale`)."""
 
     live: np.ndarray
     factor: np.ndarray
@@ -667,7 +705,12 @@ def _residual_exact(M: np.ndarray, b: np.ndarray, w: np.ndarray) -> np.ndarray:
 
 
 def refined(
-    M: np.ndarray, b: np.ndarray, w: np.ndarray, L: Optional[np.ndarray], live: np.ndarray
+    M: np.ndarray,
+    b: np.ndarray,
+    w: np.ndarray,
+    L: Optional[np.ndarray],
+    live: np.ndarray,
+    entries: Optional[Tuple[np.ndarray, np.ndarray]] = None,
 ) -> Tuple[np.ndarray, Optional[SolveError]]:
     """The solution `w` of M w = b (over the live columns, with the factor `L` the fit used) after one step of iterative
     refinement, and its `SolveError`.
@@ -676,8 +719,10 @@ def refined(
     the factorisation's own error, the normal equations' eps·cond(Z)² against the model path's eps·cond(Z), and leaves the
     rounding of M's and b's entries from the sums. `SolveError.correction` is the next step, M⁻¹(b - M w'), the error that
     remains in w' (its residual is the first one minus M (w' - w), a product that needs no extra precision since w' - w is
-    that small: one accurate residual per fit, O(p²) beside the factorisation's O(p³)). A failed or non-finite step leaves w
-    as it was. A function of M, b and w, so of the fit's sums alone. (w, None) for no live column."""
+    that small: one accurate residual per fit, O(p²) beside the factorisation's O(p³)); `SolveError.h` is Σ_j E_ij² w'_j² +
+    E_b,i², with (E, E_b) the scale of the rounding of M's and b's entries (`entries`, `ScaledStats.entry_scale`: larger than
+    |M| and |b| where the centring cancelled; |M| and |M w'| without it). A failed or non-finite step leaves w as it was. A
+    function of M, b, w and the entries' scale, so of the fit's sums alone. (w, None) for no live column."""
     if live.size == 0 or L is None:
         return w, None
     Ml, bl = _live_block(M, b, live)
@@ -693,10 +738,13 @@ def refined(
     correction, info = dpotrs(L, np.ascontiguousarray(residual, dtype=np.float64), lower=1)
     if info != 0:
         correction = np.full(live.size, np.inf)
-    Mw = Ml @ wl
+    if entries is None:
+        Em, Eb = np.abs(Ml), np.abs(Ml @ wl)
+    else:
+        Em, Eb = _live_block(entries[0], entries[1], live)
     out = w.copy()
     out[live] = wl
-    return out, SolveError(live, L, correction, (Ml * Ml) @ (wl * wl) + Mw * Mw)
+    return out, SolveError(live, L, correction, (Em * Em) @ (wl * wl) + Eb * Eb)
 
 
 def solve_error(fitted, stats: "ScaledStats", z: np.ndarray) -> float:
@@ -733,7 +781,7 @@ def ols_fit(
     solved = _cholesky_solve(M, b, guard, condition_max)
     if solved is None:
         return None
-    w, solve = refined(M, b, *solved)
+    w, solve = refined(M, b, *solved, entries=stats.entry_scale(fit_intercept))
     intercept = float(stats.ybar - stats.zbar @ w) if fit_intercept else 0.0
     return LinearFit(w, intercept, centred=fit_intercept, solve=solve)
 
