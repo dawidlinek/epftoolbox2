@@ -387,12 +387,12 @@ class TorchModel(BaseModel):
                 )
             flat.extend(names)
         # A worker rebuilds the model with predictors=[] and the blocks (`task_inputs`); a saved file holds both, equal.
-        if (
-            predictors is not None
-            and not (isinstance(predictors, list) and not predictors)
-            and list(predictors) != flat
-        ):
-            raise ValueError(f"{where}: give predictors or inputs, not both (inputs are flattened into the predictors)")
+        given = predictors is not None and not (isinstance(predictors, list) and not predictors)
+        if given and (callable(predictors) or list(predictors) != flat):
+            raise ValueError(
+                f"{where}: give predictors or inputs, not both: inputs are flattened into the predictors (a saved file holds "
+                "both, the predictors being the blocks' names one after another; leave them out when you edit the blocks)"
+            )
         return flat
 
     def _setup(
