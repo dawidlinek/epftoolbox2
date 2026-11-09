@@ -65,6 +65,7 @@ model = TorchModel(module=MLP, module_params={"hidden": [256, 128], "dropout": 0
 | `scaler` | `"standard"` | How the inputs are scaled; `output="day"` takes any scaler (the Invariant, `{"name": "asinh", "params": {"standardise": False}}`, did much better on price inputs, see [the research's recipe](#the-researchs-recipe-reproduced)), `output="period"` only `"standard"` |
 | `name` | `"torch"` | The model's name |
 | `module_hash` | `None` | Set by a saved file: the hash of the module's file and its package's version (for a class with no module file, a `session-` token) when it was saved (see [Saving and loading](#saving-and-loading)) |
+| `normalise_by`, `bounds`, `zero_when` | `None` | A per-row target, as for every model, with `output="period"`; a model with `output="day"` refuses them before any fit (see [Generation targets](/epftoolbox2/models/common-parameters/#generation-targets)) |
 
 `stack`, `pad_to`, `tf32`, `device`, the loss and the learning rate change the numbers and are compared when a run resumes.
 
@@ -213,7 +214,9 @@ hourly = MLPHourlyModel(lear_x, hidden=[64], dropout=0.0, seeds=3, name="mlp_hou
 `TorchModel(module=MLP, module_params={"hidden": [64]}, output="period", ...)`, forecast for forecast. Every other parameter is
 `TorchModel`'s, with its defaults: `training_window=728`, `refit="7D"`, `loss="l1"`, `lr=3e-4`, `max_epochs=300`,
 `patience=20`, `batch_size=64`, `early_stopping=0.2`, `weight_decay=0.0`, `stack="auto"`, `pad_to=None`, `device="auto"`,
-`tf32=False`, `random_state=0`, `newest_target="d-1"`, `binary_mask=None`, `scaler="standard"`, `module_hash=None`.
+`tf32=False`, `random_state=0`, `newest_target="d-1"`, `binary_mask=None`, `scaler="standard"`, `module_hash=None`;
+`MLPHourlyModel` also takes `normalise_by=None`, `bounds=None` and `zero_when=None` ([Generation
+targets](/epftoolbox2/models/common-parameters/#generation-targets)), which `MLPDailyModel`, of day units, doesn't.
 
 One network per horizon with an output per hour beat 24 single-hour networks in the research (DE benchmark 3.550 against 3.623
 EUR/MWh) at a 24th of the fits. Several configurations matter more than several seeds, and both help: the top 4 configurations
