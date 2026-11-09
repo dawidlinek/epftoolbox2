@@ -697,7 +697,18 @@ def test_a_pooled_unit_is_one_fit_over_every_period_s_rows_by_hand(market, trans
     """Each predictor on its period's own row (`price_d-1` that hour's price), `period` the hour, every period's rows of the
     span stacked, one fit; each forecast mapped back with its hour's Invariant or the pooled one: to 1e-10 of the hand fit,
     across the spring switch."""
-    records = by_key(PooledOLS(target_transform=transform).run(market, *WEEK, horizon=2)._results)
+    stacked = []
+    real = PooledOLS._fit_model
+
+    def spy(self, train_x, train_y):
+        stacked.append(train_x[:, -1].copy())  # the scaled `period`, increasing with the period
+        return real(self, train_x, train_y)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(PooledOLS, "_fit_model", spy)
+        records = by_key(PooledOLS(target_transform=transform).run(market, *WEEK, horizon=2)._results)
+    for periods in stacked:  # by date, then period: the period starts again on each of the W dates
+        assert (np.diff(periods) < 0).sum() == WINDOW - 1
     worst = 0.0
     for issue in pd.date_range(*WEEK).date:
         for hz in (1, 2):
@@ -744,13 +755,15 @@ def test_a_call_holds_every_day_of_the_block_the_frame_has_padded_with_its_first
     ref = model().run(data, "2023-03-21", "2023-03-22", horizon=1)
     assert ref.skipped == {"missing_test_predictors": 24}
     expected = 6 if kind == "day" else 6 * 24 - 2
-    assert [len(np.unique(call, axis=0)) for call in model.calls] == [expected]
+    ((call,),) = [model.calls]
+    assert len(np.unique(call, axis=0)) == expected and (call[expected:] == call[0]).all()
 
     model.calls.clear()
     friday = market[dates_of(market) <= np.datetime64("2023-03-24")]
     model().run(friday, "2023-03-21", "2023-03-21", horizon=1)
     ((call,),) = [model.calls]
-    assert call.shape[0] == length and len(np.unique(call, axis=0)) == (5 if kind == "day" else 5 * 24)
+    real = 5 if kind == "day" else 5 * 24
+    assert call.shape[0] == length and len(np.unique(call, axis=0)) == real and (call[real:] == call[0]).all()
 
 
 @pytest.mark.parametrize("kind", KINDS)
@@ -1080,3 +1093,21 @@ def test_with_validation_each_window_is_a_plain_run_over_it(market, kind):
     for name, (start, end) in (("validation", validation), ("test", test)):
         alone = keyed(model(**SEES_CALL).run(market, start, end, horizon=2)._results)
         assert keyed([r for r in records if r["window"] == name], "window") == alone
+
+
+def test_a_date_s_input_is_its_last_row_with_a_value(market):
+    """Where a date's rows hold two values (an issue date, which the day-level check doesn't read: the probes perturb its cells
+    one by one), its input is the value on its last row with one, in period order: as if every row of the date held it."""
+    issue = "2023-03-22"
+    on_d = dates_of(market) == np.datetime64(issue)
+    column = "price_h08_d-1"
+    last, early = market.copy(), market.copy()
+    last.loc[on_d, column] = 500.0
+    early.loc[on_d & (market.index.hour < 23), column] = 500.0  # the last row keeps its value
+    late = market.copy()
+    late.loc[on_d & (market.index.hour == 23), column] = 500.0  # the last row alone
+    base = predictions(DayRidge().run(last, issue, issue, horizon=1)._results)
+    assert predictions(DayRidge().run(late, issue, issue, horizon=1)._results) == base
+    assert predictions(DayRidge().run(early, issue, issue, horizon=1)._results) == predictions(
+        DayRidge().run(market, issue, issue, horizon=1)._results
+    )
