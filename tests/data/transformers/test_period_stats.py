@@ -149,6 +149,33 @@ def test_it_rejects_data_off_its_grid_name_clashes_and_a_plain_index():
         PeriodStatsTransformer("x").transform(df.reset_index(drop=True))
 
 
+def test_a_utc_index_warns_and_a_duplicated_timestamp_is_refused_as_in_daily_stats():
+    """A UTC index groups UTC hours, which in Kolkata (UTC+05:30) are 10:30 to 11:29 local: the information set, reading the
+    frame's local hours, would take a realised series as known half an hour early, so it warns as DailyStatsTransformer does.
+    A timestamp twice could make an hour with a missing slot look whole: both transformers refuse it."""
+    from epftoolbox2.data.transformers import DailyStatsTransformer
+
+    df = frame(SWITCHES["autumn"])
+    with pytest.warns(UserWarning, match="index is UTC"):
+        PeriodStatsTransformer("x").transform(df.tz_convert("UTC"))
+    twice = pd.concat([df.drop(df.index[5]), df.iloc[[4]]]).sort_index()
+    for transformer in (PeriodStatsTransformer("x"), DailyStatsTransformer("x", freq="15min")):
+        with pytest.raises(ValueError, match="1 duplicate timestamp"):
+            transformer.transform(twice)
+
+
+def test_data_coarser_than_freq_is_refused_rather_than_all_nan():
+    """Hourly data with the default freq="15min" has no hour of four slots: an error, not a column of NaN. With its own freq it
+    runs; a column without any value still runs (its hours have their rows), NaN as it should be."""
+    hourly = frame(SWITCHES["spring"], freq="1h")
+    with pytest.raises(ValueError, match="no hour of the data has its 4 slots of 15min"):
+        PeriodStatsTransformer("x").transform(hourly)
+    assert PeriodStatsTransformer("x", freq="1h").transform(hourly)["x_hour_mean"].notna().any()
+    empty = frame(SWITCHES["spring"]).assign(x=np.nan)
+    assert PeriodStatsTransformer("x").transform(empty)["x_hour_mean"].isna().all()
+    assert PeriodStatsTransformer("x").transform(hourly.iloc[:0].asfreq("15min")).empty
+
+
 def test_one_statistic_alone_and_the_columns_in_order():
     df = frame(SWITCHES["spring"])
     assert list(PeriodStatsTransformer("x", stats="dev").transform(df).columns) == ["x", "y", "x_hour_dev"]

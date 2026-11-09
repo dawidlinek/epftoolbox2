@@ -4,7 +4,7 @@ from it, the within-hour shape of quarter-hourly prices or generation."""
 import numpy as np
 import pandas as pd
 
-from ._daily import as_column_list, check_new_columns, parse_step, slot_of_day
+from ._daily import as_column_list, check_index, check_new_columns, check_unique_index, parse_step, slot_of_day
 from .base import Transformer
 
 _STATS = ("mean", "dev")
@@ -29,6 +29,10 @@ class PeriodStatsTransformer(Transformer):
     its slots has a row and holds a value; otherwise both are NaN on its rows. Hours are those of the local clock, each
     occurrence on its own: the hour the clocks repeat in autumn has eight rows, two hours of four, and the one they skip in
     spring has none.
+
+    The index must be the market's local time (a UTC index groups UTC hours, which in a zone half an hour off UTC aren't its
+    hours: a warning says so), without duplicate timestamps, and some hour of the data must have its slots: hourly data with
+    the default `freq="15min"` raises rather than give NaN everywhere.
 
     A row of an hour only gets statistics of that hour. The information set judges both columns at the last slot of the
     hour (10:45 for 10:00 to 11:00 on 15-minute data), by the rule of the column they were built from: the deviation at
@@ -71,9 +75,8 @@ class PeriodStatsTransformer(Transformer):
             raise ValueError(f"stats must be a non-empty subset of {list(_STATS)}, got {unknown or self.stats}")
 
     def transform(self, df: pd.DataFrame) -> pd.DataFrame:
-        index = df.index
-        if not isinstance(index, pd.DatetimeIndex):
-            raise ValueError("PeriodStatsTransformer needs a DatetimeIndex")
+        index = check_index(df, "PeriodStatsTransformer")  # a UTC index groups UTC hours: it warns
+        check_unique_index(index, "PeriodStatsTransformer")
         slot_of_day(index, self._step, self.freq)  # rejects data off the freq grid
         names = [f"{column}_{self._word}_{stat}" for column in self.columns for stat in self.stats]
         check_new_columns(df, names, type(self).__name__)
@@ -81,6 +84,12 @@ class PeriodStatsTransformer(Transformer):
         keys = hour_starts(index)
         values = df[self.columns].astype(float).reset_index(drop=True)
         groups = values.groupby(keys)
+        if len(index) and groups.size().max() < self._slots:
+            raise ValueError(
+                f"PeriodStatsTransformer: no hour of the data has its {self._slots} slots of {self.freq}, so every statistic "
+                f"would be NaN: the rows are further apart than freq={self.freq!r}. Pass the data's own slot length "
+                "(freq='1h' for hourly data)."
+            )
         complete = groups.count().eq(self._slots)
         means = groups.mean().where(complete).reindex(keys).to_numpy()
         per_stat = {"mean": means, "dev": values.to_numpy() - means}

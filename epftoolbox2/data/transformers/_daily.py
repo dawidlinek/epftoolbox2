@@ -48,6 +48,13 @@ def check_index(df: pd.DataFrame, who: str) -> pd.DatetimeIndex:
     return index
 
 
+def check_unique_index(index: pd.DatetimeIndex, who: str) -> None:
+    """Refuse an index with a timestamp twice: a period's rows would be counted twice and could pass for a missing one."""
+    if index.has_duplicates:
+        duplicated = index[index.duplicated()].unique()
+        raise ValueError(f"{who}: the index has {len(duplicated)} duplicate timestamp(s), e.g. {duplicated[0]}")
+
+
 def local_days(index: pd.DatetimeIndex) -> pd.DatetimeIndex:
     """Naive midnight of each row's local date."""
     wall = index.tz_localize(None) if index.tz is not None else index

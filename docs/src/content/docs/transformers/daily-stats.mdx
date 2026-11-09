@@ -43,7 +43,8 @@ statistics it needs the whole day: a missing value at 03:00 makes the day's peak
 
 A day gets statistics only when every slot it has holds a value: 23, 24 or 25 hours on a time-zone-aware index
 (DST switch days), 24 after [`DSTNormalizeTransformer`](/epftoolbox2/transformers/dst-normalize/). Days with a
-missing value, and the partial days at either end of the data, get NaN rather than a statistic of part of the day.
+missing value, and the partial days at either end of the data, get NaN rather than a statistic of part of the day. An
+index with a timestamp twice raises: a duplicated row could make a day with a missing slot look complete.
 
 ## Information Set
 

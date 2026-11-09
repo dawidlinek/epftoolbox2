@@ -6,6 +6,7 @@ from ._daily import (
     as_column_list,
     check_index,
     check_new_columns,
+    check_unique_index,
     local_days,
     parse_step,
     slot_of_day,
@@ -67,6 +68,7 @@ class DailyStatsTransformer(Transformer):
 
     def transform(self, df: pd.DataFrame) -> pd.DataFrame:
         index = check_index(df, "DailyStatsTransformer")
+        check_unique_index(index, "DailyStatsTransformer")
         slot_of_day(index, self._step, self.freq)  # rejects data off the freq grid
         names = [f"{column}_day_{stat}" for column in self.columns for stat in self.stats]
         check_new_columns(df, names, type(self).__name__)

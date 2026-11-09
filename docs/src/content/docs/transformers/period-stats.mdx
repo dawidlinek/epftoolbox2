@@ -43,6 +43,15 @@ Hours are those of the local clock, each occurrence on its own:
 
 On hourly data (`freq="1h"`) the mean is the value itself and every deviation is 0.
 
+It raises rather than guess:
+
+- **Data coarser than `freq`.** Hourly data with the default `freq="15min"` has no hour of four slots, so every statistic would be
+  NaN: pass the data's own slot length.
+- **A timestamp twice.** A duplicated row could make an hour with a missing slot look whole.
+
+On a UTC index the hours are UTC hours, which in a zone half an hour off UTC (Asia/Kolkata) aren't the market's, and the
+transformer warns: run [`TimezoneTransformer`](/epftoolbox2/transformers/timezone/) first.
+
 ## Information Set
 
 The statistics of an hour appear on the rows of that hour and use only that hour, never a later one. The
