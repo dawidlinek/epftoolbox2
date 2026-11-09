@@ -4,7 +4,8 @@ A forecast issued on day D at the issue time (e.g. 11:45 Brussels, before the 12
 only use values published by then. Each base column gets an `Availability` rule; predictor names are parsed
 (`x`, `x_d-k`, `x_d+k`, `x_h-k`, ...) to find the base column and the delivery time of the value they hold (a
 DailyProfileTransformer column, `x_h05` or `x_h05_d-1`, is delivered in the slot it names, not at the row, and a
-DailyStatsTransformer column, `x_day_max` or `x_day_max_d-1`, in the last slot of the day it aggregates); and
+DailyStatsTransformer column, `x_day_max` or `x_day_max_d-1`, in the last slot of the day it aggregates, and a
+PeriodStatsTransformer column, `x_hour_mean` or `x_hour_dev`, in the last slot of its row's hour); and
 `InformationSet.check` evaluates every expanded predictor for every (period, horizon) before any model is fitted.
 `leakage_probe` tests the same boundary empirically: it perturbs every value that is not yet known at issue time
 and checks that the forecasts don't move. `positive_control` tests the probe: it perturbs the freshest values that
@@ -72,7 +73,10 @@ _SLOT_MINUTES = {"h": 60, "s": 15}
 # local day. No sign, so they never parse as a shift. `is_day_mean` and `warsaw_is_day_max` are not such columns but
 # Open-Meteo's `is_day` aggregated over locations (`_open_meteo_common.aggregated_variable_names`), whoever's rule
 # reads them, so a column named `is` or `..._is` can't be told apart and is read as a plain column.
-_DAY_AGGREGATE = re.compile(r"^(?P<column>.+)(?<!_is)(?<!^is)_day_(?:min|max|mean|last)$")
+_DAY_AGGREGATE = re.compile(r"^(?P<column>.+)(?<!_is)(?<!^is)_day_(?:min|max|mean|last|peak)$")
+# PeriodStatsTransformer's suffixes (`data.transformers.period_stats`): the column's mean over the row's hour, or the row's
+# deviation from it. No sign, so they never parse as a shift.
+_HOUR_AGGREGATE = re.compile(r"^(?P<column>.+)_hour_(?:mean|dev)$")
 
 
 # The note of a use that is late on a training row, not on the issue day's.
@@ -1135,6 +1139,15 @@ class ResolvedColumn:
         return _DAY_AGGREGATE.match(self.base) is not None
 
     @property
+    def hour_aggregate(self) -> bool:
+        """Whether `base` names a PeriodStatsTransformer column (`x_hour_mean`, `x_d-1_hour_dev`).
+
+        Such a column holds a statistic of its row's hour (a deviation: of the row's value from the hour's mean), the same
+        mean on every row of the hour, so it is known when the last slot of that hour is, whatever the row's slot.
+        """
+        return _HOUR_AGGREGATE.match(self.base) is not None
+
+    @property
     def series(self) -> str:
         """The base column at the bottom of what this was built from: the one a rule would be declared for."""
         return self.base if self.built_from is None else self.built_from.series
@@ -1169,9 +1182,12 @@ def _profile_slot(base: str) -> Optional[Tuple[int, int]]:
 
 
 def _built_from_name(base: str) -> Optional[str]:
-    """The column a DailyProfileTransformer or DailyStatsTransformer column `base` was built from, with its own shifts
-    (`x_d-1` for `x_d-1_h05` and `x_d-1_day_max`), or None for a column that is neither."""
+    """The column a DailyProfileTransformer, DailyStatsTransformer or PeriodStatsTransformer column `base` was built from,
+    with its own shifts (`x_d-1` for `x_d-1_h05`, `x_d-1_day_max` and `x_d-1_hour_mean`), or None for a column that is none
+    of them."""
     match = _PROFILE_SLOT.match(base) if _profile_slot(base) is not None else _DAY_AGGREGATE.match(base)
+    if match is None:
+        match = _HOUR_AGGREGATE.match(base)
     return None if match is None else match["column"]
 
 
@@ -1386,10 +1402,11 @@ class InformationSet:
         before any layer: its availability is its upstream's issue time, which no rule, assumption or pattern can replace
         (`refuse_rules_on_chained_columns` refuses a rule that names one).
 
-        A DailyProfileTransformer or DailyStatsTransformer column first looks for a user's rule on its own name, which
-        describes the series it was built from; otherwise it takes the whole resolution of the column it was built from,
-        so `generation_solar_forecast_day_max` is judged by `generation_*_forecast`, not caught by `generation_*`. Either
-        way the value is read at its slot or the day's last slot, and the built-from column's source zone guard applies.
+        A DailyProfileTransformer, DailyStatsTransformer or PeriodStatsTransformer column first looks for a user's rule on its
+        own name, which describes the series it was built from; otherwise it takes the whole resolution of the column it was
+        built from, so `generation_solar_forecast_day_max` is judged by `generation_*_forecast`, not caught by `generation_*`.
+        Either way the value is read at its slot, the day's last slot or its hour's, and the built-from column's source zone
+        guard applies.
         An exact rule on a shifted name (`x_h05_d+1`) describes that very column, as for any other column.
         """
         chain = parse_predictor(name)
@@ -3566,6 +3583,8 @@ def _available_array(
     no period is read as it always was.
     """
     if col.built_from is not None:
+        if col.hour_aggregate:
+            return _hour_aggregate_available(col, rule, day, minute, step, ctx, first, issue_day)
         # A profile column holds, on every row of a local day, the column it was built from at its slot of that day:
         # `x_h05_d-1` on row D is `x` at 05:00 on D-1 (the shifts after the slot pick the day, and none of them is a
         # source's lead), `x_d+1_h05` is `x_d+1` at 05:00 on D. A repeated autumn slot is its first occurrence, the
@@ -3607,6 +3626,51 @@ def _available_array(
                 out, _over_time_available(col, rules, day, minute, step, ctx, first, issue_day, daily, read)
             )
     return out
+
+
+def _hour_aggregate_available(
+    col: ResolvedColumn,
+    rule: Rule,
+    day: np.ndarray,
+    minute: np.ndarray,
+    step: int,
+    ctx: _Context,
+    first: np.ndarray,
+    issue_day: Union[int, np.ndarray],
+) -> np.ndarray:
+    """`_available_array` of an hour aggregate (`x_hour_mean`, `x_hour_dev`): a statistic of the column it was built from over
+    every slot of the hour the row is read from, after the shifts after the aggregate, so it is known when the latest of them
+    is. Each rule's availability never decreases with the slot's time, so that is the hour's last slot (10:45 for the hour from
+    10:00 on 15-minute data; a deviation's own slot is one of the hour's), in the occurrence of the row's hour: the transformer
+    aggregates each occurrence of a repeated autumn hour on its own. Under rules over time an earlier slot can be known after
+    the last: the aggregate is known when every slot of its hour is."""
+    reached, last, occurrence = _hour_last_slot(col.shifts, day, minute, first, step, ctx)
+    # The issue day the shifts move the row to, which `as_of` and `weather_cutoff` rules read.
+    moved = issue_day + reached - day
+    if not over_time(rule):
+        return _available_array(col.built_from, rule, reached, last, step, ctx, occurrence, moved)
+    latest = np.full(len(reached), -np.inf)
+    for back in np.arange(0.0, 60.0, step):
+        known = _available_array(col.built_from, rule, reached, last - back, step, ctx, occurrence, moved)
+        latest = np.maximum(latest, known)
+    return latest
+
+
+def _hour_last_slot(
+    shifts: Sequence[Shift], day: np.ndarray, minute: np.ndarray, first: np.ndarray, step: int, ctx: _Context
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """For the rows (`day`, `minute`) read through `shifts`: the local day (after `ctx.day`) and the wall-clock minute of the
+    last slot of the hour they land in, and whether to read it at its first occurrence, as the row they land on is (a repeated
+    autumn hour is two hours, each occurrence's; a naive index's averaged one is complete at the second). An hour the clocks
+    skip has no row: its last slot moves forward with it, as any wall time a shift lands on."""
+    instants, wall = _shift_rows(day, minute, shifts, ctx, first)
+    if ctx.naive:
+        occurrence = np.zeros(len(wall), dtype=bool)
+    else:
+        occurrence = _to_instants(wall, ctx.data_zone, ctx) == instants
+    reached = np.floor(wall / 1440.0)
+    last = np.floor((wall - reached * 1440.0) / 60.0) * 60.0 + 60.0 - step
+    return reached, last, occurrence
 
 
 # The kinds whose value on a daily row is the whole date's, delivered in every slot of it.
@@ -3832,13 +3896,19 @@ def _delivered_span(
     A plain column is delivered in one slot, the row's with its shifts applied. A profile holds the column it was built
     from at its slot, on the day the shifts after the slot reach, and a day aggregate that column over every slot of that
     day, so `x_day_max_d-1` runs from 00:00 to the last slot of D-1 on 23-, 24- and 25-hour days alike, and an aggregate
-    of an hour lag (`x_h-12_day_max`) over two days.
+    of an hour lag (`x_h-12_day_max`) over two days. An hour aggregate holds it over every slot of the hour the row lands in.
     """
     day, minute = np.asarray(day), np.asarray(minute, dtype=float)
     later = np.zeros(len(day), dtype=bool)  # no rows, only (day, period): read as the row the model forecasts from
     if col.built_from is None:
         wall = _shifted_wall(col.shifts, day, minute, later, ctx)
         return wall, wall
+    if col.hour_aggregate:
+        # Every slot of the hour the row lands in, the first to the last.
+        reached, last, _ = _hour_last_slot(col.shifts, day, minute, later, step, ctx)
+        start, _ = _delivered_span(col.built_from, reached, last - (60.0 - step), step, ctx)
+        _, end = _delivered_span(col.built_from, reached, last, step, ctx)
+        return start, end
     reached = _shifted_day(col.shifts, day, minute, later, ctx)
     if col.slot is not None:
         return _delivered_span(col.built_from, reached, np.full(len(reached), float(col.slot[0])), col.slot[1], ctx)
