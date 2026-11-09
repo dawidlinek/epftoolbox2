@@ -474,22 +474,9 @@ def _fit_one_numpy(
         return SKIP_MISSING_TEST_ROW
     list_id, predictors, mask_of = task_list(cfg, inputs.expanded, hour, hz, position)
 
-    def fit(member, scalable_mask, index=0):
+    def fit(member, scalable_mask):
         return _fit_member(
-            arrays,
-            cfg,
-            hour,
-            hz,
-            day,
-            member,
-            newest,
-            test,
-            list_id,
-            predictors,
-            scalable_mask,
-            inputs.model,
-            engine,
-            member_index=index,
+            arrays, cfg, hour, hz, day, member, newest, test, list_id, predictors, scalable_mask, inputs.model, engine
         )
 
     members = cfg.get("members")
@@ -500,8 +487,8 @@ def _fit_one_numpy(
         prediction, coefs, extra = fitted
     else:
         outcomes = []
-        for index, member in enumerate(members):
-            fitted = fit(member, task_mask(cfg, window, mask_of, member), index)
+        for member in members:
+            fitted = fit(member, task_mask(cfg, window, mask_of, member))
             if isinstance(fitted, str):
                 return _tagged(fitted, member)
             outcomes.append(fitted)
@@ -560,7 +547,6 @@ def _fit_member(
     scalable_mask,
     model,
     engine: Optional[StatsFitter] = None,
-    member_index: int = 0,
 ) -> Union[Tuple[float, list, Dict], str]:
     """One training window's forecast of the task (`hour`, `hz`, day id `day`) issued from row `test`: (the prediction in target
     units, the coefficients, a matching list's record fields), or a skip reason. Its rows are `member_rows`: those of
@@ -573,7 +559,7 @@ def _fit_member(
     `engine` (the engine's, `_engine_worker.EngineFits`) is handed the fit as selected here (`StatsFit`: the rows, filters, mask
     and skips are this function's) and fits it from shared statistics; where it hands the fit back (None), the scaler and
     `_fit_predict` below fit it, on the same values, as without it. `_fit_predict` runs in `fit_scope` of
-    `FitUnit(hour, hz, the issue date, list_id, member_index)` and `member`."""
+    `FitUnit(hour, hz, the issue date, list_id, the member's place among config["members"])` and `member`."""
     days = arrays["days"]
     train = member_rows(days, day, member, hz, newest)
 
@@ -633,6 +619,8 @@ def _fit_member(
         columns=predictors,
     )
     issue_date = datetime.date.fromisoformat(cfg["test_start"]) + datetime.timedelta(days=day - cfg["offset"])
+    members = cfg.get("members")
+    member_index = 0 if members is None else list(members).index(member)  # a list's windows are distinct
     try:
         with fit_scope(FitUnit(hour, hz, issue_date, list_id, member_index), member):
             pred, coefs = model._fit_predict(train_x, train_y, test_x)
