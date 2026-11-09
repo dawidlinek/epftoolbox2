@@ -22,7 +22,7 @@ with `_co_batch_items`) or has a card (`_card`, a family with an extra or weight
   the later days the frame has, the issue day's forecasts on the frame cut after its date (what a run on that day has) must
   also be those of the whole frame, to the bit (`issue_day_cut`), within the rerun's noise margin as any other move. For a model
   that reads history (`models._history`), whose series read the target day's known-ahead values on later rows, the frame is cut
-  after each target day D + h instead (`target_day_cut`); one that does both is cut both ways (`frame_cut`).
+  after what each of its forecasts reads instead (`target_day_cut`), whatever else it declares (`frame_cut`).
 
 A model's status is `leak`, `inconclusive` (nothing moved, but that can't be vouched for) or `ok`, and only `ok` passes.
 
@@ -355,8 +355,9 @@ class VerifyReport:
             cut = None if batch is None else batch.cut
             if cut is not None and not cut.ok:
                 line = (
-                    f"{len(cut.changed)} of {cut.forecasts} forecasts differ when the frame ends on "
-                    f"{cut.ends or check.run_day}, as a run on that day has it (max |change| {cut.max_abs_change:.6g}), e.g. "
+                    f"{len(cut.changed)} of {cut.forecasts} forecasts differ when the frame ends "
+                    f"{cut.ends or 'on ' + check.run_day}, as a run on that day has it (max |change| "
+                    f"{cut.max_abs_change:.6g}), e.g. "
                     "(period, horizon) "
                     f"{cut.changed[:_EXAMPLES]}; in only one run: {cut.missing[:_EXAMPLES]}: they depend on which later days "
                     "their call holds, so a backtest and a run on the day differ"
@@ -529,7 +530,7 @@ def verify_model(
     `rerun` runs the unperturbed issue day twice first (`rerun_check`), and `co_batch` runs the probe, and the control if it
     runs, once more over runs widened to the other items of the issue day's call (`co_batch_probe`), and for a model that predicts
     its refit blocks in one call compares the issue day's forecasts on the frame cut after its date (`issue_day_cut`), and for a
-    model that reads history on the frame cut after each target day (`target_day_cut`); None runs
+    model that reads history on the frame cut after what each forecast reads (`target_day_cut`); None runs
     each for a model
     `checked_by_default` says, and True or False for any. A model that names no items (no `_co_batch_items`) predicts each issue
     day on its own, unless it declares `_predicts_together`, which makes it `inconclusive`. `device` is set on every copy of a
@@ -690,7 +691,7 @@ def verify_model(
             else:
                 batch = CoBatchResult(run_day, others, *probe_and_control(run_day, (others[0], others[-1]), columns))
                 # Its call holds the later days the frame has: D's forecasts on the frame a run on D has (cut after D, or for a
-                # sequence model after each target day) must be the same.
+                # sequence model after what each forecast reads) must be the same.
                 batch.cut = frame_cut(
                     probed,
                     unperturbed,
