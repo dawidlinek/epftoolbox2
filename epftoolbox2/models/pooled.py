@@ -63,7 +63,8 @@ class PooledModel:
         name: The name of the pooled model, which names its results in each zone; the inner model's name if not given.
 
     Refused in this step: a predictor function of `ctx`, a list of training windows, `newest_target="published"` (each zone
-    issues on its own clock, and one fit serves them all) and `NaiveModel`, which fits nothing. A shared fit is made by the
+    issues on its own clock, and one fit serves them all), `NaiveModel`, which fits nothing, and a model of day or pooled
+    units (`_unit_kind`, `models._units`), which fits every period of a day at once. A shared fit is made by the
     earliest issue instant of its day over the zones, so `ModelPipeline` judges every zone's training rows as of it.
     """
 
@@ -123,6 +124,11 @@ def check_pooled_model(model: Any) -> None:
     if model._fits_nothing:
         raise ValueError(
             f"{what}: {type(model).__name__} fits nothing, so there is no fit to pool. Run it in each zone."
+        )
+    if getattr(model, "_unit_kind", "period") != "period":
+        raise ValueError(
+            f"{what}: {type(model).__name__} fits {model._unit_kind} units (every period of a day at once), which can't be "
+            "pooled over zones in this step. Run it in each zone."
         )
     if not type(model)._can_refit():
         raise ValueError(

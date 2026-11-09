@@ -82,6 +82,9 @@ of any runtime entry or of a weight file's hash refuses a resume (`allow_manifes
 were found doesn't, as that differs between machines that hold the same files. A core model has none of the three keys, so its
 manifests are as before.
 
+A model of day or pooled units (`models._units`) adds `unit_kind` ("day" or "pooled") and `target_transform` ("per_period" or
+"pooled"), both compared: a change of either moves every forecast. A period model, every core model, has neither key.
+
 An ensemble's file has a manifest of its own shape (`"kind": "ensemble"`, written by `epftoolbox2.ensembles._compute`). It says
 which results it was computed from and is never compared, as the file is recomputed from them every time. No model may
 resume into it.
@@ -171,6 +174,9 @@ _COMPARED_FIELDS += ("pooled",)
 # dtype, threads per fit, ...) and its weights (each file's sha256; where they were found is recorded, not compared): either can
 # move every forecast (t0 0.5.0 against its git head moved single hours by up to 161 EUR/MWh). No key for a core model.
 _COMPARED_FIELDS += ("runtime", "weights")
+# What one fit of a model of day or pooled units holds (`models._units`): `unit_kind` "day" or "pooled", and how its targets
+# are transformed, "per_period" or "pooled"; no key for a period model. Either changes every forecast.
+_COMPARED_FIELDS += ("unit_kind", "target_transform")
 
 # How a run chooses a forecast's training rows: `Manifest.training_cut`.
 TRAINING_CUT_BY_DATE = {"rows": "dates"}
@@ -323,6 +329,10 @@ class Manifest:
     # Every set of weight file hashes ({file: sha256}) the file's forecasts were made with, once there are two or more (a resume
     # over other weights, allowed); None (and no key) while there is one. Provenance: never compared, and a resume warns.
     weights_history: Optional[List[Dict[str, str]]] = None
+    # A model of day or pooled units (`models._units`): "day" or "pooled", and its targets' transform, "per_period" (each period's
+    # own Invariant) or "pooled"; None (and no key) for a period model. Compared on resume.
+    unit_kind: Optional[str] = None
+    target_transform: Optional[str] = None
 
     def differences(self, existing: "Manifest", skip: Sequence[str] = ()) -> List[str]:
         """Human-readable list of compared fields that disagree with `existing`; empty if compatible."""
@@ -389,6 +399,9 @@ class Manifest:
         if out["pooled"] is None:  # fitted on one zone's rows
             del out["pooled"]
         for name in ("card", "runtime", "weights", "weights_history"):  # a core model, or one set of weights
+            if out[name] is None:
+                del out[name]
+        for name in ("unit_kind", "target_transform"):  # a period model
             if out[name] is None:
                 del out[name]
         return out
@@ -531,8 +544,9 @@ def _package_version() -> str:
 def _block_params(model: Any) -> Dict[str, bool]:
     """`{"block_predict": ...}` for a model whose class defines `_predict_block`: whether its refit units predict their blocks
     in one call (`models._worker.block_calls`), so that a resume refuses a switch, since a call of a block and one row at a time
-    needn't agree to the bit. Nothing for any other model, whose manifest stays as it was."""
-    if getattr(type(model), "_predict_block", None) is None:
+    needn't agree to the bit. Nothing for any other model, whose manifest stays as it was, nor for a pooled model, whose units
+    always predict their blocks in one call (`unit_kind` says so)."""
+    if getattr(type(model), "_predict_block", None) is None or getattr(model, "_unit_kind", "period") != "period":
         return {}
     from ..models._worker import block_calls  # the models import this module
 
@@ -606,6 +620,9 @@ def build_manifest(
         through = (date.fromisoformat(test_end) + timedelta(days=horizon)).isoformat()
         actuals = {"through": through, "hash": hashes.of_columns(through, [target])}
     carded = manifest_fields(model, window_starts(windows, test_start))  # nothing for a core model
+    from ..models._units import manifest_fields as unit_fields  # the models import this module
+
+    units = unit_fields(model)  # nothing for a period model
     return Manifest(
         model_class=type(model).__name__,
         predictors=sorted(set(used_columns) - {target}),
@@ -647,6 +664,7 @@ def build_manifest(
         fit_path=fit_path,
         pooled=getattr(model, "_pooled", None),  # a PooledModel's member (`models._pooled.member_of`)
         **carded,
+        **units,
     )
 
 

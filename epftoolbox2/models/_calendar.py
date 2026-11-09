@@ -392,9 +392,12 @@ class FitUnit(NamedTuple):
     its own from the one fit. `member` is the index of its training window in the model's members (`resolve_training_window`): a
     model with a list of windows fits one unit per member, and a forecast averages its members' units. With `refit="auto"` the
     anchor is that of the member's own rule (`member_rules`), so the members of one forecast can have different anchors.
+
+    `period` is None for a day or pooled unit (`models._units`), one fit of every period of the day at once: its forecasts are
+    those of every period of its horizon, issue days and list.
     """
 
-    period: int
+    period: Optional[int]
     horizon: int
     anchor: datetime.date
     list_id: Optional[int]
