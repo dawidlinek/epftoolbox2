@@ -307,7 +307,9 @@ an issue day it didn't sample.
   LassoCV or LEAR fit with two near-copy inputs (1 − |correlation| at most 1e-5); within those bounds the largest gaps measured
   were 4.8e-9 (OLS), 4.6e-9 (LassoCV), 6.1e-10 (Ridge) and 1.1e-9 (LEAR) EUR/MWh. Their manifests record
   `fit_path: "engine-2"`, compared on resume, so results written with the engine on refuse a resume with it off and the other way
-  round (`allow_manifest_mismatch=True` overrides), and as provenance how many fits came from the sums. LEAR's `solver="cd"`
+  round (`allow_manifest_mismatch=True` overrides), and as provenance how many fits came from the sums; `"engine-1"` results
+  of a development build (before OLS's refinement step) are refused too, for every class, although only OLS's numbers moved,
+  so for LEAR, Ridge and LassoCV `allow_manifest_mismatch=True` resumes them safely. LEAR's `solver="cd"`
   (`LEARModel.lago()`'s) is fitted as with `"off"`, to the bit. **`engine="check"`** is `"on"` with one fit in about 50 also
   fitted as `"off"` fits it: the results are `"on"`'s, the manifest records the gaps as provenance (`engine_check`: fits, largest
   absolute and relative gap, gaps that aren't finite, how many chose another kink or penalty, fits `"off"` couldn't fit), and a

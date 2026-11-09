@@ -355,8 +355,8 @@ class Manifest:
                 if name == "fit_path":
                     note = (
                         " (None: the model path, engine off or a model the engine fits on it; 'engine-2': fits from shared "
-                        "statistics, ModelPipeline(engine='on'), 'engine-1' the same before OLS's refinement step; they agree "
-                        "within the engine's tolerances, not to the bit)"
+                        "statistics, ModelPipeline(engine='on'), 'engine-1' the same before OLS's refinement step, which "
+                        "moved OLS's numbers alone; they agree within the engine's tolerances, not to the bit)"
                     )
                 out.append(f"{name}: {theirs!r} (existing results) vs {mine!r} (this run){note}")
         return out
