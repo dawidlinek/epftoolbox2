@@ -1197,6 +1197,13 @@ def _built_from_name(base: str) -> Optional[str]:
     return None if match is None else match["column"]
 
 
+def _is_hour_aggregate(base: str) -> bool:
+    """Whether `base` names a PeriodStatsTransformer column, as `_built_from_name` reads it."""
+    return (
+        _profile_slot(base) is None and _DAY_AGGREGATE.match(base) is None and _HOUR_AGGREGATE.match(base) is not None
+    )
+
+
 def _find_rule(name: str, chain: List[Tuple[str, Tuple[Shift, ...]]], rules, layer: str) -> Optional[ResolvedColumn]:
     """The rule of one layer for a column: exact names from the full name down to the base, then glob patterns from the
     base up."""

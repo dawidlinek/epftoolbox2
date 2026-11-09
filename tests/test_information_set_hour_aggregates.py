@@ -244,6 +244,27 @@ def test_on_a_daily_row_an_hour_aggregate_is_judged_over_its_whole_date():
     assert {v.predictor for v in found} == {"px_d+1", "px_hour_mean_d+1", "px_d+1_hour_mean"}
 
 
+def test_a_midnight_stamped_daily_frame_of_hour_aggregates_warns():
+    """A daily frame cut at its stamp holds the stamp's hour in an hour aggregate, at any level of what a name was built from:
+    on rows stamped at midnight that may be another hour than the rows mean, as with an hour lag, so a run says so."""
+    from epftoolbox2.models._contract import _counts_hours, warn_about_a_midnight_stamp
+
+    for name in [
+        "x_h-1",
+        "x_hour_mean",
+        "x_hour_dev_d-1",
+        "x_d-1_hour_mean",
+        "x_hour_mean_day_max",
+        "x_hour_mean_h05_d-1",
+    ]:
+        assert _counts_hours(name), name
+    for name in ["x", "x_d-1", "x_day_max", "x_h05", "x_day_peak_d-1", "is_day_mean", "hour_mean", None]:
+        assert not _counts_hours(name), name
+    midnight = pd.date_range("2024-01-01", periods=30, freq="D", tz="Europe/Warsaw")
+    with pytest.warns(UserWarning, match="stamped at 00:00, midnight, and 1 predictor.*x_hour_mean_d-1"):
+        warn_about_a_midnight_stamp(midnight, "1D", ["x_d-1", "x_hour_mean_d-1"], model_name="m")
+
+
 def test_delivered_span_of_an_hour_aggregate_is_its_hour():
     ctx = _Context(day=pd.Timestamp("2024-01-10"), data_zone="Europe/Warsaw")
     info = InformationSet(rules={"x": Availability.static()})
