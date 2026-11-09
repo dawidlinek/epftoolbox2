@@ -167,9 +167,8 @@ class ResidualModel(BaseModel):
         name: str = "residual",
     ):
         self._named_base: Optional[BaseModel] = None  # a pipeline's model `base` names (`bind_base`)
-        self._base_forecasts: Optional[Dict[Tuple[int, int, int], float]] = (
-            None  # (period, horizon, ordinal) -> forecast
-        )
+        # The base's forecasts during a run: (period, horizon, issue date ordinal) -> forecast.
+        self._base_forecasts: Optional[Dict[Tuple[int, int, int], float]] = None
         self._residual: Optional[Dict[str, Any]] = None  # the manifest's `residual` field during a run
         self._actuals: Dict[int, np.ndarray] = {}  # each period's targets, as the learner's arrays had them
         self._actual_days: Dict[int, np.ndarray] = {}
