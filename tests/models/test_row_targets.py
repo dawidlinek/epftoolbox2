@@ -11,8 +11,10 @@ and finds a leak planted through either column, and the engine runs such a model
 three None nothing changes: the step 2-5 equivalence grids say so for every existing model, outside the fast suite.
 """
 
+import inspect
 import json
 import math
+import warnings
 from concurrent.futures import Future
 from pathlib import Path
 
@@ -31,6 +33,7 @@ from epftoolbox2.models import (
     PooledModel,
     ResidualModel,
     RidgeModel,
+    Use,
 )
 from epftoolbox2.models._calendar import refit_anchor
 from epftoolbox2.models._history import HistorySpec
@@ -154,15 +157,15 @@ def hand(data, freq, period, horizon, day, estimator, window, anchor=None, scale
         if freq == "1D"
         else wall.hour * PER_HOUR[freq] + wall.minute // (60 // PER_HOUR[freq])
     )
+    prices = pd.Series(data["price"].to_numpy(), index=wall)
+    once = prices[~prices.index.duplicated(keep=False)]
+    x = data[names].to_numpy(dtype=float)
+    c = data[scale.replace("{horizon}", str(horizon))].to_numpy(dtype=float)
     newest = pd.Timestamp(anchor or day) - pd.Timedelta(days=1 + horizon)
     oldest = newest - pd.Timedelta(days=window - 1)
     here = np.asarray(periods == period)
     rows = np.flatnonzero(here & np.asarray((dates >= oldest) & (dates <= newest)))
-    prices = pd.Series(data["price"].to_numpy(), index=wall)
-    once = prices[~prices.index.duplicated(keep=False)]
     y = once.reindex(wall[rows] + pd.Timedelta(days=horizon)).to_numpy()
-    x = data[names].to_numpy(dtype=float)
-    c = data[scale.replace("{horizon}", str(horizon))].to_numpy(dtype=float)
     test = np.flatnonzero(here & np.asarray(dates == pd.Timestamp(day)))[-1]
     usable = np.isfinite(y) & np.isfinite(x[rows]).all(axis=1) & np.isfinite(c[rows]) & (c[rows] > 0)
     used = rows[usable]
@@ -247,21 +250,41 @@ def test_the_forecast_moves_with_the_issue_row_s_scale_alone(spring):
             assert after[key] == record, key
 
 
-def test_a_training_row_without_a_positive_scale_drops_and_an_issue_row_without_one_is_skipped(spring):
-    D = "2023-04-12"
+UNITS = {
+    "period": lambda **kw: OLSModel(PREDICTORS, training_window=30, **kw),
+    "period unit": lambda **kw: OLSModel(PREDICTORS, training_window=30, refit="7D", **kw),
+    "pooled unit": lambda **kw: HistGBModel(PREDICTORS, training_window=30, periods="pooled", max_iter=20, **kw),
+    "block call": lambda **kw: HistGBModel(PREDICTORS, training_window=30, periods="each", max_iter=20, **kw),
+}
+
+
+@pytest.mark.parametrize("unit", list(UNITS))
+def test_a_training_row_without_a_positive_scale_drops_and_an_issue_row_without_one_is_skipped(spring, unit):
+    """Training rows of (7, 1, D) with c -3, 0 and missing drop out: the forecasts are the run on y / c without those rows' targets
+    (and a hand fit, for the period model). The issue row of (9, 1, D) with c 0 is `non_positive_scale`, (10, 1, D) with c missing
+    `missing_test_predictors`."""
+    D = "2023-04-12"  # a Wednesday: a "7D" unit is fitted on Monday 10 April, on rows up to the 8th
     data = spring.copy()
     stamps = data.index.strftime("%Y-%m-%d %H")
-    data.loc[stamps == "2023-04-05 07", "cap_d+1"] = -3.0  # a training row of (7, 1, D)
-    data.loc[stamps == "2023-04-06 07", "cap_d+1"] = 0.0
-    data.loc[stamps == "2023-04-07 07", "cap_d+1"] = np.nan
+    planted = ["2023-04-05 07", "2023-04-06 07", "2023-04-07 07"]
+    for stamp, value in zip(planted, (-3.0, 0.0, np.nan)):
+        data.loc[stamps == stamp, "cap_d+1"] = value  # training rows of (7, 1, D)
     data.loc[stamps == f"{D} 09", "cap_d+1"] = 0.0  # the issue row of (9, 1, D)
     data.loc[stamps == f"{D} 10", "cap_d+1"] = np.nan
-    model = OLSModel(PREDICTORS, training_window=30, normalise_by=SCALE)
-    ref = model.run(data, D, D, horizon=1)
+    ref = UNITS[unit](normalise_by=SCALE).run(data, D, D, horizon=1)
     found = by_key(ref._results)
-    assert found[(D, 7, 1)]["prediction"] == pytest.approx(hand(data, "1h", 7, 1, D, "ols", 30), abs=HAND, rel=0)
-    assert (D, 9, 1) not in found and (D, 10, 1) not in found
-    assert ref.skipped == {"missing_test_predictors": 2}
+    assert ref.skipped == {"non_positive_scale": 1, "missing_test_predictors": 1}
+    # The oracle: the target of each planted training row (at its instant one day later) missing.
+    ratio = divided(data)
+    targets = (pd.to_datetime(planted) + pd.Timedelta(days=1)).strftime("%Y-%m-%d %H")
+    ratio.loc[stamps.isin(list(targets)), "price"] = np.nan
+    on_ratio = by_key(run(UNITS[unit](), ratio, D, D, horizon=1))
+    expected = times_scale(data, on_ratio)
+    assert found.keys() == on_ratio.keys() - {(D, 9, 1), (D, 10, 1)}
+    for key, record in found.items():
+        assert record["prediction"] == expected[key], key
+    if unit == "period":
+        assert found[(D, 7, 1)]["prediction"] == pytest.approx(hand(data, "1h", 7, 1, D, "ols", 30), abs=HAND, rel=0)
 
 
 # ---------------------------------------------------------------------------
@@ -370,29 +393,33 @@ class CountsFits(OLSModel):
         return super()._predict_fitted(fitted, test_x)
 
 
-def test_zero_when_gives_0_without_a_fit_and_leaves_every_other_record_as_it_was(spring):
+@pytest.mark.parametrize("window", [30, [20, 30]])
+def test_zero_when_gives_0_without_a_fit_and_leaves_every_other_record_as_it_was(spring, window):
     """`flag` is 0 or 1 by row: where it is 1 on the issue row the forecast is 0, with no coefficients, `detail` "zero_when" and
-    status ok, and no fit was made for it; every other record is the record of the model without `zero_when`, to the bit (its
-    training rows are untouched). The issue row decides, not the row of the target day."""
+    status ok (with a list of windows, members of 0), and no fit was made for it; every other record is the record of the model
+    without `zero_when`, to the bit (its training rows are untouched). The issue row decides, not the row of the target day."""
     D = "2023-04-10"
-    plain = by_key(run(OLSModel(PREDICTORS, training_window=30), spring, D, day_of(D, 1)))
+    plain = by_key(run(OLSModel(PREDICTORS, training_window=window), spring, D, day_of(D, 1)))
     CountsFits.fits.clear()
-    zeroed = by_key(run(CountsFits(PREDICTORS, training_window=30, zero_when="flag"), spring, D, day_of(D, 1)))
+    zeroed = by_key(run(CountsFits(PREDICTORS, training_window=window, zero_when="flag"), spring, D, day_of(D, 1)))
     assert zeroed.keys() == plain.keys()
     flags = issue_values(spring, plain, "flag")
     targets = issue_values(spring, plain, "flag_d+{horizon}")
-    fitted = {
-        (unit.anchor.isoformat(), unit.period, unit.horizon) for unit in CountsFits.fits
-    }  # refit=None: the issue day
-    assert len(fitted) == len(CountsFits.fits)
+    members = 2 if isinstance(window, list) else 1
+    # refit=None: a fit's anchor is its issue day, one fit per member
+    fitted = {(unit.anchor.isoformat(), unit.period, unit.horizon) for unit in CountsFits.fits}
+    assert len(CountsFits.fits) == members * len(fitted)
     zeros = 0
     for key, record in plain.items():
         if flags[key] == 1.0:
             assert zeroed[key]["prediction"] == 0.0 and zeroed[key]["coefficients"] == []
             assert zeroed[key]["detail"] == "zero_when" and zeroed[key]["status"] == "ok"
             assert zeroed[key]["actual"] == record["actual"]
-            assert {k: v for k, v in zeroed[key].items() if k not in ("prediction", "coefficients", "detail")} == {
-                k: v for k, v in record.items() if k not in ("prediction", "coefficients")
+            if members > 1:
+                assert zeroed[key]["member_predictions"] == [0.0, 0.0]
+            fields = ("prediction", "coefficients", "member_predictions")
+            assert {k: v for k, v in zeroed[key].items() if k not in (*fields, "detail")} == {
+                k: v for k, v in record.items() if k not in fields
             }
             assert key not in fitted
             zeros += 1
@@ -403,19 +430,33 @@ def test_zero_when_gives_0_without_a_fit_and_leaves_every_other_record_as_it_was
     assert any(flags[key] != targets[key] for key in plain)  # the target row would say otherwise somewhere
 
 
-def test_zero_when_comes_after_every_skip_of_the_forecast(spring):
+def test_zero_when_comes_after_the_input_skips_and_before_the_scale_and_the_fit(spring):
     """A forecast with a missing input is skipped whatever `zero_when` says, and a missing `zero_when` on the issue row is a
-    `missing_test_predictors` skip: the model forecasts the keys it forecasts without `zero_when`, less those."""
+    `missing_test_predictors` skip; a flag of 1 is a forecast of 0 even where the issue row's scale is 0 or missing (a clear-sky
+    night) or the fit would fail (`fit_error`): the two places a model's keys differ from the model's without `zero_when`."""
     D = "2023-04-10"
     data = spring.copy()
     stamps = data.index.strftime("%Y-%m-%d %H")
     data.loc[stamps == f"{D} 03", "load_d+1"] = np.nan
     data.loc[stamps == f"{D} 03", "flag"] = 1.0
     data.loc[stamps == f"{D} 04", "flag"] = np.nan
-    ref = OLSModel(PREDICTORS, training_window=30, zero_when="flag").run(data, D, D, horizon=1)
+    for hour, cap in (("05", 0.0), ("06", np.nan)):
+        data.loc[stamps == f"{D} {hour}", "flag"] = 1.0
+        data.loc[stamps == f"{D} {hour}", "cap_d+1"] = cap
+    ref = OLSModel(PREDICTORS, training_window=30, zero_when="flag", normalise_by=SCALE).run(data, D, D, horizon=1)
     found = by_key(ref._results)
     assert (D, 3, 1) not in found and (D, 4, 1) not in found
     assert ref.skipped == {"missing_test_predictors": 2}
+    assert found[(D, 5, 1)]["detail"] == found[(D, 6, 1)]["detail"] == "zero_when"
+    plain = OLSModel(PREDICTORS, training_window=30, normalise_by=SCALE).run(data, D, D, horizon=1)
+    assert plain.skipped == {"missing_test_predictors": 2, "non_positive_scale": 1}  # 3 and 6 missing, 5 at 0
+    # Two training rows: RidgeCV's leave-one-out can't fit, so every forecast of the plain model is a fit_error.
+    flags = issue_values(data, {(D, hour, 1): None for hour in range(24)}, "flag")
+    tiny = RidgeModel(PREDICTORS, training_window=2, zero_when="flag").run(data, D, D, horizon=1)
+    assert set(by_key(tiny._results)) == {key for key, f in flags.items() if f == 1.0} - {
+        (D, 3, 1)
+    }  # 3: a missing input
+    assert set(tiny.skipped) == {"fit_error", "missing_test_predictors"}
 
 
 @pytest.mark.parametrize("window", [30, [20, 30]])
@@ -512,18 +553,25 @@ def listed(ctx):
     return PREDICTORS
 
 
+LATE = {
+    # D+1's capacity out at 23:00 on D
+    "normalise_by": (SCALE, {"cap": Availability.published("23:00", 1)}, "cap_d+1"),
+    # D's flag out at 23:00 on D
+    "zero_when": ("flag", {"flag": Availability.published("23:00", 0)}, "flag"),
+}
+
+
 @pytest.mark.parametrize("predictors", [PREDICTORS, listed], ids=["fixed", "function"])
-@pytest.mark.parametrize("key", ["normalise_by", "zero_when"])
+@pytest.mark.parametrize("key", list(LATE))
 def test_a_late_column_is_refused_at_raise_and_listed_at_warn(spring, predictors, key):
-    late = InformationSet(
-        rules={**RULES, "cap": Availability.published("23:00", 1)}
-    )  # D+1's capacity out at 23:00 on D
-    model = OLSModel(predictors, training_window=30, **{key: SCALE})
+    column, rules, name = LATE[key]
+    late = InformationSet(rules={**RULES, **rules})
+    model = OLSModel(predictors, training_window=30, **{key: column})
     D = "2023-04-10"
-    with pytest.raises(InformationSetError, match=r"cap_d\+1"):
+    with pytest.raises(InformationSetError, match=name.replace("+", r"\+")):
         model.run(spring, D, D, horizon=1, information_set=late, availability="raise")
     ref = model.run(spring, D, D, horizon=1, information_set=late, availability="warn", warn_listing=False)
-    assert {row["predictor"] for row in ref.availability_listing} == {"cap_d+1"}
+    assert {row["predictor"] for row in ref.availability_listing} == {name}
     # Known at the issue, nothing is listed.
     assert model.run(spring, D, D, horizon=1, information_set=INFO, availability="warn").availability_listing == []
 
@@ -779,13 +827,17 @@ def test_with_all_three_none_a_record_and_a_manifest_are_unchanged(spring, tmp_p
 
 
 def test_a_torch_day_model_refuses_them_and_a_period_one_is_its_run_on_y_over_c(spring):
-    """`TorchModel(output="day")` refuses them before any fit (no torch needed); with the [torch] extra, `MLPHourlyModel`
-    (period units) with `normalise_by` is its run on the frame whose target is y / c, times c, to the bit."""
+    """`TorchModel(output="day")` refuses them when it is built, and a period one turned into a day one (no torch needed); with
+    the [torch] extra, `MLPHourlyModel` (period units) with `normalise_by` is its run on the frame whose target is y / c, times c,
+    to the bit."""
     from epftoolbox2.models import MLPHourlyModel, TorchModel
 
-    day = TorchModel("epftoolbox2.nets:MLP", predictors=["load_d+{horizon}"], output="day", bounds=(0, None))
-    with pytest.raises(ValueError, match="day units"):
-        day.run(spring, "2023-04-10", "2023-04-10", horizon=1)
+    with pytest.raises(ValueError, match="takes no per-row target"):
+        TorchModel("epftoolbox2.nets:MLP", predictors=["load_d+{horizon}"], output="day", bounds=(0, None))
+    period = TorchModel("epftoolbox2.nets:MLP", predictors=["load_d+{horizon}"], output="period", zero_when="flag")
+    with pytest.raises(ValueError, match="takes no per-row target"):
+        period.output = "day"
+    assert period.output == "period"
     pytest.importorskip("torch")
     D = "2023-04-10"
 
@@ -811,3 +863,153 @@ def test_both_stores_read_back_a_forecast_of_0_with_its_detail(spring, tmp_path)
         records[fmt] = sorted(json.dumps(r, sort_keys=True) for r in read_records(tmp_path / fmt / f"rt.{fmt}"))
     assert records["jsonl"] == records["parquet"] and len(records["jsonl"]) == 24
     assert any('"detail": "zero_when"' in line for line in records["jsonl"])
+
+
+# ---------------------------------------------------------------------------
+# After the reviews: verify's flip probe, the issue-row judging of zero_when, the listing, the refusals
+# ---------------------------------------------------------------------------
+
+
+def test_a_late_flag_that_is_0_on_the_issue_day_is_a_leak():
+    """The flag of day X is out at 23:00 on X, after the issue: a model reading it on the issue row leaks, whatever it holds.
+    Noise only ever makes a flag "not 1", so a flag of 0 on D moved nothing under it; flipped (0 to 1 and back), it moves the
+    forecasts."""
+    data = market("spring")
+    on_d = data.index.strftime("%Y-%m-%d") == "2023-04-12"
+    data["flag"] = np.where(on_d, 0.0, data["flag"])
+    late = InformationSet(rules={**RULES, "flag": Availability.published("23:00", 0)})
+    report = verified(OLSModel(PREDICTORS, training_window=30, zero_when="flag"), data, late, rerun=False)
+    row = report.table().iloc[0]
+    assert row["status"] == "leak" and row["changed"] == 24, row.to_dict()
+
+
+def test_verify_is_ok_with_a_static_zero_when_and_with_tight_bounds_and_finds_a_leak_through_them():
+    """A forecast of 0 by a static `night_d+{horizon}` reads its flag alone, which no control can perturb: it needn't move. A
+    model with tight `bounds` is probed without them, so a control's noise clipped back onto the forecast is no blind spot.
+    A late predictor is still a leak with `bounds` set."""
+    data = market("spring")
+    for model in (
+        OLSModel(PREDICTORS, training_window=30, zero_when="night_d+{horizon}"),
+        OLSModel(PREDICTORS, training_window=30, bounds=(None, 60.0)),
+    ):
+        report = verified(model, data)
+        report.assert_ok()
+        assert report.table().iloc[0]["control moved"] > 0
+    frame = data.assign(load_actual=data["load"])
+    rules = InformationSet(rules={**RULES, "load_actual": Availability.realised("1h")})
+    model = OLSModel([*PREDICTORS, "load_actual"], training_window=30, bounds=(None, 60.0))
+    assert verified(model, frame, rules, positive_control=False, rerun=False).table().iloc[0]["status"] == "leak"
+
+
+@pytest.mark.parametrize("predictors", [PREDICTORS, listed], ids=["fixed", "function"])
+def test_zero_when_is_judged_on_the_issue_row_alone(spring, predictors):
+    """`flag` has no rule for 3 to 5 April, inside the training window of a forecast on 10 April, which no fit reads: the run goes
+    on at "raise". The same gap in `normalise_by`'s column is refused (`test_a_scale_known_on_the_issue_row_..._over_time`)."""
+    gap = [
+        Availability.static().during(valid_until="2023-04-02"),
+        Availability.static().during(valid_from="2023-04-06"),
+    ]
+    info = InformationSet(rules={**RULES, "flag": gap})
+    D = "2023-04-10"
+    model = OLSModel(predictors, training_window=30, zero_when="flag")
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UserWarning)  # nor a warning that the issue row alone was judged
+        ref = model.run(spring, D, D, horizon=1, information_set=info, availability="raise")
+    assert ref.produced == 24
+    # On the issue day itself the gap refuses it.
+    with pytest.raises(InformationSetError, match="flag"):
+        model.run(spring, "2023-04-04", "2023-04-04", horizon=1, information_set=info, availability="raise")
+
+
+@pytest.mark.parametrize(
+    "predictors", [[*PREDICTORS, SCALE], lambda ctx: [*PREDICTORS, SCALE]], ids=["fixed", "function"]
+)
+def test_a_column_both_a_predictor_and_the_scale_is_listed_once(spring, predictors):
+    late = InformationSet(rules={**RULES, "cap": Availability.published("23:00", 1)})
+    model = OLSModel(predictors, training_window=30, normalise_by=SCALE)
+    D = "2023-04-10"
+    ref = model.run(spring, D, D, horizon=1, information_set=late, availability="warn", warn_listing=False)
+    assert [row["predictor"] for row in ref.availability_listing] == ["cap_d+1"]
+
+
+def test_a_model_that_fits_nothing_takes_bounds_alone(spring):
+    class Echo(OLSModel):
+        _fits_nothing = True
+
+    D = "2023-04-10"
+    for key, value in (("normalise_by", SCALE), ("zero_when", "flag")):
+        with pytest.raises(ValueError, match="fits nothing"):
+            Echo(["price_d-1"], training_window=5, **{key: value}).run(spring, D, D, horizon=1)
+
+
+def test_a_zero_when_value_other_than_0_or_1_on_an_issue_row_is_refused(spring):
+    D = "2023-04-10"
+    data = spring.copy()
+    stamps = data.index.strftime("%Y-%m-%d %H")
+    data.loc[stamps == "2023-04-05 03", "flag"] = 0.5  # a training row's: never read, never refused
+    data.loc[stamps == f"{D} 04", "flag"] = np.nan  # missing: no forecast
+    ref = OLSModel(PREDICTORS, training_window=30, zero_when="flag").run(data, D, D, horizon=1)
+    assert ref.skipped == {"missing_test_predictors": 1}
+    data.loc[stamps == f"{D} 05", "flag"] = 2.0
+    with pytest.raises(ValueError, match=r"zero_when='flag' holds 2 on an issue row"):
+        OLSModel(PREDICTORS, training_window=30, zero_when="flag").run(data, D, D, horizon=1)
+    # A day of the run that isn't an issue day (Monday the 10th, issued on Tuesdays) isn't read.
+    model = OLSModel(PREDICTORS, training_window=30, zero_when="flag")
+    assert model.run(data, D, day_of(D, 1), horizon=1, issue_days=["tuesday"]).produced > 0
+
+
+def weekend_matching(ctx):
+    if ctx.target_day.weekday() >= 5:
+        return Use(PREDICTORS, train_on="matching")
+    return PREDICTORS
+
+
+def test_a_matching_list_with_normalise_by_is_its_run_on_y_over_c(spring):
+    D = "2023-04-13"  # a Thursday: horizon 2 reaches Saturday, a matching list
+    scaled = OLSModel(weekend_matching, training_window=40, normalise_by=SCALE).run(spring, D, day_of(D, 1), horizon=2)
+    on_ratio = OLSModel(weekend_matching, training_window=40).run(divided(spring), D, day_of(D, 1), horizon=2)
+    expected = times_scale(spring, by_key(on_ratio._results))
+    found = by_key(scaled._results)
+    assert found.keys() == expected.keys() and any("matching_days" in r for r in found.values())
+    for key, record in found.items():
+        assert record["prediction"] == expected[key], key
+        assert record.get("matching_days") == by_key(on_ratio._results)[key].get("matching_days"), key
+
+
+# The registry's models that don't take all three, and why. A model added to the registry takes `normalise_by`, `bounds` and
+# `zero_when` in its signature and its TUI schema, or is listed here with its reason.
+ROW_TARGET_EXCEPTIONS = {
+    "NaiveModel": ({"bounds"}, "it fits nothing: no target to divide, no fit to replace"),
+    "MLPDailyModel": (set(), "day units: one fit of every period of a date"),
+    "ResidualModel": (set(), "its forecast is the learner's plus the base's, made after the learner's fit"),
+    "PooledModel": (set(), "a pooled fit reads each zone's rows itself"),
+}
+
+
+def accepted_parameters(cls):
+    """The keyword parameters `cls(...)` takes: its `__init__`'s, and through `**kwargs` those of the next class's that names
+    them, as far as one without `**kwargs`."""
+    names = set()
+    for klass in cls.__mro__:
+        if "__init__" not in vars(klass) or klass is object:
+            continue
+        parameters = inspect.signature(klass.__init__).parameters
+        names |= {name for name, p in parameters.items() if p.kind is not inspect.Parameter.VAR_KEYWORD}
+        if not any(p.kind is inspect.Parameter.VAR_KEYWORD for p in parameters.values()):
+            break
+    return names
+
+
+def test_every_registered_model_takes_the_row_target_or_says_why_not():
+    from epftoolbox2 import tui
+    from epftoolbox2.pipelines.model_pipeline import COMPONENT_REGISTRY
+
+    three = {"normalise_by", "bounds", "zero_when"}
+    for name, module in COMPONENT_REGISTRY["models"].items():
+        cls = getattr(__import__(module, fromlist=[name]), name)
+        expected, why = ROW_TARGET_EXCEPTIONS.get(name, (three, None))
+        assert accepted_parameters(cls) & three == expected, (name, why)
+        if name in tui.PARAM_SCHEMAS:
+            assert {f["name"] for f in tui.PARAM_SCHEMAS[name]} & three == expected, (name, "TUI", why)
+        else:
+            assert name in ROW_TARGET_EXCEPTIONS, f"{name} isn't offered in the TUI: list it with its reason"
