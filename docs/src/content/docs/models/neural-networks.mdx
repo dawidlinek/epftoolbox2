@@ -64,7 +64,7 @@ model = TorchModel(module=MLP, module_params={"hidden": [256, 128], "dropout": 0
 | `binary_mask` | `None` | Which rows decide the binary 0/1 inputs left unscaled; with `refit`, each fit's own |
 | `scaler` | `"standard"` | How the inputs are scaled; `output="day"` takes any scaler (the Invariant, `{"name": "asinh", "params": {"standardise": False}}`, did much better on price inputs, see [the research's recipe](#the-researchs-recipe-reproduced)), `output="period"` only `"standard"` |
 | `name` | `"torch"` | The model's name |
-| `module_hash` | `None` | Set by a saved file: the hash of the module's source file and its package's version when it was saved |
+| `module_hash` | `None` | Set by a saved file: the hash of the module's file and its package's version when it was saved (see [Saving and loading](#saving-and-loading)) |
 
 `stack`, `pad_to`, `tf32`, `device`, the loss and the learning rate change the numbers and are compared when a run resumes.
 
@@ -175,18 +175,25 @@ models:
     ...
 ```
 
-Loading a file whose `module_hash` isn't the module's warns that the forecasts will differ from the saved run's (the file, or a
-layer it defines next to the module, or the package's version changed), and a run that resumes over its results refuses
-([Incremental Training](/epftoolbox2/model-pipeline/caching/)). `save()` raises for a class defined in the script being run
-(`__main__`) or inside a function, which a later load can't import; such a model still runs. In a notebook its hash is of the
-source of each method (and of its notebook base classes) as the kernel keeps each cell's: the same cell run again resumes, a
-changed one refuses the resume. A class whose source isn't kept anywhere (defined with `exec`) warns: its hash is its own, so a
-run of it resumes only in the process and with the class object that made it. Two pipelines running at once in one process,
-in threads, with two classes of the same name defined in `__main__`, can give each other's class to their workers: run them
-one after the other. `MLPHourlyModel` and `MLPDailyModel` save their architecture (`hidden`,
-`dropout`, `activation`) and no `module_hash`: a preset is checked by its manifest alone, which records the hash of
-`epftoolbox2/nets.py` and the library's version, so a resume after either changed refuses, and loading its file doesn't warn.
-Without torch installed, every one of them builds, saves and loads, and `run()` names the extra to install before any model fits.
+What `module_hash` covers, and so what a resume compares:
+
+- **A network in a module file** (`my_nets.py`, imported) is hashed by that file and its package's version, plus the source of
+  any method compiled elsewhere (a decorator from another file that doesn't keep `__wrapped__`): a change to the class, or to a
+  layer next to it in the file, refuses a resume, and loading a saved file whose `module_hash` differs warns that the forecasts
+  will differ from the saved run's. A change in another module the file imports isn't seen: there the package versions in the
+  manifest (torch's, the library's) and its other fields are what guard.
+- **A network defined in a notebook, by `exec`, inside a function or in the script being run** resumes only within its session:
+  its hash is a token of the class object, the same while that object stands as it is. A run interrupted in a kernel resumes in
+  that kernel; after the cell runs again (even unchanged), the class is changed in place (`Net.forward = f`, `Net.SCALE = 3.0`)
+  or the kernel restarts, a resume refuses (`ManifestMismatchError`, which says why). The library can't tell what such a class
+  calls (another cell's layer, a global, a decorator), so it never takes two definitions for one. Define the network in a module
+  file to resume across sessions; pass `allow_manifest_mismatch=True` only if you know the class is unchanged.
+
+`save()` raises for a class defined in the script being run (`__main__`) or inside a function, which a later load can't import;
+such a model still runs. `MLPHourlyModel` and `MLPDailyModel` save their architecture (`hidden`, `dropout`, `activation`) and no
+`module_hash`: a preset is checked by its manifest alone, which records the hash of `epftoolbox2/nets.py` and the library's
+version, so a resume after either changed refuses, and loading its file doesn't warn. Without torch installed, every one of them
+builds, saves and loads, and `run()` names the extra to install before any model fits.
 
 ## MLPHourlyModel and MLPDailyModel
 
