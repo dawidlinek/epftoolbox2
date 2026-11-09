@@ -1102,6 +1102,8 @@ class SearchResult:
                 "every_nth_day": last["every_nth_day"],
                 "seeds": last["seeds"],
                 "validation": list(self._record["search"]["validation"]),
+                # The last day whose data the search read: a test period of this model must start after it.
+                "data_through": self._record["search"].get("data_through", self._record["search"]["validation"][1]),
                 "validation_mae": last["validation_mae"],
                 "validation_forecasts": last["forecasts"],
                 "validation_share": last["forecasts"] / last["planned"] if last["planned"] else None,

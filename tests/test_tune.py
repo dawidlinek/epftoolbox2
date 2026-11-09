@@ -689,6 +689,29 @@ def test_a_chosen_models_manifest_and_report_say_where_it_was_chosen(df, tmp_pat
     assert whole.attrs["search"]["ols_bayes_00"]["trial"] == result.ranking()[0]
 
 
+def test_a_chosen_model_is_never_tested_on_the_days_it_was_chosen_on(df, monkeypatch):
+    """A test period starting on or before the search's validation end raises before any fit; one after it runs."""
+    result = search(n_trials=4).run(df, horizon=1, validation=V)
+    models = result.best(1)
+    assert models[0]._search["data_through"] == V[1]
+    fits = []
+    real = OLSModel.run
+    monkeypatch.setattr(OLSModel, "run", lambda self, *a, **k: fits.append(1) or real(self, *a, **k))
+    for test in ((V[1], "2023-04-05"), ("2023-03-30", "2023-04-05")):
+        with pytest.raises(ValueError, match="must not be scored on days its settings were chosen on"):
+            ModelPipeline().add_model(models[0]).run(df, horizon=1, test=test)
+        with pytest.raises(ValueError, match="chose it on data through 2023-04-02"):
+            ModelPipeline().add_model(models[0]).run({"PL": df}, horizon=1, test=test)
+    with pytest.raises(ValueError, match="must not be scored"):
+        ModelPipeline().add_model(models[0]).run(
+            df, horizon=1, validation=("2023-03-01", "2023-03-20"), test=(V[1], T[1])
+        )
+    assert fits == []
+    ModelPipeline().add_model(models[0]).run(df, horizon=1, test=("2023-04-03", "2023-04-05"))
+    ModelPipeline().add_model(models[0]).run(df, horizon=1, validation=V)  # no test: nothing to refuse
+    assert len(fits) == 2
+
+
 def test_ensemble_choices_show_their_candidates_and_gap(df):
     pipeline = ModelPipeline()
     for window in (14, 28, 42):

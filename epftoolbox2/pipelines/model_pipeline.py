@@ -222,6 +222,25 @@ COMPONENT_REGISTRY = {
 }
 
 
+def refuse_searched_on_test(models: Sequence[Any], test_start: Optional[str]) -> None:
+    """A ValueError, before any fit, for a model a search chose (`tune.SearchResult.best`) on data through a day on or after
+    the first test issue day: its test forecasts would be scored on days its settings were chosen on, as `RunWindows.fixed`
+    refuses a validation period that doesn't end before the test starts."""
+    if not test_start:
+        return
+    first = str(resolve_date(test_start))[:10]
+    for model in models:
+        search = getattr(model.model if isinstance(model, PooledModel) else model, "_search", None)
+        through = None if not search else search.get("data_through")
+        if through is not None and str(through) >= first:
+            raise ValueError(
+                f"{model.name}: the search {search.get('search')!r} chose it on data through {through} (its validation period "
+                f"{tuple(search.get('validation') or ())}), and this run's test period starts on {first}: a test forecast must not "
+                "be scored on days its settings were chosen on. Start the test after the validation end, or search on an "
+                "earlier validation period."
+            )
+
+
 def search_choices(refs: Mapping[str, ModelResultRef], test: Optional[Tuple[str, str]]) -> Dict[str, List[Dict]]:
     """The rows of `report.choices()` of the models a search chose (`tune.SearchResult.best`, whose ref's provenance holds
     `search`), keyed `{search}:{model}`: the search's validation numbers, and the model's MAE on the `test` period of the run,
@@ -501,6 +520,10 @@ class ModelPipeline:
             validation, test, test_start, test_end, forecast_only, validation_every=validation_every
         )
         self._refuse_thinned_weekdays(windows, weekdays)
+        if not forecast_only:
+            refuse_searched_on_test(
+                self.models, windows.test[0] if windows is not None and windows.test else test_start
+            )
         self._check_ensembles(save_dir)
         self._refuse_top_without_validation(self.ensembles, windows)
         check_save_format(save_format)
@@ -725,6 +748,10 @@ class ModelPipeline:
             validation, test, test_start, test_end, forecast_only, validation_every=validation_every
         )
         self._refuse_thinned_weekdays(windows, weekdays)
+        if not forecast_only:
+            refuse_searched_on_test(
+                self.models, windows.test[0] if windows is not None and windows.test else test_start
+            )
         pooled = [model for model in self.models if isinstance(model, PooledModel)]
         plain = [model for model in self.models if not isinstance(model, PooledModel)]
         if pooled and windows is not None:
