@@ -4,8 +4,10 @@ information set.
 A sequence model reads series, not the predictor columns of a row. For the forecast issued on D at horizon h:
 
 - `target` (T,): the target's last T = context x periods-per-day steps in physical time, on the UTC index, ending at its cut.
-  With `newest_target="published"` that is its newest step known at the issue time by its rule; with `"d-1"`, the default of
-  every model, the earlier of that and the last step of local D-1, as such a model's newest training target is D-1's. T is the
+  With `newest_target="published"` that is its newest step known at the issue time by its rule, at the latest the last step of
+  the day before the target day (as `InformationSet.newest_targets` caps a row model's at h - 1: at 14:00 D+1's prices are out,
+  and the forecast at h = 1 is still of all of D+1); with `"d-1"`, the default of every model, the earlier of that and the last
+  step of local D-1, as such a model's newest training target is D-1's. T is the
   same on every issue day: a context across a DST switch covers an hour more or less of local time, and no day is resampled.
 - `past` {name: (T,)}: each past covariate on the same steps. After its own newest known step it is NaN where the backend
   accepts missing values (`HistorySpec.accepts_missing`); otherwise such a series is late.
@@ -31,8 +33,8 @@ each batch to `batch_size` with copies of its first item, so a backend call has 
 `arrays=False` (`history_batches`) the items hold the cuts alone, for a listing or `explain`.
 
 A model reads history if its class defines `_history_spec(target) -> HistorySpec` (`reads_history`). `verify` runs it on the
-frame cut after each target day (`information_set.target_day_cut`), never after the issue day: its known-ahead values are on
-later rows.
+frame cut after what each forecast reads (`information_set.target_day_cut`), never after the issue day: its known-ahead values
+are on later rows.
 """
 
 from __future__ import annotations
@@ -450,6 +452,9 @@ class _Cuts:
         # The last step of each target day (each horizon), and of D-1, where a "d-1" model's target ends at the latest.
         self.end = {h: np.searchsorted(grid.ordinal, ordinals + h, side="right") - 1 for h in horizons}
         self.before = np.searchsorted(grid.ordinal, ordinals, side="left") - 1
+        # And of the day before each target day: the target's context ends there at the latest, as `newest_targets` caps a
+        # "published" row model's newest target at h - 1, so a late issue time (prices of D+1 out by then) still forecasts.
+        self.before_target = {h: np.searchsorted(grid.ordinal, ordinals + h - 1, side="right") - 1 for h in horizons}
         last = self.end[horizons[-1]]
         lengths = last - self.walk + 1
         self.starts = np.cumsum(lengths) - lengths
@@ -512,7 +517,7 @@ class _Cuts:
         spec, grid, day = self.spec, self.grid, self.days[i]
         end = int(self.end[horizon][i])
         newest = {name: min(int(self.newest[name][i]), end) for name in spec.names}
-        cut = newest[spec.target]
+        cut = min(newest[spec.target], int(self.before_target[horizon][i]))
         if spec.newest_target == "d-1":
             cut = min(cut, int(self.before[i]))
         newest[spec.target] = cut
