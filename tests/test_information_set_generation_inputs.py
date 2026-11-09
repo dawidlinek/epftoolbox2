@@ -159,6 +159,11 @@ WITH_A_GAP = [
     Availability.realised("1h").during(valid_until=BOUND),
     Availability.realised("1h").during(valid_from="2024-04-13"),
 ]
+# A snapshot as of 09:00 on the day it is read on, each day of a window on its own day, with the same gap in the days read.
+AS_OF_GAP = [
+    Availability.as_of("09:00", "Europe/Warsaw").during(valid_until=BOUND),
+    Availability.as_of("09:00", "Europe/Warsaw").during(valid_from="2024-04-13"),
+]
 
 
 def _known_at(instant: pd.Timestamp, rules) -> pd.Timestamp:
@@ -172,12 +177,16 @@ def _known_at(instant: pd.Timestamp, rules) -> pd.Timestamp:
             continue
         if rule.kind == "realised":
             return instant + pd.Timedelta(hours=2)  # the end of its hour, plus 1 h
+        if rule.kind == "as_of":
+            return (day + pd.Timedelta(hours=9)).tz_localize("Europe/Warsaw")  # read on its own day
         return (day + pd.Timedelta(days=2, hours=13)).tz_localize("Europe/Warsaw")
     return pd.Timestamp.max.tz_localize("UTC")
 
 
 @pytest.mark.filterwarnings("ignore:The rules of")
-@pytest.mark.parametrize("rules", [SLOW_THEN_FAST, WITH_A_GAP], ids=["slow then fast", "a gap"])
+@pytest.mark.parametrize(
+    "rules", [SLOW_THEN_FAST, WITH_A_GAP, AS_OF_GAP], ids=["slow then fast", "a gap", "a gap in the days read"]
+)
 @pytest.mark.parametrize("lag", [0, 1])
 def test_under_rules_over_time_every_day_of_the_window_must_be_known(rules, lag):
     """A window whose newest day is under the fast rule can still hold an older day under the slow one, out later (or a day
