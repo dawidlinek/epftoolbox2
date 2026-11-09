@@ -7,6 +7,9 @@ and when it is known from the same clock.
 
 A sequence model (`models._history`) reads series instead: `series` has one row per series, with the newest step it reads,
 from the history accessor's own cut, not one per lagged step.
+
+A model with a per-row target (`models._row_target`) has a `row_target` table: its `normalise_by` and `zero_when` columns at the
+horizon shown, judged as predictors are (they are inputs the model reads, not regressors), with their role.
 """
 
 from __future__ import annotations
@@ -35,12 +38,14 @@ from ..information_set import (
 )
 from .._date_utils import fmt_minutes
 from ..results.availability import newest_label
-from . import _contract
+from . import _contract, _row_target
 from ._calendar import refit_anchor
 from ._history import HistorySpec, history_batch, history_spec_of
 from .context import TRAIN_ON_MATCHING, PredictorPlan, function_name
 
 COLUMNS = ["predictor", "target-relative", "rule", "known", "status"]
+# The table of a per-row target's columns (`row_target_table`): a predictor table's, after the column's role.
+ROW_TARGET_COLUMNS = ["role", *COLUMNS]
 # The table of a sequence model's series (`history_table`).
 SERIES_COLUMNS = ["series", "role", "rule", "vintage", "steps", "newest", "status"]
 _TRAINING_DAY_COLUMNS = ("smallest days", "median days", "largest days")
@@ -143,6 +148,54 @@ def predictor_table(
         label = target_relative(name, period, horizon, freq, clock, used)
         rows.append(dict(zip(COLUMNS, (name, label, rule, known, status))))
     return pd.DataFrame(rows, columns=COLUMNS)
+
+
+def row_target_table(
+    model: Any,
+    data: pd.DataFrame,
+    info: Optional[InformationSet],
+    horizon: int,
+    period: int,
+    freq: str,
+    clock: _IssueClock,
+    used: Optional[np.ndarray] = None,
+    training_rows: Optional[TrainingRows] = None,
+) -> Optional[pd.DataFrame]:
+    """One row per column of the model's per-row target at `horizon`: its role (`normalise_by`, `zero_when`, or both), then what
+    `predictor_table` says of it; None for a model without such a column."""
+    names = _row_target.columns_at(model, horizon)
+    if not names:
+        return None
+    table = predictor_table(names, data, info, horizon, period, freq, clock, used, training_rows)
+    roles = []
+    for name in names:
+        roles.append(
+            ", ".join(
+                key
+                for key in ("normalise_by", "zero_when")
+                if getattr(model, key, None) is not None and _row_target.expand(getattr(model, key), horizon) == name
+            )
+        )
+    table.insert(0, "role", roles)
+    return table[ROW_TARGET_COLUMNS]
+
+
+def row_target_note(model: Any) -> str:
+    """What the model's per-row target does to a forecast, in a line; empty without one."""
+    parts = []
+    if getattr(model, "normalise_by", None) is not None:
+        parts.append(
+            f"the target divided by {getattr(model, 'normalise_by', None)} on each training row, the forecast multiplied by the issue row's"
+        )
+    if getattr(model, "bounds", None) is not None:
+        low, high = getattr(model, "bounds", None)
+        unit = " times the scale" if getattr(model, "normalise_by", None) is not None else ""
+        parts.append(
+            f"the forecast clipped to [{'-inf' if low is None else low}, {'inf' if high is None else high}]{unit}"
+        )
+    if getattr(model, "zero_when", None) is not None:
+        parts.append(f"0 with no fit where {getattr(model, 'zero_when', None)} is 1 on the issue row")
+    return "; ".join(parts)
 
 
 def history_table(
@@ -399,6 +452,9 @@ def explain_model(
     )
     out["predictors"] = predictor_table(names, data, info, horizon, hour, freq, clock, used, rows)
     out["grouped"] = grouped_table(out["predictors"])
+    row_target = row_target_table(model, data, info, horizon, hour, freq, clock, used, rows)
+    if row_target is not None:
+        out["row_target"] = row_target
     spec = history_spec_of(model, target)
     if spec is not None:
         out["series"] = history_table(spec, data, info, days[used], horizon, freq)
@@ -408,7 +464,20 @@ def explain_model(
         )
     if echo:
         minute = clock.row_minutes(np.array([hour]), _STEP_MINUTES[freq])[0]
-        _print(out, subject, info, days, horizon, hour, freq, used, data.index, model._ctx_fn, minute)
+        _print(
+            out,
+            subject,
+            info,
+            days,
+            horizon,
+            hour,
+            freq,
+            used,
+            data.index,
+            model._ctx_fn,
+            minute,
+            row_target_note(model),
+        )
     return out
 
 
@@ -448,7 +517,7 @@ def _day_label(offset: int) -> str:
     return "D" if offset == 0 else f"D{offset:+d}"
 
 
-def _print(out, subject, info, days, horizon, hour, freq, used, index, function, minute) -> None:
+def _print(out, subject, info, days, horizon, hour, freq, used, index, function, minute, row_note="") -> None:
     if function is not None:
         print(f"{function_name(function)}: {out['lists']['list'].nunique()} distinct list(s)")
         print(out["lists"].to_string(index=False))
@@ -461,6 +530,10 @@ def _print(out, subject, info, days, horizon, hour, freq, used, index, function,
     )
     if not ("series" in out and out["grouped"].empty):  # a sequence model may read series alone
         print(out["grouped"].to_string(index=False))
+    if row_note:
+        print(f"per-row target: {row_note}")
+    if "row_target" in out:
+        print(out["row_target"].to_string(index=False))
     if "series" in out:
         print("the series it reads, cut at the newest step known at the issue time:")
         print(out["series"].to_string(index=False))
