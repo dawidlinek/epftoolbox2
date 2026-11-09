@@ -313,6 +313,21 @@ def test_an_upstream_listing_a_late_input_taints_its_column_downstream(df, tmp_p
         downstream(PREDICTORS + ["load_fc_d+1"], info).run(data, *TEST, horizon=1)
 
 
+def test_a_late_upstream_is_listed_in_each_window_of_a_run_with_validation(df, tmp_path):
+    run_upstream(df, tmp_path / "up", predictors=[*UPSTREAM, "wind"], rules=LATE_WIND)
+    source = ForecastSource(str(tmp_path / "up"), model="load_up", column="load_fc")
+    data = chained(df, source)
+    pipeline = downstream(PREDICTORS + ["load_fc_d+1"], INFO.with_source_rules([source]), availability="warn")
+    with pytest.warns(UserWarning, match="whose upstream is late"):
+        report = pipeline.run(
+            data, validation=("2023-03-28", "2023-04-03"), test=TEST, horizon=1, save_dir=str(tmp_path / "down")
+        )
+    for listing in (report.availability(), report.validation.availability()):
+        assert listing[listing["status"] == "late upstream"]["predictor"].tolist() == ["load_fc_d+1"]
+    reread = pipeline.report(str(tmp_path / "down"), test=TEST, horizon=1).availability()
+    assert reread[reread["status"] == "late upstream"]["predictor"].tolist() == ["load_fc_d+1"]
+
+
 def test_an_upstream_run_at_none_taints_its_column_and_a_clean_one_passes(df, tmp_path):
     run_upstream(df, tmp_path / "none", availability="none")
     run_upstream(df, tmp_path / "clean", availability="raise")

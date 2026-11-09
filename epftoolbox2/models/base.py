@@ -2035,7 +2035,7 @@ class BaseModel(ABC):
         if found.listing:  # every issue day reads the upstream: each window's listing has its rows too
             self._availability_listing = sort_rows([*self._availability_listing, *found.listing])
             self._window_listings = {
-                name: sort_rows([*rows, *found.listing]) for name, rows in self._window_listings.items()
+                window: sort_rows([*listed, *found.listing]) for window, listed in self._window_listings.items()
             }
 
     def _judge_lists(
