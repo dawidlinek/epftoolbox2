@@ -197,9 +197,12 @@ recorded as failed with the error. The MAE is over the keys with an actual, as a
 
 - `result.table()`: one row per trial: `trial`, each setting, `warm_start`, `rung` (the highest rung it was scored on),
   `validation_mae` there, `mae_r<r>` and `forecasts_r<r>` per rung, and `error`.
-- `result.ranking()`: trial numbers, best first: the highest rung first, then the validation MAE there.
+- `result.ranking()`: trial numbers, best first: the highest rung first, then the validation MAE there. A trial that failed a
+  rung after its last score (promoted, then no score on the dearer rung) is left out: its cheaper score doesn't stand.
+  `result.finalists()` are the ranked trials of the highest rung.
 - `result.best(k, seeds=None)`: the models of the `k` best trials, built by `make`, named `{name}_bayes_00` and on (`name` is the
-  model's). `seeds` replaces each model's `seeds`. The choice goes into the record.
+  model's). `seeds` replaces each model's `seeds`. The choice goes into the record. A `k` beyond the finalists warns: those
+  models were scored on a cheaper rung, and `report.choices()` shows no validation score or gap for them.
 - `result.save(path)`: the record as YAML: the search's settings and space, every trial with its settings, the rungs it reached
   and their scores and forecast counts, the trials each rung promoted, and what `best()` chose. `SearchResult.load(path, make=...)`
   reads it back; `best()` of a loaded result needs `make`, and raises if `make` builds another model from a trial's settings than

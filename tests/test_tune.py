@@ -356,6 +356,66 @@ def test_100_trials_keeping_a_third_promote_33_then_11(df, monkeypatch, sampler)
     assert table["rung"].value_counts().to_dict() == {0: 67, 1: 22, 2: 11}
 
 
+def rung_record(r, mae, state="complete", error=None):
+    return {"rung": r, "every_nth_day": [4, 1][r], "seeds": None, "state": state, "validation_mae": mae, "forecasts": 10,
+            "planned": 10, "error": error}  # fmt: skip
+
+
+def test_a_trial_that_fails_a_dearer_rung_is_left_out_of_the_ranking():
+    """Trial 1 had the best cheap score, was promoted and skipped keys on the dear rung: its cheap score doesn't stand, so it is
+    neither ranked nor a finalist, and the cheaper trials rank after the finalist."""
+    trials = [
+        (0, [rung_record(0, 5.0), rung_record(1, 5.5)]),
+        (1, [rung_record(0, 4.0), rung_record(1, None, "failed", "forecast 9 of 10 planned keys")]),
+        (2, [rung_record(0, 6.0)]),
+        (3, [rung_record(0, 7.0)]),
+    ]
+    record = {
+        "epftoolbox2_search": 1,
+        "name": "ols_bayes",
+        "search": {
+            "space": {"window": {"choice": [14, 28, 42, 56]}},
+            "rungs": [{"every_nth_day": 4, "seeds": None}, {"every_nth_day": 1, "seeds": None}],
+            "validation": list(V),
+        },
+        "trials": [
+            {"trial": n, "params": {"window": [14, 28, 42, 56][n]}, "warm_start": False, "model": None, "rungs": rungs}
+            for n, rungs in trials
+        ],
+        "promoted": [[1, 0]],
+        "chosen": [],
+    }
+    result = SearchResult(record)
+    assert result.ranking() == [0, 2, 3] and result.finalists() == [0]
+
+
+def test_best_below_the_finalists_warns_and_choices_shows_no_validation_score_for_them(df, monkeypatch):
+    def score(self, values, r, run):
+        if r == 2 and not failed:  # the first trial to reach the last rung skips keys there
+            failed.append(values)
+            return bayes._Score(None, 5, 10, "forecast 5 of 10 planned keys (skipped: {'fit_error': 5})")
+        return fake_score(self, values, r, run)
+
+    failed = []
+    monkeypatch.setattr(BayesSearch, "_score", score)
+    result = fake_search(n_trials=30, sampler="random").run(df, horizon=1, validation=V)
+    table = result.table().set_index("trial")
+    dropped = table.index[table["error"].notna()].tolist()
+    assert len(dropped) == 1 and dropped[0] not in result.ranking()
+    finalists = result.finalists()
+    assert len(finalists) == 2  # 3 promoted to the last rung, one failed there
+    with pytest.warns(UserWarning, match="reaches below the 2 finalist"):
+        models = result.best(3, make=lambda params: make({"window": 28, "drivers": ["load"]}))
+    assert [model._search["rung"] for model in models] == [2, 2, 1]
+    assert {model._search["top_rung"] for model in models} == {2}
+    pipeline = ModelPipeline()
+    for model in models:
+        pipeline.add_model(model)
+    rows = pipeline.run(df, horizon=1, validation=V, test=T).choices()
+    assert rows["validation_mae"].isna().tolist() == [False, False, True]
+    assert rows["gap"].isna().tolist() == [False, False, True] and rows["test_mae"].notna().all()
+
+
 def test_tpe_proposes_better_settings_than_its_random_start(df, monkeypatch):
     monkeypatch.setattr(BayesSearch, "_score", fake_score)
     table = fake_search(rungs=None, n_trials=60).run(df, horizon=1, validation=V).table()

@@ -261,15 +261,18 @@ def search_choices(refs: Mapping[str, ModelResultRef], test: Optional[Tuple[str,
             issue_days=None,
         )
         test_mae = issued_mae(whole.iter_records(cols=["run_date", "prediction", "actual"]), test) if test else None
+        # A model from below the finalists was scored on a cheaper rung: its validation numbers are of another fidelity, and
+        # its row shows none rather than a gap between two kinds of score.
+        finalist = search.get("rung") == search.get("top_rung", search.get("rung"))
         out[f"{search.get('search')}:{name}"] = [
             {
                 "chooser": search.get("search"),
                 "segment": 0,
                 "chosen": [name],
                 "k": 1,
-                "validation_mae": search.get("validation_mae"),
-                "validation_forecasts": search.get("validation_forecasts"),
-                "validation_share": search.get("validation_share"),
+                "validation_mae": search.get("validation_mae") if finalist else None,
+                "validation_forecasts": search.get("validation_forecasts") if finalist else None,
+                "validation_share": search.get("validation_share") if finalist else None,
                 "validation": tuple(search.get("validation") or (None, None)),
                 "test": None if not test else tuple(test),
                 "candidates": search.get("candidates"),

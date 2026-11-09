@@ -1075,23 +1075,34 @@ class SearchResult:
         complete = [rung for rung in trial["rungs"] if rung["state"] == "complete"]
         return max(complete, key=lambda rung: rung["rung"]) if complete else None
 
+    @classmethod
+    def _failed_after(cls, trial: Mapping[str, Any]) -> bool:
+        """Whether a trial failed a rung after the last one it was scored on: promoted, then no score on the dearer rung."""
+        last = cls._last(trial)
+        return last is not None and any(
+            rung["state"] != "complete" and rung["rung"] > last["rung"] for rung in trial["rungs"]
+        )
+
     def ranking(self) -> List[int]:
         """Trial numbers, best first: the highest rung scored first, then the validation MAE there, then the trial number.
-        Trials never scored are left out."""
+        Trials never scored are left out, and so is a trial that failed a rung after its last score: it was promoted and then
+        skipped keys or gave non-finite forecasts at the dearer rung, so its cheaper score doesn't stand."""
         keyed = []
         for trial in self._record["trials"]:
             last = self._last(trial)
-            if last is not None:
+            if last is not None and not self._failed_after(trial):
                 keyed.append((-last["rung"], last["validation_mae"], trial["trial"]))
         return [number for _, _, number in sorted(keyed)]
 
-    def finalists(self) -> List[int]:
-        """The ranked trials scored on the highest rung any trial reached (what a later search warm-starts from)."""
+    def _top(self) -> Optional[int]:
+        """The highest rung a ranked trial was scored on."""
         ranked = self.ranking()
-        if not ranked:
-            return []
-        top = self._last(self._trial(ranked[0]))["rung"]
-        return [number for number in ranked if self._last(self._trial(number))["rung"] == top]
+        return None if not ranked else self._last(self._trial(ranked[0]))["rung"]
+
+    def finalists(self) -> List[int]:
+        """The ranked trials scored on the highest rung any ranked trial reached (what a later search warm-starts from)."""
+        top = self._top()
+        return [number for number in self.ranking() if self._last(self._trial(number))["rung"] == top]
 
     def table(self) -> pd.DataFrame:
         """One row per trial, in trial order: `trial`, each setting, `warm_start`, `rung` (the highest rung it was scored on),
@@ -1143,6 +1154,16 @@ class SearchResult:
         ranked = self.ranking()
         if len(ranked) < k:
             raise ValueError(f"best({k}): the search scored {len(ranked)} trial(s)")
+        top = self._top()
+        below = [number for number in ranked[:k] if self._last(self._trial(number))["rung"] != top]
+        if below:
+            warnings.warn(
+                f"best({k}) reaches below the {len(self.finalists())} finalist(s): "
+                f"trial(s) {below} were ranked on a cheaper rung than rung {top}, on fewer days or seeds; their validation "
+                "MAE isn't comparable with the finalists', and report.choices() shows none for them",
+                UserWarning,
+                stacklevel=2,
+            )
         from ..models.base import BaseModel
 
         models, chosen = [], []
@@ -1176,6 +1197,8 @@ class SearchResult:
                 "validation_mae": last["validation_mae"],
                 "validation_forecasts": last["forecasts"],
                 "validation_share": last["forecasts"] / last["planned"] if last["planned"] else None,
+                # The rung the finalists were scored on: a model from a cheaper rung has a score of another fidelity.
+                "top_rung": top,
             }
             model._search = provenance
             self._handed_out.append(provenance)
