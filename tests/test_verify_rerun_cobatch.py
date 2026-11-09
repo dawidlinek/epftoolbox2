@@ -206,8 +206,9 @@ class AutoInContext(FakeInContext):
 class Unseeded(OLSModel):
     """OLS plus unseeded noise of `scale` to twice `scale`, either sign (in standardised target units), on each forecast, as
     a model without a fixed `random_state`, or a GPU kernel whose sums run in another order, gives. Kept away from zero: a
-    normal draw of under about 4e-4 at `scale=1e-12` rounds away in target units, so a run would now and then change 23
-    forecasts of 24 (seen once on S02)."""
+    normal draw of under about 4e-4 at `scale=1e-12` rounds away in target units. Two runs' draws can still round to the
+    same value in target units now and then (same sign, nearly equal draws: S02 saw 23 of 24 moved in about 1 run of 6),
+    so tests ask that nearly every forecast moved (`MOVED_BY_NOISE`), not all 24."""
 
     def __init__(self, predictors, training_window=WINDOW, *, scale=1e-6, **kwargs):
         super().__init__(predictors, training_window, **kwargs)
@@ -221,6 +222,10 @@ class Unseeded(OLSModel):
         prediction, coefs = super()._fit_predict(train_x, train_y, test_x)
         rng = np.random.default_rng()
         return prediction + self.scale * (1.0 + rng.random()) * rng.choice((-1.0, 1.0)), coefs
+
+
+MOVED_BY_NOISE = 20
+"""Of a day's 24 forecasts, at least this many differ between two runs of `Unseeded` (see its docstring)."""
 
 
 class GlobalRng(OLSModel):
@@ -512,7 +517,7 @@ def test_an_unseeded_model_is_inconclusive_never_ok(data, scale):
     """Above 1e-9 the probe alone would call the noise a leak; below it, a pass. The rerun, at atol 0, says neither."""
     report = on(data, MIDDLE, Unseeded(CLEAN, scale=scale, name="Unseeded"), rerun=True)
 
-    assert row(report)["rerun"] == 24
+    assert MOVED_BY_NOISE <= row(report)["rerun"] <= 24
     assert row(report)["status"] == "inconclusive" and not report.ok
     assert (row(report)["changed"] > 0) == (scale > 1e-9)
     problems = report.problems()
@@ -574,7 +579,7 @@ def test_a_leak_far_beyond_the_rerun_noise_stays_a_leak(data):
     """Noise of about 1e-11 doesn't hide a look-ahead that moves forecasts by tens of thousands (code review
     `r2_noise_masks_leak.py`), nor a co-batch leak of about 1e3 (methodology review `downgrade.py`)."""
     report = on(data, MIDDLE, Unseeded(CLEAN + ["observed"], scale=1e-12, name="Leaky"), rerun=True)
-    assert row(report)["rerun"] == 24 and row(report)["status"] == "leak"
+    assert MOVED_BY_NOISE <= row(report)["rerun"] <= 24 and row(report)["status"] == "leak"
     assert any(line.startswith("Leaky: leak on 2023-04-12") for line in report.problems())
     assert report.problems()[0].startswith("Leaky: inconclusive: nondeterministic")
 
