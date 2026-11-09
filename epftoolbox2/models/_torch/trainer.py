@@ -7,12 +7,14 @@ the TorchModel prototype's `_torch_core.py` (loop and vmap, the vmap eligibility
 gives stk.py's forecasts.
 
 **Inputs.** `x` (n, k) and `y` (n, P) are already scaled (the unit standardises its inputs and transforms its targets); `y_mask`
-(n, P) says which target slots exist (a DST gap, a missing value), and only those count in a loss. Each row is one local date
-of the unit. A member is a `MemberSpec(seed_key, train_rows, lr)`: it trains on its `train_rows` alone, the rows of its span, and
-never reads another row of `x` or `y`.
+(n, P) says which target slots exist (a DST gap, a missing value), and only those count in a loss. A row is one local date of
+the unit, or of a period unit one of its date's rows (a repeated autumn hour gives a date two). A member is a
+`MemberSpec(seed_key, train_rows, lr, groups)`: it trains on its `train_rows` alone, the rows of its span, and never reads
+another row of `x` or `y`; `groups` is each row's date (None: every row its own).
 
 **What makes a member's numbers its own.** Every random choice comes from the member's `seed_key`: its early-stopping dates, a
-random share of its own training rows (`member_split`, numpy's generator seeded by the key: stk.py's `split_indices`); its
+random share of its own training dates with every row of a held-out date (`member_split`, numpy's generator seeded by the key:
+stk.py's `split_indices`, which rows of distinct dates follow to the bit); its
 32-bit stream key `pcg32(seed_key)`, from which come the initial weights of every `nets.Linear`, the order of its rows in each
 epoch and the masks of every `nets.Dropout` (counter-based hashes, stk.py's `net_uniform`); torch's generator, seeded by the key
 around the member's build (and, in the loop, its training) for any other layer. The shapes are fixed by the configuration, not by
