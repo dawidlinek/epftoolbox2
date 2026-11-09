@@ -34,7 +34,7 @@ from ..scalers.standard import StandardScaler
 from ..scalers.registry import ScalerSpec, scaler_spec
 from ..results.store import ResultStore, StoreWriter, open_store
 from ..results.ref import ModelResultRef, split_by_window, warn_off_the_clock
-from ..results.availability import LISTING_TIMES, listing_rows, warn_about
+from ..results.availability import LISTING_TIMES, history_rows, listing_rows, warn_about
 from ..results.matching import training_day_rows, warn_about_thin
 from ..results.manifest import (
     PAST_THE_FRAME,
@@ -118,6 +118,7 @@ from ..information_set import (
     rule_dict,
 )
 from ._cards import ModelCard, Problem, card_problems, run_provenance
+from ._history import history_batches, history_spec_of
 from ._units import (
     DAY,
     PERIOD,
@@ -1836,6 +1837,9 @@ class BaseModel(ABC):
                 if windows is not None:
                     self._window_listings = self._plan_window_listings(plan, target, windows)
             plan.release()
+            self._check_history(
+                data, target, horizons, freq, information_set, test_start, test_end, availability, windows, weekdays
+            )
             return expanded
         self._check_frame(data, target, horizon, freq, test_start, test_end, windows, newest, shared)
         expanded = fixed
@@ -1915,7 +1919,62 @@ class BaseModel(ABC):
                         information_set.late_uses, checked, target, freq, data.index, start, end, listed, window
                     )
                 self._window_listings[name] = listing_rows(uses)
+        self._check_history(
+            data, target, horizons, freq, information_set, test_start, test_end, availability, windows, weekdays
+        )
         return expanded
+
+    def _check_history(
+        self,
+        data: pd.DataFrame,
+        target: str,
+        horizons: Sequence[int],
+        freq: str,
+        information_set: Optional["InformationSet"],
+        test_start: Optional[str],
+        test_end: Optional[str],
+        availability: str,
+        windows: Optional[RunWindows],
+        weekdays: Optional[Sequence[int]],
+    ) -> None:
+        """For a model that reads history (`models._history.reads_history`), after its lists' checks: its series are inputs it
+        reads (`_used_predictors`: the manifest hashes them, `report.vintages()` lists them, `verify` perturbs them), and with
+        an information set a series late on an issue day of the run (a known-ahead one not known through the target day, a past
+        one not as far as the target's context) is refused at availability "raise" and listed at "warn", one row per series
+        (`results.availability.history_rows`), from the accessor's cuts alone. Nothing for any other model."""
+        spec = history_spec_of(self, target)
+        if spec is None:
+            return
+        self._used_predictors = list(dict.fromkeys([*self._used_predictors, *spec.past, *spec.known_ahead]))
+        if information_set is None or availability == "none" or test_start is None or test_end is None:
+            return
+        cuts = information_set.in_data_zone(data.index)
+
+        def batches(start: str, end: str) -> List[Any]:
+            days = [day for day in _test_days(start, end) if weekdays is None or day.weekday() in weekdays]
+            return list(history_batches(spec, data, days, cuts, freq, horizons, arrays=False).values())
+
+        if windows is None:
+            found = batches(test_start, test_end)
+            by_window = {}
+        else:
+            by_window = {name: batches(start, end) for name, (start, end) in windows.periods}
+            found = [batch for window in by_window.values() for batch in window]
+        if availability == "raise":
+            late = {name: days for batch in found for name, days in batch.late().items()}
+            if late:
+                shown = "; ".join(
+                    f"{name} on {len(days)} issue day(s), e.g. {days[0]}" for name, days in sorted(late.items())
+                )
+                raise InformationSetError(
+                    f"{self.name}: series not known at the issue time as far as its forecasts read them: {shown}. A known-ahead "
+                    "series must be known through the end of the target day, a past one as far as the target's context (or "
+                    'NaN after its newest step, with a backend that takes missing values). availability="warn" lists them.'
+                )
+            return
+        self._availability_listing = [*self._availability_listing, *history_rows(found)]
+        for name, window in by_window.items():
+            self._window_listings[name] = [*self._window_listings.get(name, []), *history_rows(window)]
 
     def _checked_lists(self, expanded: Dict[Tuple[int, int], List[str]]) -> Dict[Tuple[int, int], List[str]]:
         """What the frame's and the information set's checks read of the expanded lists: a pooled unit's without the virtual
