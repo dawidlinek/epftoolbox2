@@ -3908,32 +3908,35 @@ def _window_available(
     """`_available_array` of a RollingStatsTransformer column under rules over time: its window, the `col.window` local days
     ending on `reached`, is known when every slot of every one of its days is.
 
-    Each day is read as a day aggregate, every slot of it, with the day an `as_of` or `weather_cutoff` value is read on moving
-    with the day (`issue_day` is the newest day's). Inside one rule's period no day is known before an earlier one, so the latest
-    of a window is its newest day or a day next to a period's bound: only those are read, two days either side of each bound as a
-    delivery day and as a read day, since a date of the rule's zone and one of the data's can be a day apart. Without rules
-    over time the newest day alone decides, read at its last slot as a day aggregate is.
+    Each day is read as a day aggregate of the column the window was built from, every slot of it, through that column's own
+    shifts, profiles and windows, so a window of a lag (`x_d-5_roll10max`) or of a window (`x_roll7max_roll10max`) reads every
+    value it holds. Each day is read once and the window takes the running maximum over its days. An `as_of` or `weather_cutoff`
+    value is read on a day that moves with the window's day (`issue_day` is the newest day's), so such a rule reads each row's
+    offset between the two on its own. Without rules over time the newest day alone decides, read at its last slot as a day
+    aggregate is: no earlier day is known later.
     """
     reached = np.asarray(reached, dtype=float)
     issue_day = np.broadcast_to(np.asarray(issue_day, dtype=float), reached.shape)
-    near = set()
-    for one in rule_elements(rule):
-        for date in (one.valid_from, one.valid_until):
-            if date is not None:
-                bound = int((pd.Timestamp(date) - ctx.day) // pd.Timedelta(days=1))
-                near.update(range(bound - 2, bound + 3))
-    offsets = [np.zeros(len(reached))]
-    for near_day in sorted(near):
-        for back in (reached - near_day, issue_day - near_day):
-            offsets.append(np.where((back >= 0) & (back < col.window), back, 0.0))
-    latest = np.full(len(reached), -np.inf)
-    second = np.zeros(len(reached), dtype=bool)
-    for back in offsets:
+    out = np.empty(len(reached))
+    if not len(reached):
+        return out
+    window = col.window
+    reads_issue_day = any(one.kind in ("as_of", "weather_cutoff") for one in rule_elements(rule))
+    offset = issue_day - reached if reads_issue_day else np.zeros(len(reached))
+    for delta in np.unique(offset):
+        rows = offset == delta
+        first = reached[rows].min() - (window - 1)
+        days = np.arange(first, reached[rows].max() + 1.0)
+        latest = np.full(len(days), -np.inf)  # each day's latest slot
+        second = np.zeros(len(days), dtype=bool)
         for slot in np.arange(0.0, 1440.0, step):
-            read = np.full(len(reached), slot)
-            known = _available_array(col.built_from, rule, reached - back, read, step, ctx, second, issue_day - back)
-            latest = np.maximum(latest, known)
-    return latest
+            read = np.full(len(days), slot)
+            latest = np.maximum(
+                latest, _available_array(col.built_from, rule, days, read, step, ctx, second, days + delta)
+            )
+        running = np.lib.stride_tricks.sliding_window_view(latest, window).max(axis=1)  # [i]: days i .. i + window - 1
+        out[rows] = running[(reached[rows] - first - (window - 1)).astype(int)]
+    return out
 
 
 def _fmt_minute(value: float) -> str:

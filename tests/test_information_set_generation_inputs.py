@@ -207,19 +207,20 @@ def test_under_rules_over_time_every_day_of_the_window_must_be_known(rules, lag)
         for day in wall.unique()
         if day - pd.Timedelta(days=lag + 3) >= wall[0]
     }
-    late_days = set()
+    late_days, known_days = set(), []
     for run_day in pd.date_range("2024-04-08", "2024-04-18"):
         issue = pd.Timestamp(f"{run_day.date()} 11:45", tz="Europe/Warsaw")
         late = latest[run_day] > issue
-        if late:
-            late_days.add(str(run_day.date()))
+        (late_days.add if late else known_days.append)(str(run_day.date()))
         perturbed, _, _ = perturb_unknown(data, str(run_day.date()), info)
         rows = wall == run_day
         assert (perturbed.loc[rows, name] != 1.0).tolist() == [late] * int(rows.sum()), run_day
-        found, _ = info.violations(
-            expand([name], horizon=1), "price", "1h", index, str(run_day.date()), str(run_day.date())
-        )
-        assert {v.period for v in found} == (set(range(24)) if late else set()), run_day
+    # The check: each late day on its own, every known day in one call (any late one among them would be found).
+    for day in sorted(late_days):
+        found, _ = info.violations(expand([name], horizon=1), "price", "1h", index, day, day)
+        assert {v.period for v in found} == set(range(24)), day
+    found, _ = info.violations(expand([name], horizon=1), "price", "1h", index, issue_days=known_days)
+    assert found == [], known_days
     # The newest day alone would have let some of these through.
     newest_alone = {
         str(day.date())
@@ -230,6 +231,135 @@ def test_under_rules_over_time_every_day_of_the_window_must_be_known(rules, lag)
     assert newest_alone <= late_days
     if lag:  # a window ending D-1: its newest day is out at 01:00 on D after the bound, while an older day isn't yet
         assert newest_alone < late_days
+
+
+# The window of a lag, or of a window, reads further back than its own days: x_d-5_roll10max holds x on D-14 .. D-5, as
+# x_roll10max_d-5 does, and x_roll7max_roll10max_d-1 x on D-16 .. D-1, as x_roll16max_d-1 does.
+PAIRS = {
+    # Until 10 April a value of day X is out at 13:00 on X+8, from 11 April 1 h after its period.
+    "a lag": (
+        ("x_d-5_roll10max", "x_roll10max_d-5"),
+        [
+            Availability.published("13:00", -8, "Europe/Warsaw").during(valid_until=BOUND),
+            Availability.realised("1h").during(valid_from="2024-04-11"),
+        ],
+        "2024-04-19",  # x of 10 April is out at 13:00 on 18 April
+    ),
+    "a window": (
+        ("x_roll7max_roll10max_d-1", "x_roll16max_d-1"),
+        [
+            Availability.published("13:00", -15, "Europe/Warsaw").during(valid_until=BOUND),
+            Availability.realised("1h").during(valid_from="2024-04-11"),
+        ],
+        "2024-04-26",  # x of 10 April is out at 13:00 on 25 April
+    ),
+}
+
+
+@pytest.mark.filterwarnings("ignore:The rules of")
+@pytest.mark.parametrize("case", sorted(PAIRS))
+def test_a_window_of_a_lag_or_of_a_window_reads_every_value_it_holds(case):
+    """Under a rule that changes over time the two names of each pair hold the same values and get the same verdicts, in the
+    check and the probe, on the issue days around the bound: late until the slow day is out, known from the day after. Read
+    at the window's own days, the outer window missed the slow day its column reaches."""
+    (name, same), rules, first_known = PAIRS[case]
+    info = InformationSet("11:45", "Europe/Warsaw", rules={"x": rules})
+    index = pd.date_range("2024-03-01", "2024-05-15", freq="h", tz="Europe/Warsaw", inclusive="left")
+    wall = index.tz_localize(None).normalize()
+    data = pd.DataFrame({name: 1.0, same: 1.0}, index=index)
+    days = pd.date_range(pd.Timestamp(first_known) - pd.Timedelta(days=3), periods=6)
+    for day in days:
+        late = day < pd.Timestamp(first_known)
+        verdicts = []
+        for column in (name, same):
+            found, _ = info.violations(
+                expand([column], horizon=1), "price", "1h", index, str(day.date()), str(day.date())
+            )
+            verdicts.append({v.period for v in found})
+        assert verdicts[0] == verdicts[1] == (set(range(24)) if late else set()), (case, day)
+        perturbed, _, _ = perturb_unknown(data, str(day.date()), info)
+        moved = (perturbed.loc[wall == day] != 1.0).all()
+        assert moved[name] == moved[same] == late, (case, day)
+
+
+# A rule in another zone than the data's: the delivery day is a Helsinki date (a Warsaw 23:00 is 00:00 of the next one) and an
+# as_of value is read at 09:00 Helsinki. The probe judges every row of the frame, each against D's issue time.
+HELSINKI = "Europe/Helsinki"
+NEVER = pd.Timestamp.max.tz_localize("UTC")
+ZONED = {
+    "published in Helsinki": [
+        Availability.published("13:00", -3, HELSINKI).during(valid_until=BOUND),
+        Availability.realised("1h").during(valid_from="2024-04-11"),
+    ],
+    "as_of in Helsinki": [
+        Availability.as_of("09:00", HELSINKI).during(valid_until=BOUND),
+        Availability.as_of("09:00", HELSINKI).during(valid_from="2024-04-13"),
+    ],
+}
+
+
+def _inside(rule, day: pd.Timestamp) -> bool:
+    return (rule.valid_from is None or day >= pd.Timestamp(rule.valid_from)) and (
+        rule.valid_until is None or day <= pd.Timestamp(rule.valid_until)
+    )
+
+
+def _slot_known(instant: pd.Timestamp, rules) -> pd.Timestamp:
+    """The published or realised value of the hour starting at `instant`: published on its Helsinki date + 3 at 13:00 there, or
+    realised 1 h after it ends on its Warsaw date; the later where both hold, never where none does."""
+    known = []
+    for rule in rules:
+        if rule.kind == "published":
+            day = instant.tz_convert(HELSINKI).tz_localize(None).normalize()
+            if _inside(rule, day):
+                known.append((day + pd.Timedelta(days=-rule.days_before, hours=13)).tz_localize(HELSINKI))
+        elif _inside(rule, instant.tz_convert("Europe/Warsaw").tz_localize(None).normalize()):
+            known.append(instant + pd.Timedelta(hours=2))
+    return max(known) if known else NEVER
+
+
+def _read_known(day: pd.Timestamp, rules) -> pd.Timestamp:
+    """An as_of value read on `day`: at 09:00 Helsinki, if a rule holds for that day."""
+    held = any(_inside(rule, day) for rule in rules)
+    return (day + pd.Timedelta(hours=9)).tz_localize(HELSINKI) if held else NEVER
+
+
+@pytest.mark.filterwarnings("ignore:The rules of")
+@pytest.mark.parametrize("case", sorted(ZONED))
+@pytest.mark.parametrize("run_day", ["2024-04-11", "2024-04-14", "2024-04-17"])
+def test_rolling_cells_of_every_row_under_a_rule_of_another_zone(case, run_day):
+    """Every row of the frame, not only the issue day's: under the published rule a row's window is known when every hour of
+    its Warsaw days is (the Warsaw 23:00 of 10 April is 11 April in Helsinki, where neither rule holds: never known); under the
+    as_of rule a row up to D reads its window's days on D - 1 back (a row after D on its own day - 1 back), each at 09:00
+    Helsinki, so the rows before D share D's verdict."""
+    rules = ZONED[case]
+    name = "x_roll4max_d-1"
+    info = InformationSet("11:45", "Europe/Warsaw", rules={"x": rules})
+    index = pd.date_range("2024-03-28", "2024-04-24", freq="h", tz="Europe/Warsaw", inclusive="left")
+    wall = index.tz_localize(None).normalize()
+    D = pd.Timestamp(run_day)
+    issue = pd.Timestamp(f"{run_day} 11:45", tz="Europe/Warsaw")
+    expected = {}
+    for day in wall.unique():
+        if rules[0].kind == "published":
+            hours = [
+                t
+                for d in pd.date_range(day - pd.Timedelta(days=4), day - pd.Timedelta(days=1))
+                for t in pd.date_range(d, d + pd.Timedelta(days=1), freq="h", tz="Europe/Warsaw", inclusive="left")
+            ]
+            latest = max(_slot_known(t, rules) for t in hours)
+        else:
+            newest = max(day, D) - pd.Timedelta(days=1)  # read on the issue day's, or a later row's own, day - 1
+            latest = max(_read_known(newest - pd.Timedelta(days=k), rules) for k in range(4))
+        expected[day] = latest > issue
+    perturbed, _, _ = perturb_unknown(pd.DataFrame({name: 1.0}, index=index), run_day, info)
+    got = pd.Series((perturbed[name] != 1.0).to_numpy()).groupby(wall).agg(["all", "any"])
+    assert (got["all"] == got["any"]).all()  # one verdict a day
+    wrong = {str(day.date()) for day in got.index if bool(got.loc[day, "all"]) != expected[day]}
+    assert not wrong, (case, run_day, sorted(wrong))
+    if rules[0].kind == "as_of" and run_day == "2024-04-14":
+        # D's window is read on 13 to 10 April, two of them in the gap: 1 April's row is late, though its own days aren't.
+        assert expected[pd.Timestamp("2024-04-01")]
 
 
 def test_explain_spans_the_whole_window():
