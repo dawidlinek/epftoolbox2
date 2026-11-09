@@ -35,6 +35,7 @@ console = Console()
 #   "lag_list"     – comma-separated text → list[int] (e.g. "1,2,7" or "-7,-1,0")
 #   "window"       – a training window: days, "expanding", or a comma-separated list of them (e.g. "56,84,728,expanding")
 #   "json"         – free text parsed as JSON → dict/list (e.g. {"price": [-500, 4000]})
+#   "bounds"       – "low,high", either side empty for none (e.g. "0,1.05" or ",100") → (low, high), empty for None
 
 
 # The training settings every network shares (TorchModel and its presets), after each class's own fields.
@@ -135,6 +136,43 @@ def _torch_fields(seeds: int) -> list[dict]:
             "required": False,
             "default": False,
             "kind": "confirm",
+        },
+    ]
+
+
+# A per-row target (`models._row_target`): the fields every model that takes one shares, after its own; `bounds_only` for a
+# model that takes `bounds` alone (`NaiveModel`).
+def _row_target_fields(bounds_only: bool = False) -> list[dict]:
+    bounds = {
+        "name": "bounds",
+        "description": (
+            "Clip the forecast: low,high (either side empty for none), in multiples of the scale with normalise_by, else "
+            "target units; empty for none"
+        ),
+        "required": False,
+        "default": None,
+        "kind": "bounds",
+    }
+    if bounds_only:
+        return [bounds]
+    return [
+        {
+            "name": "normalise_by",
+            "description": (
+                "Divide each training row's target by this column, multiply the forecast by the issue row's value (e.g. "
+                "installed_capacity_solar_d+{horizon}); empty for none"
+            ),
+            "required": False,
+            "default": None,
+            "kind": "text",
+        },
+        bounds,
+        {
+            "name": "zero_when",
+            "description": "Forecast 0, with no fit, where this 0/1 column is 1 on the issue row (e.g. is_night_d+{horizon})",
+            "required": False,
+            "default": None,
+            "kind": "text",
         },
     ]
 
@@ -985,6 +1023,7 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
             "default": None,
             "kind": "text",
         },
+        *_row_target_fields(),
     ],
     "LassoCVModel": [
         {"name": "name", "description": "Model display name", "required": False, "default": "LassoCV", "kind": "text"},
@@ -1053,6 +1092,7 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
             "default": None,
             "kind": "text",
         },
+        *_row_target_fields(),
     ],
     "RidgeModel": [
         {"name": "name", "description": "Model display name", "required": False, "default": "Ridge", "kind": "text"},
@@ -1120,6 +1160,7 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
             "default": None,
             "kind": "text",
         },
+        *_row_target_fields(),
     ],
     "LEARModel": [
         {"name": "name", "description": "Model display name", "required": False, "default": "LEAR", "kind": "text"},
@@ -1189,6 +1230,7 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
             "default": None,
             "kind": "text",
         },
+        *_row_target_fields(),
     ],
     "NaiveModel": [
         {"name": "name", "description": "Model display name", "required": False, "default": "Naive", "kind": "text"},
@@ -1206,6 +1248,7 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
             "default": True,
             "kind": "confirm",
         },
+        *_row_target_fields(bounds_only=True),
     ],
     "MLPDailyModel": [
         {
@@ -1270,6 +1313,7 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
         },
         _ACTIVATION_FIELD,
         *_torch_fields(3),
+        *_row_target_fields(),
     ],
     "TorchModel": [
         {"name": "name", "description": "Model display name", "required": False, "default": "torch", "kind": "text"},
@@ -1303,6 +1347,7 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
             "choices": ["day", "period"],
         },
         *_torch_fields(4),
+        *_row_target_fields(),  # output "period" only: a day model refuses them before any fit
     ],
     "HistGBModel": [
         {"name": "name", "description": "Model display name", "required": False, "default": "hgb", "kind": "text"},
@@ -1389,6 +1434,7 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
             "default": None,
             "kind": "text",
         },
+        *_row_target_fields(),
     ],
     "MAEEvaluator": [],
     "RMSEEvaluator": [],
@@ -1642,6 +1688,24 @@ def _ask_field(field: dict, available_columns: Optional[list[str]] = None) -> An
         except ValueError as exc:
             console.print(
                 f"[red]Please enter days, 'expanding', or a list of them, e.g. 365 or 56,84,728,expanding ({exc})[/red]"
+            )
+            return _ask_field(field, available_columns)
+
+    if kind == "bounds":
+        from .models._row_target import check_bounds
+
+        raw = questionary.text(label, default="").ask()
+        if raw is None:
+            _abort()
+        raw = raw.strip()
+        if not raw:
+            return default
+        try:
+            low, high = (part.strip() for part in raw.split(","))
+            return check_bounds((float(low) if low else None, float(high) if high else None))
+        except ValueError as exc:
+            console.print(
+                f"[red]Please enter low,high with either side empty for none, e.g. 0,1.05 or ,100 ({exc})[/red]"
             )
             return _ask_field(field, available_columns)
 
