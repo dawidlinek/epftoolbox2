@@ -164,8 +164,9 @@ _COMPARED_FIELDS = (
 # False for results written with `save_coefficients=False` (no key otherwise): a resume with the other setting would mix records
 # with and without coefficients, and an empty list can't be told from a training window list's.
 _COMPARED_FIELDS += ("save_coefficients",)
-# The numeric path of the fits, "engine-1" for an engine group's fits from shared statistics (`models._engine_worker`), no key
-# for the model path: the two agree within the engine's tolerances, not to the bit, so one file never mixes them.
+# The numeric path of the fits, `models._engine_worker.ENGINE_FIT_PATH` ("engine-2"; "engine-1" before OLS's refinement step)
+# for an engine group's fits from shared statistics, no key for the model path: the two agree within the engine's tolerances,
+# not to the bit, so one file never mixes them, nor two engine paths.
 _COMPARED_FIELDS += ("fit_path",)
 # A `PooledModel`'s zone (`models._pooled`): the zones of the fit in stack order, `over`, `zone_feature`, `missing` and the other zones'
 # data hashes, since another zone's data moves this zone's forecasts. None (and no key) for a model fitted on one zone's rows.
@@ -306,8 +307,9 @@ class Manifest:
     # False for records written with `save_coefficients=False` (`coefficients: []`); None (and no key) with their coefficients.
     # Compared on resume.
     save_coefficients: Optional[bool] = None
-    # "engine-1" for fits from shared statistics in an engine group (`ModelPipeline(engine="on")`), None (and no key) for the
-    # model path. Compared on resume: switching refuses (`allow_manifest_mismatch=True` overrides).
+    # `ENGINE_FIT_PATH` ("engine-2") for fits from shared statistics in an engine group (`ModelPipeline(engine="on")`), None
+    # (and no key) for the model path. Compared on resume: switching refuses, as does "engine-1" (before OLS's refinement
+    # step) against "engine-2" (`allow_manifest_mismatch=True` overrides).
     fit_path: Optional[str] = None
     # Provenance of the fits from shared statistics of the last run that made any (`models._engine_worker.EngineCounts`):
     # {"fits", "fallbacks": {reason: count}, "max_issue_z"}; None (and no key) otherwise. Never compared.
@@ -352,8 +354,9 @@ class Manifest:
                     note = " (None: records with their coefficients; False: written with save_coefficients=False)"
                 if name == "fit_path":
                     note = (
-                        " (None: the model path, engine off or a model the engine fits on it; 'engine-1': fits from shared "
-                        "statistics, ModelPipeline(engine='on'); they agree within the engine's tolerances, not to the bit)"
+                        " (None: the model path, engine off or a model the engine fits on it; 'engine-2': fits from shared "
+                        "statistics, ModelPipeline(engine='on'), 'engine-1' the same before OLS's refinement step; they agree "
+                        "within the engine's tolerances, not to the bit)"
                     )
                 out.append(f"{name}: {theirs!r} (existing results) vs {mine!r} (this run){note}")
         return out
@@ -610,7 +613,7 @@ def build_manifest(
     `issue_days` are the weekdays issued on (`date.weekday()` numbers), recorded by name, and only when they aren't every day.
     `vintages` are the rows of `results.vintages.vintage_rows`, recorded as they are. `kernels` is the backend of the LEAR
     kernels the model fits with (`BaseModel._kernel_backend`), None for a model without them. `fit_path` is the numeric path of
-    the fits ("engine-1" in an engine group whose fits come from shared statistics, None for the model path).
+    the fits ("engine-2" in an engine group whose fits come from shared statistics, None for the model path).
     """
     now = datetime.now(timezone.utc).isoformat()
     hashes = FrameHashes(data) if frame_hashes is None else frame_hashes

@@ -159,7 +159,7 @@ def test_which_models_fit_from_statistics():
     LEAR's `"cv"` and LassoCV's KFold blocks (5j); not LEAR's coordinate descent (it stops at a tolerance, so it follows its
     Gram's last bits), not a LassoCV whose folds aren't KFold's, not a model that declares no needs."""
     path = _engine_worker.ENGINE_FIT_PATH
-    assert path == "engine-1"
+    assert path == "engine-2"
     for model in (
         OLSModel(PREDICTORS),
         OLSModel(PREDICTORS, scaler=STANDARD),
@@ -1066,7 +1066,7 @@ def test_switching_the_engine_refuses_a_resume(spring, tmp_path):
         save = tmp_path / first
         pipeline(first, OLSModel(PREDICTORS, 28, name="ols")).run(spring, *days, horizon=1, save_dir=str(save))
         stored = json.loads((save / "ols.manifest.json").read_text())
-        assert stored.get("fit_path") == ("engine-1" if first == "on" else None)
+        assert stored.get("fit_path") == ("engine-2" if first == "on" else None)
         assert ("engine" in stored) == (first == "on")
         full = len(lines(save / "ols.jsonl"))
         keep_first_day(save / "ols.jsonl")
@@ -1076,7 +1076,7 @@ def test_switching_the_engine_refuses_a_resume(spring, tmp_path):
             spring, *days, horizon=1, save_dir=str(save), allow_manifest_mismatch=True
         )
         assert json.loads((save / "ols.manifest.json").read_text()).get("fit_path") == (
-            "engine-1" if then == "on" else None
+            "engine-2" if then == "on" else None
         )
         assert len(lines(save / "ols.jsonl")) == full
         pipeline(first, lear(PREDICTORS, 28, criterion="aic", solver="cd", name="lasso")).run(

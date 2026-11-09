@@ -48,6 +48,13 @@ The fits (`LinearFit` for OLS and Ridge; LEAR's `LearFit` from `ScaledStats.gram
   estimate between 1e9 and 1e10 reach 8.0e-9 and those between 1e10 and 1e11 1.2e-7. Every fit with cond(Z) below 316 is kept
   (the pivot ratio is at most cond(Z)², the estimate at most p·cond(Z)²), and so is every plain Lago row (ratios up to 1.2e4,
   estimates up to 1.2e8).
+  **Refinement.** The normal equations err as eps·cond(Z)² where the model path's SVD errs as eps·cond(Z), and an issue row
+  far out reads that error: on Lago's DE inputs (W 364, 247 inputs, every issue row 5 to 30 training sds out) step 5's fits
+  (fit path "engine-1") were up to 1.4e-8 from `LinearRegression`, the model path within 1e-11 of a long-double solution. So
+  `ols_fit` refines its solution by one step, w + M⁻¹(b - M w) with the fit's own Cholesky factor and the residual well below
+  float64's rounding (`refined`; in long double where `EXTENDED`, else by error-free transformations), which removes the
+  factorisation's error and leaves the rounding of M's and b's entries from the sums (`ols_issue_guard/` in the research
+  folder: Lago DE's worst gap within the distance bound 1.4e-8 -> 3.3e-9 over 61 days of 2016, 1.35e-8 -> 5.9e-9 over 2017).
 - **Ridge**, n > p (scikit-learn's `svd` mode): `RidgeCV(alphas, fit_intercept, cv=None)`'s leave-one-out error, computed from
   the eigendecomposition G = VΛV' (or of A) and the scaled rows (`ScaledStats.rows`, which Ridge alone needs): with U = Z_c V,
   the fit at α is U(V'q/(λ + α)), each row's leverage Σ_k U_ik²/(λ_k + α) plus 1/n for the unpenalised intercept, and its
@@ -73,6 +80,16 @@ from ._lars import GramStats
 from ._sums import RawSums
 
 EPS = float(np.finfo(np.float64).eps)
+
+EXTENDED = bool(float(np.finfo(np.longdouble).eps) < EPS)
+"""Whether `np.longdouble` is wider than float64 (80-bit extended on x86). The residual of `ols_fit`'s refinement step must be
+computed well below float64's rounding (a float64 residual carries rounding of the size of the error it is to remove, and the
+issue-row guard then measures noise: with it, kept forecasts reached 1.2e-8 from the model path on Lago DE): in long double
+where it is wider, else by error-free transformations in float64 (`_residual_exact`, as accurate, about four times the cost:
+1.8 ms against 0.46 ms at p 247). The refined coefficients agree to their last bits either way (the step needs a few correct
+digits of the residual; both give more)."""
+
+_SPLIT = 134217729.0  # 2**27 + 1: Veltkamp's splitting of a float64 into two halves whose products are exact
 
 CANDIDATE_RTOL = 1e-6
 """A column whose standard deviation from the sums is at most this fraction of max(|mean|, rms of x - shift) on the fit's rows
@@ -559,11 +576,17 @@ def cholesky_solve(
 ) -> Optional[np.ndarray]:
     """The solution w of M w = b over M's live columns (a zero column gets 0), or None when the Cholesky factorisation fails,
     (largest/smallest pivot)² exceeds `guard` or `dpocon`'s 1-norm condition estimate exceeds `condition_max`."""
+    solved = _cholesky_solve(M, b, guard, condition_max)
+    return None if solved is None else solved[0]
+
+
+def _cholesky_solve(M: np.ndarray, b: np.ndarray, guard: float, condition_max: float):
+    """`cholesky_solve`'s (w, the Cholesky factor of M's live block, the live columns), or None."""
     p = b.size
     w = np.zeros(p)
     live = np.flatnonzero(_live(M))
     if live.size == 0:
-        return w
+        return w, None, live
     Ml = np.ascontiguousarray(M if live.size == p else M[np.ix_(live, live)])
     L, info = dpotrf(Ml, lower=1, clean=1)
     if info != 0:
@@ -579,14 +602,72 @@ def cholesky_solve(
     if info != 0 or not np.isfinite(x).all():
         return None
     w[live] = x
-    return w
+    return w, L, live
+
+
+def _live_block(M: np.ndarray, b: np.ndarray, live: np.ndarray):
+    full = live.size == b.size
+    return (M if full else M[np.ix_(live, live)]), (b if full else b[live])
+
+
+def _residual(Ml: np.ndarray, bl: np.ndarray, wl: np.ndarray) -> np.ndarray:
+    """b - M w over a live block, well below float64's rounding: in `np.longdouble` where it is wider (`EXTENDED`), else by
+    `_residual_exact`."""
+    if EXTENDED:
+        dtype = np.longdouble
+        return np.asarray(bl, dtype=dtype) - np.asarray(Ml, dtype=dtype) @ np.asarray(wl, dtype=dtype)
+    return _residual_exact(
+        np.asarray(Ml, dtype=np.float64), np.asarray(bl, dtype=np.float64), np.asarray(wl, dtype=np.float64)
+    )
+
+
+def _residual_exact(M: np.ndarray, b: np.ndarray, w: np.ndarray) -> np.ndarray:
+    """b - M w in float64 by error-free transformations, accurate to about eps of the residual itself: each product
+    M_ij w_j = P_ij + E_ij exactly (Dekker's TwoProduct by Veltkamp's splitting), each row's b_i - Σ_j P_ij by pairwise TwoSum
+    with every level's errors carried, and the E_ij (eps-small) summed plainly. O(p²) in vectorised numpy, deterministic."""
+    P = M * w
+    c = _SPLIT * M
+    Mh = c - (c - M)
+    Mlo = M - Mh
+    c = _SPLIT * w
+    wh = c - (c - w)
+    wlo = w - wh
+    E = Mlo * wlo - (((P - Mh * wh) - Mlo * wh) - Mh * wlo)
+    terms = np.concatenate([b[:, None], -P], axis=1)
+    carried = -E.sum(axis=1)
+    while terms.shape[1] > 1:
+        if terms.shape[1] % 2:
+            terms = np.concatenate([terms, np.zeros((terms.shape[0], 1))], axis=1)
+        x, y = terms[:, 0::2], terms[:, 1::2]
+        total = x + y
+        z = total - x
+        carried = carried + ((x - (total - z)) + (y - z)).sum(axis=1)
+        terms = total
+    return terms[:, 0] + carried
+
+
+def refined(M: np.ndarray, b: np.ndarray, w: np.ndarray, L: Optional[np.ndarray], live: np.ndarray) -> np.ndarray:
+    """The solution `w` of M w = b (over the live columns, with the factor `L` the fit used) after one step of iterative
+    refinement: w + M⁻¹(b - M w), the residual well below float64's rounding (`_residual`), solved with `L` (one accurate
+    residual and a triangular solve, O(p²) beside the factorisation's O(p³)). It removes the factorisation's own error, the
+    normal equations' eps·cond(Z)² against the model path's eps·cond(Z), and leaves the rounding of M's and b's entries from
+    the sums. A failed or non-finite step leaves w as it was. A function of M, b and w, so of the fit's sums alone."""
+    if live.size == 0 or L is None:
+        return w
+    Ml, bl = _live_block(M, b, live)
+    step, info = dpotrs(L, np.ascontiguousarray(_residual(Ml, bl, w[live]), dtype=np.float64), lower=1)
+    if info != 0 or not np.isfinite(step).all():
+        return w
+    out = w.copy()
+    out[live] = w[live] + step
+    return out
 
 
 def ols_fit(
     stats: ScaledStats, fit_intercept: bool, guard: float = GUARD, condition_max: float = CONDITION_MAX
 ) -> Optional[LinearFit]:
-    """`LinearRegression(fit_intercept)` from scaled sums by the normal equations, or None where the model path must fit it:
-    n <= p + 1, a failed factorisation, or either guard."""
+    """`LinearRegression(fit_intercept)` from scaled sums by the normal equations, refined by one step (`refined`), or None
+    where the model path must fit it: n <= p + 1, a failed factorisation, or either guard."""
     p = np.asarray(stats.q).size
     if p == 0 or stats.n < MIN_ROWS or stats.n <= p + 1 or not _finite(stats):
         return None  # p 0: scikit-learn refuses a fit of no feature, which the model path counts as a fit_error
@@ -594,9 +675,10 @@ def ols_fit(
         M, b = stats.G, stats.q
     else:
         M, b, _ = stats.uncentred()
-    w = cholesky_solve(M, b, guard, condition_max)
-    if w is None:
+    solved = _cholesky_solve(M, b, guard, condition_max)
+    if solved is None:
         return None
+    w = refined(M, b, *solved)
     intercept = float(stats.ybar - stats.zbar @ w) if fit_intercept else 0.0
     return LinearFit(w, intercept, centred=fit_intercept)
 
@@ -777,6 +859,8 @@ __all__ = [
     "ols_fit",
     "ridge_fit",
     "ridgecv_rounding",
+    "EXTENDED",
+    "refined",
     "standard_stats",
     "transformed_stats",
 ]

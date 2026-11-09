@@ -110,9 +110,11 @@ from ._worker import (
 )
 
 # The numeric path of the fits from shared statistics, as a manifest records it (`fit_path`, compared on resume): a later
-# release that changes their numbers gets another name. None runs every fit of a group on the model path (5h's plumbing, which
-# `tests/models/test_engine_groups.py` checks to the bit against engine off).
-ENGINE_FIT_PATH: Optional[str] = "engine-1"
+# release that changes their numbers gets another name. "engine-1" was step 5's; "engine-2" refines OLS's normal equations by
+# one step (`_stats.refined`), which moves its numbers within the tolerance, so results of the two never mix. None runs every
+# fit of a group on the model path (5h's plumbing, which `tests/models/test_engine_groups.py` checks to the bit against engine
+# off).
+ENGINE_FIT_PATH: Optional[str] = "engine-2"
 
 # The VSTs a row set runs the own `fit_transform` of (`_RowSet`): the library's classes exactly, whose transform is column by
 # column with the parameters `(params, mean, std)` per column (`scalers.vst._VSTScaler`); a subclass may transform otherwise.
