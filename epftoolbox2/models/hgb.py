@@ -73,6 +73,8 @@ class HistGBModel(BaseModel):
         scaler: The predictors as they are and the target as the Invariant, by default (`periods="each"`; a pooled fit gives
             each period's target its own Invariant whatever this says).
         newest_target, binary_mask: As for every model (see `BaseModel`).
+        normalise_by, bounds, zero_when: A per-row target, as for every model (see `BaseModel`), with either value of
+            `periods`: a pooled fit divides each row's target by its own period row's scale.
     """
 
     _card = CARD
@@ -97,6 +99,9 @@ class HistGBModel(BaseModel):
         scaler: Any = INVARIANT_TARGET,
         newest_target: str = "d-1",
         binary_mask: Optional[str] = None,
+        normalise_by: Optional[str] = None,
+        bounds: Optional[Tuple[Optional[float], Optional[float]]] = None,
+        zero_when: Optional[str] = None,
     ):
         # `refit` last, whose check reads the unit kind (`periods`); it keeps its place among the parameters a file writes.
         super().__init__(
@@ -107,6 +112,9 @@ class HistGBModel(BaseModel):
             newest_target=newest_target,
             refit=None,
             binary_mask=binary_mask,
+            normalise_by=normalise_by,
+            bounds=bounds,
+            zero_when=zero_when,
         )
         self.periods = periods
         self.loss = loss

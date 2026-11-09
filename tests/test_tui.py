@@ -54,6 +54,22 @@ def test_the_battery_prompt_builds_the_strategy(monkeypatch):
     assert tui._instantiate("EconomicEvaluator", {"strategy": strategy}).strategy is strategy
 
 
+@pytest.mark.parametrize(("typed", "bounds"), [("0, 1.05", (0.0, 1.05)), (",100", (None, 100.0)), ("", None)])
+def test_the_bounds_prompt_reads_either_side_open(monkeypatch, typed, bounds):
+    class Answer:
+        def ask(self):
+            return typed
+
+    monkeypatch.setattr(tui.questionary, "text", lambda *args, **kwargs: Answer())
+    field = next(f for f in tui.PARAM_SCHEMAS["OLSModel"] if f["name"] == "bounds")
+    assert tui._ask_field(field) == bounds
+    if bounds is not None:
+        model = tui._instantiate(
+            "OLSModel", {"predictors": ["load"], "bounds": bounds, "zero_when": "is_night_d+{horizon}"}
+        )
+        assert model.bounds == bounds and model.zero_when == "is_night_d+{horizon}"
+
+
 def test_issue_time_prompt_defaults_to_the_information_set_default(monkeypatch, tmp_path):
     """The wizard offers the same issue time as `InformationSet()`."""
     import pandas as pd

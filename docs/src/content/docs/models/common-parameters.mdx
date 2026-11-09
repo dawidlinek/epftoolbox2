@@ -1,0 +1,109 @@
+---
+title: Common Parameters
+description: The parameters every model shares, and generation targets - normalise_by, bounds and zero_when
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Every model takes the same parameters for which rows a fit reads and how its forecast is made. Each model's own page gives its
+defaults and says which of them it doesn't take.
+
+| Parameter | Default | What it does |
+|---|---|---|
+| `predictors` | required | Full column names (`{horizon}` allowed), a `(horizon)` or `(horizon, hour)` function, or a [function of `ctx`](/epftoolbox2/model-pipeline/predictor-functions/) |
+| `training_window` | the model's | Days of rows a fit reads, `"expanding"`, or a list of them averaged in the model ([Training Windows](/epftoolbox2/model-pipeline/training-windows/)) |
+| `name` | the model's | Display name, which names its results |
+| `scaler` | the model's | How inputs and target are scaled ([Scalers and VSTs](/epftoolbox2/models/scalers/)) |
+| `newest_target` | `"d-1"` | The newest training target ([The newest target](/epftoolbox2/model-pipeline/time-and-calendars/#the-newest-target)) |
+| `refit` | the model's | How often a fit is made ([Refitting on a calendar](/epftoolbox2/model-pipeline/time-and-calendars/#refitting-on-a-calendar)) |
+| `binary_mask` | `None` | Which rows decide the 0/1 columns left unscaled ([Binary columns and `test_start`](/epftoolbox2/model-pipeline/time-and-calendars/#binary-columns-and-test_start)) |
+| `normalise_by`, `bounds`, `zero_when` | `None` | A per-row target: see [Generation targets](#generation-targets) below |
+
+## Generation targets
+
+A solar or wind forecast is often better fitted on the capacity factor, the generation divided by the capacity installed, kept
+between 0 and a little above 1, and set to 0 at night. Three parameters do that on any model that fits period or pooled units:
+
+```python
+from epftoolbox2.models import HistGBModel, NaiveModel, OLSModel
+
+predictors = ["irradiance_d+{horizon}", "temperature_d+{horizon}", "is_weekend_d+{horizon}"]
+solar = OLSModel(
+    predictors,
+    training_window=364,
+    normalise_by="capacity_d+{horizon}",  # the capacity at the target hour, as known on the issue day
+    bounds=(0, 1.05),  # in multiples of that capacity
+    zero_when="is_night_d+{horizon}",  # 1 at night: 0 with no fit
+    name="solar",
+)
+trees = HistGBModel(predictors, normalise_by="capacity_d+{horizon}", bounds=(0, 1.05), name="solar_hgb")
+tso = NaiveModel(["solar_forecast_d+{horizon}"], name="tso")  # the published forecast, as published
+```
+
+The columns are columns of your frame. For a forecast issued on D at horizon h:
+
+- **`normalise_by="<column>"`** divides each training row's target by that row's value of the column, and multiplies the
+  learner's forecast by the issue row's value. A training row whose value is missing, zero or negative drops out, as a row with a
+  missing input does; a forecast whose issue row's value is missing is skipped as `missing_test_predictors`, and one whose value
+  is zero or negative as `non_positive_scale`.
+- **`bounds=(low, high)`** clips the forecast after it is scaled back: in multiples of the issue row's scale with `normalise_by`
+  (`(0, 1.05)` is 0 to 105 % of its capacity), in target units without (`(0, None)` keeps a load forecast from going below 0).
+  Either side may be `None`.
+- **`zero_when="<column>"`** makes the forecast 0, with no fit, where the issue row's value of the column is 1; a 0 forecasts as
+  usual and a missing value is a `missing_test_predictors` skip. Any other value on a row of an issue day is refused before any fit
+  (`ValueError`): turn the column into a 0/1 flag first. Training rows are untouched: a night hour still trains the periods that
+  read it. The record has `prediction` 0, `coefficients` `[]`, `status` `"ok"` and `detail` `"zero_when"`.
+
+`{horizon}` may stand in either column's name, as in a predictor. So the learner sees y / c on its training rows, and the forecast
+is c times its forecast, clipped, with c the issue row's; its scaler is fitted on the divided targets. They are a model's
+parameters, not a run's, so a benchmark in the same pipeline, such as the published forecast above, stays as it was published.
+
+### Which forecasts exist
+
+`zero_when` is decided after the skips of the training rows and of the issue row's inputs, and before the issue row's scale and
+the fit: a forecast with a missing input or no training row is skipped whatever the column says. So a model forecasts the keys it
+forecasts without `zero_when`, with two exceptions, where its flag is 1: a forecast of 0 is made where the issue row's scale is
+missing or not positive (a clear-sky night with no capacity reported), and where the fit would fail (`fit_error`, as with too few
+training rows). Two models that differ in `zero_when` are compared on the keys they share, as any two models are. `normalise_by`
+can only take keys away (rows and issue rows without a positive scale), and `bounds` none. With all three `None`, the default,
+nothing of a model changes, its records and manifest included.
+
+### Training windows, refits and pooled units
+
+- A list of training windows scales back and clips each window's forecast on its own, so each of `member_predictions` is the
+  forecast of the model with that window alone, and the forecast is their mean; a forecast of 0 has `member_predictions` of 0s.
+- With `refit`, a unit is fitted once on its divided targets and each of its forecasts is multiplied by its own issue row's scale;
+  a unit whose forecasts are all 0 makes no fit, so a fit that would fail leaves them 0.
+- A pooled unit (`HistGBModel(periods="pooled")`) divides each stacked row's target by its own period row's scale, and reads each
+  forecast's scale and `zero_when` on its own period's issue row.
+- `NaiveModel` takes `bounds` alone, which clips its value in target units: it fits nothing to divide or replace (and so does any
+  model that fits nothing).
+- Models of day units refuse all three: `MLPDailyModel` doesn't take them, and `TorchModel(output="day")` refuses them when it is
+  built. Models that read series refuse them before any fit. They aren't supported on a `ResidualModel` in this step (its forecast is
+  the learner's plus the base's, made after the learner's fit), on itself or on its learner, nor on the model a `PooledModel` pools.
+
+### What is checked
+
+The columns are inputs the model reads, never regressors: the coefficients and the predictor layout are the list's alone.
+
+- **The information set** judges `normalise_by`'s column as a predictor: on the issue row, and where its rule changes over time
+  also on the training rows. A capacity published after the issue time is listed at `availability="warn"` and refused at `"raise"`,
+  and so is one known on the issue row but unknown on a row a fit reads (a gap in the rule, a lag that shortened). `zero_when`'s
+  column is judged on the issue row alone, which is all a forecast reads of it: a gap in its rule on a training day is no use. A
+  predictor function's plan judges its lists, and the per-row target's columns are judged beside it; a column that is both a
+  predictor and a per-row target's is listed once.
+- **`verify`** perturbs `normalise_by`'s column as it perturbs predictors, and turns each unknown value of `zero_when`'s from 0 to
+  1 and from 1 to 0 (noise would only ever make a flag "not 1", and a flag of 0 on the issue day would move nothing), so a column
+  the model reads late is a `leak`. Its copies of the model run without `bounds`: the clip only follows the forecast, which can then
+  move freely. A forecast of 0 reads its flag alone, which the flip covers, so the positive control doesn't ask it to move: a period
+  that is 0 on every sampled day by a `static` night flag leaves the model `ok`. `leakage_probe` and `positive_control` leave a
+  model's flags out of their noise (a run refuses a flag that isn't 0 or 1), and with `rebuild` put the built flag back as the
+  unperturbed source builds it; called on their own, `leakage_probe(..., columns=[flag], flip=True)` probes the flag.
+- **The manifest** records the three in `model_params` where they are set, and the columns in `predictors` and `column_hashes`, so a
+  resume with other settings, or over another capacity, raises `ManifestMismatchError`. YAML writes them only when set.
+- **`explain()`** lists the columns in a `row_target` table, with their role, after the predictors.
+
+<Aside type="note">
+A model with any of the three set runs on the model path: with `ModelPipeline(engine="on")` it never joins an engine group, whose
+fits share one target per period, and its records are those of `engine="off"`, bit for bit.
+</Aside>

@@ -30,9 +30,11 @@ skipped forecast (`missing_test_predictors`), and so is a missing row (`missing_
 | `predictors` | list or function | Required | One name, as a list (`{horizon}` templates and callables work), or a [function of `ctx`](/epftoolbox2/model-pipeline/predictor-functions/) returning a list of one name for each forecast. More than one name raises |
 | `name` | str | `"Naive"` | Display name for reports |
 | `known_only` | bool | `True` | Keyword-only. With an information set, a value its rule puts after the issue time is no forecast (`not_published`), at every level. `False` judges the column as any model's input: listed at `"warn"`, refused at `"raise"` |
+| `bounds` | (low, high) or None | `None` | Keyword-only. The value clipped to them, in target units, either side `None` for none. See [Generation targets](/epftoolbox2/models/common-parameters/#generation-targets) |
 
 `training_window`, `scaler`, `newest_target` and `refit` belong to a fit, so they aren't parameters: setting `training_window`, `newest_target` or
-`refit` on a model raises, and so does a function that returns `Use(..., train_on="matching")`.
+`refit` on a model raises, and so does a function that returns `Use(..., train_on="matching")`. So do `normalise_by` and `zero_when`,
+which divide a fit's targets and replace a fit.
 
 ## Only what was published
 

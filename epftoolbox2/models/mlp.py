@@ -11,7 +11,7 @@ hash of `epftoolbox2/nets.py` and the library's version as `module_hash`, compar
 torch.
 """
 
-from typing import Callable, List, Optional, Sequence, Union
+from typing import Callable, List, Optional, Sequence, Tuple, Union
 
 from .torch_model import TorchModel
 
@@ -90,7 +90,8 @@ class MLPHourlyModel(_MLPPreset):
         hidden: Widths of the hidden layers.
         dropout: The rate of each hidden layer's `nets.Dropout` (0: none).
         activation: The hidden layers' activation (`nets.ACTIVATIONS`).
-        Every other argument is `TorchModel`'s, with these defaults: a 728-day window refitted weekly ("7D"), 3 seeds.
+        Every other argument is `TorchModel`'s, with these defaults: a 728-day window refitted weekly ("7D"), 3 seeds; a
+        per-row target (`normalise_by`, `bounds`, `zero_when`) as for every model.
     """
 
     _OUTPUT = "period"
@@ -121,6 +122,9 @@ class MLPHourlyModel(_MLPPreset):
         scaler="standard",
         name: str = "mlp_hourly",
         module_hash: Optional[str] = None,
+        normalise_by: Optional[str] = None,
+        bounds: Optional[Tuple[Optional[float], Optional[float]]] = None,
+        zero_when: Optional[str] = None,
     ):
         super().__init__(
             predictors,
@@ -147,6 +151,9 @@ class MLPHourlyModel(_MLPPreset):
             newest_target=newest_target,
             binary_mask=binary_mask,
             scaler=scaler,
+            normalise_by=normalise_by,
+            bounds=bounds,
+            zero_when=zero_when,
         )
 
 

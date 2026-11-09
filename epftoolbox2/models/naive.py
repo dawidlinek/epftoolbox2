@@ -20,16 +20,17 @@ class NaiveModel(BaseModel):
             value wasn't published yet. Such a forecast is counted as `not_published` in `forecast_counts()`, and is neither
             refused nor listed, at every availability level and in `verify`. False judges the column as any model's input
             instead: refused at "raise", listed at "warn". Without an information set every forecast is made either way.
+        bounds: (low, high): the value clipped to them, in target units, either side None for none (see `BaseModel`).
 
     `newest_target`, `refit`, `binary_mask` and `training_window` are a fit's: they aren't parameters, and setting any of them to
     anything but its default raises (`training_window` is 0: no history, and a list of windows would average fits that don't
-    exist).
+    exist). So are `normalise_by` and `zero_when`, which scale a fit's targets and replace a fit.
     """
 
     _WRITTEN_WHEN_SET = {**BaseModel._WRITTEN_WHEN_SET, "training_window": 0, "scaler": "standard"}
     _fits_nothing = True
 
-    def __init__(self, predictors, name: str = "Naive", *, known_only: bool = True):
+    def __init__(self, predictors, name: str = "Naive", *, known_only: bool = True, bounds=None):
         if isinstance(predictors, str):
             raise TypeError(
                 f"NaiveModel takes a list of one name, got the string {predictors!r}: write [{predictors!r}]"
@@ -41,7 +42,7 @@ class NaiveModel(BaseModel):
         if not isinstance(known_only, bool):
             raise TypeError(f"known_only must be True or False, got {known_only!r}")
         # No training rows: a forecast reads its issue row alone, so the frame needs no history before the test.
-        super().__init__(predictors, training_window=0, name=name)
+        super().__init__(predictors, training_window=0, name=name, bounds=bounds)
         self.known_only = known_only
 
     def __setattr__(self, key, value):
@@ -62,6 +63,11 @@ class NaiveModel(BaseModel):
             )
         if key == "refit" and check_refit(value) is not None:
             raise ValueError(f"NaiveModel fits nothing, so it has nothing to refit: refit={value!r}. Leave it None.")
+        if key in ("normalise_by", "zero_when") and value is not None:
+            raise ValueError(
+                f"NaiveModel fits nothing, so it has no training targets to scale or fit to replace: {key}={value!r}. Leave it "
+                "None; bounds=(low, high) clips its value."
+            )
         if key == "binary_mask" and check_binary_mask(value) is not None:
             raise ValueError(
                 f"NaiveModel fits nothing, so it scales no column and has no binary-column mask: binary_mask={value!r}. Leave it None."
