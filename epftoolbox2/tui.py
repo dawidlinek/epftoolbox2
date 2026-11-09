@@ -891,6 +891,83 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
             "kind": "text",
         },
     ],
+    "SolarGeometryTransformer": [
+        {
+            "name": "locations",
+            "description": "Sites as JSON [lat, lon] pairs, e.g. [[51.0, 10.0]] (a weighted mean when several)",
+            "required": True,
+            "default": None,
+            "kind": "json",
+        },
+        {
+            "name": "weights",
+            "description": "One weight per site as JSON, e.g. [2, 1] (blank = equal)",
+            "required": False,
+            "default": None,
+            "kind": "json",
+        },
+        {
+            "name": "freq",
+            "description": "Period length of the rows; values at its middle",
+            "required": False,
+            "default": "1h",
+            "kind": "text",
+        },
+        {
+            "name": "prefix",
+            "description": "Column prefix, e.g. de gives de_sun_elevation (optional)",
+            "required": False,
+            "default": "",
+            "kind": "text",
+        },
+        {
+            "name": "night_below",
+            "description": "is_night = 1 where the sine of the elevation is below this",
+            "required": False,
+            "default": -0.05,
+            "kind": "float",
+        },
+        {
+            "name": "algorithm",
+            "description": "Solar position equations (meeus = NOAA Solar Calculator, spencer = the renewables study's)",
+            "required": False,
+            "default": "meeus",
+            "kind": "select",
+            "choices": ["meeus", "spencer"],
+        },
+    ],
+    "RollingStatsTransformer": [
+        {
+            "name": "column",
+            "description": "Column to summarise (e.g. generation_solar)",
+            "required": True,
+            "default": None,
+            "kind": "text",
+        },
+        {
+            "name": "window_days",
+            "description": "Local days in the window",
+            "required": False,
+            "default": 365,
+            "kind": "int",
+        },
+        {
+            "name": "stat",
+            "description": "Statistic of each day and of the window's days",
+            "required": False,
+            "default": "max",
+            "kind": "select",
+            "choices": ["min", "max", "mean"],
+        },
+        {
+            "name": "lag_days",
+            "description": "Days from the row's day back to the window's newest day (1 for a realised series)",
+            "required": False,
+            "default": 1,
+            "kind": "int",
+        },
+        {"name": "freq", "description": "Slot length of the data", "required": False, "default": "1h", "kind": "text"},
+    ],
     "EdaValidator": [
         {
             "name": "columns",
@@ -2210,6 +2287,8 @@ _TRANSFORMERS = [
     "DailyStatsTransformer",
     "LambdaTransformer",
     "ImputeTransformer",
+    "SolarGeometryTransformer",
+    "RollingStatsTransformer",
 ]
 _VALIDATORS = [
     "EdaValidator",
