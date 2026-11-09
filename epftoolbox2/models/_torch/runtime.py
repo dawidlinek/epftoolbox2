@@ -14,7 +14,7 @@
   MKL torch bundles. `check_torch_threads` refuses more than one thread where the pool forks (GNU OpenMP hangs there): a torch
   family's parent calls it before it starts a pool (`_pool_init` refuses too, but a failed initialiser only breaks the pool).
 - `runtime_fields(...)` are the settings that change a torch family's numbers, for `BaseModel._runtime_fields`: the manifest
-  records them and a resume with other values is refused. `device_name` (the GPU's or the CPU's model) is for a warning.
+  records them and a resume with other values is refused, except `device_name` (the GPU's or the CPU's model), which warns.
 """
 
 import contextlib
@@ -69,23 +69,38 @@ def _torch():
 
 
 @functools.lru_cache(maxsize=None)
-def cuda_probe(index: int = 0) -> Tuple[bool, Optional[str], str]:
-    """(usable, GPU name, reason) for CUDA device `index`, from a 1x1 matmul in a subprocess. A torch built without CUDA (the CPU
-    wheel) answers False without starting one."""
+def _probe_answer(index: int) -> Dict[str, Any]:
+    """What the probe subprocess says about CUDA device `index` (`_PROBE`), once per process; {"available": False, "error": ...}
+    for a torch without CUDA or a probe that failed."""
     torch = _torch()
     if not torch.backends.cuda.is_built():
-        return False, None, "this torch is built without CUDA"
+        return {"available": False, "error": "this torch is built without CUDA"}
     code = _PROBE % (index, index, index)
     try:
         done = subprocess.run(
             [sys.executable, "-c", code], capture_output=True, text=True, timeout=300, env=dict(os.environ)
         )
-        answer = json.loads(done.stdout.strip().splitlines()[-1])
+        return json.loads(done.stdout.strip().splitlines()[-1])
     except (subprocess.SubprocessError, OSError, ValueError, IndexError) as exc:
-        return False, None, f"the CUDA probe failed: {exc}"
+        return {"available": False, "error": f"the CUDA probe failed: {exc}"}
+
+
+def cuda_probe(index: int = 0) -> Tuple[bool, Optional[str], str]:
+    """(usable, GPU name, reason) for CUDA device `index`, from a 1x1 matmul in a subprocess. A torch built without CUDA (the CPU
+    wheel) answers False without starting one."""
+    answer = _probe_answer(index)
     if answer.get("available") and answer.get("value") == 1.0:
         return True, answer.get("name"), "ok"
     return False, None, answer.get("error") or "torch.cuda.is_available() is False"
+
+
+def cuda_capability(index: int = 0) -> Optional[str]:
+    """The compute capability of CUDA device `index` as "major.minor" ("8.0" for an A100, "9.0" for an H100), None without a
+    usable one: the kernels a GPU runs, which a resume compares as it compares a CPU's (`runtime_fields`)."""
+    if not cuda_probe(index)[0]:
+        return None
+    capability = _probe_answer(index).get("capability")
+    return None if not capability else ".".join(str(part) for part in capability)
 
 
 def resolve_device(device: Any = "auto"):
@@ -162,10 +177,12 @@ def runtime_fields(
     pad_to: Optional[int] = None,
 ) -> Dict[str, Any]:
     """The settings of a torch fit that change its numbers, resolved, for the manifest's `runtime` (compared on resume): torch's
-    version, the device type, dtype, `tf32`, torch's thread count per fit, the stack ("loop" or "vmap") and its size, and for a
-    CPU fit the CPU kernels torch runs (`torch.backends.cpu.get_cpu_capability()`: "AVX512", "AVX2", "DEFAULT", ...; the same
-    fit moved by 1e-6 between AVX2 and the generic kernels, and torch picks the best one the machine has). The GPU's and the
-    CPU's model names are not among them (`device_name`): a different model of the same kind should warn, not refuse."""
+    version, the device type, dtype, `tf32`, torch's thread count per fit, the stack ("loop" or "vmap") and its size, and the
+    kernels the device runs: for a CPU fit `cpu_capability` (`torch.backends.cpu.get_cpu_capability()`: "AVX512", "AVX2",
+    "DEFAULT", ...; the same fit moved by 1e-6 between AVX2 and the generic kernels, and torch picks the best one the machine
+    has), for a GPU fit `cuda_capability` ("9.0"). Also `device_name`, the GPU's or the CPU's model (`device_name`), which the
+    manifest records and only warns about when a resume runs on another (`results.manifest.RUNTIME_WARN_ONLY`): bits are not
+    known to hold across GPU models, nor known to differ across CPUs of one capability."""
     if dtype not in DTYPES:
         raise ValueError(f"dtype={dtype!r}: use one of {DTYPES}")
     torch = _torch()
@@ -182,6 +199,9 @@ def runtime_fields(
     }
     if resolved.type == "cpu":
         fields["cpu_capability"] = torch.backends.cpu.get_cpu_capability()
+    elif resolved.type == "cuda":
+        fields["cuda_capability"] = cuda_capability(resolved.index or 0)
+    fields["device_name"] = device_name(resolved)
     return fields
 
 

@@ -1040,3 +1040,13 @@ def test_early_stopping_holds_out_dates_and_a_repeated_hour_s_rows_together(autu
         assert len(set(groups[val])) == round(0.2 * len(np.unique(groups)))
     single = [s for s in splits if len(np.unique(s[0])) == len(s[0])]
     assert single and all(np.array_equal(f, rf) and np.array_equal(v, rv) for _, f, v, (rf, rv) in single)
+
+
+def test_the_device_s_model_is_recorded_and_a_resume_on_another_warns(market, tmp_path, monkeypatch):
+    save_dir = tmp_path / "device"
+    ModelPipeline().add_model(daily()).run(market, *WEEK, horizon=1, save_dir=save_dir)
+    stored = json.loads(manifest_path(ModelPipeline.results_path(save_dir, daily(), "jsonl")).read_text())
+    assert stored["runtime"]["device_name"] == runtime.cpu_name()
+    monkeypatch.setattr(runtime, "cpu_name", lambda: "Another CPU 9000")
+    with pytest.warns(UserWarning, match="runtime.device_name"):
+        ModelPipeline().add_model(daily()).run(market, *WEEK, horizon=1, save_dir=save_dir)

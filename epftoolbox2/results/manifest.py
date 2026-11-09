@@ -205,9 +205,27 @@ class ManifestMismatchError(ValueError):
     """An existing results directory was produced with a different configuration than this run."""
 
 
+# Entries of a carded family's `runtime` recorded but never compared: a resume where one differs warns. The device's model
+# (`models._torch.runtime.device_name`): bits are not known to hold across GPU models, nor known to differ across CPUs whose
+# kernels (`cpu_capability`, compared) are the same.
+RUNTIME_WARN_ONLY = ("device_name",)
+
+
 def _runtime_differences(name: str, theirs: Optional[Dict[str, Any]], mine: Optional[Dict[str, Any]]) -> List[str]:
     """The entries of a carded family's `runtime` or `weights` that differ, one line each (`runtime.packages.torch: ...`). Only
-    the weights' file hashes count: where the files were found (`ref`) differs between machines with the same files."""
+    the weights' file hashes count: where the files were found (`ref`) differs between machines with the same files. A
+    `RUNTIME_WARN_ONLY` entry of `runtime` that differs warns instead."""
+    if name == "runtime" and isinstance(theirs, dict) and isinstance(mine, dict):
+        for key in RUNTIME_WARN_ONLY:
+            if key in theirs and key in mine and theirs[key] != mine[key]:
+                warnings.warn(
+                    f"runtime.{key}: the results were made on {theirs[key]!r} and this run is on {mine[key]!r}; the same "
+                    "settings are not known to give the same bits on another device model",
+                    UserWarning,
+                    stacklevel=4,
+                )
+        theirs = {key: value for key, value in theirs.items() if key not in RUNTIME_WARN_ONLY}
+        mine = {key: value for key, value in mine.items() if key not in RUNTIME_WARN_ONLY}
     if name == "weights":
         refs = f" (weights {None if theirs is None else theirs.get('ref')!r} vs {None if mine is None else mine.get('ref')!r})"
         theirs = None if theirs is None else {"files": theirs.get("files")}
