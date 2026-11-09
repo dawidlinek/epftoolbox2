@@ -5,7 +5,8 @@ only use values published by then. Each base column gets an `Availability` rule;
 (`x`, `x_d-k`, `x_d+k`, `x_h-k`, ...) to find the base column and the delivery time of the value they hold (a
 DailyProfileTransformer column, `x_h05` or `x_h05_d-1`, is delivered in the slot it names, not at the row, and a
 DailyStatsTransformer column, `x_day_max` or `x_day_max_d-1`, in the last slot of the day it aggregates, and a
-PeriodStatsTransformer column, `x_hour_mean` or `x_hour_dev`, in the last slot of its row's hour); and
+PeriodStatsTransformer column, `x_hour_mean` or `x_hour_dev`, in the last slot of its row's hour, and a
+RollingStatsTransformer column, `x_roll365max_d-1`, in the last slot of its window's newest day); and
 `InformationSet.check` evaluates every expanded predictor for every (period, horizon) before any model is fitted.
 `leakage_probe` tests the same boundary empirically: it perturbs every value that is not yet known at issue time
 and checks that the forecasts don't move. `positive_control` tests the probe: it perturbs the freshest values that
@@ -79,6 +80,9 @@ _DAY_AGGREGATE = re.compile(rf"^(?P<column>.+)(?<!_is)(?<!^is)_day_(?:{'|'.join(
 # PeriodStatsTransformer's suffixes (`data.transformers.period_stats`): the column's mean over the row's hour, or the row's
 # deviation from it. No sign, so they never parse as a shift.
 _HOUR_AGGREGATE = re.compile(rf"^(?P<column>.+)_hour_(?:{'|'.join(map(re.escape, _HOUR_STATS))})$")
+# RollingStatsTransformer's names without their lag (`data.transformers.rolling_stats`): `x_roll365max` is a statistic of x's day
+# statistics over the 365 local days ending on the row's day; its `_d-1` moves the whole window a day back.
+_ROLLING = re.compile(r"^(?P<column>.+)_roll(?P<days>[1-9][0-9]*)(?:min|max|mean)$")
 
 
 # The note of a use that is late on a training row, not on the issue day's.
@@ -655,6 +659,25 @@ _A31_NOTE = "A65/A31 week-ahead load forecast: Fridays for the next week (Art. 6
 # The week-ahead load forecast: one value per local day of each market's Monday-to-Sunday week, published on the Friday before
 # at 10:00 Brussels, two hours before the 12:00 CET day-ahead gate closure, in every zone (Reg. 543/2013 Art. 6(2)(c)).
 _A31 = Availability.weekly("friday", "10:00", note=_A31_NOTE, vintage=_REVISED, week_zone=DATA_ZONE)
+# A68 installed capacity per production type: one value a year, due one week before the end of the year before (Reg. 543/2013
+# Art. 14(1)(a)), so every row of year Y holds a value out before Y began. Read as out at 00:00 seven days before each of its
+# dates, both of the data's zone (timezone None): so for 1 January on its deadline, early enough for every other day of the
+# year, and a lead of more than 7 days (`installed_capacity_solar_d+8`), which can reach next year's value before it is due, is
+# late. The archive holds the newest revision of it. An `EntsoeSource` with the type gets the same rule in its market's zone
+# (`_capacity_rule`), so a frame west of the market (UTC, New York) doesn't read the market's 1 January a day early.
+_CAPACITY = Availability.published(
+    "00:00",
+    7,
+    timezone=None,
+    note="A68 installed capacity: the year's value, due a week before the year begins (Art. 14(1)(a))",
+    vintage=_REVISED,
+)
+# SolarGeometryTransformer's columns (`data.transformers.solar_geometry.COLUMNS`): functions of the row's instant and the
+# transformer's sites, so known at any time and at any shift.
+_SOLAR_COLUMNS = ("sun_elevation", "sun_sin_elevation", "clear_sky_ghi", "is_night")
+_SOLAR = Availability.static(note="solar geometry (SolarGeometryTransformer)")
+# The calendar's columns (CalendarSource); a prefixed one's get the same rule from `source_rules`.
+_CALENDAR = Availability.static(note="calendar (CalendarSource)")
 
 
 _EXAA_NOTE = (
@@ -767,7 +790,8 @@ def energy_charts_rules(
 
 
 def default_rules() -> Dict[str, Availability]:
-    """Built-in rules for the columns the library's ENTSO-E and calendar sources emit (unprefixed names).
+    """Built-in rules for the columns the library's ENTSO-E and calendar sources and its SolarGeometryTransformer emit
+    (unprefixed names; a prefixed SolarGeometryTransformer's too).
 
     ENTSO-E publication times follow Reg. 543/2013 and SDAC practice; they are the latest times the data
     should be available, so a check against them is conservative.
@@ -821,10 +845,11 @@ def _built_in_rules() -> Dict[str, Availability]:
         "generation_*": Availability.realised(
             "1h", note="A75 actual generation per type: 1 h after the period", vintage=_REVISED
         ),
+        "installed_capacity_*": _CAPACITY,
     }
     # No Energy-Charts names here: an EnergyChartsSource prefixes its columns ("ec_") so that none can take an ENTSO-E
     # rule, and its rules come from `source_rules` only. Outside a source-aware run its columns have no rule (refused).
-    calendar = Availability.static(note="calendar (CalendarSource)")
+    calendar = _CALENDAR
     for name in ["is_holiday", "holiday_name", "weekday", "weekday_name", "month", "month_name"]:
         rules[name] = calendar
     for name in ["sunrise", "sunset", "daylight_hours"]:
@@ -848,11 +873,21 @@ def _built_in_rules() -> Dict[str, Availability]:
         rules[f"is_{month}"] = calendar
     rules["holiday_*"] = calendar
     rules["is_[0-9]*"] = calendar
+    # Exact names, no pattern: a series of yours named `sun_...`, `..._is_night` or `..._clear_sky_ghi` (a measured flag, another
+    # clear-sky model) gets no rule from them. A prefixed SolarGeometryTransformer's names come from `source_rules`.
+    for name in _SOLAR_COLUMNS:
+        rules[name] = _SOLAR
     return rules
 
 
+def _capacity_rule(zone: str) -> Availability:
+    """`_CAPACITY` with its dates and its 00:00 in `zone`, the market's."""
+    return replace(_CAPACITY, timezone=zone)
+
+
 def source_rules(sources: Iterable[Any]) -> Dict[str, Availability]:
-    """Rules for the columns a DataPipeline's sources emit, following their prefixes and column choices."""
+    """Rules for the columns a DataPipeline's sources emit, following their prefixes and column choices; and of a
+    `SolarGeometryTransformer` among them, its own column names (prefixed ones included), which `Workflow` passes too."""
     from .data.sources.benchmark import DATASETS, EpftoolboxBenchmarkSource
     from .data.sources.calendar import CalendarSource
     from .data.sources.energy_charts import EnergyChartsSource
@@ -860,6 +895,7 @@ def source_rules(sources: Iterable[Any]) -> Dict[str, Availability]:
     from .data.sources.forecast import ForecastSource
     from .data.sources.open_meteo import OpenMeteoSource
     from .data.sources.pse import PseSource
+    from .data.transformers.solar_geometry import SolarGeometryTransformer
 
     rules: Dict[str, Availability] = {}
     defaults = default_rules()
@@ -867,11 +903,14 @@ def source_rules(sources: Iterable[Any]) -> Dict[str, Availability]:
         if isinstance(source, CalendarSource) and getattr(source, "prefix", ""):
             prefix = source.prefix
             for key, rule in defaults.items():
-                if rule.kind == "static":
+                if rule == _CALENDAR:  # the calendar's own columns, not every static default
                     rules[f"{prefix}{key}"] = rule
         elif isinstance(source, EntsoeSource):
             prefix = f"{source.prefix}_" if getattr(source, "prefix", "") else ""
             rules.update(_entsoe_price_rules(source, prefix))
+            if "installed_capacity" in source.type:
+                # The year's value is stamped at the market's 1 January (`_daily_zone`, as the A31 rule's week): its dates.
+                rules[f"{prefix}installed_capacity_*"] = _capacity_rule(source._daily_zone())
             if "load" not in source.type:
                 continue
             # A31 week-ahead daily values are stamped at the market's own local midnight (EntsoeSource's
@@ -897,6 +936,9 @@ def source_rules(sources: Iterable[Any]) -> Dict[str, Availability]:
                 rules[name] = rule
         elif isinstance(source, PseSource):
             rules.update(_pse_rules(source))
+        elif isinstance(source, SolarGeometryTransformer):
+            for name in source.column_names():
+                rules[name] = _SOLAR
         elif isinstance(source, ForecastSource):
             # Another pipeline's forecasts: known at its issue time on the day `horizon` before their target date, a date of its
             # data zone (`day_zone`), whatever the zone of the frame they are read on. A day statistic of them (`agg`) is of
@@ -1160,6 +1202,13 @@ class ResolvedColumn:
         """The base column at the bottom of what this was built from: the one a rule would be declared for."""
         return self.base if self.built_from is None else self.built_from.series
 
+    @property
+    def window(self) -> int:
+        """The local days whose values `base` summarises, ending on its row's day: W for a RollingStatsTransformer column
+        (`x_roll365max`: 365), else 1."""
+        match = _ROLLING.match(self.base)
+        return 1 if match is None else int(match["days"])
+
 
 def parse_predictor(name: str) -> List[Tuple[str, Tuple[Shift, ...]]]:
     """All readings of a column name as base + suffixes, from the full name to the fully stripped base.
@@ -1190,9 +1239,12 @@ def _profile_slot(base: str) -> Optional[Tuple[int, int]]:
 
 
 def _built_from_name(base: str) -> Optional[str]:
-    """The column a DailyProfileTransformer, DailyStatsTransformer or PeriodStatsTransformer column `base` was built from,
-    with its own shifts (`x_d-1` for `x_d-1_h05`, `x_d-1_day_max` and `x_d-1_hour_mean`), or None for a column that is none
-    of them."""
+    """The column a DailyProfileTransformer, DailyStatsTransformer, PeriodStatsTransformer or RollingStatsTransformer column
+    `base` was built from, with its own shifts (`x_d-1` for `x_d-1_h05`, `x_d-1_day_max` and `x_d-1_hour_mean`), or None for a
+    column that is none of them."""
+    rolling = _ROLLING.match(base)
+    if rolling is not None:
+        return rolling["column"]
     match = _PROFILE_SLOT.match(base) if _profile_slot(base) is not None else _DAY_AGGREGATE.match(base)
     if match is None:
         match = _HOUR_AGGREGATE.match(base)
@@ -1314,8 +1366,9 @@ class InformationSet:
     # -- configuration --------------------------------------------------------
 
     def with_source_rules(self, sources: Iterable[Any]) -> "InformationSet":
-        """A copy that also knows the columns of these data sources (prefixes, Open-Meteo variables), and, of a `ForecastSource`,
-        its upstream (`chained_inputs`)."""
+        """A copy that also knows the columns of these data sources (prefixes, Open-Meteo variables), of a prefixed
+        `SolarGeometryTransformer` among them, and, of a `ForecastSource`, its upstream (`chained_inputs`). `Workflow` passes its
+        data pipeline's sources and transformers."""
         sources = list(sources)
         out = self.copy()
         out._source_rules = {**self._source_rules, **{k: _as_rule(v) for k, v in source_rules(sources).items()}}
@@ -1417,11 +1470,12 @@ class InformationSet:
         before any layer: its availability is its upstream's issue time, which no rule, assumption or pattern can replace
         (`refuse_rules_on_chained_columns` refuses a rule that names one).
 
-        A DailyProfileTransformer, DailyStatsTransformer or PeriodStatsTransformer column first looks for a user's rule on its
-        own name, which describes the series it was built from; otherwise it takes the whole resolution of the column it was
-        built from, so `generation_solar_forecast_day_max` is judged by `generation_*_forecast`, not caught by `generation_*`.
-        Either way the value is read at its slot, the day's last slot or its hour's, and the built-from column's source zone
-        guard applies.
+        A DailyProfileTransformer, DailyStatsTransformer, PeriodStatsTransformer or RollingStatsTransformer column first looks
+        for a user's rule on its own name, which describes the series it was built from; otherwise it takes the whole
+        resolution of the column it was built from, so `generation_solar_forecast_day_max` is judged by
+        `generation_*_forecast`, not caught by `generation_*`, and `generation_solar_roll365max_d-1` by `generation_*` at the
+        end of D-1, not at its row's hour. Either way the value is read at its slot, the day's last slot (a rolling window's
+        newest day's) or its hour's, and the built-from column's source zone guard applies.
         An exact rule on a shifted name (`x_h05_d+1`) describes that very column, as for any other column.
         """
         chain = parse_predictor(name)
@@ -3610,8 +3664,12 @@ def _available_array(
         # A day aggregate holds a statistic of that column over every slot of the day (23, 24 or 25 hours on a DST
         # index), so it is known when the latest of them is: the day's last slot (23:00 for hourly data), on the day
         # the shifts after the aggregate reach. Each rule's availability never decreases with the slot's time, so no
-        # earlier slot is known later; a repeated last slot is its second occurrence.
+        # earlier slot is known later; a repeated last slot is its second occurrence. A rolling statistic (`col.window`
+        # days ending on its row's day) is known when its newest day is, read as a day aggregate, as no earlier day is
+        # known later; under rules over time an earlier one can be, and `_window_available` reads them.
         reached = _shifted_day(col.shifts, day, minute, first, ctx)
+        if col.window > 1 and over_time(rule):
+            return _window_available(col, rule, reached, step, ctx, issue_day + reached - day)
         if col.slot is None and over_time(rule):
             # Under rules over time an earlier slot can be known after the last (a lag that shortens, a gap, a day of one zone
             # that reaches two of another's): the aggregate is known when every slot of its day is.
@@ -3931,7 +3989,7 @@ def _delivered_span(
     reached = _shifted_day(col.shifts, day, minute, later, ctx)
     if col.slot is not None:
         return _delivered_span(col.built_from, reached, np.full(len(reached), float(col.slot[0])), col.slot[1], ctx)
-    start, _ = _delivered_span(col.built_from, reached, np.zeros(len(reached)), step, ctx)
+    start, _ = _delivered_span(col.built_from, reached - (col.window - 1), np.zeros(len(reached)), step, ctx)
     _, end = _delivered_span(col.built_from, reached, np.full(len(reached), 1440.0 - step), step, ctx)
     return start, end
 
@@ -3947,6 +4005,48 @@ def _read_day_offset(
     moves it to the next or the previous day (see `_shift_rows`).
     """
     return _shifted_day(_shifts_after_source_lead(shifts), day, minute, first, ctx) - np.asarray(day)
+
+
+def _window_available(
+    col: ResolvedColumn,
+    rule: Rule,
+    reached: np.ndarray,
+    step: int,
+    ctx: _Context,
+    issue_day: Union[int, np.ndarray],
+) -> np.ndarray:
+    """`_available_array` of a RollingStatsTransformer column under rules over time: its window, the `col.window` local days
+    ending on `reached`, is known when every slot of every one of its days is.
+
+    Each day is read as a day aggregate of the column the window was built from, every slot of it, through that column's own
+    shifts, profiles and windows, so a window of a lag (`x_d-5_roll10max`) or of a window (`x_roll7max_roll10max`) reads every
+    value it holds. Each day is read once and the window takes the running maximum over its days. An `as_of` or `weather_cutoff`
+    value is read on a day that moves with the window's day (`issue_day` is the newest day's), so such a rule reads each row's
+    offset between the two on its own. Without rules over time the newest day alone decides, read at its last slot as a day
+    aggregate is: no earlier day is known later.
+    """
+    reached = np.asarray(reached, dtype=float)
+    issue_day = np.broadcast_to(np.asarray(issue_day, dtype=float), reached.shape)
+    out = np.empty(len(reached))
+    if not len(reached):
+        return out
+    window = col.window
+    reads_issue_day = any(one.kind in ("as_of", "weather_cutoff") for one in rule_elements(rule))
+    offset = issue_day - reached if reads_issue_day else np.zeros(len(reached))
+    for delta in np.unique(offset):
+        rows = offset == delta
+        first = reached[rows].min() - (window - 1)
+        days = np.arange(first, reached[rows].max() + 1.0)
+        latest = np.full(len(days), -np.inf)  # each day's latest slot
+        second = np.zeros(len(days), dtype=bool)
+        for slot in np.arange(0.0, 1440.0, step):
+            read = np.full(len(days), slot)
+            latest = np.maximum(
+                latest, _available_array(col.built_from, rule, days, read, step, ctx, second, days + delta)
+            )
+        running = np.lib.stride_tricks.sliding_window_view(latest, window).max(axis=1)  # [i]: days i .. i + window - 1
+        out[rows] = running[(reached[rows] - first - (window - 1)).astype(int)]
+    return out
 
 
 def _fmt_minute(value: float) -> str:

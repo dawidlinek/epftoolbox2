@@ -40,7 +40,10 @@ trees = HistGBModel(predictors, normalise_by="capacity_d+{horizon}", bounds=(0, 
 tso = NaiveModel(["solar_forecast_d+{horizon}"], name="tso")  # the published forecast, as published
 ```
 
-The columns are columns of your frame. For a forecast issued on D at horizon h:
+The columns are columns of your frame: [`SolarGeometryTransformer`](/epftoolbox2/transformers/solar-geometry/) makes a static
+`is_night`, and [`RollingStatsTransformer`](/epftoolbox2/transformers/rolling-stats/) a capacity proxy known at the issue
+(`generation_solar_roll365max_d-1`); [Generation Targets](/epftoolbox2/model-pipeline/generation/) puts them together. For a
+forecast issued on D at horizon h:
 
 - **`normalise_by="<column>"`** divides each training row's target by that row's value of the column, and multiplies the
   learner's forecast by the issue row's value. A training row whose value is missing, zero or negative drops out, as a row with a

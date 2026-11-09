@@ -14,6 +14,7 @@ from ._daily import (
     wall_hours,
 )
 from .base import Transformer
+from ._daily import check_spacing
 
 _STATS = ("min", "max", "mean", "last")
 # What `stats` may name, `{column}_day_{stat}`: the default four, and the mean over the peak hours. The information set reads
@@ -77,6 +78,7 @@ class DailyStatsTransformer(Transformer):
         names = [f"{column}_day_{stat}" for column in self.columns for stat in self.stats]
         check_new_columns(df, names, type(self).__name__)
 
+        check_spacing(index, self._step, self.freq, type(self).__name__)  # hourly rows read with freq="15min": all NaN
         order = np.argsort(index.asi8, kind="stable")
         days = local_days(index)
         values = df[self.columns].astype(float).iloc[order]

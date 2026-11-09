@@ -112,6 +112,11 @@ an issue day it didn't sample.
 
 ### Fixed
 
+- **`DailyStatsTransformer(freq="1D")` on a daily frame keeps the day of the spring switch.** A frame of one row a day counted its
+  slots in hours, so the 23-hour day had none, its one row read as an incomplete day and got NaN in every statistic (and
+  `DailyProfileTransformer(freq="1D")` warned of it). A slot of a day or more is now one per date, whatever its length. Hourly and
+  15-minute frames are bit for bit as before. A `freq` shorter than the rows' spacing (hourly rows with `freq="15min"`), which
+  made every day incomplete and every statistic NaN without a word, now raises `ValueError`.
 - **A `Workflow` file's inline sources read a relative path from the file's directory.** `data_pipeline: sources:` in a Workflow
   YAML resolved `file_path` (or `path`) against the working directory, while the same source in a data pipeline file, and the model
   pipeline's `save_dir`, were read from the YAML's directory. They are all the YAML's now: a workflow run from another directory
@@ -218,6 +223,33 @@ an issue day it didn't sample.
   again after the upstream changed. See [ForecastSource](/epftoolbox2/data-sources/forecast/) and
   [Chaining Pipelines](/epftoolbox2/model-pipeline/chaining/). No existing record, listing or table moves; only daily manifests gain
   `daily_stamp`.
+- **Generation inputs: `SolarGeometryTransformer`, `RollingStatsTransformer` and built-in rules for them and the installed
+  capacity.** `SolarGeometryTransformer(locations, weights=None, freq="1h", prefix="", night_below=-0.05, algorithm="meeus")`
+  adds `sun_elevation` (degrees, no refraction), `sun_sin_elevation`, `clear_sky_ghi` (Haurwitz) and `is_night` at the middle of
+  each period, read at the row's UTC instant (each row of the repeated autumn hour gets its own), over one site or the weighted
+  mean of several; `"meeus"` is the NOAA Solar Calculator's equations, astral's, and `"spencer"` the fractional-year series the
+  renewables study used, up to about 0.5 degrees off near the equinoxes. `RollingStatsTransformer(column, window_days=365,
+  stat="max", lag_days=1, min_days=None, freq="1h")` adds `{column}_roll{W}{stat}_d-{lag}`, the statistic of the column's complete
+  days over the W local days ending `lag_days` before the row's, NaN where fewer than `min_days` of them are complete (all of them
+  by default, so a window reaching before the frame's first day, or holding a missing hour, has no value and the forecasts that read
+  it are skipped and counted): the study's capacity proxy is `generation_solar_roll365max_d-1` with `min_days=60`. Both refuse rows
+  further apart than `freq`. The information set gives the four solar columns static rules by their exact names (a prefixed
+  transformer's through `with_source_rules`, which a `Workflow` now calls with its data pipeline's transformers too), and
+  `installed_capacity_*` a rule that knows a date's value at 00:00 seven days before it, in the data's zone (`latest_revision`; a
+  an `EntsoeSource`'s through `with_source_rules`, in its market's zone): A68 is due a week before its year, so a lead of up to 7 days is known
+  and a longer one, which can reach next year's value, is late. Those columns had no rule: a model that read them was refused at
+  `"raise"` with `unknown="raise"` and listed as `no rule` at `"warn"`. A rolling column is judged by the rule of the column it was
+  built from at the last slot of its window's newest day, and under rules over time when every day of the window is. See
+  [Generation Targets](/epftoolbox2/model-pipeline/generation/).
+  - **A column of yours named like a rolling statistic is judged as one.** A name that ends in `_roll<N>min`, `_roll<N>max` or
+    `_roll<N>mean` before its shifts (`load_roll24mean`, `load_roll24mean_d-1`) now takes the rule of the column before
+    `_roll<N>` and is judged at the last slot of the N-day window ending on its row's day, where it was judged at its own row's
+    period, or had no rule. That can only call it later than before: a 24-hour rolling mean of realised load that your rule
+    called known at 09:00 is now late on the issue day (a false refusal if it was a window of hours, never a leak). Rename such a
+    column: a rule in `rules=` on its own name sets its timing, as for a day aggregate, but it is still read at the last slot of
+    its newest day.
+  - No record or table of a model that reads none of these columns moves; one that does lists them as known where it listed
+    `no rule`.
 - **`day_zone` on `Availability.published` and `daily_close`.** The delivery day as a date of another zone than `timezone`: a zone's
   name, or `"data"` for the data's (the later of the data's and the issue zone's date on a frame in another zone), the publication
   instant staying `time` in `timezone`; validity periods read the same day. `None`, the default, is every rule as it was, and YAML

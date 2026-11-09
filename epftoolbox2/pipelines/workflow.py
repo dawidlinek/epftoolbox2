@@ -335,8 +335,9 @@ class Workflow:
             mp.ensembles, mp.evaluators, mp.exporters = [], [], []
         dp = self._build_data_pipeline()
         if mp.information_set is not None:
-            # Knows the columns of the configured sources, e.g. a CalendarSource prefix or Open-Meteo variables.
-            mp.information_set = mp.information_set.with_source_rules(dp.sources)
+            # Knows the columns of the configured sources, e.g. a CalendarSource prefix or Open-Meteo variables, and a prefixed
+            # SolarGeometryTransformer's.
+            mp.information_set = mp.information_set.with_source_rules([*dp.sources, *dp.transformers])
 
         data = self._run_data(dp)
         if array_task and not self.model_forecast_only:
