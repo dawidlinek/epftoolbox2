@@ -195,7 +195,7 @@ For a predictor function it shows [the distinct lists first](/epftoolbox2/model-
 | `installed_capacity_*` (A68 installed capacity per production type; a prefixed `EntsoeSource`'s through `with_source_rules`) | published 00:00 seven days before the delivery day, both of the data's zone: one value a year, due a week before the year begins (Art. 14(1)(a)), so exact for 1 January and early enough for every other day; a lead of up to 7 days (`_d+7`) is known, a longer one can reach next year's value and is late | `latest_revision` |
 | `PseSource` columns (`pse_*`) | `load_fcst` 10:00 Warsaw on D-1, the prices (`csdac_pln`, `rce_pln`) 15:00 on D-1, `usage_fcst` at the source's `pdgsz_cutoff` on D-1; `load_actual`, `his-wlk-cal` and `flow_*` columns 13:00 on D+1 (see [PseSource](/epftoolbox2/data-sources/pse/#availability-rules)) | `snapshot` for the prices and `usage_fcst`, `last_write_stamp` for the rest |
 | Calendar columns (`is_holiday`, weekday/month dummies, `sunrise`/`sunset`/`daylight_hours`, ...) | static, known in advance | none |
-| [`SolarGeometryTransformer`](/epftoolbox2/transformers/solar-geometry/) columns (`sun_elevation`, `sun_sin_elevation`, `clear_sky_ghi`, `is_night`, and `<prefix>_sun_elevation` and so on) | static: a function of the row's instant, known in advance at any shift. Exact names, so a series of yours named `sun_...` gets no rule from them | none |
+| [`SolarGeometryTransformer`](/epftoolbox2/transformers/solar-geometry/) columns (`sun_elevation`, `sun_sin_elevation`, `clear_sky_ghi`, `is_night`; a prefixed transformer's `<prefix>_sun_elevation` and so on through `with_source_rules`) | static: a function of the row's instant, known in advance at any shift. Exact names, so a series of yours named `sun_...` or `..._is_night` gets no rule from them | none |
 
 An `OpenMeteoSource` column's rule (below) is a `snapshot`, and so is an `EpftoolboxBenchmarkSource`'s `price`.
 
@@ -232,9 +232,10 @@ before that. `load_forecast_h+35` on a noon row there is 23:00 on D+1, delivered
 Column names are parsed the same way predictors are: `price_d-1` resolves to the base column `price` shifted
 one calendar day back. There is no built-in default rule for weather columns, a `*_temperature_2m`-style
 name alone doesn't say whether it's a forecast or an observed value. A `DataPipeline`'s sources refine the
-check: `with_source_rules()` (called automatically by `Workflow`) teaches it about a `CalendarSource(prefix=...)`,
-overrides the default week-ahead rule for an `EntsoeSource`'s own columns, and assigns a rule to exactly the
-columns an `OpenMeteoSource` or an `EpftoolboxBenchmarkSource` emits:
+check: `with_source_rules()` (called automatically by `Workflow`, with the data pipeline's transformers too) teaches it about a
+`CalendarSource(prefix=...)` (the calendar's own columns under its prefix), overrides the default week-ahead rule for an
+`EntsoeSource`'s own columns, gives a prefixed `EntsoeSource`'s `installed_capacity_*` the built-in rule, and assigns a rule to
+exactly the columns an `OpenMeteoSource`, an `EpftoolboxBenchmarkSource` or a prefixed `SolarGeometryTransformer` emits:
 
 - An `EntsoeSource` with `"load"` in `type` gets its own `load_forecast_daily_min`/`_max` rule (prefixed the
   same way as its other columns): published Friday 10:00 Brussels like the built-in one, for the week of the source's

@@ -1,6 +1,7 @@
-"""The information set and the generation inputs of step 7e: built-in static rules for SolarGeometryTransformer's columns and
-ENTSO-E's installed capacity, and a RollingStatsTransformer column judged through the column it was built from at the last slot
-of its window's newest day, every day of the window under rules over time."""
+"""The information set and the generation inputs of step 7e: static rules for SolarGeometryTransformer's columns (built in for
+its own names, from `source_rules` for a prefixed one), ENTSO-E's installed capacity known a week ahead, and a
+RollingStatsTransformer column judged through the column it was built from at the last slot of its window's newest day, every
+day of the window under rules over time."""
 
 import warnings
 
@@ -8,8 +9,11 @@ import numpy as np
 import pandas as pd
 import pytest
 
+import yaml
+
+from epftoolbox2.data.sources.calendar import CalendarSource
 from epftoolbox2.data.sources.entsoe import EntsoeSource
-from epftoolbox2.data.transformers import LagTransformer, RollingStatsTransformer
+from epftoolbox2.data.transformers import LagTransformer, RollingStatsTransformer, SolarGeometryTransformer
 from epftoolbox2.information_set import (
     Availability,
     InformationSet,
@@ -17,6 +21,7 @@ from epftoolbox2.information_set import (
     perturb_unknown,
     source_rules,
 )
+from epftoolbox2.pipelines import Workflow
 from tests.test_information_set import _refused_periods, _verdicts_against_held_deliveries, expand, violations
 
 SOLAR = ["sun_elevation", "sun_sin_elevation", "clear_sky_ghi", "is_night"]
@@ -30,20 +35,80 @@ SOLAR = ["sun_elevation", "sun_sin_elevation", "clear_sky_ghi", "is_night"]
 @pytest.mark.parametrize("prefix", ["", "de_"])
 def test_solar_geometry_columns_are_static_at_any_shift(prefix):
     """A function of the row's instant: known at any time, so `is_night_d+1` can be a model's `zero_when` and a lead of a week
-    is as known as the column itself."""
-    info = InformationSet()
+    is as known as the column itself. The transformer's own names are built in; a prefixed one's come from `source_rules`, which
+    has none without it."""
     names = [f"{prefix}{name}{shift}" for name in SOLAR for shift in ("", "_d+1", "_d+7", "_d-1", "_h+30")]
+    info = InformationSet()
+    if prefix:
+        assert all(info.resolve(name).rule is None for name in names)
+        info = info.with_source_rules([SolarGeometryTransformer([(51.0, 10.0)], prefix=prefix.rstrip("_"))])
     for name in names:
         col = info.resolve(name)
         assert col.rule is not None and col.rule.kind == "static", name
-    assert violations(names, horizon=7) == (set(), set())
+    assert violations(names, info=info, horizon=7) == (set(), set())
 
 
-def test_no_pattern_gives_another_sun_column_a_rule():
-    """Exact names and `*_<name>`: a series of yours named `sun_power` or `pv_sun_forecast` gets no rule from them."""
-    info = InformationSet()
-    for name in ["sun_power", "pv_sun_forecast_d+1", "is_nightly", "sun_elevation_max", "clear_sky"]:
+def test_no_pattern_gives_another_series_a_solar_rule():
+    """Exact names only: a series of yours named `sun_power`, a measured night flag or another clear-sky model's irradiance gets
+    no rule from them, also beside a prefixed transformer (which names its own columns)."""
+    names = ["sun_power", "pv_sun_forecast_d+1", "is_nightly", "sun_elevation_max", "clear_sky", "cams_clear_sky_ghi"]
+    names += ["measured_is_night_d-1", "de_sun_elevation", "at_is_night"]
+    info = InformationSet().with_source_rules([SolarGeometryTransformer([(47.8, 14.5)], prefix="atx")])
+    for name in names:
         assert info.resolve(name).rule is None, name
+    assert info.resolve("atx_is_night_d+1").rule.kind == "static"
+
+
+def test_a_prefixed_calendar_copies_the_calendar_s_rules_alone():
+    """`CalendarSource(prefix="pl_")` gets the calendar's static rules under its prefix, not every static default: no
+    `pl_sun_elevation` or `pl_is_night`."""
+    rules = source_rules([CalendarSource("PL", prefix="pl_")])
+    assert {"pl_is_holiday", "pl_is_monday", "pl_sunrise", "pl_holiday_*", "pl_is_[0-9]*"} <= set(rules)
+    assert not any(word in key for key in rules for word in ("sun_", "night", "clear_sky", "capacity"))
+    assert all(rule.note == "calendar (CalendarSource)" for rule in rules.values())
+
+
+def test_a_workflow_knows_a_prefixed_solar_transformer_s_columns(tmp_path):
+    """`Workflow` passes the data pipeline's transformers to `with_source_rules`, so `pl_is_night_d+1` is static at "raise"."""
+    index = pd.date_range("2023-01-01", "2023-04-01", freq="1h", tz="UTC", inclusive="left")
+    rng = np.random.default_rng(0)
+    pd.DataFrame({"datetime": index.strftime("%Y-%m-%d %H:%M:%S"), "price": rng.normal(100, 10, len(index))}).to_csv(
+        tmp_path / "prices.csv", index=False
+    )
+    config = {
+        "data_pipeline": {
+            "start": "2023-01-01",
+            "end": "2023-03-31",
+            "sources": [{"class": "CsvSource", "params": {"file_path": str(tmp_path / "prices.csv")}}],
+            "transformers": [
+                {"class": "TimezoneTransformer", "params": {"target_tz": "Europe/Warsaw"}},
+                {"class": "SolarGeometryTransformer", "params": {"locations": [[52.2, 21.0]], "prefix": "pl"}},
+                {"class": "LagTransformer", "params": {"columns": ["price"], "lags": [1], "freq": "day"}},
+                {"class": "LagTransformer", "params": {"columns": ["pl_clear_sky_ghi"], "lags": [-1], "freq": "day"}},
+            ],
+        },
+        "model_pipeline": {
+            "test_start": "2023-03-01",
+            "test_end": "2023-03-01",
+            "horizon": 1,
+            "information_set": {"issue_time": "11:45", "issue_timezone": "Europe/Brussels"},
+            "availability": "raise",
+            "models": [
+                {
+                    "class": "OLSModel",
+                    "params": {
+                        "predictors": ["price_d-1", "pl_clear_sky_ghi_d+1"],
+                        "training_window": 30,
+                        "name": "OLS",
+                    },
+                }
+            ],
+        },
+    }
+    path = tmp_path / "experiment.yaml"
+    path.write_text(yaml.safe_dump(config))
+    report = Workflow.load(path).run()
+    assert report.forecast_counts().loc[0, "produced"] == 24
 
 
 def test_installed_capacity_is_known_a_week_ahead_with_its_archive_s_newest_revision():

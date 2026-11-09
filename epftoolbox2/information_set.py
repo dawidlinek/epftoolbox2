@@ -669,6 +669,8 @@ _CAPACITY = Availability.published(
 # transformer's sites, so known at any time and at any shift.
 _SOLAR_COLUMNS = ("sun_elevation", "sun_sin_elevation", "clear_sky_ghi", "is_night")
 _SOLAR = Availability.static(note="solar geometry (SolarGeometryTransformer)")
+# The calendar's columns (CalendarSource); a prefixed one's get the same rule from `source_rules`.
+_CALENDAR = Availability.static(note="calendar (CalendarSource)")
 
 
 _EXAA_NOTE = (
@@ -840,7 +842,7 @@ def _built_in_rules() -> Dict[str, Availability]:
     }
     # No Energy-Charts names here: an EnergyChartsSource prefixes its columns ("ec_") so that none can take an ENTSO-E
     # rule, and its rules come from `source_rules` only. Outside a source-aware run its columns have no rule (refused).
-    calendar = Availability.static(note="calendar (CalendarSource)")
+    calendar = _CALENDAR
     for name in ["is_holiday", "holiday_name", "weekday", "weekday_name", "month", "month_name"]:
         rules[name] = calendar
     for name in ["sunrise", "sunset", "daylight_hours"]:
@@ -864,15 +866,16 @@ def _built_in_rules() -> Dict[str, Availability]:
         rules[f"is_{month}"] = calendar
     rules["holiday_*"] = calendar
     rules["is_[0-9]*"] = calendar
-    # Exact names, and `*_<name>` for a prefixed transformer's: no pattern that a series of yours named `sun_...` could fall to.
+    # Exact names, no pattern: a series of yours named `sun_...`, `..._is_night` or `..._clear_sky_ghi` (a measured flag, another
+    # clear-sky model) gets no rule from them. A prefixed SolarGeometryTransformer's names come from `source_rules`.
     for name in _SOLAR_COLUMNS:
         rules[name] = _SOLAR
-        rules[f"*_{name}"] = _SOLAR
     return rules
 
 
 def source_rules(sources: Iterable[Any]) -> Dict[str, Availability]:
-    """Rules for the columns a DataPipeline's sources emit, following their prefixes and column choices."""
+    """Rules for the columns a DataPipeline's sources emit, following their prefixes and column choices; and of a
+    `SolarGeometryTransformer` among them, its own column names (prefixed ones included), which `Workflow` passes too."""
     from .data.sources.benchmark import DATASETS, EpftoolboxBenchmarkSource
     from .data.sources.calendar import CalendarSource
     from .data.sources.energy_charts import EnergyChartsSource
@@ -880,6 +883,7 @@ def source_rules(sources: Iterable[Any]) -> Dict[str, Availability]:
     from .data.sources.forecast import ForecastSource
     from .data.sources.open_meteo import OpenMeteoSource
     from .data.sources.pse import PseSource
+    from .data.transformers.solar_geometry import SolarGeometryTransformer
 
     rules: Dict[str, Availability] = {}
     defaults = default_rules()
@@ -887,7 +891,7 @@ def source_rules(sources: Iterable[Any]) -> Dict[str, Availability]:
         if isinstance(source, CalendarSource) and getattr(source, "prefix", ""):
             prefix = source.prefix
             for key, rule in defaults.items():
-                if rule.kind == "static":
+                if rule == _CALENDAR:  # the calendar's own columns, not every static default
                     rules[f"{prefix}{key}"] = rule
         elif isinstance(source, EntsoeSource):
             prefix = f"{source.prefix}_" if getattr(source, "prefix", "") else ""
@@ -919,6 +923,9 @@ def source_rules(sources: Iterable[Any]) -> Dict[str, Availability]:
                 rules[name] = rule
         elif isinstance(source, PseSource):
             rules.update(_pse_rules(source))
+        elif isinstance(source, SolarGeometryTransformer):
+            for name in source.column_names():
+                rules[name] = _SOLAR
         elif isinstance(source, ForecastSource):
             # Another pipeline's forecasts: known at its issue time on the day `horizon` before their target date, a date of its
             # data zone (`day_zone`), whatever the zone of the frame they are read on.
@@ -1321,8 +1328,9 @@ class InformationSet:
     # -- configuration --------------------------------------------------------
 
     def with_source_rules(self, sources: Iterable[Any]) -> "InformationSet":
-        """A copy that also knows the columns of these data sources (prefixes, Open-Meteo variables), and, of a `ForecastSource`,
-        its upstream (`chained_inputs`)."""
+        """A copy that also knows the columns of these data sources (prefixes, Open-Meteo variables), of a prefixed
+        `SolarGeometryTransformer` among them, and, of a `ForecastSource`, its upstream (`chained_inputs`). `Workflow` passes its
+        data pipeline's sources and transformers."""
         sources = list(sources)
         out = self.copy()
         out._source_rules = {**self._source_rules, **{k: _as_rule(v) for k, v in source_rules(sources).items()}}

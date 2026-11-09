@@ -75,10 +75,22 @@ the study's sites. That series is up to about 0.5 degrees off near the equinoxes
 
 ## Information Set
 
-The built-in rules make `sun_elevation`, `sun_sin_elevation`, `clear_sky_ghi` and `is_night`, and with a prefix
-`<prefix>_sun_elevation` and so on, `static`: known in advance, unshifted and at any `_d+k`, like the calendar columns
-([Built-in Availability Rules](/epftoolbox2/model-pipeline/information-set/#built-in-availability-rules)). The rules name
-these columns exactly, so a series of yours named `sun_power` gets no rule from them.
+The built-in rules make `sun_elevation`, `sun_sin_elevation`, `clear_sky_ghi` and `is_night` `static`: known in advance,
+unshifted and at any `_d+k`, like the calendar columns
+([Built-in Availability Rules](/epftoolbox2/model-pipeline/information-set/#built-in-availability-rules)). A prefixed
+transformer's columns (`de_sun_elevation`, ...) get the same rule from the transformer itself, as a source's columns do: a
+`Workflow` passes its data pipeline's transformers to `with_source_rules`, and outside one you pass them too. The rules name
+the columns exactly, never a pattern, so a series of yours named `sun_power`, a measured night flag `x_is_night` or another
+clear-sky model's `cams_clear_sky_ghi` gets no rule from them.
+
+```python
+from epftoolbox2.data.transformers import SolarGeometryTransformer
+from epftoolbox2.pipelines import DataPipeline, ModelPipeline
+
+data = DataPipeline(timezone="Europe/Berlin").add_transformer(SolarGeometryTransformer([(51.0, 10.0)], prefix="de"))
+pipeline = ModelPipeline(issue_time="11:45", issue_timezone="Europe/Brussels")
+pipeline.information_set = pipeline.information_set.with_source_rules([*data.sources, *data.transformers])
+```
 
 <Aside type="note">
   A static flag used as `zero_when` reads nothing the positive control of `verify` can move on a night forecast, so such a
