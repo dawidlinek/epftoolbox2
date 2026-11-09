@@ -12,7 +12,9 @@ ShapeModel in a 15-minute run then:
 - drops a training row whose target date isn't natively 15-minute: `native="distinct"` keeps a date where some hour has 4
   quarter-hours with values that aren't all equal (a step-filled hourly date has 4 equal ones in every hour), `native="YYYY-MM-DD"`
   keeps the dates from that one on (the study's "shape model on 15-minute days only", which avoided the shape dilution of a
-  step-filled history);
+  step-filled history). A fit whose window reaches before the first native date would train on the few native days inside
+  it: it is skipped as `too_few_native_days` unless it has `min_native_days` of them (by default its window's length, so
+  none of an int window is missing), decided before any fit, and a warning names its issue days;
 - forecasts the issue row's `base` value plus the learner's forecast. Both go through the per-row target seam
   (`models._row_target.offset_config`: the offset is ȳ on a training row and `base` on the issue row);
 - warns where `base` isn't a chained column (`InformationSet.chained_of`, registered by `with_source_rules`): the audit found the
@@ -36,6 +38,7 @@ learner's in this step.
 """
 
 import datetime
+import re
 import warnings
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
@@ -44,11 +47,21 @@ import pandas as pd
 
 from .._date_utils import shift_calendar_days
 from ..data.transformers.period_stats import hour_starts
+from ..information_set import frame_first_day
+from ..results.availability import sort_rows
 from ..results.store import outside_stacklevel
 from . import _chained, _contract, _row_target
-from ._calendar import NewestTargets, listed_days, periods_per_day
+from ._calendar import (
+    EXPANDING,
+    NewestTargets,
+    listed_days,
+    member_window,
+    periods_per_day,
+    refit_anchor,
+    training_span,
+)
 from ._history import reads_history
-from ._units import DAY, PER_PERIOD, unit_kind
+from ._units import DAY, PER_PERIOD, PERIOD, unit_kind
 from .base import BaseModel, _without_repeats, hour_arrays_of
 
 # `native`: a target date is native when some hour of it has quarter-hours that aren't all equal.
@@ -56,6 +69,10 @@ NATIVE_DISTINCT = "distinct"
 # The run frequency a ShapeModel forecasts at, and the period its shape is taken over.
 SHAPE_FREQ = "15min"
 _PERIODS = {pd.Timedelta(hours=1): "1h"}
+# A forecast whose fit has fewer native target dates than `min_native_days` (its window's length by default): decided before any
+# fit (`ShapeModel._execute`).
+SKIP_TOO_FEW_NATIVE_DAYS = "too_few_native_days"
+_EPOCH_ORDINAL = datetime.date(1970, 1, 1).toordinal()
 
 
 def hour_mean_column(target: str, horizon: int) -> str:
@@ -121,7 +138,19 @@ def _checked_period(value: Any, where: str) -> str:
         raise ValueError(
             f"{where}: period is '1h', the hour whose quarter-hours the shape is taken over, got {value!r}"
         )
-    return value
+    return _PERIODS[length]
+
+
+def _checked_min_native_days(value: Any, where: str) -> Optional[int]:
+    """`min_native_days` as kept: None (each window's own length), or a whole number of days from 0."""
+    if value is None:
+        return None
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, np.integer)) or value < 0:
+        raise ValueError(
+            f"{where}: min_native_days is the fewest native days a fit may train on, a whole number from 0, or None for "
+            f"each training window's own length, got {value!r}"
+        )
+    return int(value)
 
 
 def _checked_base(value: Any, where: str) -> str:
@@ -143,6 +172,9 @@ class ShapeModel(BaseModel):
         period: The period whose mean the shape is taken from: "1h".
         native: Which target dates train: "distinct" (a date where some hour has quarter-hours that aren't all equal, so not a
             step-filled hourly one) or the first natively 15-minute date, such as "2025-10-01".
+        min_native_days: The fewest native target dates a fit may train on, counted in its window from the first native date
+            on: a forecast whose fit (any window's, with a list) has fewer is skipped as `too_few_native_days`. None, the
+            default, is each window's own length (an `"expanding"` one has no minimum); 0 skips nothing.
         name: The model's name, which names its results.
     """
 
@@ -151,6 +183,10 @@ class ShapeModel(BaseModel):
     _pooled_ok = False
     # Read by `ModelPipeline._load_component`: the parameter that holds a model, saved as {class, params}.
     _NESTED_MODELS = ("learner",)
+    _WRITTEN_WHEN_SET = {**BaseModel._WRITTEN_WHEN_SET, "min_native_days": None}
+    # `verify`'s probe runs pass their information set as `cut_rules` (`information_set._issue_day_forecasts`): the base's check
+    # tells a chained column by it, and nothing numeric reads it.
+    _cut_rules_in_probes = True
 
     def __init__(
         self,
@@ -159,6 +195,7 @@ class ShapeModel(BaseModel):
         *,
         period: str = "1h",
         native: Union[str, datetime.date] = NATIVE_DISTINCT,
+        min_native_days: Optional[int] = None,
         name: str = "Shape",
     ):
         self.name = name  # first: the checks below name the model
@@ -166,6 +203,9 @@ class ShapeModel(BaseModel):
         self.base = base
         self.period = period
         self.native = native
+        self.min_native_days = min_native_days
+        self._first_native: Optional[int] = None  # the first native date's ordinal in the run's frame (`_preprocess`)
+        self._check_target: Optional[str] = None  # the target of the last `_check_inputs`
         super().__init__(
             learner.predictors,
             learner.training_window,
@@ -190,6 +230,8 @@ class ShapeModel(BaseModel):
             value = _checked_period(value, where)
         elif key == "native":
             value = _checked_native(value, where)
+        elif key == "min_native_days":
+            value = _checked_min_native_days(value, where)
         elif key in _row_target.PARAMETERS and value is not None:
             raise ValueError(
                 f"{where}: {key} (a per-row target) isn't supported on a ShapeModel in this step: its learner's target is "
@@ -362,13 +404,14 @@ class ShapeModel(BaseModel):
 
     @property
     def _model_kwargs(self) -> Dict[str, Any]:
-        """What the manifest's `model_params` records besides the scaler: the base, the period, the native rule and the learner
-        (its class and its own keyword arguments; its list, window, refit, newest target and mask rule are recorded as this
-        model's)."""
+        """What the manifest's `model_params` records besides the scaler: the base, the period, the native rule, the native
+        minimum and the learner (its class and its own keyword arguments; its list, window, refit, newest target and mask rule
+        are recorded as this model's)."""
         return {
             "base": self.base,
             "period": self.period,
             "native": self.native,
+            "min_native_days": self.min_native_days,
             "learner": {"class": type(self.learner).__name__, "params": dict(self.learner._model_kwargs)},
         }
 
@@ -395,12 +438,29 @@ class ShapeModel(BaseModel):
         wall = index.tz_localize(None) if index.tz is not None else index
         return np.asarray(wall.normalize() >= pd.Timestamp(self.native))
 
+    def _native_dates(self, target: pd.Series) -> Tuple[np.ndarray, np.ndarray]:
+        """(the local dates of the frame's rows as ordinals, whether each is native), one entry per distinct date, sorted."""
+        index = target.index
+        wall = index.tz_localize(None) if index.tz is not None else index
+        ordinals = np.asarray(wall.normalize().asi8 // pd.Timedelta(days=1).value, dtype=np.int64) + _EPOCH_ORDINAL
+        flags = pd.Series(self._native_rows(target)).groupby(ordinals).any()
+        return flags.index.to_numpy(dtype=np.int64), flags.to_numpy(dtype=bool)
+
+    def _first_native_of(self, target: pd.Series) -> Optional[int]:
+        """The ordinal of the first native date: `native`'s date, or with `"distinct"` the frame's first such date (None if it
+        has none)."""
+        if self.native != NATIVE_DISTINCT:
+            return datetime.date.fromisoformat(self.native).toordinal()
+        ordinals, flags = self._native_dates(target)
+        return int(ordinals[flags][0]) if flags.any() else None
+
     def _preprocess(self, data: pd.DataFrame, horizon: int, target: str) -> pd.DataFrame:
         """BaseModel's frame, with the auxiliary columns of each horizon h: the hour mean of `{target}_d+{h}` (`hour_mean_column`)
         and whether its target date is native (`native_column`, 1 or 0), each by the calendar shift that builds `{target}_d+{h}`
         (NaN where the target is: the slot skipped in spring, the repeated autumn hour from a day that has it once)."""
         out = super()._preprocess(data, horizon, target)
         index = out.index
+        self._first_native = self._first_native_of(out[target])  # for the native minimum of each fit (`_execute`)
         means = pd.Series(hour_means(out[target], self._slots), index=index)
         native = pd.Series(self._native_rows(out[target]).astype(np.float64), index=index)
         columns = {}
@@ -411,6 +471,64 @@ class ShapeModel(BaseModel):
                 aligned.index = index
                 columns[name] = aligned
         return pd.concat([out, pd.DataFrame(columns)], axis=1)
+
+    # -- the native minimum ----------------------------------------------------------------------------------------------------
+
+    def _native_shortfall(self, task: tuple, first_day: datetime.date) -> Tuple[bool, Optional[str]]:
+        """(whether a fit of the forecast `task` has an int window reaching before the first native date, the skip outcome
+        where a fit has fewer native target dates than it needs, else None). Each window's fit (from its anchor with `refit`)
+        reads the rows of `training_span`, whose target dates from the first native date on are its native days."""
+        period, hz, day_in_test = task
+        issue = first_day + datetime.timedelta(days=day_in_test)
+        first = self._first_native
+        reaches, outcome = False, None
+        for member, rule in zip(self._members, self._refit_rules):
+            anchor = issue if rule is None else refit_anchor(issue, rule)
+            day = anchor.toordinal() - self._first_ordinal
+            newest = self._newest_of(period, day)
+            low, high = training_span(day, member_window(member, day), hz, newest)
+            low, high = low + hz + self._first_ordinal, high + hz + self._first_ordinal  # the target dates, as ordinals
+            native = 0 if first is None else max(0, high - max(low, first) + 1)
+            expanding = member == EXPANDING
+            if not expanding and (first is None or low < first):
+                reaches = True
+            need = self.min_native_days if self.min_native_days is not None else (0 if expanding else int(member))
+            if native < need and outcome is None:
+                outcome = f"{SKIP_TOO_FEW_NATIVE_DAYS}: window {member}: {native} of {need} native days"
+        return reaches, outcome
+
+    def _execute(self, state: Any, sink: Any = None) -> None:
+        """BaseModel's, less the forecasts a fit of which has fewer native target dates than `min_native_days`
+        (`too_few_native_days`, decided before any fit and counted), with one warning naming the issue days whose fits reach
+        before the first native date."""
+        kept, reaching, skipped = [], set(), set()
+        for task in state.tasks:
+            reaches, outcome = self._native_shortfall(task, state.first_day)
+            day = state.first_day + datetime.timedelta(days=task[2])
+            if reaches:
+                reaching.add(day)
+            if outcome is None:
+                kept.append(task)
+            else:
+                skipped.add(day)
+                state.skip(task, outcome, f"period {task[0]}, horizon {task[1]}, run date {day}", state.store)
+        state.tasks = kept
+        if reaching:
+            first = "none" if self._first_native is None else datetime.date.fromordinal(self._first_native).isoformat()
+            what = (
+                f"{len(skipped)} of them are skipped as {SKIP_TOO_FEW_NATIVE_DAYS} (min_native_days="
+                f"{self.min_native_days!r}: {'each window' if self.min_native_days is None else 'that many days'})"
+                if skipped
+                else f"they train on at least min_native_days={self.min_native_days} native days, fewer than their window"
+            )
+            warnings.warn(
+                f"{self.name}: on {len(reaching)} issue days, from {min(reaching)} to {max(reaching)}, a fit's training window "
+                f"reaches before the first native 15-minute date ({first}), so it holds fewer native days than its length: "
+                f"{what}. Start the test later, or give min_native_days= the fewest native days a fit may train on.",
+                UserWarning,
+                stacklevel=outside_stacklevel(),
+            )
+        super()._execute(state, sink)
 
     def _build_hour_arrays(self, horizon: int) -> Dict[int, Dict]:
         """The period arrays with the auxiliary columns of every horizon after the inputs: what the worker's offset reads."""
@@ -493,6 +611,7 @@ class ShapeModel(BaseModel):
             raise ValueError(f"{self.name}: the learner's predictors are a list; a ShapeModel takes no plan")
         # Again at the run: a learner changed after this model was built.
         self._check_learner(self.learner, self._where)
+        self._check_target = target  # for the coverage of chained inputs (`_check_chained`)
         expanded = super()._check_inputs(
             data,
             target,
@@ -518,6 +637,15 @@ class ShapeModel(BaseModel):
         }
         names = list(dict.fromkeys(name for listed in bases.values() for name in listed))
         _contract.check_predictors(data, bases, target, horizon)
+        # The target's actual hour mean on a later date (`{target}_hour_mean_d+k`) refused by name, as `_contract` refuses
+        # `{target}_d+k` as a predictor: it is the learner's own training offset.
+        lead = re.compile(rf"{re.escape(target)}_hour_mean_d\+[1-9]\d*")
+        leads = [name for name in names if lead.fullmatch(name)]
+        if leads:
+            raise ValueError(
+                f"{self.name}: the base {leads} is the actual hour mean of the target on a later date, the learner's own "
+                "training offset: look-ahead. The base is the hourly model's forecast, such as a chained column"
+            )
         internal = {
             name for h in range(1, horizon + 1) for name in (hour_mean_column(target, h), native_column(target, h))
         }
@@ -550,6 +678,64 @@ class ShapeModel(BaseModel):
                 self._window_listings[window] = _without_repeats(self._window_listings.get(window, []), rows)
         self._check_base_chained(data, bases, names, information_set, cut_rules, availability, issued, weekdays)
         return expanded
+
+    def _check_chained(
+        self,
+        data: pd.DataFrame,
+        lists: Dict[Tuple[int, int], List[str]],
+        information_set: Any,
+        availability: str,
+        issued: Optional[Sequence[datetime.date]],
+        weekdays: Optional[Sequence[int]],
+        newest: Any,
+    ) -> None:
+        """BaseModel's checks of chained inputs, their coverage counted on the rows whose target date is native alone: the
+        others drop from every fit whatever the upstream holds (`_chained.check(kept=)`)."""
+        days = None if issued is None else listed_days(issued, weekdays)
+        rows = None
+        if days:
+            rows = self._training_rows(newest, self._reach_window(data, days), frame_first_day(data.index))
+        horizons = sorted({hz for _, hz in lists})
+        kept = None if self._check_target is None else self._kept_rows(data, self._check_target, horizons)
+        found = _chained.check(
+            self.name,
+            data,
+            lists,
+            information_set,
+            availability,
+            days,
+            rows,
+            self._freq,
+            unit_kind(self) != PERIOD,
+            kept,
+        )
+        self._chained_record = found.record
+        if found.listing:
+            self._availability_listing = sort_rows([*self._availability_listing, *found.listing])
+            self._window_listings = {
+                window: sort_rows([*listed, *found.listing]) for window, listed in self._window_listings.items()
+            }
+
+    def _kept_rows(self, data: pd.DataFrame, target: str, horizons: Sequence[int]) -> Dict[int, np.ndarray]:
+        """Horizon -> which rows of `data` (in its order) have a native target date at that horizon: with a date rule those
+        dated from `native - h` on, with `"distinct"` by the frame's own native dates."""
+        index = data.index
+        wall = index.tz_localize(None) if index.tz is not None else index
+        rows = np.asarray(wall.normalize().asi8 // pd.Timedelta(days=1).value, dtype=np.int64) + _EPOCH_ORDINAL
+        if self.native != NATIVE_DISTINCT:
+            first = datetime.date.fromisoformat(self.native).toordinal()
+            return {hz: rows + hz >= first for hz in horizons}
+        ordinals, flags = self._native_dates(data[target])
+        out = {}
+        for hz in horizons:
+            at = np.searchsorted(ordinals, rows + hz)
+            found = at < len(ordinals)
+            out[hz] = (
+                found
+                & (ordinals[np.minimum(at, len(ordinals) - 1)] == rows + hz)
+                & flags[np.minimum(at, len(ordinals) - 1)]
+            )
+        return out
 
     def _check_base_chained(
         self,

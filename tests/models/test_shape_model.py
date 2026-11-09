@@ -134,45 +134,49 @@ def autumn():
     return with_shape_columns(make_market_data("2023-10-01", 40, freq="15min", noise=3.0, seed=12))
 
 
+SHORT = "reaches before the first native"  # the warning of fits short of native days
+
+
 def quiet_run(model, data, *args, **kwargs):
-    """`model.run` without the warning that a stand-in base isn't chained."""
+    """`model.run` without the warning that a stand-in base isn't chained, nor that of fits short of native days (a test that
+    trains across the switch on purpose sets `min_native_days`)."""
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", message=f".*{NOT_CHAINED}", category=UserWarning)
+        warnings.filterwarnings("ignore", message=f".*{SHORT}", category=UserWarning)
         return model.run(data, *args, freq="15min", **kwargs)
 
 
-def by_slot(series):
-    """(local date, quarter-hour of the day) -> value, the issue row's (the second occurrence) on a repeated hour; built once per
-    column of a module frame."""
-    key = (series.name, series.to_numpy().ctypes.data, len(series))
-    if key not in _SLOTS:
-        _SLOTS[key] = _by_slot(series)
-    return _SLOTS[key]
+class Oracle:
+    """Lookups of one frame built without the model, each once: a column by (local date, quarter-hour of the day), the issue
+    row's (the second occurrence) on a repeated hour, and the native dates (no repeated hour in the frames they're used on)."""
+
+    def __init__(self, frame):
+        self.frame = frame
+        self._slots = {}
+        self._native = None
+
+    def slot(self, column):
+        if column not in self._slots:
+            series = self.frame[column]
+            wall = series.index.tz_localize(None)
+            periods = wall.hour * 4 + wall.minute // 15
+            self._slots[column] = {(d, int(p)): float(v) for d, p, v in zip(wall.date, periods, series.to_numpy())}
+        return self._slots[column]
+
+    @property
+    def native(self):
+        if self._native is None:
+            wall = self.frame.index.tz_localize(None)
+            table = pd.DataFrame({"date": wall.date, "hour": wall.hour, "value": self.frame["price"].to_numpy()})
+            hours = table.groupby(["date", "hour"])["value"].agg(["count", "min", "max"])
+            distinct = (hours["count"] == 4) & (hours["max"] != hours["min"])
+            self._native = {day for (day, _), on in distinct.items() if on}
+        return self._native
 
 
-_SLOTS = {}
-
-
-def _by_slot(series):
-    wall = series.index.tz_localize(None)
-    periods = wall.hour * 4 + wall.minute // 15
-    return {(day, int(p)): float(v) for day, p, v in zip(wall.date, periods, series.to_numpy())}
-
-
-def native_oracle(price):
-    """The dates with an hour whose four quarter-hours have values that aren't all equal (no repeated hour in these frames)."""
-    key = ("native", price.to_numpy().ctypes.data, len(price))
-    if key not in _SLOTS:
-        _SLOTS[key] = _native_oracle(price)
-    return _SLOTS[key]
-
-
-def _native_oracle(price):
-    wall = price.index.tz_localize(None)
-    table = pd.DataFrame({"date": wall.date, "hour": wall.hour, "value": price.to_numpy()})
-    hours = table.groupby(["date", "hour"])["value"].agg(["count", "min", "max"])
-    distinct = (hours["count"] == 4) & (hours["max"] != hours["min"])
-    return {day for (day, _), on in distinct.items() if on}
+@pytest.fixture(scope="module")
+def oracle(frame):
+    return Oracle(frame)
 
 
 def by_key(records):
@@ -182,12 +186,12 @@ def by_key(records):
 # -- the hand fit --------------------------------------------------------------------------------------------------------
 
 
-def training_rows(frame, issue, horizon, period, window):
+def training_rows(oracle, issue, horizon, period, window):
     """(deviation, regressor) of each training row of (period, horizon) for `issue`, from the frame alone: rows dated D-1-h-W+1 to
     D-1-h, a row's target the quarter-hour's price on its target date less its hour's mean there, native target dates only."""
-    price = by_slot(frame["price"])
-    regressor = by_slot(frame[f"load_hour_dev_d+{horizon}"])
-    native = native_oracle(frame["price"])
+    price = oracle.slot("price")
+    regressor = oracle.slot(f"load_hour_dev_d+{horizon}")
+    native = oracle.native
     rows = []
     for back in range(window):
         day = issue - datetime.timedelta(days=1 + horizon + back)
@@ -204,17 +208,17 @@ def training_rows(frame, issue, horizon, period, window):
 @pytest.mark.parametrize(
     "issue", ["2023-03-20", "2023-03-28"], ids=["across the native switch", "after the spring switch"]
 )
-def test_the_forecast_is_a_per_slot_ols_of_the_deviation_plus_the_base(frame, issue):
-    window = 21
-    model = ShapeModel(BASE, OLSModel(REGRESSORS, training_window=window, fit_intercept=True))
+def test_the_forecast_is_a_per_slot_ols_of_the_deviation_plus_the_base(frame, oracle, issue):
+    window = 21  # across the switch: its native days alone, which min_native_days=1 lets train
+    model = ShapeModel(BASE, OLSModel(REGRESSORS, training_window=window, fit_intercept=True), min_native_days=1)
     found = by_key(quiet_run(model, frame, issue, issue, horizon=2)._results)
     day = datetime.date.fromisoformat(issue)
     checked = 0
     for horizon in (1, 2):
-        base = by_slot(frame[f"base_fc_d+{horizon}"])
-        regressor = by_slot(frame[f"load_hour_dev_d+{horizon}"])
+        base = oracle.slot(f"base_fc_d+{horizon}")
+        regressor = oracle.slot(f"load_hour_dev_d+{horizon}")
         for period in range(96):
-            rows = training_rows(frame, day, horizon, period, window)
+            rows = training_rows(oracle, day, horizon, period, window)
             if (day, period) not in base:
                 assert (period, horizon, issue) not in found
                 continue
@@ -230,16 +234,16 @@ def test_the_forecast_is_a_per_slot_ols_of_the_deviation_plus_the_base(frame, is
     assert checked >= 2 * 92
 
 
-def test_an_intercept_only_learner_forecasts_the_per_slot_mean_deviation(frame):
+def test_an_intercept_only_learner_forecasts_the_per_slot_mean_deviation(frame, oracle):
     """B24_static: a learner with no predictor and an intercept (`LEARModel([], scaler="standard")`: LEAR forecasts the training
     mean of a fit of no column) forecasts the base plus the mean deviation of its slot over the native days of its window."""
     issue, window = "2023-03-22", 28
-    model = ShapeModel(BASE, LEARModel([], training_window=window, scaler="standard"))
+    model = ShapeModel(BASE, LEARModel([], training_window=window, scaler="standard"), min_native_days=1)
     found = by_key(quiet_run(model, frame, issue, issue, horizon=1)._results)
     day = datetime.date.fromisoformat(issue)
-    base = by_slot(frame["base_fc_d+1"])
+    base = oracle.slot("base_fc_d+1")
     for period in range(96):
-        rows = training_rows(frame, day, 1, period, window)
+        rows = training_rows(oracle, day, 1, period, window)
         assert 0 < len(rows) < window
         expected = base[(day, period)] + float(np.mean(rows[:, 0]))
         assert found[(period, 1, issue)]["prediction"] == pytest.approx(expected, abs=1e-9), period
@@ -247,40 +251,48 @@ def test_an_intercept_only_learner_forecasts_the_per_slot_mean_deviation(frame):
 
 # -- the model is its learner on the deviation plus the base ------------------------------------------------------------
 
+# (learner, its issue days): the slow cells over fewer days, the spring switch (2023-03-26) in every cell's training rows, and the
+# step-filled dates before 2023-03-10 in every cell's windows.
+DAYS, SHORT_DAYS = ("2023-03-23", "2023-03-28"), ("2023-03-27", "2023-03-28")
 LEARNERS = {
-    "ols": lambda: OLSModel(REGRESSORS, training_window=21, fit_intercept=True),
-    "ols refit": lambda: OLSModel(REGRESSORS, training_window=21, refit="7D", fit_intercept=True),
-    "ols windows": lambda: OLSModel(REGRESSORS, training_window=[14, 21], fit_intercept=True),
-    "ols mask fit": lambda: OLSModel([*REGRESSORS, "is_weekend_d+{horizon}"], training_window=21, binary_mask="fit"),
-    "ridge": lambda: RidgeModel(REGRESSORS, training_window=21),
-    "lear refit": lambda: LEARModel(
-        [*REGRESSORS, "load_d+{horizon}"], training_window=21, refit="7D", scaler="standard"
+    "ols": (lambda: OLSModel(REGRESSORS, training_window=21, fit_intercept=True), DAYS),
+    "ols refit": (lambda: OLSModel(REGRESSORS, training_window=21, refit="7D", fit_intercept=True), DAYS),
+    "ols windows": (lambda: OLSModel(REGRESSORS, training_window=[14, 21], fit_intercept=True), SHORT_DAYS),
+    "ols mask fit": (
+        lambda: OLSModel([*REGRESSORS, "is_weekend_d+{horizon}"], training_window=21, binary_mask="fit"),
+        DAYS,
     ),
-    "hgb pooled": lambda: HistGBModel([*REGRESSORS, "period"], training_window=21, refit="7D", max_iter=15),
+    "ridge": (lambda: RidgeModel(REGRESSORS, training_window=21), SHORT_DAYS),
+    "lear refit": (
+        lambda: LEARModel([*REGRESSORS, "load_d+{horizon}"], training_window=21, refit="7D", scaler="standard"),
+        DAYS,
+    ),
+    "hgb pooled": (lambda: HistGBModel([*REGRESSORS, "period"], training_window=21, refit="7D", max_iter=15), DAYS),
 }
 
 
-def deviation_frame(frame):
+def deviation_frame(frame, oracle):
     """`frame` with `dev`, the price less its hour's mean on native dates and NaN on the others, built without the model."""
     out = frame.copy()
-    native = np.isin(np.asarray([d for d in out.index.tz_localize(None).date]), list(native_oracle(frame["price"])))
+    native = np.isin(np.asarray([d for d in out.index.tz_localize(None).date]), list(oracle.native))
     out["dev"] = np.where(native, (out["price"] - out["price_hour_mean"]).to_numpy(), np.nan)
     return out
 
 
 @pytest.mark.parametrize("name", list(LEARNERS))
-def test_the_model_is_its_learner_run_on_the_deviation_plus_the_base(frame, name):
+def test_the_model_is_its_learner_run_on_the_deviation_plus_the_base(frame, oracle, name):
     """The learner run with the target `dev` (price less hour mean, NaN off the native dates) gives each forecast's learner part
     to the bit: the ShapeModel's forecast is the issue row's base plus it (each window's of a list, then their mean), on the
-    same keys."""
-    start, end = "2023-03-23", "2023-03-28"  # across the spring switch, the step-filled dates in the windows of 21 days
-    shape = quiet_run(ShapeModel(BASE, LEARNERS[name]()), frame, start, end, horizon=2)
-    plain = LEARNERS[name]().run(deviation_frame(frame), start, end, target="dev", horizon=2, freq="15min")
+    same keys. `min_native_days=1` lets the fits train on the native days of windows across the switch."""
+    build, (start, end) = LEARNERS[name]
+    shape = quiet_run(ShapeModel(BASE, build(), min_native_days=1), frame, start, end, horizon=2)
+    plain = build().run(deviation_frame(frame, oracle), start, end, target="dev", horizon=2, freq="15min")
     found, learned = by_key(shape._results), by_key(plain._results)
-    assert found.keys() == learned.keys() and len(found) > 6 * 2 * 92
+    days = (datetime.date.fromisoformat(end) - datetime.date.fromisoformat(start)).days + 1
+    assert found.keys() == learned.keys() and len(found) >= days * 2 * 92
     for key, record in learned.items():
         day = datetime.date.fromisoformat(key[2])
-        base = by_slot(frame[f"base_fc_d+{key[1]}"])[(day, key[0])]
+        base = oracle.slot(f"base_fc_d+{key[1]}")[(day, key[0])]
         if "member_predictions" in record:
             members = [base + member for member in record["member_predictions"]]
             assert found[key]["member_predictions"] == members, key
@@ -288,7 +300,7 @@ def test_the_model_is_its_learner_run_on_the_deviation_plus_the_base(frame, name
         else:
             assert found[key]["prediction"] == base + record["prediction"], key
         assert found[key]["coefficients"] == record["coefficients"], key
-        assert found[key]["actual"] == by_slot(frame["price"])[(day + datetime.timedelta(days=key[1]), key[0])], key
+        assert found[key]["actual"] == oracle.slot("price")[(day + datetime.timedelta(days=key[1]), key[0])], key
 
 
 # -- native days -----------------------------------------------------------------------------------------------------------
@@ -308,7 +320,8 @@ def test_distinct_dates_need_an_hour_of_four_values_not_all_equal():
 @pytest.mark.parametrize("native", ["distinct", SWITCH, datetime.date(2023, 3, 10)])
 def test_the_native_filter_drops_exactly_the_step_filled_dates(frame, native, monkeypatch):
     """Each fit trains on the native dates of its span and on no other: the training rows' target dates (the fit's own day ids,
-    `current_fit().row_days`, plus the horizon) are the span's dates from the switch on, for both rules."""
+    `current_fit().row_days`, plus the horizon) are the span's dates from the switch on, for both rules (`min_native_days=0`
+    lets every fit across the switch train)."""
     seen = []
     original = OLSModel._fit_predict
 
@@ -319,8 +332,8 @@ def test_the_native_filter_drops_exactly_the_step_filled_dates(frame, native, mo
 
     monkeypatch.setattr(OLSModel, "_fit_predict", spy)
     window = 14
-    model = ShapeModel(BASE, OLSModel(REGRESSORS, training_window=window, fit_intercept=True), native=native)
-    quiet_run(model, frame, "2023-03-14", "2023-03-17", horizon=2)
+    learner = OLSModel(REGRESSORS, training_window=window, fit_intercept=True)
+    quiet_run(ShapeModel(BASE, learner, native=native, min_native_days=0), frame, "2023-03-14", "2023-03-17", horizon=2)
     first = frame.index[0].date()
     switch = datetime.date.fromisoformat(SWITCH)
     assert len(seen) == 4 * 2 * 96
@@ -332,11 +345,84 @@ def test_the_native_filter_drops_exactly_the_step_filled_dates(frame, native, mo
 
 def test_both_native_rules_give_the_same_forecasts_here(frame):
     days = ("2023-03-14", "2023-03-15")
-    distinct = quiet_run(ShapeModel(BASE, OLSModel(REGRESSORS, 14, fit_intercept=True)), frame, *days, horizon=2)
-    dated = quiet_run(
-        ShapeModel(BASE, OLSModel(REGRESSORS, 14, fit_intercept=True), native=SWITCH), frame, *days, horizon=2
-    )
-    assert by_key(distinct._results) == by_key(dated._results)
+    learner = OLSModel(REGRESSORS, 14, fit_intercept=True)
+    distinct = quiet_run(ShapeModel(BASE, learner, min_native_days=0), frame, *days, horizon=2)
+    dated = quiet_run(ShapeModel(BASE, learner, native=SWITCH, min_native_days=0), frame, *days, horizon=2)
+    assert by_key(distinct._results) == by_key(dated._results) and distinct.produced == 2 * 2 * 96
+
+
+def native_days_of(issue, horizon, window):
+    """The native target dates of a window of `window` days for a forecast issued on `issue` at `horizon` (targets D-W to D-1)."""
+    switch = datetime.date.fromisoformat(SWITCH)
+    targets = [issue - datetime.timedelta(days=back) for back in range(1, window + 1)]
+    return sum(day >= switch for day in targets)
+
+
+@pytest.mark.parametrize("native", ["distinct", SWITCH])
+def test_a_fit_short_of_native_days_is_skipped_by_default_and_warned_about(frame, native):
+    """Issue days within a window of the switch: by default (`min_native_days=None`, each window's length) every fit whose
+    window reaches before the first native date is skipped as `too_few_native_days` before any fit, and one warning names the
+    issue days. Before, they trained on 1 to 13 rows of their 14 and some forecast prices far off. The window of 2023-03-24
+    (targets 2023-03-10 to 03-23) is the first that is native throughout."""
+    learner = OLSModel(REGRESSORS, training_window=14, fit_intercept=True)
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message=f".*{NOT_CHAINED}", category=UserWarning)
+        warnings.filterwarnings(
+            "ignore", message=".*produced", category=UserWarning
+        )  # the count's own shortfall warning
+        with pytest.warns(
+            UserWarning, match=r"on 13 issue days, from 2023-03-11 to 2023-03-23, a fit's training window"
+        ) as w:
+            ref = ShapeModel(BASE, learner, native=native).run(
+                frame, "2023-03-11", "2023-03-25", horizon=1, freq="15min"
+            )
+    message = str([x for x in w if SHORT in str(x.message)][0].message)
+    assert "first native 15-minute date (2023-03-10)" in message and "skipped as too_few_native_days" in message
+    assert ref.skipped == {"too_few_native_days": 13 * 96} and ref.produced == 96 + 92  # 2023-03-26's target day has 92
+
+
+@pytest.mark.parametrize("refit", [None, "7D"])
+def test_min_native_days_lets_fits_with_enough_native_days_train(frame, tmp_path, refit):
+    """`min_native_days=3`: a fit with 3 native target dates in its window trains, one with fewer is skipped, its skip record
+    saying how many it had; the warning says the others train on fewer days than their window."""
+    learner = OLSModel(REGRESSORS, training_window=14, refit=refit, fit_intercept=True)
+    model = ShapeModel(BASE, learner, min_native_days=3, name="short")
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message=f".*{NOT_CHAINED}", category=UserWarning)
+        with pytest.warns(UserWarning, match=SHORT):
+            ref = model.run(
+                frame, "2023-03-11", "2023-03-16", horizon=1, freq="15min", save_to=str(tmp_path / "s.jsonl")
+            )
+    records = [json.loads(line) for line in (tmp_path / "s.jsonl").read_text().splitlines()]
+    for day in ("2023-03-11", "2023-03-12", "2023-03-13", "2023-03-14", "2023-03-15", "2023-03-16"):
+        issue = datetime.date.fromisoformat(day)
+        anchor = (
+            issue if refit is None else issue - datetime.timedelta(days=issue.weekday())
+        )  # Mondays, the 7D calendar
+        native = native_days_of(anchor, 1, 14)
+        on_day = [r for r in records if r["run_date"] == day]
+        assert len(on_day) == 96, day
+        if native >= 3:
+            assert all(r["status"] == "ok" for r in on_day), day
+        else:
+            assert {r["status"] for r in on_day} == {"too_few_native_days"}, day
+            assert {r["detail"] for r in on_day} == {f"window 14: {native} of 3 native days"}, day
+    assert ref.produced + ref.skipped["too_few_native_days"] == 6 * 96 and ref.produced > 0
+
+
+def test_an_expanding_learner_has_no_native_minimum_unless_given(frame):
+    """An `"expanding"` window has no length to fill: it trains on the native days it has, without a warning, unless given
+    `min_native_days`."""
+    learner = OLSModel(REGRESSORS, training_window="expanding", fit_intercept=True)
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message=f".*{NOT_CHAINED}", category=UserWarning)
+        warnings.filterwarnings("error", message=f".*{SHORT}")
+        ref = ShapeModel(BASE, learner).run(frame, "2023-03-12", "2023-03-12", horizon=1, freq="15min")
+    assert ref.produced == 96
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message=".*produced", category=UserWarning)
+        ref = quiet_run(ShapeModel(BASE, learner, min_native_days=5), frame, "2023-03-12", "2023-03-15", horizon=1)
+    assert ref.skipped == {"too_few_native_days": 3 * 96} and ref.produced == 96  # 2, 3, 4 and 5 native days
 
 
 def test_a_day_before_the_switch_with_any_distinct_hour_counts_as_native(frame):
@@ -571,41 +657,79 @@ def test_a_base_from_an_upstream_that_read_something_late_is_late_upstream(frame
 def test_a_missing_base_on_the_issue_row_skips_its_forecast(frame):
     data = frame.copy()
     wall = data.index.tz_localize(None)
-    on = (wall.normalize() == pd.Timestamp("2023-03-20")) & (wall.hour == 10)
+    on = (wall.normalize() == pd.Timestamp("2023-03-28")) & (wall.hour == 10)
     data.loc[on, "base_fc_d+1"] = np.nan
     model = ShapeModel(BASE, OLSModel(REGRESSORS, 14, fit_intercept=True))
-    ref = quiet_run(model, data, "2023-03-20", "2023-03-20", horizon=1)
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message=".*produced", category=UserWarning)  # the count's shortfall warning
+        ref = quiet_run(model, data, "2023-03-28", "2023-03-28", horizon=1)
     assert ref.produced == 92 and ref.skipped == {"missing_test_predictors": 4}
     assert all(np.isfinite(record["prediction"]) for record in ref._results)
 
 
 def test_verify_is_ok_with_its_control_on_the_chained_base(chain):
+    """`verify` with its control, and without a warning about the base: its probe runs get the rules to tell a chained column
+    by (`_cut_rules_in_probes`)."""
     pipeline = ModelPipeline(information_set=chain["info"], availability="raise").add_model(chained_model())
-    with warnings.catch_warnings():
-        # The probe's own runs have no information set to tell a chained base by; verify's check of the model has.
-        warnings.filterwarnings("ignore", message=".*without an information set", category=UserWarning)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
         report = pipeline.verify(chain["data"], *TEST, horizon=1, freq="15min", days=2)
+    assert not [w for w in caught if NOT_CHAINED in str(w.message)]
     row = report.table().set_index("model").loc["b24_dyn"]
     assert row["status"] == "ok", report.problems()
     assert row["control moved"] > 0
 
 
+def test_the_actual_hour_mean_of_a_later_date_is_refused_as_base_by_name(frame):
+    """`{target}_hour_mean_d+k`, the learner's own training offset, refused by name, as `{target}_d+k` is as a predictor."""
+    leak = ShapeModel("price_hour_mean_d+{horizon}", OLSModel(REGRESSORS, training_window=21, fit_intercept=True))
+    with pytest.raises(ValueError, match=r"price_hour_mean_d\+1.*look-ahead"):
+        quiet_run(leak, frame, *TEST, horizon=1)
+
+
+def with_hour_mean_ahead(frame):
+    """`frame` with `price_hour_mean_h+24`, the actual hour mean 24 elapsed hours ahead: the next day's outside a switch."""
+    data = frame.copy()
+    data["price_hour_mean_h+24"] = LagTransformer(["price_hour_mean"], [-24], "hour").transform(
+        data[["price_hour_mean"]]
+    )["price_hour_mean_h+24"]
+    return data
+
+
 def test_the_actual_hour_mean_as_base_is_refused_by_the_availability_check(frame):
-    """A planted leak: the base `price_hour_mean_d+1`, the actual hour mean of D+1 (the learner's own training offset), whose
+    """A planted leak the name doesn't give away: the base `price_hour_mean_h+24`, the actual hour mean 24 hours ahead, whose
     prices are out at 13:00 on D, after the 11:45 issue. Refused at raise, listed at warn, and `verify` finds it."""
     learner = OLSModel(REGRESSORS, training_window=21, fit_intercept=True)
-    leak = ShapeModel("price_hour_mean_d+{horizon}", learner, name="leak")
-    with pytest.raises(InformationSetError, match=r"price_hour_mean_d\+1"):
-        quiet_run(leak, frame, *TEST, horizon=1, information_set=INFO)
+    leak = ShapeModel("price_hour_mean_h+24", learner, name="leak")
+    data = with_hour_mean_ahead(frame)
+    with pytest.raises(InformationSetError, match=r"price_hour_mean_h\+24"):
+        quiet_run(leak, data, *TEST, horizon=1, information_set=INFO)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", UserWarning)
-        ref = leak.run(frame, *TEST, horizon=1, freq="15min", information_set=INFO, availability="warn")
-    assert "price_hour_mean_d+1" in {row["predictor"] for row in ref.availability_listing}
+        ref = leak.run(data, *TEST, horizon=1, freq="15min", information_set=INFO, availability="warn")
+    assert "price_hour_mean_h+24" in {row["predictor"] for row in ref.availability_listing}
     pipeline = ModelPipeline(information_set=INFO, availability="warn").add_model(leak)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", UserWarning)
-        report = pipeline.verify(frame, *TEST, horizon=1, freq="15min", days=1)
+        report = pipeline.verify(data, *TEST, horizon=1, freq="15min", days=1)
     assert report.table().set_index("model").loc["leak", "status"] == "leak"
+
+
+def test_explain_lists_the_base_judged_on_the_issue_row(chain, frame):
+    """`explain()` shows the learner's inputs and, apart, the base: the chained one with its upstream and known at the issue,
+    the hour mean ahead late."""
+    pipeline = ModelPipeline(information_set=chain["info"]).add_model(chained_model())
+    out = pipeline.explain(chain["data"], model="b24_dyn", test=TEST, horizon=1, hour=40, freq="15min", echo=False)
+    assert list(out["predictors"]["predictor"]) == ["price_fc_d+1", "price_fc_d+1_h-1", "load_hour_dev_d+1"]
+    base = out["base"].set_index("predictor").loc["price_fc_d+1"]
+    assert base["role"] == "base" and base["status"] == "ok" and "price_up" in base["rule"]
+    leak = ShapeModel("price_hour_mean_h+24", OLSModel(REGRESSORS, 21, fit_intercept=True), name="leak")
+    out = (
+        ModelPipeline(information_set=INFO)
+        .add_model(leak)
+        .explain(with_hour_mean_ahead(frame), model="leak", test=TEST, horizon=1, hour=40, freq="15min", echo=False)
+    )
+    assert out["base"].set_index("predictor").loc["price_hour_mean_h+24", "status"] != "ok"
 
 
 # -- newest targets under "published" ----------------------------------------------------------------------------------------
@@ -624,6 +748,64 @@ def test_published_newest_targets_are_the_oldest_of_the_hour_or_of_the_date(nati
         group = range(96) if native == "distinct" else range(4 * (period // 4), 4 * (period // 4) + 4)
         assert list(found.k[period]) == list(k[list(group)].min(axis=0)), period
     assert found.days == days
+
+
+def test_with_published_targets_a_quarter_hour_trains_to_its_hour_s_oldest_known_target(frame, monkeypatch):
+    """A price known 75 minutes after its quarter-hour ends: at 11:45 on D, D's 10:00 and 10:15 are out, 10:30 and 10:45 not.
+    A plain model trains period 40 (10:00) on D's target; a ShapeModel, whose deviation reads the whole hour, stops at D-1 for
+    every period of that hour, while the 09:00 hour, all out, trains on D. Checked on the fits' own rows."""
+    info = InformationSet(
+        "11:45",
+        ZONE,
+        rules={**RULES, "price": Availability.realised("75min"), "base_fc": Availability.published("10:00", 1)},
+    )
+    learner = OLSModel(REGRESSORS, training_window=14, newest_target="published", fit_intercept=True)
+    issue = datetime.date(2023, 4, 12)
+    plain = learner._newest_targets(frame, "price", 1, "15min", info, [issue]).k[:, 0]
+    assert list(plain[36:44]) == [0, 0, 0, 0, 0, 0, -1, -1]  # the rule differs within the 10:00 hour
+    seen = {}
+    original = OLSModel._fit_predict
+
+    def spy(self, train_x, train_y, test_x):
+        fit = current_fit()
+        seen[fit.unit.period] = int(fit.row_days.max()) + fit.unit.horizon
+        return original(self, train_x, train_y, test_x)
+
+    monkeypatch.setattr(OLSModel, "_fit_predict", spy)
+    model = ShapeModel(BASE, learner, native=SWITCH)
+    quiet_run(model, frame, issue.isoformat(), issue.isoformat(), horizon=1, information_set=info)
+    first = frame.index[0].date().toordinal()
+    newest = {period: datetime.date.fromordinal(first + day) for period, day in seen.items()}
+    assert [newest[p] for p in (36, 39)] == [issue, issue]  # the 09:00 hour: all four out on D
+    assert [newest[p] for p in (40, 41, 42, 43)] == [issue - datetime.timedelta(days=1)] * 4
+
+
+# -- coverage of chained inputs on native rows -----------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("native", ["distinct", SWITCH])
+def test_coverage_counts_only_rows_with_a_native_target_date(frame, tmp_path, native):
+    """An upstream from 2023-03-09, whose forecasts cover every row with a native target date (from 2023-03-10): a fit across
+    the switch reads earlier rows without a forecast, which the native filter drops anyway, so the coverage check is silent at
+    raise; an upstream from 2023-03-12 leaves native rows uncovered, refused."""
+    learner = OLSModel(["price_fc_d+{horizon}", *REGRESSORS], training_window=14, fit_intercept=True)
+    for start, covered in (("2023-03-09", True), ("2023-03-12", False)):
+        pipeline = ModelPipeline(information_set=InformationSet("09:30", ZONE, rules=RULES), availability="warn")
+        pipeline.add_model(OLSModel(PREDICTORS, training_window=28, name="price_up"))
+        pipeline.run(hourly_of(frame), start, "2023-03-20", target="price", horizon=1, save_dir=str(tmp_path / start))
+        source, data = chained_frame(frame, tmp_path / start)
+        model = ShapeModel("price_fc_d+{horizon}", learner, native=native, min_native_days=0, name="cov")
+        run = lambda: model.run(  # noqa: E731
+            data, "2023-03-14", "2023-03-15", horizon=1, freq="15min", information_set=INFO.with_source_rules([source])
+        )
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", message=f".*{SHORT}", category=UserWarning)
+            if covered:
+                warnings.filterwarnings("error", message=".*have no value of")
+                assert run().produced == 2 * 96
+            else:
+                with pytest.raises(InformationSetError, match=r"price_fc_d\+1 on .* from 2023-03-09"):
+                    run()
 
 
 # -- YAML, the manifest, the refusals ---------------------------------------------------------------------------------------
@@ -649,8 +831,8 @@ def test_a_resume_with_another_native_rule_or_learner_refuses(frame, tmp_path):
     quiet_run(
         ShapeModel(BASE, OLSModel(REGRESSORS, 14, fit_intercept=True)),
         frame,
-        "2023-03-20",
-        "2023-03-20",
+        "2023-03-28",
+        "2023-03-28",
         horizon=1,
         save_to=save_to,
     )
@@ -658,15 +840,19 @@ def test_a_resume_with_another_native_rule_or_learner_refuses(frame, tmp_path):
         quiet_run(
             ShapeModel(BASE, OLSModel(REGRESSORS, 14, fit_intercept=True), native=SWITCH),
             frame,
-            "2023-03-20",
-            "2023-03-21",
+            "2023-03-28",
+            "2023-03-29",
             horizon=1,
             save_to=save_to,
         )
     with pytest.raises(ManifestMismatchError, match="RidgeModel"):
         quiet_run(
-            ShapeModel(BASE, RidgeModel(REGRESSORS, 14)), frame, "2023-03-20", "2023-03-21", horizon=1, save_to=save_to
+            ShapeModel(BASE, RidgeModel(REGRESSORS, 14)), frame, "2023-03-28", "2023-03-29", horizon=1, save_to=save_to
         )
+
+
+def test_the_period_is_kept_as_the_hour_however_it_is_written():
+    assert ShapeModel(BASE, OLSModel(REGRESSORS), period="60min").period == "1h"
 
 
 def test_the_learner_s_settings_are_the_model_s_and_set_on_the_learner():
@@ -710,6 +896,9 @@ class TorchLike(OLSModel):
         (lambda: ShapeModel(BASE, OLSModel(REGRESSORS), native="sometimes"), ValueError, "native"),
         (lambda: ShapeModel(BASE, OLSModel(REGRESSORS), period="30min"), ValueError, "period"),
         (lambda: PooledModel(ShapeModel(BASE, OLSModel(REGRESSORS))), ValueError, "can't be pooled"),
+        (lambda: ResidualModel(OLSModel(PREDICTORS), ShapeModel(BASE, OLSModel(REGRESSORS))), ValueError, "ShapeModel"),
+        (lambda: ShapeModel(BASE, OLSModel(REGRESSORS), min_native_days=-1), ValueError, "min_native_days"),
+        (lambda: ShapeModel(BASE, OLSModel(REGRESSORS), min_native_days=True), ValueError, "min_native_days"),
     ],
 )
 def test_what_a_shape_model_refuses(build, error, match):
