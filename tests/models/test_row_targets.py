@@ -799,3 +799,15 @@ def test_a_torch_day_model_refuses_them_and_a_period_one_is_its_run_on_y_over_c(
     assert scaled.keys() == on_ratio.keys() and scaled
     for key, record in scaled.items():
         assert record["prediction"] == expected[key], key
+
+
+def test_both_stores_read_back_a_forecast_of_0_with_its_detail(spring, tmp_path):
+    from epftoolbox2.results.store import read_records
+
+    records = {}
+    for fmt in ("jsonl", "parquet"):
+        pipeline = ModelPipeline().add_model(OLSModel(PREDICTORS, training_window=30, zero_when="flag", name="rt"))
+        pipeline.run(spring, "2023-04-10", "2023-04-10", horizon=1, save_dir=str(tmp_path / fmt), save_format=fmt)
+        records[fmt] = sorted(json.dumps(r, sort_keys=True) for r in read_records(tmp_path / fmt / f"rt.{fmt}"))
+    assert records["jsonl"] == records["parquet"] and len(records["jsonl"]) == 24
+    assert any('"detail": "zero_when"' in line for line in records["jsonl"])
