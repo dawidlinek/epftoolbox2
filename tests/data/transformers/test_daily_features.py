@@ -140,13 +140,89 @@ def test_daily_stats_count_dst_days_as_complete():
 
 def test_daily_stats_are_leak_free():
     df = local_frame("2024-10-20", "2024-11-03", freq="15min")
+    stats = ["min", "max", "mean", "last", "peak"]
     for day in ["2024-10-26", "2024-10-27"]:
-        assert_rows_up_to_day_unchanged(DailyStatsTransformer(columns=["price", "load"], freq="15min"), df, day)
+        assert_rows_up_to_day_unchanged(DailyStatsTransformer(["price", "load"], stats, freq="15min"), df, day)
 
 
 def test_daily_stats_reject_unknown_stat():
     with pytest.raises(ValueError, match="median"):
         DailyStatsTransformer(columns="price", stats=["median"])
+
+
+def _peak_oracle(df: pd.DataFrame, column: str, slots_per_hour: int, first: int = 8, end: int = 20) -> pd.Series:
+    """The mean over the rows of each local date whose wall-clock hour is in [first, end), on dates with every slot the
+    clock gives them (23, 24 or 25 hours), each with a value; NaN on the others."""
+    wall = df.index.tz_localize(None)
+    out = pd.Series(np.nan, index=df.index)
+    for day in wall.normalize().unique():
+        on = np.asarray(wall.normalize() == day)
+        hours = 24 + {pd.Timestamp("2024-03-31"): -1, pd.Timestamp("2024-10-27"): 1}.get(day, 0)
+        values = df.loc[on, column]
+        if len(values) == hours * slots_per_hour and values.notna().all():
+            out[on] = values[(wall[on].hour >= first) & (wall[on].hour < end)].mean()
+    return out
+
+
+@pytest.mark.parametrize("freq", ["1h", "15min"])
+@pytest.mark.parametrize("peak_hours", [(8, 20), (0, 24), (17, 21), (2, 3)])
+def test_daily_peak_is_the_mean_over_the_peak_hours_of_whole_days_across_both_switches(freq, peak_hours):
+    per_hour = 4 if freq == "15min" else 1
+    for start, end in [("2024-03-30", "2024-04-02"), ("2024-10-26", "2024-10-29")]:
+        index = pd.date_range(start, end, freq=freq, tz="UTC", inclusive="left").tz_convert(TZ)  # partial first day
+        rng = np.random.default_rng(1)
+        df = pd.DataFrame({"price": rng.normal(50, 10, len(index))}, index=index)
+        # The whole day after the switch misses a slot outside the peak block: only the switch day is whole.
+        df.loc[pd.Timestamp(end, tz=TZ) - pd.Timedelta(hours=21), "price"] = np.nan
+        out = DailyStatsTransformer(
+            columns="price", stats=["peak", "mean"], freq=freq, peak_hours=peak_hours
+        ).transform(df)
+        want = _peak_oracle(df, "price", per_hour, *peak_hours)
+        np.testing.assert_allclose(out["price_day_peak"], want, rtol=0, atol=1e-12)
+        assert np.array_equal(out["price_day_peak"].isna(), want.isna())
+        spring = start.endswith("30")
+        # 02:00 to 02:59 is no hour of the spring switch day and two of the autumn one.
+        whole = 0 if spring and peak_hours == (2, 3) else (23 if spring else 25) * per_hour
+        assert out["price_day_peak"].notna().sum() == whole
+        if peak_hours == (0, 24):
+            np.testing.assert_allclose(out["price_day_peak"], out["price_day_mean"], rtol=0, atol=1e-12)
+
+
+def test_daily_peak_is_asked_for_and_the_default_statistics_are_as_before():
+    df = local_frame("2024-01-01", "2024-01-04")
+    assert list(DailyStatsTransformer(columns="price").transform(df).columns) == [
+        "price",
+        "load",
+        "price_day_min",
+        "price_day_max",
+        "price_day_mean",
+        "price_day_last",
+    ]
+    out = DailyStatsTransformer(columns="price", stats=["peak"]).transform(df)
+    day = df.loc["2024-01-02", "price"]
+    assert np.allclose(out.loc["2024-01-02", "price_day_peak"], day.between_time("08:00", "19:59").mean())
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "match"),
+    [
+        ({"stats": ["peak"], "peak_hours": (20, 8)}, "peak_hours"),
+        ({"stats": ["peak"], "peak_hours": (8, 25)}, "peak_hours"),
+        ({"stats": ["peak"], "peak_hours": (8.0, 20.0)}, "peak_hours"),
+        ({"stats": ["peak"], "peak_hours": 8}, "peak_hours"),
+        ({"stats": ["max"], "peak_hours": (7, 19)}, "means nothing"),
+    ],
+)
+def test_daily_peak_hours_are_checked(kwargs, match):
+    with pytest.raises(ValueError, match=match):
+        DailyStatsTransformer(columns="price", **kwargs)
+
+
+def test_daily_peak_block_is_the_report_s():
+    from epftoolbox2.data.transformers._daily import PEAK_HOURS
+    from epftoolbox2.results.breakdowns import PEAK_HOURS as REPORT_PEAK_HOURS
+
+    assert PEAK_HOURS == REPORT_PEAK_HOURS == DailyStatsTransformer(columns="x").peak_hours
 
 
 # --------------------------------------------------------------------------- UTC warnings and YAML
@@ -171,6 +247,7 @@ def test_local_day_features_warn_on_utc_index(transformer):
     [
         DailyProfileTransformer(columns=["price", "load"], freq="15min"),
         DailyStatsTransformer(columns="price", stats=["min", "last"], freq="15min"),
+        DailyStatsTransformer(columns="price", stats=["peak", "max"], peak_hours=[7, 19]),
     ],
 )
 def test_yaml_round_trip(tmp_path, transformer):

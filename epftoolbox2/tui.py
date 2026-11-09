@@ -816,9 +816,47 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
             "required": False,
             "default": None,
             "kind": "multiselect",
-            "choices": ["min", "max", "mean", "last"],
+            "choices": ["min", "max", "mean", "last", "peak"],
         },
         {"name": "freq", "description": "Slot length of the data", "required": False, "default": "1h", "kind": "text"},
+        {
+            "name": "peak_hours",
+            "description": "Local hours of the peak block as [first, end], the end left out (only for peak)",
+            "required": False,
+            "default": (8, 20),
+            "kind": "json",
+        },
+    ],
+    "PeriodStatsTransformer": [
+        {
+            "name": "columns",
+            "description": "Columns to summarise per hour",
+            "required": True,
+            "default": None,
+            "kind": "column_select",
+        },
+        {
+            "name": "period",
+            "description": "Period of the statistics",
+            "required": False,
+            "default": "1h",
+            "kind": "text",
+        },
+        {
+            "name": "stats",
+            "description": "The hour's mean, and each row's deviation from it",
+            "required": False,
+            "default": None,
+            "kind": "multiselect",
+            "choices": ["mean", "dev"],
+        },
+        {
+            "name": "freq",
+            "description": "Slot length of the data (it must divide the period)",
+            "required": False,
+            "default": "15min",
+            "kind": "text",
+        },
     ],
     # `func` (a callable df -> df) can only be set in code, not through the wizard or YAML.
     "LambdaTransformer": [
@@ -2208,6 +2246,7 @@ _TRANSFORMERS = [
     "DSTNormalizeTransformer",
     "DailyProfileTransformer",
     "DailyStatsTransformer",
+    "PeriodStatsTransformer",
     "LambdaTransformer",
     "ImputeTransformer",
 ]

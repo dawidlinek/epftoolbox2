@@ -61,6 +61,7 @@ COMPONENT_REGISTRY = {
         "DSTNormalizeTransformer": "epftoolbox2.data.transformers.dst_normalize",
         "DailyProfileTransformer": "epftoolbox2.data.transformers.daily_profile",
         "DailyStatsTransformer": "epftoolbox2.data.transformers.daily_stats",
+        "PeriodStatsTransformer": "epftoolbox2.data.transformers.period_stats",
         "LambdaTransformer": "epftoolbox2.data.transformers.lambda_transformer",
         "ImputeTransformer": "epftoolbox2.data.transformers.impute",
     },
