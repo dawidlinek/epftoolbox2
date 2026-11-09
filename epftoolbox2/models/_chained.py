@@ -76,9 +76,12 @@ def check(
     if information_set is None or not information_set.chained_inputs():
         return ChainedCheck()
     uses: Dict[str, _Use] = {}
+    resolved: Dict[str, Optional[ChainedInput]] = {}  # each name once, however many lists hold it
     for (period, hz), names in lists.items():
         for name in names:
-            chained = information_set.chained_of(name)
+            if name not in resolved:
+                resolved[name] = information_set.chained_of(name)
+            chained = resolved[name]
             if chained is not None:
                 uses.setdefault(name, _Use(chained)).cells.add((int(period), int(hz)))
     if not uses:
