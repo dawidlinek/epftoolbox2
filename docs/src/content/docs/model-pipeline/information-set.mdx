@@ -192,8 +192,10 @@ For a predictor function it shows [the distinct lists first](/epftoolbox2/model-
 | `load_forecast_daily_min`/`_max` (A65/A31) | published Friday 10:00 Brussels for the whole following Monday-to-Sunday week of the data's local dates, each market's own (a bound `EntsoeSource` names its market's zone, see below) | `latest_revision` |
 | `generation_*_forecast` (A69 wind/solar) | published 18:00 Brussels on D-1 (legal deadline, Reg. 543/2013 Art. 14(2)(d)) | `latest_revision` |
 | `generation_*` (A75 actual generation) | 1h after the end of the delivery period | `latest_revision` |
+| `installed_capacity_*` (A68 installed capacity per production type; a prefixed `EntsoeSource`'s through `with_source_rules`) | static: one value a year, due a week before the year begins (Art. 14(1)(a)), so every row holds a value out before its year did | `latest_revision` |
 | `PseSource` columns (`pse_*`) | `load_fcst` 10:00 Warsaw on D-1, the prices (`csdac_pln`, `rce_pln`) 15:00 on D-1, `usage_fcst` at the source's `pdgsz_cutoff` on D-1; `load_actual`, `his-wlk-cal` and `flow_*` columns 13:00 on D+1 (see [PseSource](/epftoolbox2/data-sources/pse/#availability-rules)) | `snapshot` for the prices and `usage_fcst`, `last_write_stamp` for the rest |
 | Calendar columns (`is_holiday`, weekday/month dummies, `sunrise`/`sunset`/`daylight_hours`, ...) | static, known in advance | none |
+| [`SolarGeometryTransformer`](/epftoolbox2/transformers/solar-geometry/) columns (`sun_elevation`, `sun_sin_elevation`, `clear_sky_ghi`, `is_night`, and `<prefix>_sun_elevation` and so on) | static: a function of the row's instant, known in advance at any shift. Exact names, so a series of yours named `sun_...` gets no rule from them | none |
 
 An `OpenMeteoSource` column's rule (below) is a `snapshot`, and so is an `EpftoolboxBenchmarkSource`'s `price`.
 
@@ -553,6 +555,23 @@ rule for the plain column itself lifts.
   such a case, although it uses that zone: its 23:00 is 23:00 on D of the files' wall clock, and its rules
   (`with_source_rules`) say so, so `price_day_max` and `price_h23` pass all year.
 </Aside>
+
+## Rolling Statistics
+
+A [`RollingStatsTransformer`](/epftoolbox2/transformers/rolling-stats/) column, `x_roll365max_d-1`, holds a statistic of `x`'s
+days over a window of local days: `x_roll365max` the 365 days ending on the row's day D, and its day shifts move the whole window
+(`_d-1`: ending on D-1). It is judged by the rule of `x`, as a day aggregate of the window's newest day, at that day's last slot:
+no earlier day of the window is known later, and the newest is known only when its last slot is. So with the built-in rule of
+`generation_*`, `generation_solar_roll365max_d-1`, the renewables study's capacity proxy, is known at 01:00 on D and passes at
+every period, and `generation_solar_roll365max` is late at every period, the early ones too: matched by `generation_*` as a plain
+column it would have been judged at its row's hour, and passed from 00:00 to 09:00 with values of the rest of D in it. A rolling
+statistic of a day-ahead series follows that series' rule: `price_roll7max`, the window ending D, is known on D, published with
+D's prices at 13:00 on D-1.
+
+Under [rules over time](#rules-over-time) an older day can be out after the newest (a lag that shortened, a day no rule holds
+for): the column is then known when every slot of every day of its window is. A key of `rules=` that matches the rolling column's
+own name replaces the timing of the column it was built from, as for a day aggregate. `explain` shows the window's whole span,
+`T-366 00:00 … T-2 23:00` for the proxy at horizon 1.
 
 ---
 

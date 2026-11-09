@@ -1,0 +1,108 @@
+---
+title: Generation Targets
+description: Forecasting solar or wind generation - solar geometry, a capacity proxy or the installed capacity, the capacity factor, night zeros and what the checks say
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+A solar or wind generation forecast is a model like any other, with three differences: its target grows with the capacity
+installed, so it is fitted on the capacity factor; it is bounded, by 0 and a little over the capacity; and a solar forecast is 0
+at night. The model parameters `normalise_by`, `bounds` and `zero_when`
+([Common Parameters](/epftoolbox2/models/common-parameters/#generation-targets)) do that, from columns of the frame that two
+transformers and the installed capacity provide. The forecasts can then feed a price model through
+[Chaining Pipelines](/epftoolbox2/model-pipeline/chaining/).
+
+## A Day-ahead Solar Forecast
+
+```python
+from epftoolbox2.data.sources import EntsoeSource, OpenMeteoSource
+from epftoolbox2.data.transformers import (
+    LagTransformer,
+    ResampleTransformer,
+    RollingStatsTransformer,
+    SolarGeometryTransformer,
+    TimezoneTransformer,
+)
+from epftoolbox2.evaluators import MAEEvaluator
+from epftoolbox2.models import NaiveModel, RidgeModel
+from epftoolbox2.pipelines import DataPipeline, ModelPipeline
+
+data = (
+    DataPipeline(timezone="Europe/Berlin")
+    .add_source(EntsoeSource("DE_LU", api_key=key, type=["generation"]))
+    .add_source(OpenMeteoSource(latitude=51.0, longitude=10.0, columns=["shortwave_radiation"], prefix="de", horizon=1))
+    .add_transformer(TimezoneTransformer())
+    .add_transformer(ResampleTransformer(freq="1h"))
+    .add_transformer(SolarGeometryTransformer(locations=[(51.0, 10.0)]))
+    .add_transformer(RollingStatsTransformer("generation_solar", window_days=365, stat="max", lag_days=1))
+    .add_transformer(LagTransformer(columns=["clear_sky_ghi", "is_night"], lags=[-1], freq="day"))
+)
+df = data.run("2022-01-01", "2024-12-31")  # a year before the first training row, for the proxy's window
+
+pipeline = ModelPipeline(issue_time="11:45", issue_timezone="Europe/Brussels", availability="raise")
+pipeline.information_set = pipeline.information_set.with_source_rules(data.sources)
+pipeline.add_model(
+    RidgeModel(
+        ["de_shortwave_radiation_d+{horizon}", "clear_sky_ghi_d+{horizon}"],
+        training_window=364,
+        normalise_by="generation_solar_roll365max_d-1",  # the largest hour of the year to D-1
+        bounds=(0, 1.05),  # 0 to 105 % of it
+        zero_when="is_night_d+{horizon}",  # 0 with no fit where the sun is down at the target hour
+        name="solar_ridge",
+    )
+)
+pipeline.add_model(NaiveModel(["generation_solar_forecast"], name="tso_a69_of_d"))  # the TSO's forecast of D, out on D-1
+pipeline.add_evaluator(MAEEvaluator())
+report = pipeline.run(df, test_start="2024-01-01", test_end="2024-12-31", target="generation_solar", horizon=1)
+```
+
+The TSO's A69 forecast for D+1 (`generation_solar_forecast_d+1`) is published at 18:00 on D, after the issue (see the
+[ENTSO-E page](/epftoolbox2/data-sources/entsoe/#information-available-at-forecast-time)), so at `"raise"` a model reading it is
+refused; the benchmark above is its forecast of D, out on D-1. To score the D+1 forecast as a post-gate benchmark, run at
+`"warn"`, which lists it as late.
+
+## The Inputs
+
+- **Solar geometry.** [`SolarGeometryTransformer`](/epftoolbox2/transformers/solar-geometry/) adds the sun's elevation, its sine,
+  a clear-sky irradiance and a night flag at the middle of each period, over one site or the weighted mean of several. They
+  depend on the row's instant alone, so their built-in rule is `static`: `clear_sky_ghi_d+1` is an input like a calendar column,
+  and `is_night_d+{horizon}` the flag of `zero_when`.
+- **A capacity proxy.** [`RollingStatsTransformer`](/epftoolbox2/transformers/rolling-stats/) with `stat="max"` and
+  `lag_days=1` gives the largest hourly generation of the year to D-1, `generation_solar_roll365max_d-1`, the renewables study's
+  proxy. It follows the capacity a year late on its way up and never down, but it is known at the issue and needs no other source.
+  The information set judges it at the end of D-1 by the rule of `generation_*`, and refuses the window ending on D
+  (`lag_days=0`), whose last hour is out after midnight.
+- **The installed capacity.** `EntsoeSource(type=["installed_capacity"])` gives `installed_capacity_<type>`, one value a year
+  carried over every row of it by `ResampleTransformer`. Its built-in rule is `static` (vintage `latest_revision`): A68 is due a
+  week before the year it is for begins, so every row holds a value out before its year. A year's value moves only on 1 January,
+  so a proxy follows growth within the year better.
+
+## What the Parameters Do
+
+`normalise_by` divides each training row's target by its value of the column and multiplies the learner's forecast by the issue
+row's: the model learns the capacity factor, and its forecast follows the capacity of the issue day. `bounds=(0, 1.05)` then clips
+the forecast to 0 to 105 % of that value, and `zero_when` makes the forecasts of night hours 0 with no fit (training rows are left
+as they are, so a night hour still trains the periods that read it). The order on the issue row, the skips, what is recorded and
+how windows, refits and pooled units handle them are on [Common Parameters](/epftoolbox2/models/common-parameters/#generation-targets).
+
+A wind forecast takes `normalise_by` and `bounds` alone. The parameters are a model's, not a run's: a benchmark such as the TSO's
+forecast in the same pipeline stays as it was published.
+
+## What Is Checked
+
+- **The issue-time check** judges `normalise_by`'s column as a predictor, on the issue row and, under rules that change over time,
+  on the training rows; `zero_when`'s on the issue row alone. With the built-in rules the pipeline above passes at `"raise"`, and a
+  proxy without its lag is refused.
+- **[`verify`](/epftoolbox2/model-pipeline/verification/)** passes: the probe perturbs the generation the issue time doesn't know and
+  the forecasts don't move, the positive control perturbs the generation of D-1 and they do, through the proxy. A forecast of 0 by
+  the static night flag reads nothing the control can move and is exempt from moving. Pass `rebuild=` to rebuild the transformers'
+  columns from the perturbed source columns, and a window that reads D is found as a `leak` too.
+- **Scoring.** `report.by_column("is_night")` gives the daylight MAE in its row of 0, and
+  [`ScaledMAEEvaluator`](/epftoolbox2/evaluators/scaled-mae/) the MAE as a share of a capacity column. Models that differ in
+  `zero_when` are compared on the keys they share, as any two models are.
+
+<Aside type="caution">
+  A price model that reads a generation forecast should train on the forecasts it will be served, not on actual generation: run
+  the generation pipeline over the price model's training years and read it back through `ForecastSource`
+  ([Chaining Pipelines](/epftoolbox2/model-pipeline/chaining/)).
+</Aside>

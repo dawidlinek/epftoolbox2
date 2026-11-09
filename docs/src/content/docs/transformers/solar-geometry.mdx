@@ -1,0 +1,87 @@
+---
+title: SolarGeometryTransformer
+description: The sun's elevation at the middle of each period, a clear-sky irradiance and a night flag, known at any time
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Adds the position of the sun over one or more sites to every row, at the middle of the row's period:
+
+| Column | What it holds |
+|---|---|
+| `sun_elevation` | The sun's elevation above the horizon in degrees, geometric (no atmospheric refraction) |
+| `sun_sin_elevation` | Its sine: the cosine of the zenith angle, which a horizontal panel's clear-sky output follows |
+| `clear_sky_ghi` | The clear-sky global horizontal irradiance in W/m² by Haurwitz (1945): 1098 · cos z · exp(-0.059 / cos z), 0 with the sun down |
+| `is_night` | 1 where `sun_sin_elevation` is below `night_below`, else 0 |
+
+They depend on nothing but the row's instant, so they are known at any time, at any shift: a solar model can read
+`clear_sky_ghi_d+1` as an input and use `is_night_d+{horizon}` as its
+[`zero_when`](/epftoolbox2/models/common-parameters/#generation-targets). See
+[Generation Targets](/epftoolbox2/model-pipeline/generation/) for a whole solar forecast.
+
+## Basic Usage
+
+```python
+from epftoolbox2.data.transformers import LagTransformer, SolarGeometryTransformer
+
+df = SolarGeometryTransformer(locations=[(51.0, 10.0)]).transform(df)  # central Germany
+df = LagTransformer(columns=["clear_sky_ghi", "is_night"], lags=[-1], freq="day").transform(df)
+# clear_sky_ghi_d+1, is_night_d+1: the same hour of D+1, by local calendar days
+```
+
+## Parameters
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `locations` | `(lat, lon)` or a list of them | required | Sites in degrees, north and east positive |
+| `weights` | List[float] or None | `None` | One positive weight per site (normalised to sum 1); `None` weighs them equally |
+| `freq` | str | `"1h"` | Period length of the rows; each value is at the row's instant plus half of it. Shorter than a day |
+| `prefix` | str | `""` | Prepended with an underscore: `"de"` gives `de_sun_elevation`, ... |
+| `night_below` | float | `-0.05` | `is_night` is 1 where the sine of the elevation is below this (about -2.9 degrees: the renewables study's threshold for a solar forecast of 0) |
+| `algorithm` | str | `"meeus"` | `"meeus"`: the NOAA Solar Calculator's equations; `"spencer"`: NOAA's fractional-year series, as the renewables study (see below) |
+
+## The Middle of the Period, at Its Instant
+
+Each row is read at its UTC instant plus half of `freq`: the hourly row of 10:00 is the sun at 10:30, the 15-minute row of
+10:15 the sun at 10:22:30. The instant, not the wall clock, so a clock change moves nothing: on the day the clocks go back
+the two rows of the repeated hour are an hour apart and each gets the sun of its own instant, and on the day they go forward
+there is no row for the skipped hour to fill. A row's value is the same whichever zone the index is in, UTC included.
+
+The index must have a zone: a naive index after [`DSTNormalizeTransformer`](/epftoolbox2/transformers/dst-normalize/) gives
+no instant, and is refused. Run it after [`TimezoneTransformer`](/epftoolbox2/transformers/timezone/) (and
+[`ResampleTransformer`](/epftoolbox2/transformers/resample/), so the rows are on the `freq` grid) and before
+`DSTNormalizeTransformer` and `LagTransformer`.
+
+## Several Sites
+
+With several `locations`, each column is the weighted mean of the sites' values, and `is_night` is read on the mean sine:
+the night of a zone's sites taken together, not of any one of them.
+
+```python
+from epftoolbox2.data.transformers import SolarGeometryTransformer
+
+# DE_LU: north, centre and south, weighted by the capacity installed around each
+solar = SolarGeometryTransformer(locations=[(53.5, 9.5), (51.0, 10.0), (48.5, 11.0)], weights=[1, 2, 3], prefix="de")
+```
+
+## Which Equations
+
+`"meeus"`, the default, computes the declination and the equation of time from the Julian century, as the NOAA Solar
+Calculator (after Meeus, *Astronomical Algorithms*) and the [astral](https://github.com/sffjunkie/astral) package do: the
+elevation is within 1e-6 degrees of `astral.sun.elevation(..., with_refraction=False)` on 2,000 random instants and places
+(the tests). `"spencer"` uses the Fourier series in the fractional year of NOAA's *General Solar Position Calculations*
+(Spencer 1971) with a 365-day year, which is what the renewables study computed: its sine equals the study's within 1e-9 on
+the study's sites. That series is up to about 0.5 degrees off near the equinoxes, so use it only to reproduce the study.
+
+## Information Set
+
+The built-in rules make `sun_elevation`, `sun_sin_elevation`, `clear_sky_ghi` and `is_night`, and with a prefix
+`<prefix>_sun_elevation` and so on, `static`: known in advance, unshifted and at any `_d+k`, like the calendar columns
+([Built-in Availability Rules](/epftoolbox2/model-pipeline/information-set/#built-in-availability-rules)). The rules name
+these columns exactly, so a series of yours named `sun_power` gets no rule from them.
+
+<Aside type="note">
+  A static flag used as `zero_when` reads nothing the positive control of `verify` can move on a night forecast, so such a
+  forecast of 0 is exempt from moving: the model verifies `ok` (see
+  [What is checked](/epftoolbox2/models/common-parameters/#what-is-checked)).
+</Aside>

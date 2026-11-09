@@ -218,6 +218,21 @@ an issue day it didn't sample.
   again after the upstream changed. See [ForecastSource](/epftoolbox2/data-sources/forecast/) and
   [Chaining Pipelines](/epftoolbox2/model-pipeline/chaining/). No existing record, listing or table moves; only daily manifests gain
   `daily_stamp`.
+- **Generation inputs: `SolarGeometryTransformer`, `RollingStatsTransformer` and built-in rules for them and the installed
+  capacity.** `SolarGeometryTransformer(locations, weights=None, freq="1h", prefix="", night_below=-0.05, algorithm="meeus")`
+  adds `sun_elevation` (degrees, no refraction), `sun_sin_elevation`, `clear_sky_ghi` (Haurwitz) and `is_night` at the middle of
+  each period, read at the row's UTC instant (each row of the repeated autumn hour gets its own), over one site or the weighted
+  mean of several; `"meeus"` is the NOAA Solar Calculator's equations, astral's, and `"spencer"` the fractional-year series the
+  renewables study used, up to about 0.5 degrees off near the equinoxes. `RollingStatsTransformer(column, window_days=365,
+  stat="max", lag_days=1, freq="1h")` adds `{column}_roll{W}{stat}_d-{lag}`, the statistic of the column's complete days over the
+  W local days ending `lag_days` before the row's (NaN until the frame reaches back over the window): the study's capacity proxy
+  is `generation_solar_roll365max_d-1`. The information set gives the solar columns (and `<prefix>_<name>`) and
+  `installed_capacity_*` (`latest_revision`; a prefixed `EntsoeSource`'s through `with_source_rules`) static rules, which they
+  didn't have: a model that read them was refused at `"raise"` with `unknown="raise"`, and listed as `no rule` at `"warn"`. A
+  rolling column is judged by the rule of the column it was built from at the last slot of its window's newest day, every day of
+  the window under rules over time; before, `generation_solar_roll365max` (a window ending on D) fell to `generation_*` at its
+  row's hour. No record or table of a model that doesn't read these columns moves; one that does lists them as known where
+  it listed `no rule`. See [Generation Targets](/epftoolbox2/model-pipeline/generation/).
 - **`day_zone` on `Availability.published` and `daily_close`.** The delivery day as a date of another zone than `timezone`: a zone's
   name, or `"data"` for the data's (the later of the data's and the issue zone's date on a frame in another zone), the publication
   instant staying `time` in `timezone`; validity periods read the same day. `None`, the default, is every rule as it was, and YAML
