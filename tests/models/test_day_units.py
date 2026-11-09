@@ -1103,13 +1103,67 @@ def test_a_resume_with_another_target_transform_refuses_and_the_same_resumes(mar
 
 
 def test_what_target_transform_a_unit_refuses(market):
-    """A value outside per_period, pooled and none, or "pooled" for a day unit (one transform over every period's rows is a
-    pooled unit's), raises when the run starts, before any fit."""
+    """A value outside per_period, pooled and none; "pooled" for a day unit (one transform over every period's rows is a pooled
+    unit's): each raises when the run starts, before any fit. A network (`TorchModel`, the MLP presets) trains on each period's
+    Invariant, so it takes no other transform: not a parameter, and setting another value raises."""
+    from epftoolbox2.models import MLPDailyModel, MLPHourlyModel, TorchModel
+
     with pytest.raises(ValueError, match=r"target_transform must be one of \['per_period', 'pooled', 'none'\]"):
         PooledOLS(target_transform="raw").run(market, *WEEK, horizon=1)
     with pytest.raises(ValueError, match="a day unit fits each period of the day as an output of its own"):
         DayRidge(target_transform="pooled").run(market, *WEEK, horizon=1)
     assert DayRidge.calls == [] and PooledOLS.calls == []
+    networks = (
+        MLPDailyModel(PRICE),
+        MLPHourlyModel(["price_d-1"]),
+        TorchModel("epftoolbox2.nets:MLP", PRICE, output="day"),
+        TorchModel("epftoolbox2.nets:MLP", ["price_d-1"], output="period", refit=None),
+    )
+    for network in networks:
+        assert network.target_transform == "per_period"
+        network.target_transform = "per_period"  # its own value: nothing to refuse
+        for value in ("none", "pooled"):
+            with pytest.raises(ValueError, match=f"takes no target_transform='{value}'"):
+                network.target_transform = value
+        assert network.target_transform == "per_period" and "target_transform" not in vars(network)
+    with pytest.raises(TypeError, match="target_transform"):
+        MLPDailyModel(PRICE, target_transform="none")
+
+
+# Which registered models take `target_transform`: the families whose units can be pooled. Every other registered model fits
+# period units only, or is listed with the reason it takes none.
+TAKES_TARGET_TRANSFORM = {"HistGBModel", "LightGBMModel", "XGBoostModel", "CatBoostModel"}
+NO_TARGET_TRANSFORM = {
+    "MLPDailyModel": "day units, trained on each period's Invariant: refused when set",
+    "MLPHourlyModel": "period units, trained on the Invariant: refused when set",
+    "TorchModel": "day or period units, trained on each period's Invariant: refused when set",
+    "ResidualModel": "its learner's (a pooled learner's target_transform)",
+    "ShapeModel": "its learner's (a pooled learner's target_transform)",
+    "PooledModel": "period units only",
+}
+
+
+def test_every_registered_model_with_day_or_pooled_units_takes_target_transform_or_says_why_not():
+    """In its signature and TUI schema, written to YAML only when set (`_WRITTEN_WHEN_SET`, so files saved before it existed
+    don't move); never in `_model_kwargs`, so no manifest's `model_params` moves (the manifest's own `target_transform` field
+    records it)."""
+    from epftoolbox2 import tui
+    from epftoolbox2.pipelines.model_pipeline import COMPONENT_REGISTRY
+    from tests.models.test_row_targets import accepted_parameters
+
+    for name, module in COMPONENT_REGISTRY["models"].items():
+        cls = getattr(__import__(module, fromlist=[name]), name)
+        takes = "target_transform" in accepted_parameters(cls)
+        assert takes == (name in TAKES_TARGET_TRANSFORM), (name, NO_TARGET_TRANSFORM.get(name, "period units only"))
+        if name in tui.PARAM_SCHEMAS:
+            fields = {f["name"]: f for f in tui.PARAM_SCHEMAS[name]}
+            assert ("target_transform" in fields) == takes, (name, "TUI")
+        if takes:
+            assert cls._WRITTEN_WHEN_SET["target_transform"] == "per_period", name
+            field = fields["target_transform"]
+            assert (field["default"], field["choices"]) == ("per_period", ["per_period", "pooled", "none"])
+            model = cls(["price_d-1"], target_transform="none")
+            assert "target_transform" not in model._model_kwargs and model.target_transform == "none"
 
 
 # ---------------------------------------------------------------------------

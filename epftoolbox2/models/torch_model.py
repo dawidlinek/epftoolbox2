@@ -71,7 +71,7 @@ from ..scalers.target import MultiTargetAsinh
 from . import _row_target
 from ._calendar import EXPANDING, unit_seed
 from ._cards import RUN_DATA, ModelCard
-from ._units import DAY, PERIOD
+from ._units import DAY, PER_PERIOD, PERIOD
 from ._worker import _POOLS_SPAWN, current_fit, member_mean
 from .base import BaseModel, _block_co_batch_items, _predicts_blocks, _usable_cpu_count
 
@@ -84,6 +84,11 @@ _DAY_NEEDS_REFIT = (
 )
 _DAY_NO_ROW_TARGET = (
     'output="day" fits every period of a date at once, so it takes no per-row target ({key}); use output="period"'
+)
+_INVARIANT_ONLY = (
+    "{cls} trains its module on each period's Invariant of the target (asinh of median and MAD): the module's outputs, the "
+    "loss, the learning rate and early stopping are in that space, for output='day' and 'period' alike, so it takes no "
+    "target_transform={value!r} (a day or pooled unit's 'none' fits the raw target): only 'per_period'"
 )
 LOSS_NAMES = ("l1", "mse")
 _LOSS_PATH = re.compile(r"^[A-Za-z_][\w.]*:[A-Za-z_][\w.]*\Z")
@@ -404,6 +409,17 @@ class TorchModel(BaseModel):
     # A day model predicts each block in one call (`models._units`); a period model one row at a time, so neither for it.
     _predicts_together = property(_predicts_blocks)
     _co_batch_items = _block_co_batch_items
+
+    @property
+    def target_transform(self) -> str:
+        """`"per_period"`, always: a network trains on each period's Invariant of its target (`_INVARIANT_ONLY`). Not a
+        parameter, nor saved; setting another value raises, so a day unit never fits a raw target it isn't built for."""
+        return PER_PERIOD
+
+    @target_transform.setter
+    def target_transform(self, value: Any) -> None:
+        if value != PER_PERIOD:
+            raise ValueError(_INVARIANT_ONLY.format(cls=type(self).__name__, value=value))
 
     def __init__(
         self,

@@ -3,7 +3,8 @@
 Each runs as `HistGBModel` does (`models/hgb.py`): `periods="pooled"` (the default) fits one model per (horizon, refit day) on the
 (date, period) rows of every period (`models._units`, the research's "global" rows), each predictor read on its period's own
 row, the virtual `period` a feature where the list names it, and each period's target through its own Invariant (asinh of
-median and MAD); `periods="each"` fits one per period, horizon and refit day. Both run on the refit calendar and predict each
+median and MAD), or another `target_transform` ("pooled": one Invariant over every row; "none": the raw target);
+`periods="each"` fits one per period, horizon and refit day. Both run on the refit calendar and predict each
 block in one call (`_predict_block`): a tree's prediction of a row reads that row alone. Inputs go in as they are
 (`INVARIANT_TARGET`: a tree splits on order, not scale).
 
@@ -46,7 +47,7 @@ import numpy as np
 from .._extras import MissingExtraError
 from . import _worker
 from ._cards import RUN_DATA, ModelCard
-from ._units import PERIOD, POOLED
+from ._units import PER_PERIOD, PERIOD, POOLED, check_periods_target_transform
 from .base import BaseModel, _usable_cpu_count
 from .hgb import INVARIANT_TARGET, PERIODS
 
@@ -192,12 +193,16 @@ class _BoostedTrees(BaseModel):
     and the fit and predictions of a scikit-learn style estimator (`_estimator()`, each class's) inside the thread scope."""
 
     _engine_ok = False
+    # `target_transform` is written only when set, so files saved before it existed don't move.
+    _WRITTEN_WHEN_SET = {**BaseModel._WRITTEN_WHEN_SET, "target_transform": PER_PERIOD}
 
     def __setattr__(self, key, value):
         if key == "periods" and value not in PERIODS:
             raise ValueError(f"periods must be one of {list(PERIODS)}, got {value!r}")
         if key == "periods" and "periods" in vars(self):
             raise ValueError(f"periods can't change after the model is made: build another {type(self).__name__}")
+        if key == "target_transform":
+            check_periods_target_transform(self, value, self.periods)
         if key == "objective" and value not in OBJECTIVES:
             raise ValueError(f"objective must be one of {list(OBJECTIVES)} (absolute or squared error), got {value!r}")
         if key == "threads":
@@ -304,8 +309,11 @@ class LightGBMModel(_BoostedTrees):
         random_state: The seed of the row and column samples, the same for every fit.
         threads: OpenMP threads of one fit, recorded in the manifest's `runtime` and compared on resume; more than one is
             refused where the run's workers fork (Linux, macOS: `check_tree_threads`).
-        scaler: The predictors as they are and the target as the Invariant, by default (`periods="each"`; a pooled fit gives
-            each period's target its own Invariant whatever this says).
+        scaler: The predictors as they are and the target as the Invariant, by default (`periods="each"`; a pooled fit
+            transforms its targets by `target_transform` whatever this says).
+        target_transform: How a pooled fit transforms its targets: `"per_period"` (each period's own Invariant, the
+            default), `"pooled"` (one Invariant over every row) or `"none"` (the raw target: the estimator fits the stacked
+            targets as they are and its predictions are the forecasts). `periods="each"` takes the default alone.
         newest_target, binary_mask: As for every model (see `BaseModel`).
         normalise_by, bounds, zero_when: A per-row target, as for every model (see `BaseModel`), with either value of
             `periods`: a pooled fit divides each row's target by its own period row's scale.
@@ -333,6 +341,7 @@ class LightGBMModel(_BoostedTrees):
         name: str = "lgbm",
         *,
         scaler: Any = INVARIANT_TARGET,
+        target_transform: str = PER_PERIOD,
         newest_target: str = "d-1",
         binary_mask: Optional[str] = None,
         normalise_by: Optional[str] = None,
@@ -352,6 +361,7 @@ class LightGBMModel(_BoostedTrees):
             zero_when=zero_when,
         )
         self.periods = periods
+        self.target_transform = target_transform
         self.objective = objective
         self.n_estimators = n_estimators
         self.learning_rate = learning_rate
@@ -409,8 +419,8 @@ class XGBoostModel(_BoostedTrees):
     (`[xgboost]` extra).
 
     Args:
-        predictors, training_window, refit, periods, objective, random_state, threads, scaler, newest_target, binary_mask,
-            normalise_by, bounds, zero_when: As for `LightGBMModel`.
+        predictors, training_window, refit, periods, objective, random_state, threads, scaler, target_transform,
+            newest_target, binary_mask, normalise_by, bounds, zero_when: As for `LightGBMModel`.
         n_estimators, learning_rate, max_depth, subsample, colsample_bytree, min_child_weight, reg_lambda: XGBoost's
             (scikit-learn API names), at the research's values.
         device: `"cpu"` (the default) or a CUDA GPU (`"cuda"`, `"cuda:1"`). CPU and GPU forecasts differ, so the device type is
@@ -440,6 +450,7 @@ class XGBoostModel(_BoostedTrees):
         name: str = "xgb",
         *,
         scaler: Any = INVARIANT_TARGET,
+        target_transform: str = PER_PERIOD,
         newest_target: str = "d-1",
         binary_mask: Optional[str] = None,
         normalise_by: Optional[str] = None,
@@ -459,6 +470,7 @@ class XGBoostModel(_BoostedTrees):
             zero_when=zero_when,
         )
         self.periods = periods
+        self.target_transform = target_transform
         self.objective = objective
         self.n_estimators = n_estimators
         self.learning_rate = learning_rate
@@ -544,8 +556,8 @@ class CatBoostModel(_BoostedTrees):
     which has no wheels for free-threaded Python or 3.15).
 
     Args:
-        predictors, training_window, refit, periods, objective, random_state, threads, scaler, newest_target, binary_mask,
-            normalise_by, bounds, zero_when: As for `LightGBMModel`.
+        predictors, training_window, refit, periods, objective, random_state, threads, scaler, target_transform,
+            newest_target, binary_mask, normalise_by, bounds, zero_when: As for `LightGBMModel`.
         iterations, learning_rate, depth, l2_leaf_reg: CatBoost's, at the research's values (`ztree.py`). CatBoost runs
             silently and writes no files (`allow_writing_files=False`).
     """
@@ -568,6 +580,7 @@ class CatBoostModel(_BoostedTrees):
         name: str = "catboost",
         *,
         scaler: Any = INVARIANT_TARGET,
+        target_transform: str = PER_PERIOD,
         newest_target: str = "d-1",
         binary_mask: Optional[str] = None,
         normalise_by: Optional[str] = None,
@@ -587,6 +600,7 @@ class CatBoostModel(_BoostedTrees):
             zero_when=zero_when,
         )
         self.periods = periods
+        self.target_transform = target_transform
         self.objective = objective
         self.iterations = iterations
         self.learning_rate = learning_rate

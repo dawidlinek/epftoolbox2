@@ -142,6 +142,22 @@ def _torch_fields(seeds: int) -> list[dict]:
 
 # A per-row target (`models._row_target`): the fields every model that takes one shares, after its own; `bounds_only` for a
 # model that takes `bounds` alone (`NaiveModel`).
+def _target_transform_field() -> dict:
+    """A tree's `target_transform`, after `periods`: how a pooled fit transforms its targets (periods="each" takes the
+    default alone)."""
+    return {
+        "name": "target_transform",
+        "description": (
+            "How a pooled fit transforms its targets: per_period (each period's Invariant), pooled (one over every row), "
+            "none (the raw target); periods=each takes per_period"
+        ),
+        "required": False,
+        "default": "per_period",
+        "kind": "select",
+        "choices": ["per_period", "pooled", "none"],
+    }
+
+
 def _row_target_fields(bounds_only: bool = False) -> list[dict]:
     bounds = {
         "name": "bounds",
@@ -1547,6 +1563,7 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
             "kind": "select",
             "choices": ["pooled", "each"],
         },
+        _target_transform_field(),
         {
             "name": "loss",
             "description": "l1 (absolute error) or l2 (squared error)",
@@ -1634,6 +1651,7 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
             "kind": "select",
             "choices": ["pooled", "each"],
         },
+        _target_transform_field(),
         {
             "name": "objective",
             "description": "l1 (absolute error) or l2 (squared error)",
@@ -1742,6 +1760,7 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
             "kind": "select",
             "choices": ["pooled", "each"],
         },
+        _target_transform_field(),
         {
             "name": "objective",
             "description": "l1 (absolute error) or l2 (squared error)",
@@ -1850,6 +1869,7 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
             "kind": "select",
             "choices": ["pooled", "each"],
         },
+        _target_transform_field(),
         {
             "name": "objective",
             "description": "l1 (absolute error) or l2 (squared error)",
