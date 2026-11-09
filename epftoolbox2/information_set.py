@@ -2933,13 +2933,83 @@ def perturb_recent(
     return out, counts, unchecked
 
 
-class StepsKnown(NamedTuple):
-    """When the values of one column at some steps are known, as of the issue time on one issue day (`steps_known`)."""
+class StepsReader:
+    """The steps of a frame's index (instants, each a row's) read for several issue days at once: when the value of a column at
+    a step is known, and each day's issue time, on the scale of minutes since the first issue day's midnight in the data's zone.
 
-    # The instant each value is known, in minutes since midnight of the issue day in the data's zone.
+    This is the per-cell reading `perturb_unknown` (and so `verify`) perturbs by, for many days in one call: a step is read as of
+    its own issue day where that is later than the day's (an `as_of` or `weather_cutoff` value of a later row comes from that
+    row's own run), every time through `_available_array`, on the issue clock `violations` reads (`_IssueClock`). Times are
+    whole minutes or fractions with a short binary expansion, so a common origin changes no comparison. A sequence model's
+    context is cut here (`models._history`)."""
+
+    def __init__(self, information_set: InformationSet, steps: pd.DatetimeIndex, days: Sequence[Any], freq: str = "1h"):
+        if not len(days):
+            raise ValueError("a StepsReader reads steps for one issue day at least")
+        self._info = information_set
+        self._steps = steps
+        self._step = _STEP_MINUTES[freq]
+        self._daily = _daily_rows(steps, freq)
+        days = pd.DatetimeIndex([pd.Timestamp(day) for day in days])
+        self._clock = information_set._issue_clock(days, steps, freq)
+        _, self._day, self._minute, self._first = _rows_around_issue(steps, str(days[0].date()), information_set)
+        self._columns: Dict[str, ResolvedColumn] = {}
+
+    def column(self, name: str) -> ResolvedColumn:
+        """`name` resolved; InformationSetError for a column without a rule, whatever `unknown` says: the cut decides numbers."""
+        col = self._columns.get(name)
+        if col is None:
+            col = self._info._resolve_for(name, self._step)
+            if col.rule is None:
+                raise InformationSetError(
+                    f"'{name}' has no availability rule, and a sequence model's context is cut where its rule says the values "
+                    f"are known: declare it, e.g. InformationSet(rules={{'{name}': Availability.realised('1h')}})."
+                )
+            self._info._check_source_zone(col, self._steps)
+            self._columns[name] = col
+        return col
+
+    def available(self, name: str, rows: np.ndarray, days: np.ndarray) -> np.ndarray:
+        """The instant the value of `name` at each step `steps[rows]` is known, read for the issue day `days` (positions in the
+        reader's days) of each, in minutes since the first issue day's midnight."""
+        col = self.column(name)
+        rows, days = np.asarray(rows, dtype=np.int64), np.asarray(days, dtype=np.int64)
+        day = self._day[rows]
+        issue_day = np.maximum(day, self._clock.offset[days])  # a row after the issue day: its own day's reading
+        out = _available_array(
+            col,
+            col.rule,
+            day,
+            self._minute[rows],
+            self._step,
+            self._clock.ctx,
+            self._first[rows],
+            issue_day,
+            self._daily,
+        )
+        return np.asarray(out, dtype=float)
+
+    def issue(self, days: np.ndarray) -> np.ndarray:
+        """The issue instant of each of these issue days (positions), on the same scale."""
+        return self._clock.issue[np.asarray(days, dtype=np.int64)]
+
+    def since_midnight(self, minutes: float, day: int) -> float:
+        """An instant on the reader's scale as minutes since the midnight of issue day `day` (a position)."""
+        return self._clock.minute_of_day(minutes, day)
+
+    def label(self, minutes: float, day: int) -> str:
+        """An instant on the reader's scale as the data zone's clock reads it from issue day `day`, as `D+1 18:00`."""
+        return self._clock.label(float(minutes), day)
+
+
+@dataclass(frozen=True, eq=False)
+class StepsKnown:
+    """When the values of one column at some steps are known, and the issue time, on one issue day (`steps_known`): minutes since
+    that day's midnight in the data's zone."""
+
     available: np.ndarray
-    issue: float  # the issue instant, on the same scale
-    ctx: _Context
+    issue: float
+    _reader: StepsReader = field(repr=False, compare=False)
 
     @property
     def known(self) -> np.ndarray:
@@ -2954,40 +3024,20 @@ class StepsKnown(NamedTuple):
         return len(self.available) - 1 if not len(unknown) else int(unknown[0]) - 1
 
     def label(self, minutes: float) -> str:
-        """An instant on this scale as the data zone's clock reads it from the issue day, as `D+1 18:00`."""
-        return _fmt_instant(float(minutes), self.ctx)
+        """Minutes since the issue day's midnight as the data zone's clock reads them, as `D+1 18:00`."""
+        return self._reader.label(float(minutes), 0)
 
 
 def steps_known(
     information_set: InformationSet, name: str, steps: pd.DatetimeIndex, run_day: Any, freq: str = "1h"
 ) -> StepsKnown:
-    """When the value of the column `name` at each of `steps` (instants of the data's index, each a row's) is known, and the
-    issue time on `run_day`: the per-cell reading of `perturb_unknown`, which `verify` perturbs by, for these steps alone. Each
-    step is read as of its own issue day where that is later than `run_day` (an `as_of` or `weather_cutoff` value of a later
-    row comes from that row's own run), every conversion through `_available_array`, as the check and the listing read a
-    column. A sequence model's context is cut here (`models._history`), so a probe can't perturb a value it reads.
-
-    Raises InformationSetError for a column without a rule, whatever `unknown` says: the cut decides numbers."""
-    step = _STEP_MINUTES[freq]
-    col = information_set._resolve_for(name, step)
-    if col.rule is None:
-        raise InformationSetError(
-            f"'{name}' has no availability rule, and a sequence model's context is cut where its rule says the values are "
-            f"known: declare it, e.g. InformationSet(rules={{'{name}': Availability.realised('1h')}})."
-        )
-    information_set._check_source_zone(col, steps)
-    ctx, day, minute, first = _rows_around_issue(steps, str(pd.Timestamp(run_day).date()), information_set)
-    daily = _daily_rows(steps, freq)
-    available = _available_array(col, col.rule, day, minute, step, ctx, first, np.maximum(day, 0), daily=daily)
-    return StepsKnown(np.asarray(available, dtype=float), float(ctx.issue_minute), ctx)
-
-
-def newest_known_step(
-    information_set: InformationSet, name: str, steps: pd.DatetimeIndex, run_day: Any, freq: str = "1h"
-) -> int:
-    """The position in `steps` of the newest value of the column `name` known at the issue time on `run_day` with every value
-    before it (`StepsKnown.newest`): -1 if the first is unknown."""
-    return steps_known(information_set, name, steps, run_day, freq).newest()
+    """When the value of the column `name` at each of `steps` (instants of the data's index) is known, and the issue time on
+    `run_day`: `StepsReader` for one day, the reading of `perturb_unknown` for these steps. Raises InformationSetError for a
+    column without a rule."""
+    reader = StepsReader(information_set, steps, [str(pd.Timestamp(run_day).date())], freq)
+    rows = np.arange(len(steps))
+    available = reader.available(name, rows, np.zeros(len(steps), dtype=np.int64))
+    return StepsKnown(available, float(reader.issue(np.zeros(1, dtype=np.int64))[0]), reader)
 
 
 def _has_rule(information_set: InformationSet, name: Any, freq: str) -> bool:
