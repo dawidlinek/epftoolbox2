@@ -4,8 +4,8 @@
 The engine fits OLS by the normal equations, which err as eps·cond(Z)² where the model path's SVD errs as eps·cond(Z), and an
 issue row far out reads that error times its distance: on Lago's DE inputs (n 364, p 247, every issue row 5 to 30 training
 standard deviations out) engine-1 kept forecasts 1.4e-8 EUR/MWh from engine off, the model path itself within 1e-11 of a
-long-double solution. One step of iterative refinement (the residual well below float64's rounding, in long double or by
-error-free transformations) removes the factorisation's error; what it can't remove, the rounding of the equations' entries,
+long-double solution. One step of iterative refinement (the residual well below float64's rounding, by error-free
+transformations) removes the factorisation's error; what it can't remove, the rounding of the equations' entries,
 the guard estimates per row and sends a row whose estimate is above `OLS_SOLVE_ERROR_MAX` back to the model path
 (`far_issue`). The calibration is in `epftoolbox2-research/library_check_step5/ols_issue_guard/`.
 """
@@ -32,16 +32,6 @@ from tests.synthetic import make_market_data
 def one_blas_thread():
     with threadpool_limits(limits=1):  # what the engine's jobs with fits from statistics run on
         yield
-
-
-@pytest.fixture(params=[True, False], ids=["long-double", "error-free"])
-def residual_path(request, monkeypatch):
-    """Both ways the refinement's residual is computed: in long double (x86) and by error-free transformations (where
-    `np.longdouble` is float64)."""
-    if request.param and not _stats.EXTENDED:
-        pytest.skip("np.longdouble is float64 here")
-    monkeypatch.setattr(_stats, "EXTENDED", request.param)
-    return request.param
 
 
 def ill_conditioned(seed=36, n=100, p=60, spread=1e-2):
@@ -99,7 +89,7 @@ def far_along_weakest(x, metric, k):
     return (x.mean(axis=0) + x.std(axis=0, ddof=1) * (k * metric.vectors[:, 0] / metric.scale[0]))[None, :]
 
 
-def test_the_refinement_removes_the_factorisations_error_at_a_row_20_sds_out(residual_path):
+def test_the_refinement_removes_the_factorisations_error_at_a_row_20_sds_out():
     """Where the first solution's error is the factorisation's (columns of three factors and 3 % noise each, a row 20 training
     sds out along the fit's weakest direction): 3.7e-9 from the model path before the step, 6e-12 after, kept by the guard."""
     x, y = ill_conditioned(seed=31, n=120, p=80, spread=3e-2)
@@ -115,7 +105,7 @@ def test_the_refinement_removes_the_factorisations_error_at_a_row_20_sds_out(res
     assert not counts.fallbacks and abs(out[0][0] - off) <= 2e-11
 
 
-def test_an_ill_conditioned_fit_keeps_a_row_10_sds_out_and_hands_back_one_20_out(residual_path):
+def test_an_ill_conditioned_fit_keeps_a_row_10_sds_out_and_hands_back_one_20_out():
     """Columns of three factors and 1 % noise (cond(Z) about 3.6e3): at 20 training sds out along the weakest direction (inside
     OLS's bound of 30) the first solution was 1.4e-8 from the model path (engine-1's kind of miss) and the refined one is
     still 5.8e-9, the rest the rounding of the equations' entries; the guard's estimate (9e-9) sends the row back. At 10 sds
@@ -139,7 +129,7 @@ def test_an_ill_conditioned_fit_keeps_a_row_10_sds_out_and_hands_back_one_20_out
     assert abs(out[0][0] - off_mid) <= 3e-9
 
 
-def test_the_guard_sends_back_a_row_whose_entries_rounding_the_refinement_cant_remove(residual_path):
+def test_the_guard_sends_back_a_row_whose_entries_rounding_the_refinement_cant_remove():
     """A near-copy pair 3e-3 of the load's sd apart and a row 20 of the difference's sds out along it (18 in the fit's metric,
     inside the bound): the entries' own rounding puts even the refined forecast 1.8e-8 from the model path's, the guard's
     estimate sees it, and the row goes back; a training row stays, within 1e-9."""
@@ -173,7 +163,7 @@ def lago_rows(hour, end, n=364):
 # Of the DE fixture's 25,872 (hour, day) fits at n 364 whose issue row the 30-sd bound keeps, the two that engine-1 forecast
 # over 5e-9 from the model path (half OLS's tolerance) and one ordinary row (`ols_issue_guard/fixture_scan.py`).
 @pytest.mark.parametrize("hour, end", [(14, 1245), (15, 1447), (0, 1245)])
-def test_lago_shaped_de_rows_like_the_experiment_checks_are_within_the_budget(hour, end, residual_path):
+def test_lago_shaped_de_rows_like_the_experiment_checks_are_within_the_budget(hour, end):
     """As the experiment-check's miss (Lago's DE inputs, W 364, no intercept, the weekday dummies raw, an issue row 26 sds
     out): the refined forecast is within 2e-9 of the model path's (engine-1's were up to 5.4e-9) and the guard keeps it."""
     x, y, row, mask = lago_rows(hour, end)
@@ -188,8 +178,8 @@ def test_lago_shaped_de_rows_like_the_experiment_checks_are_within_the_budget(ho
 
 
 def test_the_error_free_residual_is_exact_to_the_residuals_last_bits():
-    """`_residual_exact` (where `np.longdouble` is float64) against exact rational arithmetic, on normal equations of a
-    near-collinear pair, where b - M w cancels to about 1e-13 of its terms: within 4 eps of the residual itself."""
+    """`_residual_exact` against exact rational arithmetic, on normal equations of a near-collinear pair, where b - M w cancels
+    to about 1e-13 of its terms: within 4 eps of the residual itself (a float64 residual would lose it all)."""
     rng = np.random.default_rng(3)
     A = rng.normal(size=(60, 8))
     A[:, 1] = A[:, 0] + 1e-4 * A[:, 1]
@@ -201,20 +191,6 @@ def test_the_error_free_residual_is_exact_to_the_residuals_last_bits():
     got = _stats._residual_exact(M, b, w)
     assert np.all(np.abs(got - exact) <= 4 * _stats.EPS * np.abs(exact))
     assert np.abs(exact).max() < 1e-10 * np.abs(M).max() * np.abs(w).max()  # what a float64 residual would lose
-
-
-def test_both_residual_paths_refine_to_the_same_forecasts(monkeypatch):
-    """The refined coefficients from a long-double residual and from the error-free one agree to their last bits (forecasts
-    within 1e-12 on the Lago-shaped rows); each is deterministic."""
-    if not _stats.EXTENDED:
-        pytest.skip("np.longdouble is float64 here")
-    x, y, row, mask = lago_rows(14, 1245)
-    stats, params, wide = engine_fit(x, y, mask)
-    monkeypatch.setattr(_stats, "EXTENDED", False)
-    _, _, exact = engine_fit(x, y, mask)
-    assert np.array_equal(engine_fit(x, y, mask)[2].coef_, exact.coef_)
-    z = params.transform(row)
-    assert abs(float(wide.predict(z)[0]) - float(exact.predict(z)[0])) * stats.yscale <= 1e-12
 
 
 def test_the_guard_reads_a_vst_forecast_in_target_units_where_the_inverse_is_steeper():

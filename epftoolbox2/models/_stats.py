@@ -52,8 +52,8 @@ The fits (`LinearFit` for OLS and Ridge; LEAR's `LearFit` from `ScaledStats.gram
   eps·cond(Z), and an issue row far out reads that error: on Lago's DE inputs (W 364, 247 inputs, every issue row 5 to 30
   training sds out) step 5's fits (fit path "engine-1") were up to 1.4e-8 from `LinearRegression`, the model path within
   1e-11 of a long-double solution. So `ols_fit` refines its solution by one step, w + M⁻¹(b - M w) with the fit's own
-  Cholesky factor and the residual well below float64's rounding (`refined`; in long double where `EXTENDED`, else by
-  error-free transformations), which removes the factorisation's error and leaves the rounding of M's and b's entries from
+  Cholesky factor and the residual well below float64's rounding (`refined`, by error-free transformations in float64, the
+  same on every platform), which removes the factorisation's error and leaves the rounding of M's and b's entries from
   the sums. Per issue row the error that remains is estimated (`solve_error`, from `LinearFit.solve`):
   sqrt((δw·(z - c))² + eps² Σ_i g_i² h_i), δw the next refinement step (measured), g = M⁻¹(z - c) and h_i = Σ_j M_ij² w_j² +
   (M w)_i² (the first-order effect of the entries' rounding, each of random sign, which no refinement against those entries can
@@ -96,14 +96,6 @@ from ._sums import RawSums
 
 EPS = float(np.finfo(np.float64).eps)
 
-EXTENDED = bool(float(np.finfo(np.longdouble).eps) < EPS)
-"""Whether `np.longdouble` is wider than float64 (80-bit extended on x86). The residual of `ols_fit`'s refinement step must be
-computed well below float64's rounding (a float64 residual carries rounding of the size of the error it is to remove, and the
-issue-row guard then measures noise: with it, kept forecasts reached 1.2e-8 from the model path on Lago DE): in long double
-where it is wider, else by error-free transformations in float64 (`_residual_exact`, as accurate, about four times the cost:
-1.8 ms against 0.46 ms at p 247). The refined coefficients agree to their last bits either way (the step needs a few correct
-digits of the residual; both give more)."""
-
 _SPLIT = 134217729.0  # 2**27 + 1: Veltkamp's splitting of a float64 into two halves whose products are exact
 
 CANDIDATE_RTOL = 1e-6
@@ -129,9 +121,10 @@ this: the gap to `RidgeCV` was at most 8.7 times that measure where it mattered,
 the model path, however exact the engine (see the module)."""
 
 OLS_SOLVE_ERROR_MAX = 5e-9
-"""OLS hands an issue row back (the engine's `far_issue`) when the normal equations' own error in its forecast, measured by one
-step of iterative refinement (`LinearFit.correction`, `solve_error_ok`), exceeds this in target units: the model path's SVD is
-far closer to the exact least-squares fit there (see the module)."""
+"""OLS hands an issue row back (the engine's `far_issue`) when the error its refined normal equations leave in the forecast,
+estimated per fit and row (`solve_error`: the next refinement step, `LinearFit.solve.correction`, and the rounding of the
+equations' entries, `LinearFit.solve.h`), exceeds this in target units (`solve_error_ok`): the model path's SVD is far closer
+to the exact least-squares fit there (see the module)."""
 
 MIN_ROWS = 3
 """Fewer rows in ρ go to the model path for every model (the engine's fallback table)."""
@@ -646,21 +639,12 @@ def _live_block(M: np.ndarray, b: np.ndarray, live: np.ndarray):
     return (M if full else M[np.ix_(live, live)]), (b if full else b[live])
 
 
-def _residual(Ml: np.ndarray, bl: np.ndarray, wl: np.ndarray) -> np.ndarray:
-    """b - M w over a live block, well below float64's rounding: in `np.longdouble` where it is wider (`EXTENDED`), else by
-    `_residual_exact`."""
-    if EXTENDED:
-        dtype = np.longdouble
-        return np.asarray(bl, dtype=dtype) - np.asarray(Ml, dtype=dtype) @ np.asarray(wl, dtype=dtype)
-    return _residual_exact(
-        np.asarray(Ml, dtype=np.float64), np.asarray(bl, dtype=np.float64), np.asarray(wl, dtype=np.float64)
-    )
-
-
 def _residual_exact(M: np.ndarray, b: np.ndarray, w: np.ndarray) -> np.ndarray:
     """b - M w in float64 by error-free transformations, accurate to about eps of the residual itself: each product
     M_ij w_j = P_ij + E_ij exactly (Dekker's TwoProduct by Veltkamp's splitting), each row's b_i - Σ_j P_ij by pairwise TwoSum
-    with every level's errors carried, and the E_ij (eps-small) summed plainly. O(p²) in vectorised numpy, deterministic."""
+    with every level's errors carried, and the E_ij (eps-small) summed plainly. O(p²) in vectorised numpy, deterministic, and
+    the same on every platform (only float64 additions and multiplications, no wider type: `np.longdouble` is 80-bit on x86
+    and float64 on most ARM builds, and its results differ by about 1e-14 relative in most coefficients)."""
     P = M * w
     c = _SPLIT * M
     Mh = c - (c - M)
@@ -688,8 +672,8 @@ def refined(
     """The solution `w` of M w = b (over the live columns, with the factor `L` the fit used) after one step of iterative
     refinement, and its `SolveError`.
 
-    The step is w + M⁻¹(b - M w), the residual well below float64's rounding (`_residual`), solved with `L`: it removes the
-    factorisation's own error, the normal equations' eps·cond(Z)² against the model path's eps·cond(Z), and leaves the
+    The step is w + M⁻¹(b - M w), the residual well below float64's rounding (`_residual_exact`), solved with `L`: it removes
+    the factorisation's own error, the normal equations' eps·cond(Z)² against the model path's eps·cond(Z), and leaves the
     rounding of M's and b's entries from the sums. `SolveError.correction` is the next step, M⁻¹(b - M w'), the error that
     remains in w' (its residual is the first one minus M (w' - w), a product that needs no extra precision since w' - w is
     that small: one accurate residual per fit, O(p²) beside the factorisation's O(p³)). A failed or non-finite step leaves w
@@ -698,7 +682,9 @@ def refined(
         return w, None
     Ml, bl = _live_block(M, b, live)
     wl = w[live]
-    residual = _residual(Ml, bl, wl)
+    residual = _residual_exact(
+        np.asarray(Ml, dtype=np.float64), np.asarray(bl, dtype=np.float64), np.asarray(wl, dtype=np.float64)
+    )
     step, info = dpotrs(L, np.ascontiguousarray(residual, dtype=np.float64), lower=1)
     if info == 0 and np.isfinite(step).all():
         moved = wl + step
@@ -716,9 +702,9 @@ def refined(
 def solve_error(fitted, stats: "ScaledStats", z: np.ndarray) -> float:
     """The scale of the error left in an OLS forecast at an issue row `z` (scaled as the fit's rows), in scaled target units:
     sqrt((δw·(z - c))² + eps² Σ_i g_i² h_i), g = M⁻¹(z - c), c the training means with an intercept and 0 without. δw is the
-    refinement step that remains (`refined`: after the one taken, small); the second term the first-order effect of the rounding of M's and b's entries, each of random sign, which no refinement
-    against those entries can see. 0.0 for a fit without `SolveError` (no live column). A function of the fit and the row
-    alone."""
+    refinement step that remains (`refined`: after the one taken, small); the second term the first-order effect of the
+    rounding of M's and b's entries, each of random sign, which no refinement against those entries can see. 0.0 for a fit
+    without `SolveError` (no live column). A function of the fit and the row alone."""
     terms = getattr(fitted, "solve", None)
     if terms is None:
         return 0.0
@@ -944,7 +930,6 @@ __all__ = [
     "ols_fit",
     "ridge_fit",
     "ridgecv_rounding",
-    "EXTENDED",
     "SolveError",
     "refined",
     "solve_error",
