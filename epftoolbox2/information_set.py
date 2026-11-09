@@ -2421,7 +2421,8 @@ def _issue_day_forecasts(
     Such a function is planned on this very frame, so a value it reads can move its list, and it answers through the
     information set. The run itself gets none, so a late list isn't refused and the forecasts show it. A model with
     `newest_target="published"` reads its training cut from it (`cut_rules`), and nothing else; so does a `known_only` model
-    (`NaiveModel`) which of its forecasts are published, since one that isn't has no forecast in any run.
+    (`NaiveModel`) which of its forecasts are published, since one that isn't has no forecast in any run, and a model that reads
+    history (`models._history`) where its series are cut, whatever its `newest_target`.
 
     A model with `refit` is run from `run_day` to the end of its refit block (or of the frame), and only `run_day`'s forecasts are
     returned: a unit fits once for every issue day of its block, so a fit that read one of the later days would show only in a
@@ -2454,7 +2455,11 @@ def _issue_day_forecasts(
         if plan is not None and (first_day, last_day) != (run_day, run_day):
             run_plan = planned(first_day, last_day)
     extra = {} if run_plan is None else {"plan": run_plan}
-    if getattr(m, "newest_target", "d-1") == "published" or getattr(m, "_known_only", False):
+    from .models._history import reads_history  # models import this module
+
+    # A sequence model cuts its series by the rules (`models._history`), whatever its newest target, as such a model's training
+    # cut does.
+    if getattr(m, "newest_target", "d-1") == "published" or getattr(m, "_known_only", False) or reads_history(m):
         extra["cut_rules"] = information_set
     read = {} if plan is None else plan.read_cells()  # the run lets go of them
     late = [] if plan is None else plan.late_reads()
@@ -2641,14 +2646,17 @@ class CoBatchResult:
 
 @dataclass
 class CutResult:
-    """Outcome of `issue_day_cut`: the issue day's forecasts on the frame cut after its local date, as a run on that day has
-    it, against those on the whole frame, compared at atol 0 (equal, or NaN in both)."""
+    """Outcome of `issue_day_cut` (and `target_day_cut`): the issue day's forecasts on the frame cut after its local date (after
+    each target day's), as a run on that day has it, against those on the whole frame, compared at atol 0 (equal, or NaN in
+    both)."""
 
     run_day: str
     forecasts: int
     changed: List[Tuple[int, int]]  # (period, horizon)
     max_abs_change: float
     missing: List[Tuple[int, int]] = field(default_factory=list)  # forecasts present in only one of the runs
+    # Where the cut frames end, as a message says it: the issue day's date, or each target day's.
+    ends: str = ""
 
     @property
     def ok(self) -> bool:
@@ -2660,17 +2668,26 @@ def cuts_at_issue_day(model: Any) -> bool:
     for a model that predicts its refit blocks in one call (`_predict_block`, and `_predicts_together` True). Its call holds the
     issue rows of the block's later days that the frame has, which a run on the issue day doesn't have, so a forecast that
     depends on which rows its call holds, not only on their values, would differ between a backtest and that run. A row of a
-    later day enters such a call only as an issue row, so the cut frame takes away nothing the forecast may read; a model that
-    reads a later row's known-ahead value directly (a sequence model's covariate) would lose it, and isn't cut here. A model of
-    day or pooled units (`_unit_kind`, `models._units`) predicts its blocks in one call the same way, and is cut too, unless it
-    reads series through the history accessor (`models._history.reads_history`): that is such a sequence model."""
+    later day enters such a call only as an issue row, so the cut frame takes away nothing the forecast may read. A model of day
+    or pooled units (`_unit_kind`, `models._units`) predicts its blocks in one call the same way, and is cut too, unless it reads
+    series through the history accessor (`models._history.reads_history`): such a model's call is of series, and a series
+    reads the target day's known-ahead values on later rows, which this cut would take away; `target_day_cut` checks it
+    instead. A model that reads history and predicts row blocks (`_predict_block`) is cut here for its rows too."""
     from .models._history import reads_history  # models import this module
 
     m = model() if callable(model) and not hasattr(model, "run") else model
-    if reads_history(m):
-        return False
-    blocks = getattr(type(m), "_predict_block", None) is not None or getattr(m, "_unit_kind", "period") != "period"
+    days = getattr(m, "_unit_kind", "period") != "period" and not reads_history(m)
+    blocks = getattr(type(m), "_predict_block", None) is not None or days
     return blocks and bool(getattr(m, "_predicts_together", False))
+
+
+def cuts_after_target_day(model: Any) -> bool:
+    """Whether the co-batch check also compares the issue day's forecasts at each horizon h on the frame cut after D + h
+    (`target_day_cut`): for every model that reads history (`models._history.reads_history`), whatever else it declares."""
+    from .models._history import reads_history  # models import this module
+
+    m = model() if callable(model) and not hasattr(model, "run") else model
+    return reads_history(m)
 
 
 def issue_day_cut(
@@ -2707,7 +2724,85 @@ def issue_day_cut(
     changed = [key for key in keys if not (whole[key] == alone[key] or (pd.isna(whole[key]) and pd.isna(alone[key])))]
     finite = [abs(whole[key] - alone[key]) for key in changed if np.isfinite(whole[key]) and np.isfinite(alone[key])]
     max_abs = max(finite, default=float("inf") if changed else 0.0)
-    return CutResult(run_day, len(whole), changed, max_abs, sorted(whole.keys() ^ alone.keys()))
+    return CutResult(run_day, len(whole), changed, max_abs, sorted(whole.keys() ^ alone.keys()), run_day)
+
+
+def target_day_cut(
+    model: Any,
+    frame: pd.DataFrame,
+    run_day: str,
+    information_set: InformationSet,
+    target: str = "price",
+    horizon: Optional[int] = None,
+    freq: str = "1h",
+    availability: str = "raise",
+    horizons: Optional[Sequence[int]] = None,
+    runs_in: Optional[Callable[[], Any]] = None,
+) -> CutResult:
+    """`run_day`'s forecasts at each horizon h on `frame` cut after the local date D + h, against those of the whole `frame`, at
+    atol 0, each run as the probe runs it (`issue_day_cut`'s comparison). A sequence model's forecast at h reads the known-ahead
+    series to the end of D + h, which every frame a run on D has holds, and nothing later: a forecast that moves when the frame
+    ends there depends on where the frame ends (the other days of its call, a statistic over them), so a backtest and a run on
+    the day differ. `runs_in` wraps each run, as there."""
+    from .models._calendar import horizon_arguments, resolve_horizons  # models import this module
+
+    run_day = str(pd.Timestamp(run_day).date())
+    _, chosen = resolve_horizons(horizon, horizons, 1)
+    local = frame.index.tz_localize(None) if frame.index.tz is not None else frame.index
+    dates = local.normalize()
+
+    def forecasts(each: pd.DataFrame, arguments: Dict[str, Any]) -> Dict[Tuple[int, int], float]:
+        common = (run_day, target, arguments, freq, information_set, availability)
+        if runs_in is None:
+            return _issue_day_forecasts(model, each, *common)[0]
+        with runs_in():
+            return _issue_day_forecasts(model, each, *common)[0]
+
+    whole = forecasts(frame, horizon_arguments(*resolve_horizons(horizon, horizons, 1)))
+    alone: Dict[Tuple[int, int], float] = {}
+    for h in chosen:
+        cut = frame[np.asarray(dates <= pd.Timestamp(run_day) + pd.Timedelta(days=h))]
+        alone.update({key: value for key, value in forecasts(cut, {"horizons": (h,)}).items() if key[1] == h})
+    keys = sorted(whole.keys() & alone.keys())
+    changed = [key for key in keys if not (whole[key] == alone[key] or (pd.isna(whole[key]) and pd.isna(alone[key])))]
+    finite = [abs(whole[key] - alone[key]) for key in changed if np.isfinite(whole[key]) and np.isfinite(alone[key])]
+    max_abs = max(finite, default=float("inf") if changed else 0.0)
+    return CutResult(run_day, len(whole), changed, max_abs, sorted(whole.keys() ^ alone.keys()), "each target day")
+
+
+def frame_cut(
+    model: Any,
+    frame: pd.DataFrame,
+    run_day: str,
+    information_set: InformationSet,
+    target: str = "price",
+    horizon: Optional[int] = None,
+    freq: str = "1h",
+    availability: str = "raise",
+    horizons: Optional[Sequence[int]] = None,
+    runs_in: Optional[Callable[[], Any]] = None,
+) -> Optional[CutResult]:
+    """The co-batch check's cut frames for `model`, in one result: `issue_day_cut` where `cuts_at_issue_day`, `target_day_cut`
+    where `cuts_after_target_day`, both for a model of both; None for a model of neither."""
+    args = (model, frame, run_day, information_set, target, horizon, freq, availability)
+    found = []
+    if cuts_at_issue_day(model):
+        found.append(issue_day_cut(*args, horizons=horizons, runs_in=runs_in))
+    if cuts_after_target_day(model):
+        found.append(target_day_cut(*args, horizons=horizons, runs_in=runs_in))
+    if not found:
+        return None
+    if len(found) == 1:
+        return found[0]
+    first, second = found
+    return CutResult(
+        first.run_day,
+        max(first.forecasts, second.forecasts),
+        sorted({*first.changed, *second.changed}),
+        max(first.max_abs_change, second.max_abs_change),
+        sorted({*first.missing, *second.missing}),
+        f"{first.ends} and {second.ends}",
+    )
 
 
 def co_batch_items(model: Any, run_day: str, frame: Optional[pd.DataFrame] = None) -> Optional[List[str]]:
@@ -2760,7 +2855,8 @@ def co_batch_probe(
 
     For a model that predicts its refit blocks in one call (`cuts_at_issue_day`) it also compares `run_day`'s forecasts on the
     frame cut after its date with the whole frame's (`issue_day_cut`, in `cut`): its call holds the later days the frame has,
-    which a run on `run_day` doesn't.
+    which a run on `run_day` doesn't. For a model that reads history (`cuts_after_target_day`) the frame is cut after each
+    target day instead (`target_day_cut`, `frame_cut`).
 
     A model without the hook gives `items=None` and runs nothing; one that names no other day the frame has gives `items=[]`
     and runs nothing either. The other arguments are `leakage_probe`'s.
@@ -2782,11 +2878,7 @@ def co_batch_probe(
         model, data, run_day, information_set, target, check_target_boundary=check_target_boundary, **common
     )
     moved = positive_control(model, data, run_day, information_set, target, **common) if control else None
-    cut = None
-    if cuts_at_issue_day(model):
-        cut = issue_day_cut(
-            model, frame, run_day, information_set, target, horizon, freq, availability, horizons=horizons
-        )
+    cut = frame_cut(model, frame, run_day, information_set, target, horizon, freq, availability, horizons=horizons)
     return CoBatchResult(run_day, others, probe, moved, cut)
 
 
