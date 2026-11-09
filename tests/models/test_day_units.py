@@ -1196,3 +1196,27 @@ def test_a_period_with_no_training_target_is_skipped_whatever_the_target_transfo
         ref = model(**settings).run(data, "2023-04-03", "2023-04-05", horizon=1)
         assert len(ref._results) == 69 and ref.skipped == {"no_finite_training_rows": 3}, transform
         assert 5 not in {r["hour"] for r in ref._results}
+
+
+class EngineShaped(BaseModel):
+    """Defines every method an engine group fits through, `_fit_stats` included, all in one class: a period model of this
+    class is engine-capable, so only the unit kind keeps a day or pooled one off the engine."""
+
+    def _fit_predict(self, train_x, train_y, test_x):
+        return self._predict_fitted(self._fit_model(train_x, train_y), test_x)
+
+    def _fit_model(self, train_x, train_y):
+        return float(np.mean(train_y))
+
+    def _predict_fitted(self, fitted, test_x):
+        return fitted, []
+
+    def _fit_stats(self, *args, **kwargs):
+        return None
+
+
+def test_the_engine_never_takes_a_day_or_pooled_unit_whatever_methods_it_defines():
+    assert EngineShaped(["x"])._engine_capable()
+    for kind in ("day", "pooled"):
+        shaped = type(f"Engine_{kind}", (EngineShaped,), {"_unit_kind": kind})
+        assert shaped(["x"])._engine_capable() is False, kind
