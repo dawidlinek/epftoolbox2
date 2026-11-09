@@ -1,15 +1,206 @@
 ---
 title: Neural Networks
-description: The [torch] extra, the networks of epftoolbox2.nets (MLP, the counter-based Dropout and Linear), the module contract, and what the library's trainer guarantees about seeds, stacks, threads and TF32
+description: TorchModel (a torch.nn.Module of your own, one output per period or a day of outputs), the MLPHourlyModel and MLPDailyModel presets, the [torch] extra, the networks of epftoolbox2.nets, and what the library's trainer guarantees about seeds, stacks, threads and TF32
 ---
 
 import { Aside } from '@astrojs/starlight/components';
 
-The neural-network families train their networks with the library's own trainer: the library owns the training rows and their
-cut, the scaling, the loss, Adam, the early-stopping days, the seeds and the shapes, so a forecast is the same alone, in a stack
-of other networks and after a resume. This page covers what is there now: the `[torch]` extra, the networks of `epftoolbox2.nets`,
-the contract a network of your own follows, and the trainer's rules. The model classes that use them (`TorchModel`,
-`MLPHourlyModel`, `MLPDailyModel`) come in a later release.
+The neural-network models train a network of your choice with the library's own trainer: the library owns the training rows and
+their cut, the scaling, the loss, Adam, the early-stopping days, the seeds and the shapes, so a forecast is the same alone, in a
+loop of other models and after a resume. `TorchModel` takes any `torch.nn.Module` class; `MLPHourlyModel` and `MLPDailyModel`
+are its two presets with the library's `epftoolbox2.nets.MLP`.
+
+```python
+from epftoolbox2.models import MLPDailyModel, MLPHourlyModel, TorchModel
+from epftoolbox2.pipelines import ModelPipeline
+from epftoolbox2.presets import lear_predictors
+
+lear_x = lear_predictors(["load_forecast"])  # day-level: every slot of the day as its own column
+
+pipeline = ModelPipeline()
+# One network per horizon with an output for every period of the target day (the Lago-style DNN).
+pipeline.add_model(MLPDailyModel(lear_x, hidden=[256, 128], dropout=0.1, training_window=728, refit="7D", seeds=4,
+                                 name="mlp_daily"))
+# One network per (period, horizon), one output.
+pipeline.add_model(MLPHourlyModel(lear_x, hidden=[64], training_window=728, seeds=3, name="mlp_hourly"))
+# Your own network, saved to YAML by its import path.
+pipeline.add_model(TorchModel(module="my_nets:ResidualMLP", module_params={"width": 256, "depth": 3}, output="day",
+                              predictors=lear_x, training_window=1456, seeds=4, name="resmlp"))
+```
+
+## TorchModel
+
+```python
+from epftoolbox2.models import TorchModel
+from epftoolbox2.nets import MLP
+
+model = TorchModel(module=MLP, module_params={"hidden": [256, 128], "dropout": 0.1}, output="day",
+                   predictors=["price_h00_d-1", "price_h12_d-1", "is_monday_d+{horizon}"], name="mlp")
+```
+
+| Parameter | Default | What it is |
+|---|---|---|
+| `module` | | The `torch.nn.Module` class, or its import path `"package.module:Class"` |
+| `predictors` | `None` | Full predictor names (with `{horizon}`), a `(horizon)` function or a function of `ctx`, for a module with one flat input. Give this or `inputs` |
+| `inputs` | `None` | Named blocks `{"block": [names], ...}` for a module that takes one tensor per block (see [Named blocks](#named-blocks)) |
+| `module_params` | `None` | Keyword arguments of the module's `__init__` (its architecture), as plain values |
+| `output` | `"day"` | `"day"`: one network per (horizon, refit day) with an output for every period of the target day, day-level predictors only; `"period"`: one network per (period, horizon, refit day) with one output |
+| `training_window` | `728` | Days of rows per fit, `"expanding"`, or a list of them averaged in EUR/MWh, as for every model |
+| `refit` | `"7D"` | The fixed refit calendar: `"7D"` on Mondays, `"1MS"`, `"1D"`, `"auto"`; `None` fits every forecast (`output="period"` only) |
+| `seeds` | `4` | Networks per fit, each with its own seed; a forecast is their mean in EUR/MWh |
+| `loss` | `"l1"` | `"l1"`, `"mse"` or an elementwise function `(prediction, target) -> loss` as `"package.module:function"`, in the scaled target space; the library masks missing slots and averages |
+| `lr` | `3e-4` | Adam's learning rate |
+| `max_epochs` | `300` | At most this many epochs |
+| `patience` | `20` | Stop after this many epochs without a better early-stopping loss |
+| `batch_size` | `64` | Rows per step |
+| `early_stopping` | `0.2` | Share of each fit's own training days held out for early stopping; `0` trains every epoch and keeps the last weights |
+| `weight_decay` | `0.0` | Adam's L2 weight decay |
+| `stack` | `"auto"` | `"auto"` (one network after another on a CPU, a padded stack on a GPU), `"loop"` or `"vmap"` |
+| `pad_to` | `None` | The size a stack is padded to (16 when `None`) |
+| `device` | `"auto"` | `"auto"` (CUDA when a product runs on it, else the CPU), `"cpu"`, `"cuda"`, `"cuda:N"` |
+| `tf32` | `False` | TF32 products on a GPU for this model's fits |
+| `random_state` | `0` | The base seed every network's seed is drawn from |
+| `newest_target` | `"d-1"` | The newest training target, as for every model ([Time and Calendars](/epftoolbox2/model-pipeline/time-and-calendars/)) |
+| `binary_mask` | `None` | Which rows decide the binary 0/1 inputs left unscaled; with `refit`, each fit's own |
+| `scaler` | `"standard"` | How the inputs are scaled; `output="day"` takes any scaler, `output="period"` only `"standard"` |
+| `name` | `"torch"` | The model's name |
+| `module_hash` | `None` | Set by a saved file: the hash of the module's source file and its package's version when it was saved |
+
+`stack`, `pad_to`, `tf32`, `device`, the loss and the learning rate change the numbers and are compared when a run resumes.
+
+### The module contract
+
+With `predictors`, the module is built as `Module(n_inputs, n_outputs, **module_params)` and called as `forward(x)` with `x` of
+shape (batch, n_inputs); with named blocks as `Module(input_sizes, n_outputs, **module_params)`, `input_sizes` the width of each
+block in the order given, and called as `forward(blocks)` with a dict of one (batch, width) tensor per block. Either returns
+(batch, n_outputs): `n_outputs` is the periods of a day (24, or 96 at 15 minutes) for `output="day"` and 1 for `"period"`. The
+first two parameter names are checked when the model is built, and so is every key of `module_params`. The module sees scaled
+inputs only, never dates or targets, and its outputs are in the scaled target space; see [A network of your own](#a-network-of-your-own).
+
+### What the library does around the module
+
+- **Rows.** `output="day"`: the rows are local dates, the targets the target day's periods, a slot the clock doesn't have (the
+  02:00 hour of the spring switch, the repeated autumn hour) or a missing value masked, never filled from another period.
+  `output="period"`: the rows of one period, as every model fits. Both on the fixed refit calendar: a forecast issued on D uses
+  the fit of its refit day, whose targets end the day before it, never warm-started from an earlier fit.
+- **Scaling.** The inputs are standardised, binary columns kept, on each fit's own rows (each window of a list on its own); the
+  target of each output goes through its own Invariant, `asinh((y - median) / MAD)`, and back.
+- **Seeds and their mean.** Network s of a fit is seeded by a hash of `random_state`, the fit (period, horizon, refit day,
+  predictor list, window) and s; never by the model's name, its place in a pipeline, the process or the shard. A forecast is the
+  mean of its networks' forecasts in EUR/MWh. A network that diverged (no finite early-stopping loss) makes every forecast of
+  its fit a `fit_error`, counted in `forecast_counts()`, never a mean of the others.
+- **Shapes.** The steps of an epoch come from the days of a full window, so a fit at the start of the data trains as many steps
+  as a later one; a day model predicts every issue day of its refit block in one call of the block's length, so a forecast is
+  the same alone, in its block and after a resume.
+- **Device, threads, TF32.** Each fit runs on one torch thread with TF32 off (unless `tf32=True`), and puts both back after the
+  fit. One fit at a time per worker process: `THREADS_PER_PROCESS` is not used for these models, and `MAX_PROCESSES` (every
+  usable CPU by default) is how many fits run at once.
+
+### Day-level predictors
+
+`output="day"` reads one value of each predictor per local date: daily profiles such as `price_h05_d-1`
+([DailyProfileTransformer](/epftoolbox2/transformers/daily-profile/) and a day lag), calendar flags such as `is_monday_d+{horizon}`.
+A column that changes with the period of the day raises before any fit, naming its profile names as the fix:
+
+```text
+mlp: a day unit reads one value of each predictor per local date, but 'price_d-1' holds values from 61.2 to 98.4 on 2024-03-05
+(28 dates like it): it changes with the period of the day. Give its daily profile instead: price_h00_d-1 … price_h23_d-1
+```
+
+A [predictor function of `ctx`](/epftoolbox2/model-pipeline/predictor-functions/) may change the list with the horizon and the
+issue day, not with the period (`ctx.period`, `ctx.hour`): one fit reads one list for every period of its day, and a function
+that returns two raises. `output="period"` takes any predictor and any function.
+
+### Named blocks
+
+```python
+import torch
+from epftoolbox2 import nets
+from epftoolbox2.models import TorchModel
+from epftoolbox2.presets import profile_columns
+
+
+class HourShared(torch.nn.Module):
+    """One small layer shared by the 24 hours of each block, then a head."""
+
+    def __init__(self, input_sizes, n_outputs, width=8):
+        super().__init__()
+        self.names = list(input_sizes)
+        self.embed = nets.Linear(len(self.names), width)
+        self.head = nets.Linear(width * 24, n_outputs)
+
+    def forward(self, blocks):
+        x = torch.stack([blocks[name] for name in self.names], dim=-1)  # (batch, 24, blocks)
+        return self.head(torch.relu(self.embed(x)).flatten(1))
+
+
+model = TorchModel(
+    module=HourShared,
+    inputs={
+        "price_d-1": [f"{c}_d-1" for c in profile_columns("price")],
+        "price_d-6": [f"{c}_d-6" for c in profile_columns("price")],
+        "load_d+h": [f"{c}_d+{{horizon}}" for c in profile_columns("load_forecast")],
+    },
+    output="day",
+    name="hour_shared",
+)
+```
+
+The blocks are flattened into the model's predictors for every check (the information set, the day-level check, `verify`), and
+the module gets them as views of the flattened columns. The blocks, names and order, are in the manifest: the same columns split
+into other blocks are another model to a resume.
+
+### Saving and loading
+
+The module is saved by its import path with a hash of the file that defines it and of its package's version:
+
+```yaml
+models:
+- class: TorchModel
+  params:
+    predictors: [...]
+    name: resmlp
+    refit: 7D
+    output: day
+    inputs: null
+    module_params: {width: 256, depth: 3}
+    module: my_nets:ResidualMLP
+    module_hash: 3f2a9c0d81b7e4a5
+    ...
+```
+
+Loading a file whose `module_hash` isn't the module's warns that the forecasts will differ from the saved run's (the file, or a
+layer it defines next to the module, or the package's version changed), and a run that resumes over its results refuses
+([Incremental Training](/epftoolbox2/model-pipeline/caching/)). `save()` raises for a class defined in the script being run
+(`__main__`) or inside a function, which a later load can't import; such a model still runs. `MLPHourlyModel` and `MLPDailyModel`
+save their architecture (`hidden`, `dropout`, `activation`); their manifest records the hash of `epftoolbox2/nets.py` and the
+library's version. Without torch installed, every one of them builds, saves and loads, and `run()` names the extra to install
+before any model fits.
+
+## MLPHourlyModel and MLPDailyModel
+
+```python
+from epftoolbox2.models import MLPDailyModel, MLPHourlyModel
+from epftoolbox2.presets import lear_predictors
+
+lear_x = lear_predictors(["load_forecast"])
+daily = MLPDailyModel(lear_x, hidden=[256, 128], dropout=0.1, activation="relu", training_window=[364, 728, "expanding"],
+                      seeds=4, lr=3e-4, early_stopping=0.2, name="mlp_daily")
+hourly = MLPHourlyModel(lear_x, hidden=[64], dropout=0.0, seeds=3, name="mlp_hourly")
+```
+
+`MLPDailyModel(predictors, hidden=(256, 128), dropout=0.1, activation="relu", ..., seeds=4, name="mlp_daily")` is
+`TorchModel(module=MLP, module_params={"hidden": [256, 128], "dropout": 0.1}, output="day", ...)` and
+`MLPHourlyModel(predictors, hidden=(64,), dropout=0.0, activation="relu", ..., seeds=3, name="mlp_hourly")` is
+`TorchModel(module=MLP, module_params={"hidden": [64]}, output="period", ...)`, forecast for forecast. Every other parameter is
+`TorchModel`'s, with its defaults: `training_window=728`, `refit="7D"`, `loss="l1"`, `lr=3e-4`, `max_epochs=300`,
+`patience=20`, `batch_size=64`, `early_stopping=0.2`, `weight_decay=0.0`, `stack="auto"`, `pad_to=None`, `device="auto"`,
+`tf32=False`, `random_state=0`, `newest_target="d-1"`, `binary_mask=None`, `scaler="standard"`, `module_hash=None`.
+
+One network per horizon with an output per hour beat 24 single-hour networks in the research (DE benchmark 3.550 against 3.623
+EUR/MWh) at a 24th of the fits. Several configurations matter more than several seeds, and both help: the top 4 configurations
+of a search with 4 seeds each beat the best one with 4 seeds. The default search is a loop of models and an
+[AverageEnsemble](/epftoolbox2/model-pipeline/ensembles/) of the best on validation: `examples/mlp_search.py`.
 
 ## Installing torch
 
