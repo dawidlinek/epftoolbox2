@@ -65,9 +65,38 @@ class Upstream:
                     found.append(label if len(self.leaves) == 1 else f"{name}: {label}")
         return tuple(dict.fromkeys(found))
 
-    def unchecked(self) -> Tuple[str, ...]:
-        """The leaf models that ran at level "none", whose manifests hold no listing: nothing says their inputs were known."""
-        return tuple(name for name, manifest in self.leaves if not manifest.get("availability"))
+    def unchecked(self, issued: Optional[Dict[str, Tuple[str, str]]] = None) -> Tuple[str, ...]:
+        """Each leaf model whose listing doesn't vouch for every forecast it stored, with why: it ran at level "none" (no
+        listing); at "raise" with `unknown` other than "raise" (a column without a rule passed unlisted); it was resumed under
+        other rules than its manifest's (`stored_under_other_rules`), or over a mismatch (`data_unverified`, `training_cut`
+        "stored": "unverified"); or (`issued`: model -> first and last run date of its records) it holds forecasts issued outside
+        the test period its manifest describes, which no run it records checked."""
+        from ...results.manifest import STORED_UNDER_OTHER_RULES, TRAINING_CUT_UNVERIFIED
+
+        out: List[str] = []
+        for name, manifest in self.leaves:
+            availability = manifest.get("availability")
+            unknown = (manifest.get("information_set") or {}).get("unknown", "raise")
+            cut = manifest.get("training_cut") or {}
+            span = (issued or {}).get(name)
+            if not availability:
+                out.append(f"{name} (ran at availability='none')")
+            elif availability.get("level") == "raise" and unknown != "raise":
+                out.append(
+                    f"{name} (ran at availability='raise' with unknown={unknown!r}: a column without a rule passed)"
+                )
+            if availability and availability.get(STORED_UNDER_OTHER_RULES) is not None:
+                out.append(f"{name} (holds forecasts listed under other rules than its manifest's)")
+            if manifest.get("data_unverified") or cut.get("stored") == TRAINING_CUT_UNVERIFIED["stored"]:
+                out.append(
+                    f"{name} (its stored forecasts were accepted unverified, over a mismatch or without a manifest)"
+                )
+            if span is not None and not manifest.get("windows") and _outside(span, manifest):
+                out.append(
+                    f"{name} (holds forecasts issued {span[0]} to {span[1]}, outside the test period "
+                    f"{manifest.get('test_start')} to {manifest.get('test_end')} its manifest checked)"
+                )
+        return tuple(out)
 
 
 class ForecastSource(DataSource):
@@ -127,14 +156,21 @@ class ForecastSource(DataSource):
 
     # -- the upstream -----------------------------------------------------------------------------------------------------
 
+    def _directory(self) -> Path:
+        """`path`, with `~` expanded."""
+        return Path(os.path.expanduser(self.path))
+
     def _stem(self, name: str) -> Path:
-        return Path(self.path) / name.lower().replace(" ", "_")
+        return self._directory() / name.lower().replace(" ", "_")
 
     def results_path(self) -> Path:
         """The upstream's results: `<name>.jsonl` or the directory `<name>.parquet`, whichever exists (both raise)."""
+        return self._results_of(self.model)
+
+    def _results_of(self, name: str) -> Path:
         from ...results.store import SAVE_FORMATS
 
-        stem = self._stem(self.model)
+        stem = self._stem(name)
         jsonl = stem.with_name(stem.name + SAVE_FORMATS["jsonl"])
         parquet = stem.with_name(stem.name + SAVE_FORMATS["parquet"])
         if jsonl.exists() and parquet.is_dir():
@@ -245,10 +281,10 @@ class ForecastSource(DataSource):
         from ...results.manifest import manifest_digest
 
         upstream = self.upstream() if upstream is None else upstream
-        unchecked = upstream.unchecked()
+        issued = {name: _issued_span(self._results_of(name), self.horizon) for name, _ in upstream.leaves}
         return ChainedInput(
             column=self.column,
-            path=self.path,
+            path=str(self._directory().resolve()),
             model=self.model,
             horizon=self.horizon,
             issue_time=upstream.issue_time,
@@ -257,27 +293,21 @@ class ForecastSource(DataSource):
             available=self.available,
             digest=manifest_digest(upstream.manifest),
             late=upstream.late_inputs(),
-            unchecked=unchecked,
+            unchecked=upstream.unchecked(issued),
             freq=upstream.freq,
         )
 
     def content_digest(self) -> Optional[str]:
-        """A hash of the upstream's manifest (without provenance, `manifest_digest`) and of its results' identity (a JSONL file's
-        size and modification time, a Parquet directory's catalog), so that a single-file pipeline cache refetches after the
-        upstream changed."""
+        """A hash of the upstream's manifest (without provenance, `manifest_digest`) and of its results' content (a JSONL file's
+        bytes, a Parquet directory's catalog, which names its immutable parts), so that a single-file pipeline cache fetches
+        again after the upstream changed, whatever the file system's clock, and reuses its file otherwise."""
         from ...results.manifest import manifest_digest
         from ...results.parquet_store import CATALOG
 
         manifest = self._manifest_of(self.model)
         results = self.results_path()
-        if results.is_dir():
-            catalog = results / CATALOG
-            identity: Any = hashlib.sha256(catalog.read_bytes()).hexdigest() if catalog.exists() else None
-        elif results.exists():
-            stat = results.stat()
-            identity = [stat.st_size, stat.st_mtime_ns]
-        else:
-            identity = None
+        path = results / CATALOG if results.is_dir() else results
+        identity = _file_digest(path) if path.exists() else None
         content = {"manifest": manifest_digest(manifest), "results": identity}
         return hashlib.sha256(json.dumps(content, sort_keys=True).encode()).hexdigest()
 
@@ -353,6 +383,61 @@ def _placed(picked: List[Tuple[str, int, float]], upstream: Upstream, column: st
         twice = index[index.duplicated()][:3]
         raise UpstreamError(f"ForecastSource: two forecasts for the instants {list(twice)}")
     return pd.DataFrame({column: placed[order]}, index=index)
+
+
+def _outside(span: Tuple[str, str], manifest: Dict[str, Any]) -> bool:
+    """Whether run dates from `span[0]` to `span[1]` reach outside the manifest's `[test_start, test_end]`."""
+    start, end = manifest.get("test_start"), manifest.get("test_end")
+    if start is None or end is None:
+        return True
+    return str(span[0]) < str(start)[:10] or str(span[1]) > str(end)[:10]
+
+
+# (results path, horizon, the file's identity) -> (first, last) run date of its ok records at that horizon
+_ISSUED: Dict[Tuple[Any, ...], Optional[Tuple[str, str]]] = {}
+
+
+def _issued_span(results: Path, horizon: int) -> Optional[Tuple[str, str]]:
+    """The first and last `run_date` of the ok records at `horizon` of a results file or directory, None without any."""
+    from ...results.store import read_records
+
+    if not results.exists():
+        return None
+    key = (str(results.resolve()), horizon, _identity(results))
+    if key not in _ISSUED:
+        dates = [
+            str(day)
+            for day in read_records(
+                results,
+                columns=("run_date", "horizon"),
+                transform=lambda record: record.get("run_date") if record.get("horizon") == horizon else None,
+            )
+        ]
+        _ISSUED[key] = (min(dates), max(dates)) if dates else None
+        while len(_ISSUED) > 64:
+            del _ISSUED[next(iter(_ISSUED))]
+    return _ISSUED[key]
+
+
+def _identity(results: Path) -> Any:
+    """What says a results file or directory is as it was: a JSONL file's size, modification time and inode, a Parquet
+    directory's catalog's."""
+    from ...results.parquet_store import CATALOG
+
+    path = results / CATALOG if results.is_dir() else results
+    if not path.exists():
+        return None
+    stat = path.stat()
+    return (stat.st_size, stat.st_mtime_ns, stat.st_ino)
+
+
+def _file_digest(path: Path) -> str:
+    """The sha256 of a file's bytes, read in blocks."""
+    digest = hashlib.sha256()
+    with open(path, "rb") as f:
+        for block in iter(lambda: f.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 def _utc(value: Any) -> pd.Timestamp:

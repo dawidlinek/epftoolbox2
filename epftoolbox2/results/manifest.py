@@ -98,6 +98,10 @@ upstream changes the column, which `data_columns_hash` refuses. A model that rea
 A daily run (`freq="1D"`) records `daily_stamp`, the time of day its rows are stamped at ("12:00"), provenance: a downstream
 `ForecastSource` places each forecast there. Other runs have no key.
 
+Resumed under another information set (another issue time, other rules), a run lists what the current rules say, and its
+`availability` keeps the earlier rows under `stored_under_other_rules`: the file holds records those rules judged, and a
+`ForecastSource` reading it treats the model as unchecked. Every later resume keeps the mark.
+
 An ensemble's file has a manifest of its own shape (`"kind": "ensemble"`, written by `epftoolbox2.ensembles._compute`). It says
 which results it was computed from and is never compared, as the file is recomputed from them every time. No model may
 resume into it.
@@ -1070,7 +1074,7 @@ def check_and_write(
             manifest.predictor_lists += list(kept.values())
         if manifest.binary_masks is not None and existing.binary_masks:
             manifest.binary_masks = {**existing.binary_masks, **manifest.binary_masks}
-        _keep_listing(existing, manifest)
+        _keep_listing(existing, manifest, has_existing_results)
         _keep_vintages(existing, manifest)
     elif has_existing_results:
         message = f"{model_name}: {path.parent} has results but no manifest ({path.name} not found)."
@@ -1339,17 +1343,35 @@ def _keep_windows(existing: Manifest, manifest: Manifest, allow_mismatch: bool, 
     manifest.windows = run.keeping(on_file).to_dict()
 
 
-def _keep_listing(existing: Manifest, manifest: Manifest) -> None:
+# Under `availability`: what was listed of records a run resumed under other rules (another issue time, other rules, other
+# assumptions), {"listing": rows}. Its records stay in the file, judged by rules the manifest no longer holds, so nothing vouches
+# for them under the ones it does: a `ForecastSource` reading such results treats the model as unchecked. Kept by every later
+# resume, never compared.
+STORED_UNDER_OTHER_RULES = "stored_under_other_rules"
+
+
+def _keep_listing(existing: Manifest, manifest: Manifest, has_existing_results: bool = True) -> None:
     """Keep what an earlier run listed: its records stay in the file, and with them the reason to mention it.
 
     A run over a narrower test period adds its rows to the earlier ones. A run at level "none" looks at nothing, so it can't
     take anything back, and results that were flagged must not read as clean because of how they were last resumed. Rules that
-    changed leave nothing to keep: what the old ones said may no longer be true, and this run's rows are what the current ones
-    say. Without an information set there are no rules left to say otherwise. A listing made when the check compared
-    wall-clock times (no `"times"`) is kept no more than one made under other rules.
+    changed leave the listing to this run's rows, which are what the current rules say; the earlier rows go under
+    `STORED_UNDER_OTHER_RULES`, with which every later resume keeps the mark that the file holds records judged by other rules.
+    Without an information set there are no rules left to say otherwise. A listing made when the check compared wall-clock times
+    (no `"times"`) is replaced too, without the mark: its rules are the run's.
     """
-    if not existing.availability or manifest.information_set not in (None, existing.information_set):
+    if not existing.availability:
         return
+    marked = existing.availability.get(STORED_UNDER_OTHER_RULES)
+    if manifest.information_set not in (None, existing.information_set):
+        if manifest.availability is not None and has_existing_results:
+            earlier = (marked or {}).get("listing", [])
+            manifest.availability[STORED_UNDER_OTHER_RULES] = {
+                "listing": merge_listings(earlier, existing.availability.get("listing", []))
+            }
+        return
+    if marked is not None and manifest.availability is not None:
+        manifest.availability[STORED_UNDER_OTHER_RULES] = marked
     if existing.availability.get("times") != LISTING_TIMES:
         return  # listed on the wall clock: like rules that changed, it says nothing this run can vouch for
     earlier = existing.availability.get("windows")

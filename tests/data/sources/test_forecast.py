@@ -9,6 +9,7 @@ in all 30 cells (they cost nothing). The rest pins what the source refuses and w
 
 import datetime
 import json
+import os
 import shutil
 import warnings
 from pathlib import Path
@@ -17,8 +18,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from epftoolbox2.data.sources import DataSource, ForecastSource
-from epftoolbox2.data.sources.forecast import UpstreamError
+from epftoolbox2.data.sources import DataSource, ForecastSource, UpstreamError
 from epftoolbox2.data.transformers import LagTransformer
 from epftoolbox2.models._calendar import clock_periods
 from epftoolbox2.pipelines import DataPipeline
@@ -283,15 +283,27 @@ def test_the_rule_is_the_upstream_s_issue_time_on_its_data_zone_s_dates(tmp_path
 
 
 def test_it_has_no_per_source_cache_and_a_content_digest_that_follows_the_upstream(tmp_path):
-    write_upstream(tmp_path)
+    records = write_upstream(tmp_path)
     source = ForecastSource(tmp_path, "up", "x")
     assert source.get_cache_config() is None
     first = source.content_digest()
     assert first == source.content_digest()
-    records = [json.loads(line) for line in (tmp_path / "up.jsonl").read_text().splitlines()]
-    records[0]["prediction"] += 1.0
-    write_upstream(tmp_path, records=records)
+    results = tmp_path / "up.jsonl"
+    before = results.stat()
+    longer = [dict(record) for record in records]
+    longer[0]["prediction"] = 1.0 / 3.0  # a longer number: the file's size changes
+    write_upstream(tmp_path, records=longer)
+    assert results.stat().st_size != before.st_size and source.content_digest() != first
+    # Another value of the same length, and the first file's modification time put back (a coarse clock, or a copy that kept
+    # it): the bytes still tell. The first bytes again give the first digest.
+    same_size = [dict(record) for record in records]
+    same_size[0]["prediction"] = records[0]["prediction"] + 1.0
+    write_upstream(tmp_path, records=same_size)
+    os.utime(results, ns=(before.st_atime_ns, before.st_mtime_ns))
+    assert results.stat().st_size == before.st_size and results.stat().st_mtime_ns == before.st_mtime_ns
     assert source.content_digest() != first
+    write_upstream(tmp_path, records=records)
+    assert source.content_digest() == first
     assert DataSource.content_digest(source) is None  # the hook's default
 
 
@@ -386,3 +398,59 @@ def test_a_name_with_spaces_reads_the_store_s_file_name(tmp_path):
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         assert not everything(ForecastSource(tmp_path, "Solar Ridge", "x")).empty
+
+
+@pytest.mark.parametrize(
+    ("manifest", "reason"),
+    [
+        ({"availability": None}, "ran at availability='none'"),
+        (
+            {
+                "availability": {"level": "raise", "times": "instants", "listing": []},
+                "information_set": {"issue_time": "09:30", "issue_timezone": "Europe/Brussels", "unknown": "warn"},
+            },
+            "unknown='warn'",
+        ),
+        (
+            {
+                "availability": {
+                    "level": "warn",
+                    "times": "instants",
+                    "listing": [],
+                    "stored_under_other_rules": {"listing": []},
+                }
+            },
+            "listed under other rules",
+        ),
+        ({"data_unverified": True}, "accepted unverified"),
+        ({"training_cut": {"rows": "dates", "stored": "unverified"}}, "accepted unverified"),
+        ({"test_start": "2024-03-30", "test_end": "2024-04-02"}, "outside the test period 2024-03-30 to 2024-04-02"),
+    ],
+    ids=["none", "unknown", "other rules", "data unverified", "rows unverified", "outside its window"],
+)
+def test_an_upstream_whose_listing_doesn_t_vouch_for_every_forecast_is_late(tmp_path, manifest, reason):
+    """Records issued 2024-03-27 to 2024-04-01 at horizon 2: a manifest whose listing doesn't cover them all is no clean upstream."""
+    write_upstream(tmp_path, manifest={"test_start": "2024-03-27", "test_end": "2024-04-02"})
+    clean = ForecastSource(tmp_path, "up", "x", horizon=2).chained_input()
+    assert not clean.late_upstream and clean.unchecked == ()
+    write_upstream(tmp_path, manifest={"test_start": "2024-03-27", "test_end": "2024-04-02", **manifest})
+    found = ForecastSource(tmp_path, "up", "x", horizon=2).chained_input()
+    assert found.late_upstream and any(reason in one for one in found.unchecked), found.unchecked
+
+
+def test_a_run_with_windows_is_judged_by_them_not_by_its_test_period(tmp_path):
+    write_upstream(
+        tmp_path, manifest={"test_start": "2024-03-30", "test_end": "2024-04-02", "windows": {"test": ["x"]}}
+    )
+    assert not ForecastSource(tmp_path, "up", "x", horizon=2).chained_input().late_upstream
+
+
+def test_the_path_expands_home_and_the_upstream_is_recorded_by_its_absolute_path(tmp_path, monkeypatch):
+    write_upstream(tmp_path / "home" / "runs")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    source = ForecastSource("~/runs", "up", "x")
+    assert source.path == "~/runs"  # as given, which YAML writes back
+    assert not everything(source).empty
+    assert source.chained_input().path == str((tmp_path / "home" / "runs").resolve())
+    monkeypatch.chdir(tmp_path / "home")
+    assert ForecastSource("runs", "up", "x").chained_input().path == str((tmp_path / "home" / "runs").resolve())
