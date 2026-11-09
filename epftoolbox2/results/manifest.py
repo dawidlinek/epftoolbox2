@@ -144,6 +144,9 @@ _PROVENANCE_FIELDS += ("card",)
 # `weights_history`: every set of weight file hashes a results file's forecasts were made with, in the order first used, once a
 # resume accepted other weights (`allow_manifest_mismatch=True`); a resume warns while the file mixes them (`_weights_on_file`).
 _PROVENANCE_FIELDS += ("weights_history",)
+# `residual_base`: a `ResidualModel`'s base's card, runtime and weights, with its first issue day (the warm-up's), for
+# `report.provenance()`; the base's own manifest compares them, and this one's `residual` field its configuration.
+_PROVENANCE_FIELDS += ("residual_base",)
 
 # Compared to decide whether an existing manifest is compatible with the current run. Order is the
 # order differences are reported in.
@@ -339,6 +342,9 @@ class Manifest:
     # A `ResidualModel`: {"base_manifest": the hash of its base's configuration (`configuration_digest` of the base's own
     # manifest)}, or {} for a run of a base held in memory; None (and no key) for any other model. Compared on resume.
     residual: Optional[Dict[str, Any]] = None
+    # A `ResidualModel` whose base has a card: {"card", "runtime", "weights", "first_issue_day"}; None (and no key) otherwise.
+    # Provenance: never compared.
+    residual_base: Optional[Dict[str, Any]] = None
 
     def differences(self, existing: "Manifest", skip: Sequence[str] = ()) -> List[str]:
         """Human-readable list of compared fields that disagree with `existing`; empty if compatible."""
@@ -410,8 +416,9 @@ class Manifest:
         for name in ("unit_kind", "target_transform"):  # a period model
             if out[name] is None:
                 del out[name]
-        if out["residual"] is None:  # no ResidualModel
-            del out["residual"]
+        for name in ("residual", "residual_base"):  # no ResidualModel, or a base without a card
+            if out[name] is None:
+                del out[name]
         return out
 
     @classmethod
@@ -672,6 +679,7 @@ def build_manifest(
         fit_path=fit_path,
         pooled=getattr(model, "_pooled", None),  # a PooledModel's member (`models._pooled.member_of`)
         residual=getattr(model, "_residual", None),  # a ResidualModel's base (`models.residual`)
+        residual_base=getattr(model, "_residual_base", None),
         **carded,
         **units,
     )

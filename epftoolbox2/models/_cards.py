@@ -619,11 +619,14 @@ def read_provenance(stored: Union[str, "os.PathLike", Mapping[str, Any]]) -> Opt
         if not path.is_file():
             return None
         stored = json.loads(path.read_text())
+    base = stored.get("residual_base")  # a ResidualModel's carded base
     if not stored.get("card"):
-        return None
+        return None if not base else {"base": base}
     out = {"card": stored["card"], "runtime": stored.get("runtime"), "weights": stored.get("weights")}
     if stored.get("weights_history"):
         out["weights_history"] = stored["weights_history"]
+    if base:
+        out["base"] = base
     return out
 
 
@@ -658,28 +661,42 @@ def provenance_frame(
 
     rows = []
     for name, record in records.items():
-        if not record or not record.get("card"):
+        if not record:
             continue
-        card = record["card"]
-        weights = record.get("weights")
-        verdicts = {window: contamination_verdict(card, start) for window, start in starts.get(name, {}).items()}
-        rows.append(
-            {
-                "model": name,
-                "family": card.get("family"),
-                "licence": card.get("licence"),
-                "licence_url": card.get("licence_url"),
-                "commercial_use": card.get("commercial_use"),
-                "revenue_cap": card.get("revenue_cap"),
-                "attribution": card.get("attribution"),
-                "weights": _weights_text(weights, record.get("weights_history")),
-                "sha256": _short_hashes(weights) or None,
-                "runtime": _runtime_text(record.get("runtime")) or None,
-                "corpus": card.get("corpus"),
-                "corpus_end": card.get("corpus_end"),
-                "released": card.get("released"),
-                "validation_verdict": verdicts.get("validation"),
-                "test_verdict": verdicts.get("test"),
+        own = [(name, record, starts.get(name, {}))] if record.get("card") else []
+        base = record.get("base")
+        if base and base.get("card"):
+            # A ResidualModel's base, judged from its own first issue day, the warm-up's: the learner trains on its forecasts
+            # from then on, so a corpus that reaches into the warm-up reaches every window.
+            first = base.get("first_issue_day")
+            judged = {
+                window: min(str(start), first) if start and first else first
+                for window, start in starts.get(name, {}).items()
             }
-        )
+            own.append((f"{name}.base", base, judged))
+        rows.extend(_provenance_row(row_name, row_record, row_starts) for row_name, row_record, row_starts in own)
     return pd.DataFrame(rows, columns=PROVENANCE_COLUMNS)
+
+
+def _provenance_row(name: str, record: Mapping[str, Any], starts: Mapping[str, Any]) -> Dict[str, Any]:
+    """One row of `provenance_frame`: a model's (or a ResidualModel's base's) card record and the verdict of each window."""
+    card = record["card"]
+    weights = record.get("weights")
+    verdicts = {window: contamination_verdict(card, start) for window, start in starts.items()}
+    return {
+        "model": name,
+        "family": card.get("family"),
+        "licence": card.get("licence"),
+        "licence_url": card.get("licence_url"),
+        "commercial_use": card.get("commercial_use"),
+        "revenue_cap": card.get("revenue_cap"),
+        "attribution": card.get("attribution"),
+        "weights": _weights_text(weights, record.get("weights_history")),
+        "sha256": _short_hashes(weights) or None,
+        "runtime": _runtime_text(record.get("runtime")) or None,
+        "corpus": card.get("corpus"),
+        "corpus_end": card.get("corpus_end"),
+        "released": card.get("released"),
+        "validation_verdict": verdicts.get("validation"),
+        "test_verdict": verdicts.get("test"),
+    }
