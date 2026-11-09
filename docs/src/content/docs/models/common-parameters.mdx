@@ -96,7 +96,9 @@ The columns are inputs the model reads, never regressors: the coefficients and t
   1 and from 1 to 0 (noise would only ever make a flag "not 1", and a flag of 0 on the issue day would move nothing), so a column
   the model reads late is a `leak`. Its copies of the model run without `bounds`: the clip only follows the forecast, which can then
   move freely. A forecast of 0 reads its flag alone, which the flip covers, so the positive control doesn't ask it to move: a period
-  that is 0 on every sampled day by a `static` night flag leaves the model `ok`.
+  that is 0 on every sampled day by a `static` night flag leaves the model `ok`. `leakage_probe` and `positive_control` leave a
+  model's flags out of their noise (a run refuses a flag that isn't 0 or 1), and with `rebuild` put the built flag back as the
+  unperturbed source builds it; called on their own, `leakage_probe(..., columns=[flag], flip=True)` probes the flag.
 - **The manifest** records the three in `model_params` where they are set, and the columns in `predictors` and `column_hashes`, so a
   resume with other settings, or over another capacity, raises `ManifestMismatchError`. YAML writes them only when set.
 - **`explain()`** lists the columns in a `row_target` table, with their role, after the predictors.
