@@ -265,6 +265,10 @@ def test_the_module_contract_is_checked_when_the_model_is_built():
     with pytest.raises(ValueError, match="output must be"):
         day.output = "hour"
     assert (day.output, day._unit_kind, day.refit) == ("day", "day", "7D")
+    preset = MLPHourlyModel(PERIOD)
+    with pytest.raises(AttributeError):
+        preset.output = "day"  # a preset's output is its class's
+    assert (preset.output, preset._unit_kind) == ("period", "period")
 
 
 # --- 2. save() refuses a class without an import path (prototype) --------------------------------------------------------

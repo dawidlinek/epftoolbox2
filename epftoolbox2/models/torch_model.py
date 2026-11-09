@@ -574,8 +574,10 @@ class TorchModel(BaseModel):
                 raise ValueError(f"output must be one of {list(OUTPUTS)}, got {value!r}")
             if value == "day" and "refit" in self.__dict__ and self.refit is None:
                 raise ValueError(_DAY_NEEDS_REFIT)
+            super().__setattr__(key, value)
             super().__setattr__("_unit_kind", DAY if value == "day" else PERIOD)
-        elif key == "refit" and value is None and self.__dict__.get("_unit_kind") == DAY:
+            return
+        if key == "refit" and value is None and self.__dict__.get("_unit_kind") == DAY:
             raise ValueError(_DAY_NEEDS_REFIT)  # when built (BaseModel sets refit) or set later
         super().__setattr__(key, value)
 
