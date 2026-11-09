@@ -325,7 +325,8 @@ series as inputs it reads (the manifest hashes them, `report.vintages()` lists t
 resume whatever its `newest_target`) and hashes what its last issue day reads after `test_end` (`history_ahead`: its known-ahead
 series through `test_end` plus the largest horizon, and its target where a late issue time reads it there). `verify` gives its runs
 the information set whatever its `newest_target` (and still perturbs the target from D on under `"d-1"`); its positive control
-perturbs the target's fresh values too, the input of a univariate model; and its co-batch check runs each forecast on the frame a
+perturbs each series of its spec on its own, the target too (a series whose perturbation moves nothing, such as one read from a
+copy of the model's own, leaves it `inconclusive`); and its co-batch check runs each forecast on the frame a
 run on D has for it (`target_day_cut`): every row up to D, and after D only what that forecast reads (its known-ahead series to the
 end of D + h), so no later day of its call keeps what a run on D couldn't have. A forecast that moves there depends on where the
 frame ends. Such a model can't be a `ResidualModel`'s base in this release.
