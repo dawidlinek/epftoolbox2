@@ -142,7 +142,8 @@ _PROVENANCE_FIELDS += ("engine",)
 # the largest absolute and relative gaps of their forecasts, how many chose another kink or penalty), in the same last run.
 _PROVENANCE_FIELDS += ("engine_check",)
 # `stack_check`: with `TORCH_STACKS=check`, how a sample of a torch model's calls trained in a stack with other models compared
-# with the same calls trained alone (calls, how many differed, the largest absolute difference), in the last such run.
+# with the same calls trained alone (calls, how many differed, how many raised alone and weren't compared, the largest
+# absolute difference), in the last such run.
 _PROVENANCE_FIELDS += ("stack_check",)
 # `card`: a carded family's licence, corpus, runtime pins and weights reference, with the contamination verdict of each window
 # (`models._cards.manifest_fields`): what the model is under, which a new release may reword without changing a forecast.
@@ -369,7 +370,7 @@ class Manifest:
     # "max_abs", "max_rel", "other_choice"}; None (and no key) otherwise. Never compared.
     engine_check: Optional[Dict[str, Any]] = None
     # With `TORCH_STACKS=check`, that run's sample of a torch model's stacked calls also trained alone
-    # (`models._torch.groups`): {"calls", "differing", "max_abs"}; None (and no key) otherwise. Never compared.
+    # (`models._torch.groups`): {"calls", "differing", "failed", "max_abs"}; None (and no key) otherwise. Never compared.
     stack_check: Optional[Dict[str, Any]] = None
     # A `PooledModel`'s zone: {"zones", "over", "zone_feature", "missing", "data": {other zone: its data_columns_hash}}; None (and
     # no key) otherwise. Compared on resume.

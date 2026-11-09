@@ -17,6 +17,7 @@ import random
 import warnings
 from concurrent.futures import Future
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -828,7 +829,8 @@ def test_jobs_are_cut_at_whole_units_in_block_order():
 
 def test_check_mode_trains_a_sample_alone_and_records_it(market, tmp_path, monkeypatch):
     """`TORCH_STACKS=check` (every call sampled here): each manifest's `stack_check` counts its calls, none differing; a call
-    whose numbers alone differ from the stack's is counted, its largest difference recorded, and the model warns."""
+    whose numbers alone differ from the stack's is counted, its largest difference recorded, and the model warns; a call
+    that raised when trained alone is counted apart (`failed`: nothing compared), and the model warns so."""
     monkeypatch.setenv(groups.TORCH_STACKS_VAR, "check")
     monkeypatch.setattr(groups, "CHECK_EVERY", 1)
     models = [daily("c0"), daily("c1", lr=3e-3), daily("c2", dropout=0.3)]
@@ -840,7 +842,7 @@ def test_check_mode_trains_a_sample_alone_and_records_it(market, tmp_path, monke
         return json.loads(manifest_path(ModelPipeline.results_path(tmp_path / where, model, "jsonl")).read_text())
 
     for model in models:
-        assert stored("ok", model)["stack_check"] == {"calls": 2, "differing": 0, "max_abs": 0.0}  # two horizons
+        assert stored("ok", model)["stack_check"] == {"calls": 2, "differing": 0, "failed": 0, "max_abs": 0.0}
 
     real = groups._check_alone
 
@@ -853,7 +855,26 @@ def test_check_mode_trains_a_sample_alone_and_records_it(market, tmp_path, monke
     with pytest.warns(RuntimeWarning, match="torch stack check: 2 of 2 calls checked gave other bits"):
         run_pipeline(models, market, test=WEEK, save_dir=tmp_path / "off")
     for model in models:
-        assert stored("off", model)["stack_check"] == {"calls": 2, "differing": 2, "max_abs": 1.0}
+        assert stored("off", model)["stack_check"] == {"calls": 2, "differing": 2, "failed": 0, "max_abs": 1.0}
+
+    def refused(*args, **kwargs):
+        raise RuntimeError("out of memory, alone")
+
+    def alone_raises(session, result, call, model, trainer, *rest):
+        real(session, result, call, model, SimpleNamespace(train_members=refused), *rest)
+
+    monkeypatch.setattr(groups, "_check_alone", alone_raises)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        run_pipeline(models, market, test=WEEK, save_dir=tmp_path / "failed")
+    said = [str(w.message) for w in caught if "torch stack check" in str(w.message)]
+    assert len(said) == 3 and all("2 of 2 calls checked raised when trained or predicted alone" in s for s in said)
+    assert not any("gave other bits" in s for s in said)
+    for model in models:
+        assert stored("failed", model)["stack_check"] == {"calls": 2, "differing": 0, "failed": 2, "max_abs": 0.0}
+        assert lines(ModelPipeline.results_path(tmp_path / "failed", model, "jsonl")) == lines(
+            ModelPipeline.results_path(tmp_path / "ok", model, "jsonl")
+        )  # the stacks' records, all of them
 
 
 def trainer_result_shifted(result, by):

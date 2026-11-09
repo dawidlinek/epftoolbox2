@@ -325,24 +325,38 @@ def run_stack_group(
 
 def _record_check(model: BaseModel, state: _RunState, checked: Optional[Dict[str, Any]]) -> None:
     """`TORCH_STACKS=check`'s result for one model: into its manifest (`stack_check`, provenance), and a warning if a call
-    stacked gave other bits than alone."""
-    checked = dict(checked or {"calls": 0, "differing": 0, "max_abs": 0.0})
+    stacked gave other bits than alone, or couldn't be trained or predicted alone to compare (`failed`)."""
+    checked = dict(checked or _NO_CHECK)
     if state.store:
         record_stack_check(manifest_path(state.store.path), state.manifest, checked)
+    said = []
     if checked["differing"]:
+        said.append(
+            f"{checked['differing']} of {checked['calls']} calls checked gave other bits stacked than trained alone (largest "
+            f"difference {checked['max_abs']:.3g} in the scaled space)"
+        )
+    if checked["failed"]:
+        said.append(
+            f"{checked['failed']} of {checked['calls']} calls checked raised when trained or predicted alone, so they were not "
+            "compared"
+        )
+    if said:
         warnings.warn(
-            f"{model.name}: torch stack check: {checked['differing']} of {checked['calls']} calls checked gave other bits "
-            f"stacked than trained alone (largest difference {checked['max_abs']:.3g} in the scaled space); its results "
-            "use the stacks'. Run it with TORCH_STACKS=off to get its numbers alone.",
+            f"{model.name}: torch stack check: {'; '.join(said)}; its results use the stacks'. Run it with TORCH_STACKS=off "
+            "to get its numbers alone.",
             RuntimeWarning,
             stacklevel=4,
         )
 
 
+# A model's `stack_check` when none of its calls was sampled.
+_NO_CHECK = {"calls": 0, "differing": 0, "failed": 0, "max_abs": 0.0}
+
+
 def _merge_checks(into: Dict[str, Dict[str, Any]], name: str, part: Dict[str, Any]) -> None:
-    found = into.setdefault(name, {"calls": 0, "differing": 0, "max_abs": 0.0})
-    found["calls"] += part["calls"]
-    found["differing"] += part["differing"]
+    found = into.setdefault(name, dict(_NO_CHECK))
+    for key in ("calls", "differing", "failed"):
+        found[key] += part[key]
     found["max_abs"] = max(found["max_abs"], part["max_abs"])
 
 
@@ -700,23 +714,35 @@ class _Session:
         self.failure: Optional[BaseException] = None
         self.fallbacks = 0
         self.alone = 0
-        self.checked: Dict[int, Dict[str, Any]] = {}  # place -> {"calls", "differing" (ids of calls), "max_abs"}
+        # place -> {"calls", "differing" and "failed" (ids of calls), "max_abs"}
+        self.checked: Dict[int, Dict[str, Any]] = {}
 
     def counts(self) -> Dict[str, Any]:
-        """What `run_stack_job` returns of the session: fallbacks, calls alone by design, each place's check."""
+        """What `run_stack_job` returns of the session: fallbacks, calls alone by design, each place's check (a call that
+        couldn't be compared, `failed`, isn't counted among those that differ)."""
         check = {
-            place: {"calls": part["calls"], "differing": len(part["differing"]), "max_abs": part["max_abs"]}
+            place: {
+                "calls": part["calls"],
+                "differing": len(part["differing"] - part["failed"]),
+                "failed": len(part["failed"]),
+                "max_abs": part["max_abs"],
+            }
             for place, part in self.checked.items()
         }
         return {"fallbacks": self.fallbacks, "alone": self.alone, "check": check}
 
-    def compared(self, result: "_StackedResult", same: bool, gap: float = 0.0) -> None:
-        """Record one comparison of a checked call with itself trained alone (`TORCH_STACKS=check`)."""
-        part = self.checked.setdefault(result.place, {"calls": 0, "differing": set(), "max_abs": 0.0, "seen": set()})
+    def compared(self, result: "_StackedResult", same: bool, gap: float = 0.0, failed: bool = False) -> None:
+        """Record one comparison of a checked call with itself trained alone (`TORCH_STACKS=check`): the same bits or not,
+        the largest difference, or `failed` when its training or prediction alone raised (nothing to compare)."""
+        part = self.checked.setdefault(
+            result.place, {"calls": 0, "differing": set(), "failed": set(), "max_abs": 0.0, "seen": set()}
+        )
         if id(result) not in part["seen"]:
             part["seen"].add(id(result))
             part["calls"] += 1
-        if not same:
+        if failed:
+            part["failed"].add(id(result))
+        elif not same:
             part["differing"].add(id(result))
         if math.isfinite(gap):
             part["max_abs"] = max(part["max_abs"], gap)
@@ -1142,7 +1168,7 @@ def _check_alone(session, result, call, model, trainer, torch_scope, threads) ->
                 **call["settings"],
             )
     except Exception:
-        session.compared(result, False, math.inf)  # it trains alone where its stack trained: not the same
+        session.compared(result, False, failed=True)  # it raised alone where its stack trained: nothing to compare
         return
     result.check = alone
     same = np.array_equal(alone.failed, result.failed) and np.array_equal(alone.best_epoch, result.best_epoch)
@@ -1258,7 +1284,7 @@ def _compare_alone(result: "_StackedResult", rows: np.ndarray, stacked: np.ndarr
         with torch_scope(result.device, tf32=result.tf32, threads=THREADS_PER_FIT):
             alone = np.asarray(result.check.predict(rows), dtype=np.float64)
     except Exception:
-        result.session.compared(result, False, math.inf)
+        result.session.compared(result, False, failed=True)
         return
     same = alone.shape == stacked.shape and np.array_equal(alone, stacked, equal_nan=True)
     both = np.isfinite(alone) & np.isfinite(stacked) if alone.shape == stacked.shape else np.zeros(0, dtype=bool)
