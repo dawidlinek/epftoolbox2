@@ -454,18 +454,20 @@ def test_the_day_level_check_accepts_profiles_calendar_flags_and_a_date_with_som
 # ---------------------------------------------------------------------------
 
 
-def day_tables(data, names, horizon, target="price"):
+def day_tables(data, names, horizon, target="price", freq="1h"):
     """By hand from the frame: each local date's value of `names` (the last non-NaN one of its rows) and, per wall-clock
-    hour, the target `horizon` calendar days later where that hour exists once on the target day, NaN where it doesn't or
-    where the issue date has no row at that hour; and which (date, hour) has a row."""
+    hour (quarter-hour at 15 minutes), the target `horizon` calendar days later where that slot exists once on the target
+    day, NaN where it doesn't or where the issue date has no row at that slot; and which (date, slot) has a row."""
     local = data.index.tz_localize(None)
-    dates, hours = local.normalize(), local.hour
+    dates = local.normalize()
+    hours = local.hour if freq == "1h" else local.hour * 4 + local.minute // 15
+    slots = range(24 if freq == "1h" else 96)
     x = data[names].groupby(dates).last()
     count = data[target].groupby([dates, hours]).count().unstack()
     price = data[target].groupby([dates, hours]).last().unstack().where(count == 1)
     every = pd.date_range(x.index.min(), x.index.max() + pd.Timedelta(days=horizon), freq="D")
-    price = price.reindex(index=every, columns=range(24))
-    exists = count.reindex(index=x.index, columns=range(24)).notna()
+    price = price.reindex(index=every, columns=slots)
+    exists = count.reindex(index=x.index, columns=slots).notna()
     y = pd.DataFrame(price.shift(-horizon).reindex(x.index).to_numpy(), index=x.index).where(exists.to_numpy())
     return x, y, exists
 
@@ -487,10 +489,10 @@ def day_reference(data, issue, horizon, predictors=DAY_PREDICTORS, alpha=1.0, wi
     x, y, _ = day_tables(data, names, horizon)
     anchor = pd.Timestamp(refit_anchor(issue, refit))
     k = {period: -1 for period in range(24)} if newest is None else {p: min(v, horizon - 1) for p, v in newest.items()}
-    last = anchor + pd.Timedelta(days=min(max(k.values()) - horizon, -1))
-    span = (x.index >= last - pd.Timedelta(days=window - 1)) & (x.index <= last)
-    for period, newest_k in k.items():  # a slot whose target isn't known on the anchor
-        y.loc[y.index > anchor + pd.Timedelta(days=newest_k - horizon), period] = np.nan
+    lasts = {period: anchor + pd.Timedelta(days=min(newest_k - horizon, -1)) for period, newest_k in k.items()}
+    span = (x.index >= min(lasts.values()) - pd.Timedelta(days=window - 1)) & (x.index <= max(lasts.values()))
+    for period, last in lasts.items():  # each period's own W dates: its slots outside them are no target
+        y.loc[(y.index > last) | (y.index < last - pd.Timedelta(days=window - 1)), period] = np.nan
     xs, ys = x[span].to_numpy(), y[span].to_numpy()
     mask = StandardScaler.get_scalable_mask(xs)
     keep = np.isfinite(xs).all(axis=1) & np.isfinite(ys).any(axis=1)
@@ -901,9 +903,10 @@ PUBLISHED = {
 @pytest.mark.parametrize("horizon", [1, 2])
 @pytest.mark.parametrize("case", PUBLISHED)
 def test_published_masks_the_slots_its_rule_doesn_t_know_on_the_anchor(market, case, horizon):
-    """A day unit with `newest_target="published"` on the anchor Monday 13 March: its span is the W dates up to the newest one
-    any period's target is known on (the anchor + 0 - h, one date later than "d-1"), and on that date the slots of the periods
-    whose target isn't known yet are masked, counted by hand from the rule; every other slot trains. Each record's
+    """A day unit with `newest_target="published"` on the anchor Monday 13 March: each period trains on the W dates of its own
+    period unit, up to the anchor + k(p) - h, k counted by hand from the rule (0 for a period whose target of the anchor is out
+    by the issue time, -1 for one that isn't). The rows are the dates of any of them: with the load rule W + 1, the oldest
+    date the unknown periods', the newest the known ones'; with the price rule, the W dates one later than "d-1". Each record's
     `newest_target_day` is its period's, and the forecasts are the hand fit's on those slots, to 1e-10."""
     rule, known = PUBLISHED[case]
     info = InformationSet("11:45", "Europe/Brussels", rules={**RULES, "price": rule})
@@ -921,8 +924,11 @@ def test_published_masks_the_slots_its_rule_doesn_t_know_on_the_anchor(market, c
         )
     by_horizon = dict(zip((1, 2)[:horizon], masks))
     mask = by_horizon[horizon]
-    assert mask.shape == (WINDOW, 24)
-    assert mask[:-1].all() and np.flatnonzero(mask[-1]).tolist() == known
+    both = len(known) < 24  # periods on both sides: their spans differ by a date
+    assert mask.shape == (WINDOW + both, 24) and (mask.sum(axis=0) == WINDOW).all()
+    assert np.flatnonzero(mask[-1]).tolist() == known
+    assert np.flatnonzero(mask[0]).tolist() == ([p for p in range(24) if p not in known] if both else known)
+    assert mask[1:-1].all()
     records = by_key(ref._results)
     anchor = day("2023-03-13")
     for (_, period, hz), record in records.items():
@@ -1111,3 +1117,68 @@ def test_a_date_s_input_is_its_last_row_with_a_value(market):
     assert predictions(DayRidge().run(early, issue, issue, horizon=1)._results) == predictions(
         DayRidge().run(market, issue, issue, horizon=1)._results
     )
+
+
+# ---------------------------------------------------------------------------
+# Review 6f: each period's own span, keys whatever the transform, the engine whatever the methods
+# ---------------------------------------------------------------------------
+
+# Issued at 00:30 Warsaw, with actuals out 1 h after their period: D-1's last hour (23:30 and 23:45 at 15 minutes) isn't out yet,
+# k = -2; every other period's D-1 is, k = -1; on the spring Sunday the hour the clock skips (02:00, quarter-hours 8 to 11) counts
+# as known, k = 0. Written down from the rule.
+SPRING_ISSUE = InformationSet("00:30", "Europe/Warsaw", rules={**RULES, "price": Availability.realised("1h")})
+SPRING_K = {
+    "1h": {"late": [23], "skipped": [2], "periods": 24},
+    "15min": {"late": [94, 95], "skipped": [8, 9, 10, 11], "periods": 96},
+}
+
+
+def spring_k(freq, issue):
+    table = SPRING_K[freq]
+    k = np.full(table["periods"], -1)
+    k[table["late"]] = -2
+    if issue == "2023-03-26":
+        k[table["skipped"]] = 0
+    return k
+
+
+@pytest.mark.parametrize("freq", ["1h", "15min"])
+def test_on_the_spring_switch_each_period_trains_on_its_period_unit_s_dates(freq):
+    """Refitted every day around the spring switch (25 to 27 March), each period's training slots are those of its own period
+    unit: the W dates up to the anchor + k(p) - h that have its target, so W but where a target is missing (the skipped hour's,
+    which only its own period loses). The skipped hour's k of 0 on the spring Sunday moves no other period's dates (a span of the
+    largest k cost each of them one)."""
+    data = frame(start="2023-02-14", days=46, freq=freq, horizon=1)
+    names = profile_columns(freq)
+    x, y, _ = day_tables(data, [name.format(horizon=1) for name in names], 1, freq=freq)
+    masks = []
+    real = DayRidge._fit_days
+
+    def spy(self, x_, y_, y_mask):
+        masks.append(y_mask.copy())
+        return real(self, x_, y_, y_mask)
+
+    for issue in ("2023-03-25", "2023-03-26", "2023-03-27"):
+        k = spring_k(freq, issue)
+        assert SPRING_ISSUE.newest_targets("price", freq, data.index, [issue], 1, WINDOW)[:, 0].tolist() == k.tolist()
+        masks.clear()
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(DayRidge, "_fit_days", spy)
+            ref = DayRidge(names, refit="1D", newest_target="published").run(
+                data, issue, issue, horizon=1, freq=freq, information_set=SPRING_ISSUE
+            )
+        assert ref._results and not ref.skipped
+        ((mask,),) = [masks]
+        anchor = pd.Timestamp(issue)
+        expected = []
+        for period, newest in enumerate(k):
+            last = anchor + pd.Timedelta(days=int(newest) - 1)
+            dates = (y.index >= last - pd.Timedelta(days=WINDOW - 1)) & (y.index <= last)
+            usable = dates & np.isfinite(y[period].to_numpy()) & np.isfinite(x.to_numpy()).all(axis=1)
+            expected.append(int(usable.sum()))
+        assert mask.sum(axis=0).tolist() == expected, issue
+        lost = [period for period, count in enumerate(expected) if count != WINDOW]
+        assert set(lost) <= set(SPRING_K[freq]["skipped"]), (
+            issue,
+            lost,
+        )  # only the skipped hour's own target is missing

@@ -1159,10 +1159,12 @@ def _fit_day_unit(
     """Fit one day unit (`FitUnit(None, h, anchor, list, member)`) and forecast each of `tasks`, every period of its horizon
     issued in its block, from one call. Returns (task, record or skip reason) of each.
 
-    Rows are the local dates of `training_span(anchor, W, h, newest)`, `newest` the largest k of a period on the anchor under
-    `newest_target="published"`; a slot of period p dated after the anchor + k(p) - h isn't known by the issue time and is
-    masked, as is a slot with no target (`_units.day_arrays`: the hour a spring switch skips, the repeated autumn hour, a missing
-    value). X is each date's value of the list's day-level columns; a date with a missing input, or with no target to train on,
+    Rows are the local dates of `training_span(anchor, W, h)`. Under `newest_target="published"` each period p has the W dates of
+    its own period unit, `training_span(anchor, W, h, k(p))` with k(p) read on the anchor, and the rows are every date of any of
+    them: a slot of p outside its own span is masked, so p trains on the dates its period unit would (the hour a spring switch
+    skips counts as known, so its k can be another period's plus one, and a span of the largest k would cost every other
+    period a date). A slot with no target is masked too (`_units.day_arrays`: the hour a spring switch skips, the repeated
+    autumn hour, a missing value). X is each date's value of the list's day-level columns; a date with a missing input, or with no target to train on,
     drops out. The binary-column mask is read from the span's dates before any filter, the scaler (`config["scaler"]`) fitted on
     the training dates and applied to the call's rows value by value, and the targets go through `MultiTargetAsinh`, each
     period's Invariant fitted on its own training slots.
@@ -1185,7 +1187,9 @@ def _fit_day_unit(
     if newest is None:
         first, last = training_span(anchor, width, hz)
     else:
-        first, last = training_span(anchor, width, hz, int(newest.max()))
+        # Each period's own span, the W dates of its period unit; the rows are every date of any of them.
+        firsts, lasts = training_span(anchor, width, hz, newest)
+        first, last = firsts.min(), lasts.max()
     first, last = int(first), int(last)
     predictors = unit_list(cfg, inputs.expanded, unit)
     has_row, train_x, train_y = day_arrays(inputs.hour_arrays, periods, predictors, first, last, hz)
@@ -1201,8 +1205,8 @@ def _fit_day_unit(
     scalable_mask = StandardScaler.get_scalable_mask(train_x[has_row])
     valid = np.isfinite(train_y)
     if newest is not None:
-        dates = np.arange(first, last + 1, dtype=np.int64)
-        valid &= dates[:, None] <= (anchor + newest - hz)[None, :]
+        dates = np.arange(first, last + 1, dtype=np.int64)[:, None]
+        valid &= (dates >= firsts[None, :]) & (dates <= lasts[None, :])
     keep = has_row & valid.any(axis=1)
     if train_x.shape[1]:
         keep &= np.isfinite(train_x).all(axis=1)

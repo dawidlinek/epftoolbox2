@@ -2072,9 +2072,9 @@ class BaseModel(ABC):
         newest: Optional[NewestTargets],
     ) -> None:
         """A ValueError (`_units.check_day_level`) if a predictor of a day unit holds two finite values on one local date its
-        fits train on: from the earliest first date of `training_span(a, W, h, k)` over the run's anchors, windows and horizons
-        (k the largest of a period's on the anchor under `"published"`; an `"expanding"` window from the frame's first date) to
-        the latest last one, or every date of the frame without a test period (`verify` checks each model so first).
+        fits train on: from the earliest first date of `training_span(a, W, h, k)` over the run's anchors, windows, horizons
+        and (under `"published"`, each with its own k on the anchor) periods, an `"expanding"` window from the frame's first
+        date, to the latest last one; or every date of the frame without a test period (`verify` checks each model so first).
 
         Not the issue dates: a probe of `verify` perturbs what is unknown, or fresh, at the issue time cell by cell, which the
         issue date's and the later dates' rows hold, and a check there would refuse the probe's own run. The dates a fit trains
@@ -2094,11 +2094,9 @@ class BaseModel(ABC):
         firsts, lasts = [], []
         for member, rule in zip(self._members, self._refit_rules):
             anchors = np.array([day.toordinal() for day in refit_anchors(issued, rule)], dtype=np.int64)
-            k = -1
+            k = -1  # or each period's on each anchor, (periods, anchors)
             if newest is not None:
-                k = np.max(
-                    [np.atleast_1d(newest.at(period, anchors)) for period in range(self._periods_per_day)], axis=0
-                )
+                k = np.stack([np.atleast_1d(newest.at(period, anchors)) for period in range(self._periods_per_day)])
             for horizon in horizons:
                 last = np.minimum(anchors + k - int(horizon), anchors - 1)
                 lasts.append(int(last.max()))
