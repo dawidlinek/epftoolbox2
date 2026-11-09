@@ -14,10 +14,17 @@
   Training rows are untouched, and the column is judged by the information set on the issue row alone.
 
 `{horizon}` is the only placeholder in either name, as in a predictor. So the learner sees (y - o) / s on its training rows and the
-forecast is o + s * y_hat, clipped, with s and o the issue row's; o is 0 here (a model with an offset of its own, 7f's
-`ShapeModel`, uses the same seam). y_hat is the learner's forecast mapped back through the model's scaler, which is fitted on the
-normalised targets. Each training window of a list is scaled back and clipped on its own, so a member's forecast is that of the
-model with its window alone, and the forecast is their mean.
+forecast is o + s * y_hat, clipped, with s and o the issue row's; o is 0 for these three. y_hat is the learner's forecast mapped
+back through the model's scaler, which is fitted on the normalised targets. Each training window of a list is scaled back and
+clipped on its own, so a member's forecast is that of the model with its window alone, and the forecast is their mean.
+
+An offset (step 7f, `ShapeModel`, `offset_config`) goes through the same seam: `config["row_target"]["offset"]` names, per
+horizon, the column each training row's offset is read from (`train`, the target's own hour mean there, an auxiliary column of
+the period frames) and the column the issue row's is read from (`issue`, a frame column the model reads); `keep` names, per
+horizon, a 0/1 column whose 0 drops a training row (the target date isn't native). A training row's learner target is then
+y - o_train (NaN where `keep` isn't 1 or o_train is missing, so the row drops with the rows of missing values), and the forecast
+o_issue + y_hat; an issue row whose o_issue is missing is a `missing_test_predictors` skip. No model sets an offset together with
+any of the three above.
 
 The columns are inputs the model reads (`BaseModel._used_predictors`: loaded and hashed in the manifest), never regressors.
 `normalise_by`'s is judged by the information set on the issue row and, for a rule that changes over time, on the training rows;
@@ -165,6 +172,21 @@ def manifest_params(model: Any) -> Dict[str, Any]:
     return out
 
 
+def offset_config(
+    train: Dict[int, str], issue: Dict[int, str], keep: Optional[Dict[int, str]] = None
+) -> Dict[str, Any]:
+    """A worker's `config["row_target"]` for a model whose learner target is y less an offset (`ShapeModel`): `train` and
+    `issue`, horizon -> the column a training row's and the issue row's offset is read from, `keep` horizon -> a 0/1 column whose
+    0 (or missing value) drops a training row, None for none. No scale, flag or bounds."""
+    return {
+        "bounds": None,
+        "scale": None,
+        "zero": None,
+        "offset": {"train": dict(train), "issue": dict(issue)},
+        "keep": None if keep is None else dict(keep),
+    }
+
+
 def config_of(model: Any, horizons: Iterable[int]) -> Optional[Dict[str, Any]]:
     """What a worker reads (`config["row_target"]`): `scale` and `zero`, horizon -> the column's name (None for a parameter not
     set), and `bounds`, (low, high) or None. None without any of them, so the config doesn't change."""
@@ -206,12 +228,42 @@ def zero_outcome(arrays: Dict, row_target: Optional[Dict], hz: int, row: int) ->
     return bool(value == 1)
 
 
-def scaled_back(row_target: Dict, prediction: float, scale: Optional[float]) -> float:
+def has_offset(row_target: Optional[Dict]) -> bool:
+    """Whether a worker's per-row target has an offset (`offset_config`)."""
+    return row_target is not None and row_target.get("offset") is not None
+
+
+def learner_targets(arrays: Dict, row_target: Optional[Dict], hz: int, rows: Any, targets: np.ndarray) -> np.ndarray:
+    """The learner's targets of a period's training rows `rows` (a slice or row numbers) at horizon `hz`, from their targets
+    `targets` (`arrays["y"][rows][:, hz - 1]`): `targets` itself without an offset; else y less each row's training offset, NaN
+    where the row's `keep` value isn't 1, so the row drops out with the rows of missing values."""
+    if not has_offset(row_target):
+        return targets
+    index = arrays["col_index"]
+    out = targets - arrays["x"][rows, index[row_target["offset"]["train"][hz]]]
+    keep = row_target.get("keep")
+    if keep is not None:
+        out = np.where(arrays["x"][rows, index[keep[hz]]] == 1.0, out, np.nan)
+    return out
+
+
+def issue_offset(arrays: Dict, row_target: Optional[Dict], hz: int, row: int) -> Optional[float]:
+    """The issue row `row`'s offset at horizon `hz`, which the forecast adds to the learner's (NaN for a missing value: a
+    `missing_test_predictors` skip); None without an offset."""
+    if not has_offset(row_target):
+        return None
+    return float(arrays["x"][row, arrays["col_index"][row_target["offset"]["issue"][hz]]])
+
+
+def scaled_back(row_target: Dict, prediction: float, scale: Optional[float], offset: Optional[float] = None) -> float:
     """The forecast from the learner's, in target units of the scaler (`prediction`, y_hat): s * y_hat with `normalise_by` (`scale`,
-    the issue row's), then clipped to `bounds`, multiples of s with `normalise_by` and target units without."""
+    the issue row's), plus the issue row's `offset` where there is one, then clipped to `bounds`, multiples of s with
+    `normalise_by` and target units without."""
     value = float(prediction)
     if scale is not None:
         value = float(scale) * value
+    if offset is not None:
+        value = float(offset) + value
     bounds = row_target["bounds"]
     if bounds is not None:
         low, high = bounds
