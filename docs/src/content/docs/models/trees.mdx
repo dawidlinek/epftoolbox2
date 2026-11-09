@@ -68,19 +68,20 @@ date's 05:00 price), so one list serves every period, and `"period"` (0 to 23 ho
 ## Parameters
 
 Every class takes, in this order, `predictors`, `training_window`, `refit`, `periods` and `objective`, then its package's own
-settings, then `random_state`, `threads` (and XGBoost's `device`) and `name`; `scaler`, `newest_target`, `binary_mask`,
-`normalise_by`, `bounds` and `zero_when` are keyword-only.
+settings, then `random_state`, `threads` (and XGBoost's `device`) and `name`; `scaler`, `target_transform`, `newest_target`,
+`binary_mask`, `normalise_by`, `bounds` and `zero_when` are keyword-only.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `predictors` | list | Required | Full names, `{horizon}` allowed, saved verbatim. A ResidualModel learner's list may name the base's forecasts |
 | `training_window` | int or `"expanding"` | `"expanding"` | Days of rows, or every row from the frame's first date (validation picked the wrong window for LightGBM in 15 of 16 cases) |
 | `refit` | str | `"7D"` | The refit calendar: `"7D"` on Mondays, `"1D"` every day, `"1MS"` monthly. A pooled fit needs one |
-| `periods` | str | `"pooled"` | `"pooled"`: one fit over the (date, period) rows of every period, each period's target through its own Invariant; `"each"`: one fit per period. Fixed once the model is made |
+| `periods` | str | `"pooled"` | `"pooled"`: one fit over the (date, period) rows of every period, its targets transformed by `target_transform`; `"each"`: one fit per period. Fixed once the model is made |
 | `objective` | str | `"l1"` | `"l1"` (absolute error) or `"l2"` (squared error): LightGBM's `l1`/`l2`, XGBoost's `reg:absoluteerror`/`reg:squarederror`, CatBoost's `MAE`/`RMSE` |
 | `random_state` | int | `0` | The seed of every fit (row and column samples), the same in each, so a forecast doesn't depend on which other fits a run makes |
 | `threads` | int | `1` | OpenMP threads (CatBoost's `thread_count`) of one fit; more than one is refused where workers fork (Linux, macOS); recorded and compared on resume (see [Threads](#threads-and-determinism)) |
-| `scaler` | scaler spec | `INVARIANT_TARGET` | Keyword-only. The predictors as they are (a tree splits on order) and the target as epftoolbox's Invariant; a pooled fit gives each period's target its own Invariant whatever this says |
+| `scaler` | scaler spec | `INVARIANT_TARGET` | Keyword-only. The predictors as they are (a tree splits on order) and the target as epftoolbox's Invariant; a pooled fit transforms its targets by `target_transform` whatever this says |
+| `target_transform` | str | `"per_period"` | Keyword-only. How a pooled fit transforms its targets: `"per_period"`, each period's own Invariant; `"pooled"`, one Invariant over every row; `"none"`, the raw target (see [Target transform](#target-transform)). `periods="each"` takes the default alone (its targets go through `scaler`); written to YAML only when set |
 | `newest_target`, `binary_mask` | | `"d-1"`, `None` | Keyword-only, as for every model ([Time and Calendars](/epftoolbox2/model-pipeline/time-and-calendars/)) |
 | `normalise_by`, `bounds`, `zero_when` | | `None` | Keyword-only. A per-row target, as for every model, with either `periods`: a pooled fit divides each row's target by its own period row's scale ([Generation targets](/epftoolbox2/models/common-parameters/#generation-targets)). Not on a `ResidualModel`'s learner in this step |
 
@@ -125,6 +126,37 @@ settings, then `random_state`, `threads` (and XGBoost's `device`) and `name`; `s
 
 The defaults are the research's (`zoo_classic`'s `ztree.py`). Records are those of every model: one per (period, horizon, run
 date), `coefficients` `[]`.
+
+## Target transform
+
+A pooled fit stacks the rows of every period and fits one tree model on them; `target_transform` says what it fits them on:
+
+- **`"per_period"`** (the default, the research's `ztree.py`): each period's targets through their own Invariant,
+  `asinh((y - median) / (MAD / 0.6745))` of that period's training targets, and each forecast mapped back with its period's.
+- **`"pooled"`**: one Invariant over the targets of every row.
+- **`"none"`**: the raw targets. The estimator fits the stacked targets as they are (no centring, no scale, no asinh) and its
+  prediction of a row is the forecast. A target the transform distorts is better fitted raw: on a solar capacity factor
+  (`normalise_by`, between 0 and about 1, with many night zeros), a reproduction of a solar and wind study found pooled
+  `HistGBModel`s up to 21 % worse in MAE through the per-period Invariant than the study's fits of the raw target, and every tree
+  within 2 % of the study with the raw target.
+
+The transform is the pooled fit's own: the inputs still go through `scaler`'s input part, the per-row target (`normalise_by`,
+`bounds`, `zero_when`) still divides each row's target and multiplies the forecast, and the forecasts a run makes (its keys) don't
+depend on it. `periods="each"` fits each period's target through `scaler` (the Invariant by default) and refuses another value. The
+manifest records `target_transform`, and a resume with another raises `ManifestMismatchError` before any fit. As a
+[`ResidualModel`](/epftoolbox2/models/residual/) learner, the learner's transform applies to the residuals.
+
+```python
+from epftoolbox2.models import LightGBMModel
+
+capacity_factor = LightGBMModel(
+    ["irradiance_d+{horizon}", "temperature_d+{horizon}", "period"],
+    normalise_by="generation_solar_roll365max_d-1",
+    bounds=(0, 1.05),
+    target_transform="none",  # fit the capacity factor as it is
+    name="solar_lgbm",
+)
+```
 
 ## Threads and determinism
 

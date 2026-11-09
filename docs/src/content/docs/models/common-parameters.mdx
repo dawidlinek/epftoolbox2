@@ -78,7 +78,9 @@ nothing of a model changes, its records and manifest included.
 - With `refit`, a unit is fitted once on its divided targets and each of its forecasts is multiplied by its own issue row's scale;
   a unit whose forecasts are all 0 makes no fit, so a fit that would fail leaves them 0.
 - A pooled unit (`HistGBModel(periods="pooled")`) divides each stacked row's target by its own period row's scale, and reads each
-  forecast's scale and `zero_when` on its own period's issue row.
+  forecast's scale and `zero_when` on its own period's issue row. Its `target_transform` then applies to the divided targets: each
+  period's Invariant of y / c by default, the capacity factor as it is with `target_transform="none"` (see
+  [Target transform](/epftoolbox2/models/trees/#target-transform)).
 - `NaiveModel` takes `bounds` alone, which clips its value in target units: it fits nothing to divide or replace (and so does any
   model that fits nothing).
 - Models of day units refuse all three: `MLPDailyModel` doesn't take them, and `TorchModel(output="day")` refuses them when it is

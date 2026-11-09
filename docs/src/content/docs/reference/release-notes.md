@@ -211,6 +211,17 @@ an issue day it didn't sample.
 
 ### New
 
+- **`target_transform="none"`: a pooled tree fits the raw target.** `HistGBModel`, `LightGBMModel`, `XGBoostModel` and
+  `CatBoostModel` take a keyword-only `target_transform`: `"per_period"` (each period's own Invariant, the default and the only
+  behaviour before), `"pooled"` (one Invariant over every row) or `"none"`, with which the estimator fits the stacked targets as
+  they are and its prediction is the forecast (`scalers.target.RawTarget`). A solar capacity factor (`normalise_by`) is better fitted
+  raw: a reproduction of a solar and wind study found the per-period Invariant up to 21 % worse in MAE than the study's raw fits, and
+  the raw target within 2 % of them. `periods="each"` transforms its targets with `scaler=` and refuses another value. The default
+  moves nothing: it is written to YAML only when set and kept out of `model_params`, and the manifest's `target_transform` field,
+  compared on resume, records `"none"`. A `ResidualModel`'s pooled learner applies its own to the residuals. A day or pooled unit
+  of your own takes `target_transform = "none"` too (a day unit `"per_period"` or `"none"`: `"pooled"` on a day unit, which it
+  ignored, now raises). `TorchModel` and its presets train on each period's Invariant and refuse another value. See
+  [Target transform](/epftoolbox2/models/trees/#target-transform).
 - **`ForecastSource`: another pipeline's stored forecasts as an input.** `ForecastSource(path, model, column, horizon=1,
   available=None)` reads one horizon of the forecasts a `ModelPipeline` stored in `path` (JSONL or Parquet, bit for bit the same
   frame) and puts each at its target instant, the slot of its target date in the upstream's data zone (both rows of a repeated autumn
