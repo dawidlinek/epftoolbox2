@@ -163,8 +163,10 @@ class HistGBModel(BaseModel):
         )
 
     def _fit_model(self, train_x: np.ndarray, train_y: np.ndarray) -> Any:
+        # Built (and scikit-learn's OpenMP runtime loaded) before the scope: `threadpool_limits` limits only what is loaded.
+        estimator = self._estimator()
         with _one_thread():
-            return self._estimator().fit(train_x, train_y)
+            return estimator.fit(train_x, train_y)
 
     def _predict_block(self, fitted: Any, rows: np.ndarray) -> Tuple[np.ndarray, List[list]]:
         with _one_thread():
