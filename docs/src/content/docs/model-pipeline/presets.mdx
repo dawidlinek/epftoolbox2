@@ -5,20 +5,22 @@ description: LEAR and expert-model inputs in this library's column naming
 
 import { Aside } from '@astrojs/starlight/components';
 
-`epftoolbox2.presets` returns the inputs of two standard benchmark models as predictor lists. The lists are plain
-strings with a `{horizon}` template, so they can be saved in a model pipeline YAML.
+`epftoolbox2.presets` returns the inputs of two standard benchmark models, and of a tree pooled over the periods of a day, as
+predictor lists. The lists are plain strings with a `{horizon}` template, so they can be saved in a model pipeline YAML.
 
 ```python
-from epftoolbox2.presets import expert_predictors, lear_predictors, profile_columns, WEEKDAYS
+from epftoolbox2.presets import expert_predictors, lear_predictors, profile_columns, tree_predictors, WEEKDAYS
 
 lear = lear_predictors(exogenous=["load_forecast", "residual_load"])  # 247 inputs
 expert = expert_predictors(exogenous=["load_forecast"])
+tree = tree_predictors(exogenous=["load_forecast"])  # 183 inputs, for HistGBModel(periods="pooled")
 ```
 
 | Function | Parameters (defaults) | Returns |
 |----------|-----------------------|---------|
 | `lear_predictors` | `exogenous` (required), `price="price"`, `freq="1h"`, `calendar_prefix=""`, `order="library"` | LEAR inputs (Lago et al. 2021) |
 | `expert_predictors` | `exogenous=("load_forecast",)`, `price="price"`, `weekdays=WEEKDAYS`, `calendar_prefix=""` | Expert-model inputs (Ziel & Weron 2018) |
+| `tree_predictors` | `exogenous` (required), `price="price"`, `freq="1h"`, `calendar_prefix=""` | A pooled tree's inputs: `lear_predictors`, then `"period"`, then the row's own period of the same blocks (`price`, `price_d-1`, `price_d-2`, `price_d-6`, and per series `x_d+{horizon}`, `x`, `x_d-6`), the research's order ([Residual Model](/epftoolbox2/models/residual/)) |
 | `profile_columns` | `column`, `freq="1h"` | The names `DailyProfileTransformer` creates, e.g. `price_h00` … `price_h23` |
 
 ## From "Day d" to the Issue Day
