@@ -379,3 +379,92 @@ CPU (`verify(..., device="cpu")`), or keep to layers whose backward has no atomi
 The trainer is a port of the research's stacked trainer, and on the research's own inputs (the DE benchmark, LEAR features,
 1456-day windows, 256-128 networks) it gives that trainer's forecasts to the bit on the CPU.
 </Aside>
+
+## Many networks at once: torch stacks
+
+A loop of `add_model` calls (a search, plan section 3.12) trains its networks together. `ModelPipeline.run` puts the torch
+models of a run whose fits are stacks on their device (`stack="vmap"`, or `"auto"` on a GPU) and that share a **stack key** in
+one group, and trains their networks in stacks of `pad_to` members on one device: each network on its own rows, with its own
+seeds, learning rate and dropout rate. It is speed only: every forecast, record and manifest is the one the model gives alone,
+to the bit, whatever the other models of the loop, their order or how they are split over array tasks
+(`models_per_task`), and after a resume.
+
+```python
+import random
+
+from epftoolbox2.models import TorchModel
+from epftoolbox2.nets import MLP
+from epftoolbox2.pipelines import ModelPipeline
+from epftoolbox2.presets import lear_predictors
+
+lear_x = lear_predictors(["load_forecast"])
+pipeline = ModelPipeline()
+rng = random.Random(0)
+for i in range(48):
+    pipeline.add_model(TorchModel(module=MLP, output="day", predictors=lear_x, training_window=728, refit="7D",
+                                  module_params={"hidden": rng.choice([[256, 128], [512, 256], [1024, 512]]),
+                                                 "dropout": round(rng.uniform(0, 0.5), 2)},
+                                  lr=round(10 ** rng.uniform(-4, -3.5), 6), seeds=4, device="cuda", pad_to=256,
+                                  name=f"mlp_{i:02d}"))
+```
+
+Here the models of each width are one group, their 4 seeds of every weekly fit trained 256 at a time.
+
+- **The key**: the module (its import path, or a notebook class's own token, so only models of the same class object of the
+  session stack together) and its hash, `module_params` but `dropout` (the defaults filled in), `output`, `training_window`,
+  `refit`, `loss`, `batch_size`, `max_epochs`, `patience`, `early_stopping`, `weight_decay`, the device, `tf32`, `pad_to` and
+  the sizes of named blocks.
+  Models that differ in anything else (`lr`, `dropout`, `seeds`, `random_state`, the predictors, the scaler, a per-row
+  target) share stacks, each fit prepared and mapped back by its own model. Within a group a stack holds networks of one
+  structure only (every layer's class and settings, every weight's shape): a dropout of 0 (no `Dropout` layer) or another
+  number of inputs is another stack, and so is a module of your own that keeps a setting of its own as a plain attribute
+  rather than in a buffer.
+- **When it is bit for bit, and who runs alone.** A stack gives each network the numbers it gets alone when every operation of
+  the module and the loss computes each slot's elements alike:
+  - on a GPU, for any module the stack takes (its elementwise kernels compute every element alike);
+  - on a CPU, only for `nets.MLP` (the presets and `TorchModel(module=MLP)`) with `loss="l1"` or `"mse"`: there a vectorised
+    kernel takes a stacked tensor's tail by its scalar path, so a module's own `torch.sigmoid`, `silu`, `softplus`, `log1p`
+    or power, or a loss of its own, can give the last slot other last bits (up to 4e-7 in a test). Any other model runs alone
+    on a CPU.
+
+  Also alone: a model whose key no other model of the run has, a loop (`stack="auto"` on a CPU: a loop's arithmetic isn't a
+  stack's), a `forecast_only` run, and a subclass that changes how a fit is made or read. A module whose structure is drawn
+  from torch's generator when it is built (a random projection or permutation kept as a plain attribute rather than a
+  buffer, which vmap would run with the first slot's for every slot) is found by building it under two seeds, and its fits
+  train alone in their job. A draw both seeds happen to agree on (a coin tossed at build) is found when a stack is built:
+  each network's module is compared with the first's, and if any differs that stack's fits train alone, and the models'
+  later fits too. `TORCH_STACKS=off`, an environment variable read when a run runs, runs every model on its own.
+- **`TORCH_STACKS=check`** stacks as `on` does and also trains about one stacked fit in 50 alone (chosen by a hash of its
+  seeds, so the same fits whatever the loop), comparing failures, best epochs and forecasts bit for bit. Each model's
+  manifest records `stack_check` (fits checked, how many differed, how many raised when trained or predicted alone and so
+  weren't compared, the largest difference in the scaled space), and a model with a difference or a fit not compared warns. A checked fit trains alone as its model would, in a stack of `pad_to` slots of its own, so on a
+  GPU with a large `pad_to` each costs about a whole stack: it is a check to run on a sample of a study, not on every run.
+- **`pad_to` on a GPU.** A step of a stack costs far less than its networks one by one: the trainer ran 67 networks per second
+  (256-128, 50 epochs of 1,456-day windows) in stacks of 256 on an H100, 75 in stacks of 2,048. Alone, a fit's 4 seeds fill 4
+  of its `pad_to` slots and the rest is padding; in a loop the stacks are full. Set `pad_to` for the loop (256 suits these
+  networks), and keep it: it is compared when a run resumes.
+- **On a CPU** a stack does one product per network, so stacking a loop buys little there: `stack="auto"` (a loop of
+  single-thread fits in a pool of processes) is the fast way, and it runs each model alone.
+- **Failures stay where they were.** A network that diverged makes its own fit's forecasts `fit_error`s, as alone, and moves no
+  other network of its stack. A stack that raises (out of GPU memory, say) is trained again fit by fit, as each model alone,
+  slower: each worker process warns once, with the error. A fit that raises stops the group as it stops a model's own run,
+  with a `RuntimeError` naming the model; what came back is saved and a later run resumes, as after an interrupt.
+
+How it runs: the group reads the data once, as an [engine group](/epftoolbox2/model-pipeline/engine/) does (chunks of at most
+`ENGINE_MAX_MODELS` models and `ENGINE_MAX_COLUMNS` columns), and runs jobs of a few refit blocks of every model in
+`MAX_PROCESSES` worker processes (one on a GPU). A job holds at least `TORCH_STACK_MEMBERS` networks (by default one stack, up
+to four where every process still has a job) and at most 1,024 fits (or `pad_to`, if more); its fits are prepared as each
+model's own run prepares them, then trained together, members of one learning rate in the same stacks, since a stack trains
+until its last member stops. `ModelPipeline.run` refuses a `TORCH_STACKS` or `TORCH_STACK_MEMBERS` it can't read before any
+model writes.
+
+Measured (synthetic data of the research's shapes: 247 inputs, 24 outputs, 728-day windows, weekly refits, 4 seeds): the
+48-configuration loop above over half a year, 4,992 networks, took 4.7 minutes on one H100, so two years about 19; a second
+process on the same GPU gained nothing. Once warm, a stack trained as fast per network as the research's stacked trainer at a
+fixed 50 epochs (0.93 to 1.02 of its speed in stacks of 256 from 256-128 to 1024-512, 1.11 in stacks of 1,024); preparing each
+fit's rows (about 50 ms a fit, as alone) was a quarter of the loop's time, and the first stack of a process waits for CUDA. On
+a CPU the same loop with `stack="vmap"` over two weeks (384 networks, 20 epochs, `pad_to=16`, 8 processes) took 3.4 minutes
+stacked against 31 for its models one by one, each fit's 4 networks padded to 16. Every forecast was its model's own, to the
+bit: on the CPU for the 48 configurations alone, in another order and in shards of 20; on the H100 for 12 of them alone and in
+another order, for a loop of `MLPHourlyModel`-shaped networks (one output, 146 early-stopping rows a fit) alone and stacked,
+and for the tests' loops with TF32 off and on.

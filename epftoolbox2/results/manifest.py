@@ -141,6 +141,10 @@ _PROVENANCE_FIELDS += ("engine",)
 # `engine_check`: with `engine="check"`, how a sample of those fits compared with the model path on the same values (fits,
 # the largest absolute and relative gaps of their forecasts, how many chose another kink or penalty), in the same last run.
 _PROVENANCE_FIELDS += ("engine_check",)
+# `stack_check`: with `TORCH_STACKS=check`, how a sample of a torch model's calls trained in a stack with other models compared
+# with the same calls trained alone (calls, how many differed, how many raised alone and weren't compared, the largest
+# absolute difference), in the last such run.
+_PROVENANCE_FIELDS += ("stack_check",)
 # `card`: a carded family's licence, corpus, runtime pins and weights reference, with the contamination verdict of each window
 # (`models._cards.manifest_fields`): what the model is under, which a new release may reword without changing a forecast.
 _PROVENANCE_FIELDS += ("card",)
@@ -365,6 +369,9 @@ class Manifest:
     # With `engine="check"`, that run's sample of fits also run on the model path (`EngineCounts.check_dict`): {"fits",
     # "max_abs", "max_rel", "other_choice"}; None (and no key) otherwise. Never compared.
     engine_check: Optional[Dict[str, Any]] = None
+    # With `TORCH_STACKS=check`, that run's sample of a torch model's stacked calls also trained alone
+    # (`models._torch.groups`): {"calls", "differing", "failed", "max_abs"}; None (and no key) otherwise. Never compared.
+    stack_check: Optional[Dict[str, Any]] = None
     # A `PooledModel`'s zone: {"zones", "over", "zone_feature", "missing", "data": {other zone: its data_columns_hash}}; None (and
     # no key) otherwise. Compared on resume.
     pooled: Optional[Dict[str, Any]] = None
@@ -458,6 +465,8 @@ class Manifest:
             del out["engine"]
         if out["engine_check"] is None:  # no engine="check"
             del out["engine_check"]
+        if out["stack_check"] is None:  # no TORCH_STACKS=check
+            del out["stack_check"]
         if out["pooled"] is None:  # fitted on one zone's rows
             del out["pooled"]
         for name in ("card", "runtime", "weights", "weights_history"):  # a core model, or one set of weights
@@ -897,6 +906,15 @@ def record_engine(
         manifest.write(path)
 
 
+def record_stack_check(path: Path, manifest: Manifest, check: Dict[str, Any]) -> None:
+    """Write `TORCH_STACKS=check`'s comparison of a run's stacked calls with the same calls alone (`models._torch.groups`) into
+    its manifest's provenance, replacing an earlier run's."""
+    check = dict(check)
+    if check != manifest.stack_check:
+        manifest.stack_check = check
+        manifest.write(path)
+
+
 def read_skipped(
     path: Union[str, Path],
     window: str = TEST,
@@ -1020,6 +1038,7 @@ def check_and_write(
         manifest.skipped = existing.skipped  # until this run finishes and says otherwise: it may not
         manifest.engine = existing.engine  # the same: until this run's fits from shared statistics are counted
         manifest.engine_check = existing.engine_check
+        manifest.stack_check = existing.stack_check
         if existing.data_unverified or (
             has_existing_results and _accepted_other_data(existing, manifest, data_diffs, frame_hashes)
         ):

@@ -326,6 +326,19 @@ an issue day it didn't sample.
   refused where workers fork, on Linux and macOS) and XGBoost's `device`; a package's own error stops the run.
   Each is also a `ResidualModel` learner, whose learner stage now runs with its learner's processes. See
   [Gradient-Boosted Trees](/epftoolbox2/models/trees/).
+- **Torch stacks: the networks of an `add_model` loop trained together.** `ModelPipeline.run` trains the torch models of a run
+  whose fits are stacks on their device (`stack="vmap"`, or `"auto"` on a GPU) and that share a stack key (the module and its
+  parameters but `dropout`, `output`, training window, refit, loss, batch size, epochs, patience, early stopping, weight decay,
+  device, `tf32`, `pad_to`) in stacks of `pad_to` networks on one device, after the engine groups and whatever `engine`. Speed
+  only: each model's records and manifest are its own run's to the bit, alone, in any loop, order or `models_per_task` split and
+  after a resume, on a GPU for any module and on a CPU for `nets.MLP` (the presets) with the `"l1"` or `"mse"` loss, the only
+  models a CPU stacks (a module's own `torch.sigmoid` or power can give a CPU stack's last slot other last bits); a module whose
+  structure is drawn from torch's generator when built trains alone; a network that diverged makes its own fit's forecasts
+  `fit_error`s and moves no other. Nothing moves for a model whose fits are a loop (`stack="auto"` on a CPU, the default there)
+  or whose key is its own. `TORCH_STACKS=off` runs each model on its own, `TORCH_STACKS=check` also trains a sample of the
+  stacked fits alone and records the comparison as `stack_check` in the manifest, and `TORCH_STACK_MEMBERS` sets the networks
+  a job holds at least; `ModelPipeline.run` refuses either variable it can't read before any model writes. See
+  [Neural Networks](/epftoolbox2/models/neural-networks/#many-networks-at-once-torch-stacks).
 - **`TorchModel`, `MLPHourlyModel` and `MLPDailyModel`: neural networks on the library's trainer.** `TorchModel(module, ...)` trains
   a `torch.nn.Module` class of your own (flat predictors or named blocks), with one output per period (`output="period"`) or a day of
   outputs on day-level predictors (`output="day"`); `MLPHourlyModel` and `MLPDailyModel` are its presets with `epftoolbox2.nets.MLP`.

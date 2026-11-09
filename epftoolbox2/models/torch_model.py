@@ -779,6 +779,7 @@ class TorchModel(BaseModel):
                 f"{self.name}: a TorchModel fits on the library's fit units (its seeds are the unit's), and this fit has none: "
                 "it runs through ModelPipeline.run or the model's run, not PooledModel or a direct call"
             )
+        from ._torch.groups import stack_session
         from ._torch.runtime import torch_scope
         from ._torch.trainer import MemberSpec, train_members
 
@@ -794,27 +795,29 @@ class TorchModel(BaseModel):
             MemberSpec(seed_key=unit_seed(self.random_state, unit, index), train_rows=rows, groups=groups)
             for index in range(self.seeds)
         ]
-        with torch_scope(self.device, tf32=self.tf32, threads=THREADS_PER_FIT) as device:
-            result = train_members(
-                self._factory(x.shape[1], y.shape[1]),
-                x,
-                y,
-                y_mask,
-                members,
-                loss=self.loss,
-                lr=self.lr,
-                max_epochs=self.max_epochs,
-                patience=self.patience,
-                batch_size=self.batch_size,
-                early_stopping=self.early_stopping,
-                weight_decay=self.weight_decay,
-                stack=self.stack,
-                pad_to=self.pad_to,
-                device=device,
-                dtype=DTYPE,
-                nominal_rows=nominal,
-                blocks=self._block_slices(),
-            )
+        settings = dict(
+            loss=self.loss,
+            lr=self.lr,
+            max_epochs=self.max_epochs,
+            patience=self.patience,
+            batch_size=self.batch_size,
+            early_stopping=self.early_stopping,
+            weight_decay=self.weight_decay,
+            stack=self.stack,
+            pad_to=self.pad_to,
+            dtype=DTYPE,
+            nominal_rows=nominal,
+            blocks=self._block_slices(),
+        )
+        factory = self._factory(x.shape[1], y.shape[1])
+        session = stack_session()
+        if session is not None:
+            # A torch stack of several models (`_torch.groups`): its members train with theirs on the group's device, each
+            # with the numbers this call would give it alone.
+            result, device = session.fit(self, factory, x, y, y_mask, members, settings)
+        else:
+            with torch_scope(self.device, tf32=self.tf32, threads=THREADS_PER_FIT) as device:
+                result = train_members(factory, x, y, y_mask, members, device=device, **settings)
         failed = np.flatnonzero(result.failed)
         if failed.size:
             raise ValueError(
@@ -825,7 +828,9 @@ class TorchModel(BaseModel):
 
     def _members_out(self, fitted: _Fitted, rows: np.ndarray) -> np.ndarray:
         """(members, rows, outputs): each member's forecasts of `rows`, in the scope of the fit (a loop's numbers move with
-        the thread count)."""
+        the thread count). A torch stack's members (`_torch.groups`) are predicted by their group, in that scope."""
+        if getattr(fitted.result, "stacked", False):
+            return fitted.result.predict(np.asarray(rows, dtype=np.float64))
         with _torch_scope_of(self, fitted.device):
             return fitted.result.predict(np.asarray(rows, dtype=np.float64))
 

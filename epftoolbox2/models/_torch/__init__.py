@@ -5,6 +5,8 @@
 - `optim`: `StackedAdam` (a learning rate per member, an active mask) and the loop's `Adam`, in the research trainer's arithmetic.
 - `runtime`: `resolve_device`, `torch_scope(device, tf32=False, threads=1)`, `runtime_fields(...)`, `pin_torch_threads`.
 - `finetune`: `fine_tune(model, windows, ...) -> FineTuneResult`, with the cut asserted.
+- `groups`: torch stacks, the models of a run that share a stack key trained together in padded stacks on one device, each
+  model's records its own run's to the bit (`ModelPipeline.run`; `TORCH_STACKS=off` runs each alone).
 
 Importing this package imports no torch; its modules `trainer` and `finetune` do (`MissingExtraError` without it), and `runtime`
 imports it in each function, so `_worker._pool_init` can use it for a torch family only.
