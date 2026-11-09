@@ -578,6 +578,19 @@ class PooledModel:                          # one fit over the zones of run(data
                  zone_feature: Optional[str] = "onehot", missing: str = "raise",
                  name: Optional[str] = None): ...
 
+class HistGBModel(BaseModel):               # scikit-learn's HistGradientBoostingRegressor, pooled over periods by default
+    def __init__(self, predictors: List[str], training_window: Union[int, str] = "expanding",
+                 refit: Optional[str] = "7D", periods: str = "pooled", loss: str = "l1", max_iter: int = 500,
+                 learning_rate: float = 0.05, max_leaf_nodes: int = 31, min_samples_leaf: int = 20,
+                 l2_regularization: float = 1.0, max_features: float = 0.5, random_state: int = 0,
+                 name: str = "hgb", *, scaler: Any = INVARIANT_TARGET, newest_target: str = "d-1",
+                 binary_mask: Optional[str] = None): ...
+
+class ResidualModel(BaseModel):             # a base's out-of-sample forecasts + a learner fitted on their residuals
+    def __init__(self, base: Union[BaseModel, str], learner: BaseModel,
+                 training_window: Union[int, str] = "expanding", refit: Optional[str] = "7D",
+                 warmup: Optional[int] = None, name: str = "residual"): ...
+
 class TorchModel(BaseModel):                # a torch.nn.Module class of your own on the library's trainer ([torch])
     def __init__(self, module: Union[str, type], predictors: Union[List, Callable, None] = None,
                  inputs: Optional[Dict[str, List[str]]] = None, module_params: Optional[Dict[str, Any]] = None,
@@ -606,6 +619,10 @@ class MLPDailyModel(TorchModel):            # nets.MLP, output="day": one networ
                  newest_target: str = "d-1", binary_mask: Optional[str] = None, scaler="standard",
                  name: str = "mlp_daily", module_hash: Optional[str] = None): ...
 ```
+
+`HistGBModel` and `ResidualModel` are in [Residual Model](/epftoolbox2/models/residual/): `INVARIANT_TARGET` is
+`{"name": "asinh", "params": {"apply_to": "target", "standardise": False}}` (`epftoolbox2.models.hgb`), the predictors as they are
+and the target as epftoolbox's Invariant; `base` is a model or the name of one added to the pipeline before the `ResidualModel`.
 
 `TorchModel`, `MLPHourlyModel` and `MLPDailyModel` build, save and load without torch, and need the `[torch]` extra to fit (the
 pre-flight names it). Their seeds are a hash of `random_state` and the fit alone and a forecast is their mean in target units; a

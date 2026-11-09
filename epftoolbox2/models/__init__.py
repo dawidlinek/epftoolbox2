@@ -9,6 +9,8 @@ from .naive import NaiveModel
 from .pooled import PooledModel
 from .torch_model import TorchModel
 from .mlp import MLPDailyModel, MLPHourlyModel
+from .hgb import HistGBModel
+from .residual import ResidualModel
 
 __all__ = [
     "BaseModel",
@@ -21,6 +23,8 @@ __all__ = [
     "TorchModel",
     "MLPHourlyModel",
     "MLPDailyModel",
+    "HistGBModel",
+    "ResidualModel",
     "PredictorContext",
     "PredictorPlan",
     "Use",

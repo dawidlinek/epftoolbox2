@@ -10,6 +10,7 @@ from epftoolbox2.data.transformers import ResampleTransformer, LagTransformer
 from epftoolbox2.data.validators import CoverageValidator
 from epftoolbox2.ensembles import AverageEnsemble
 from epftoolbox2.models import (
+    HistGBModel,
     LassoCVModel,
     LEARModel,
     MLPDailyModel,
@@ -17,6 +18,7 @@ from epftoolbox2.models import (
     NaiveModel,
     OLSModel,
     PooledModel,
+    ResidualModel,
     RidgeModel,
     TorchModel,
 )
@@ -786,7 +788,7 @@ class TestModelPipelineParameterFidelity:
                     name="T",
                 ),
                 MLPHourlyModel(
-                    ["price_d-1"], hidden=[16, 8], dropout=0.1, activation="gelu", refit=None, seeds=1, name="H"
+                    ["price_d-1"], hidden=[16, 8], dropout=0.1, activation="gelu", refit=None, seeds=1, name="MH"
                 ),
                 MLPDailyModel(
                     ["price_h05_d-1"],
@@ -804,6 +806,29 @@ class TestModelPipelineParameterFidelity:
                     zone_feature="code",
                     missing="zero",
                     name="P",
+                ),
+                HistGBModel(
+                    ["price_d-1", "period"],
+                    training_window=56,
+                    refit="1D",
+                    loss="l2",
+                    max_iter=99,
+                    learning_rate=0.1,
+                    max_leaf_nodes=15,
+                    min_samples_leaf=7,
+                    l2_regularization=0.5,
+                    max_features=0.8,
+                    random_state=3,
+                    name="H",
+                ),
+                # A base by name, and a base and learner nested in it.
+                ResidualModel(
+                    "O", HistGBModel(["price_d-1", "base_fc_d+{horizon}"], periods="each"), 91, "14D", 30, "Res"
+                ),
+                ResidualModel(
+                    RidgeModel(["price_d-1"], training_window=40, alphas=[2.0], name="b"),
+                    HistGBModel(["price_d-1", "base_fc_h05_d+{horizon}"], max_iter=12),  # its name isn't written
+                    name="Res2",
                 ),
             ],
             "ensembles": [AverageEnsemble(["O", "L"], top=1, by="validation", name="best")],

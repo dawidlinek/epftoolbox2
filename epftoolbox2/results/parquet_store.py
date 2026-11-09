@@ -768,6 +768,28 @@ def _models_in(save_dir: Path, model: Optional[str]) -> List[str]:
     return [stem for stem in stems if not is_ensemble_manifest(manifest_path(save_dir / f"{stem}.jsonl"))]
 
 
+def _refuse_residual_models(save_dir: Path, stems: List[str]) -> None:
+    """A ValueError, before anything is converted, where a model of `stems` is a `ResidualModel` (its manifest's
+    `model_class`) or the base of one in `save_dir` (`<name>.base`): the residual's records hold `base_prediction`, which the
+    Parquet schema has no column for, and it reads its base's results as JSONL."""
+    from .manifest import manifest_path
+
+    residual = []
+    for stem in _models_in(save_dir, None):
+        path = manifest_path(save_dir / f"{stem}.jsonl")
+        if path.is_file() and json.loads(path.read_text()).get("model_class") == "ResidualModel":
+            residual.append(stem)
+    kept = set(residual) | {f"{stem}.base" for stem in residual}
+    found = [stem for stem in stems if stem in kept]
+    if found:
+        raise ValueError(
+            f"{save_dir}: {', '.join(found)} are a ResidualModel's results or its base's (<name>.base), which stay JSONL: the "
+            "residual model's records hold `base_prediction`, which the Parquet results schema has no column for, and it reads "
+            "its base's results as JSONL. Nothing was converted. Convert the other models one by one (model=...), or keep the "
+            "directory as JSONL"
+        )
+
+
 def _lock_model(save_dir: Path, stem: str) -> Callable[[], None]:
     lock_path = save_dir / f"{stem}.lock"
     try:
@@ -838,8 +860,11 @@ def convert(save_dir: Any, to: str, model: Optional[str] = None) -> List[Tuple[s
     if to not in ("parquet", "jsonl"):
         raise ValueError(f"to must be 'parquet' or 'jsonl', got {to!r}")
     save_dir = Path(save_dir)
+    stems = _models_in(save_dir, model)
+    if to == "parquet":
+        _refuse_residual_models(save_dir, stems)
     done = []
-    for stem in _models_in(save_dir, model):
+    for stem in stems:
         source = save_dir / f"{stem}.{'jsonl' if to == 'parquet' else 'parquet'}"
         target = save_dir / f"{stem}.{to}"
         if not source.exists():

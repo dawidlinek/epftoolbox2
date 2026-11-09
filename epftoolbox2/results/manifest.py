@@ -144,6 +144,9 @@ _PROVENANCE_FIELDS += ("card",)
 # `weights_history`: every set of weight file hashes a results file's forecasts were made with, in the order first used, once a
 # resume accepted other weights (`allow_manifest_mismatch=True`); a resume warns while the file mixes them (`_weights_on_file`).
 _PROVENANCE_FIELDS += ("weights_history",)
+# `residual_base`: a `ResidualModel`'s base's card, runtime and weights, with its first issue day (the warm-up's), for
+# `report.provenance()`; the base's own manifest compares them, and this one's `residual` field its configuration.
+_PROVENANCE_FIELDS += ("residual_base",)
 
 # Compared to decide whether an existing manifest is compatible with the current run. Order is the
 # order differences are reported in.
@@ -177,6 +180,9 @@ _COMPARED_FIELDS += ("runtime", "weights")
 # What one fit of a model of day or pooled units holds (`models._units`): `unit_kind` "day" or "pooled", and how its targets
 # are transformed, "per_period" or "pooled"; no key for a period model. Either changes every forecast.
 _COMPARED_FIELDS += ("unit_kind", "target_transform")
+# A `ResidualModel` (`models.residual`): the hash of its base's configuration as the base's own manifest records it
+# (`base_manifest`), since the base's forecasts are the learner's inputs and targets; None (and no key) for any other model.
+_COMPARED_FIELDS += ("residual",)
 
 # How a run chooses a forecast's training rows: `Manifest.training_cut`.
 TRAINING_CUT_BY_DATE = {"rows": "dates"}
@@ -351,6 +357,12 @@ class Manifest:
     # own Invariant) or "pooled"; None (and no key) for a period model. Compared on resume.
     unit_kind: Optional[str] = None
     target_transform: Optional[str] = None
+    # A `ResidualModel`: {"base_manifest": the hash of its base's configuration (`configuration_digest` of the base's own
+    # manifest)}, or {} for a run of a base held in memory; None (and no key) for any other model. Compared on resume.
+    residual: Optional[Dict[str, Any]] = None
+    # A `ResidualModel` whose base has a card: {"card", "runtime", "weights", "first_issue_day"}; None (and no key) otherwise.
+    # Provenance: never compared.
+    residual_base: Optional[Dict[str, Any]] = None
 
     def differences(self, existing: "Manifest", skip: Sequence[str] = ()) -> List[str]:
         """Human-readable list of compared fields that disagree with `existing`; empty if compatible."""
@@ -420,6 +432,9 @@ class Manifest:
             if out[name] is None:
                 del out[name]
         for name in ("unit_kind", "target_transform"):  # a period model
+            if out[name] is None:
+                del out[name]
+        for name in ("residual", "residual_base"):  # no ResidualModel, or a base without a card
             if out[name] is None:
                 del out[name]
         return out
@@ -681,6 +696,8 @@ def build_manifest(
         record_schema=RECORD_SCHEMA,
         fit_path=fit_path,
         pooled=getattr(model, "_pooled", None),  # a PooledModel's member (`models._pooled.member_of`)
+        residual=getattr(model, "_residual", None),  # a ResidualModel's base (`models.residual`)
+        residual_base=getattr(model, "_residual_base", None),
         **carded,
         **units,
     )
@@ -729,6 +746,13 @@ def is_ensemble_manifest(path: Union[str, Path]) -> bool:
     """Whether the manifest at `path` exists and is an ensemble's."""
     path = Path(path)
     return path.exists() and json.loads(path.read_text()).get("kind") == ENSEMBLE_KIND
+
+
+def configuration_digest(manifest: Dict[str, Any]) -> str:
+    """A hash of what a resume compares of a manifest (its `_COMPARED_FIELDS`, as a dict read from its file): equal for two runs
+    of one configuration on the same data over the same last day, whichever days they ran."""
+    kept = {name: manifest.get(name) for name in _COMPARED_FIELDS}
+    return hashlib.sha256(json.dumps(kept, sort_keys=True, default=str).encode()).hexdigest()
 
 
 def manifest_digest(manifest: Dict[str, Any]) -> str:
@@ -907,6 +931,7 @@ def check_and_write(
         manifest.kernels = _kernels_on_file(existing, manifest, model_name, path, has_existing_results)
         manifest.weights_history = _weights_on_file(existing, manifest, model_name, path, has_existing_results)
         manifest.created_at = existing.created_at  # keep the first run's provenance
+        manifest.residual_base = _earliest_base(existing.residual_base, manifest.residual_base)
         manifest.skipped = existing.skipped  # until this run finishes and says otherwise: it may not
         manifest.engine = existing.engine  # the same: until this run's fits from shared statistics are counted
         manifest.engine_check = existing.engine_check
@@ -946,6 +971,16 @@ def check_and_write(
         manifest.data_unverified = True
         _mark_rows_unverified(manifest, model_name, path, "they have no manifest")
     manifest.write(path)
+
+
+def _earliest_base(existing: Optional[Dict[str, Any]], mine: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """A `ResidualModel`'s `residual_base` after a resume: this run's card, with the earliest first issue day of the base over
+    the runs into the file, since its records' learners trained on base forecasts from then on (a later start would judge a
+    contaminated base clean over them)."""
+    if not existing or not mine:
+        return mine
+    days = [day for day in (existing.get("first_issue_day"), mine.get("first_issue_day")) if day]
+    return {**mine, "first_issue_day": min(days)} if days else mine
 
 
 def _kernels_on_file(

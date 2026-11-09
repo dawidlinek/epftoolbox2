@@ -1,7 +1,8 @@
 """Predictor lists for benchmark models from the literature, in this library's column naming.
 
-Both presets are day-ahead models. The papers index inputs by the target (delivery) day d; this library indexes
-columns by the issue day D of the row, and a forecast issued on D for horizon h targets D+h. For h = 1 (d = D+1):
+Both benchmark presets are day-ahead models (`tree_predictors` is LEAR's inputs, the period and the row's own period). The
+papers index inputs by the target (delivery) day d; this library indexes columns by the issue day D of the row, and a forecast
+issued on D for horizon h targets D+h. For h = 1 (d = D+1):
 
     paper         column on the row of D              built by
     p(d-1, ·)     price, or price_h00 .. price_h23    (DailyProfileTransformer)
@@ -88,6 +89,31 @@ def lear_predictors(
     return prices + exog + dummies
 
 
+def tree_predictors(
+    exogenous: Sequence[str],
+    price: str = "price",
+    freq: str = "1h",
+    calendar_prefix: str = "",
+) -> list[str]:
+    """Inputs of a tree pooled over the periods of a day (`HistGBModel(periods="pooled")`), the research's "global" rows
+    (`zoo_classic`'s `ztree.py`): every name of `lear_predictors` (the day's slot prices, slot values of each exogenous series and
+    weekday dummies, the same on every row of a date), then `"period"` (the row's period, 0 to P-1), then the row's own period
+    of the same blocks: the price of d-1, d-2, d-3 and d-7 (`price`, `price_d-1`, `price_d-2`, `price_d-6`) and each exogenous
+    series for d, d-1 and d-7 (`x_d+{horizon}`, `x`, `x_d-6`). With hourly data and one exogenous series that is
+    175 + 1 + 7 = 183 inputs, in the research's column order.
+
+    A `ResidualModel` learner adds its base's forecasts after them: `[f"base_fc_h{h:02d}_d+{{horizon}}" for h in range(24)]`
+    (the target day's, day-level) and `"base_fc_d+{horizon}"` (the row's own period), as the research's rows have them.
+
+    The data pipeline must produce what `lear_predictors` needs and the plain lags of the own-period names:
+    `LagTransformer(columns=[price], lags=[1, 2, 6], freq="day")` and `LagTransformer(columns=exogenous, lags=[-1, ..., -H, 6],
+    freq="day")`.
+    """
+    own = [price, f"{price}_d-1", f"{price}_d-2", f"{price}_d-6"]
+    own += [f"{x}{lag}" for x in exogenous for lag in ("_d+{horizon}", "", "_d-6")]
+    return [*lear_predictors(exogenous, price, freq, calendar_prefix), "period", *own]
+
+
 def expert_predictors(
     exogenous: Sequence[str] = ("load_forecast",),
     price: str = "price",
@@ -115,4 +141,4 @@ def expert_predictors(
     return own + exog + _weekday_columns(weekdays, calendar_prefix)
 
 
-__all__ = ["ORDERS", "WEEKDAYS", "expert_predictors", "lear_predictors", "profile_columns"]
+__all__ = ["ORDERS", "WEEKDAYS", "expert_predictors", "lear_predictors", "profile_columns", "tree_predictors"]

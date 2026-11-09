@@ -1304,6 +1304,92 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
         },
         *_torch_fields(4),
     ],
+    "HistGBModel": [
+        {"name": "name", "description": "Model display name", "required": False, "default": "hgb", "kind": "text"},
+        {
+            "name": "predictors",
+            "description": "Predictor column names, each read on the row's own period (presets.tree_predictors gives 183)",
+            "required": True,
+            "default": None,
+            "kind": "column_select",
+        },
+        {
+            "name": "training_window",
+            "description": "Training window in days, or 'expanding' (every row from the frame's first date)",
+            "required": False,
+            "default": "expanding",
+            "kind": "window",
+        },
+        {
+            "name": "refit",
+            "description": "Refit on a fixed calendar: 7D once a week (Mondays), 1D every day, 1MS once a month",
+            "required": False,
+            "default": "7D",
+            "kind": "text",
+        },
+        {
+            "name": "periods",
+            "description": "pooled: one fit over every period's rows (the period a feature where listed); each: one per period",
+            "required": False,
+            "default": "pooled",
+            "kind": "select",
+            "choices": ["pooled", "each"],
+        },
+        {
+            "name": "loss",
+            "description": "l1 (absolute error) or l2 (squared error)",
+            "required": False,
+            "default": "l1",
+            "kind": "select",
+            "choices": ["l1", "l2"],
+        },
+        {"name": "max_iter", "description": "Boosting iterations", "required": False, "default": 500, "kind": "int"},
+        {"name": "learning_rate", "description": "Learning rate", "required": False, "default": 0.05, "kind": "float"},
+        {"name": "max_leaf_nodes", "description": "Leaves per tree", "required": False, "default": 31, "kind": "int"},
+        {
+            "name": "min_samples_leaf",
+            "description": "Rows per leaf at least",
+            "required": False,
+            "default": 20,
+            "kind": "int",
+        },
+        {
+            "name": "l2_regularization",
+            "description": "L2 penalty of the leaf values",
+            "required": False,
+            "default": 1.0,
+            "kind": "float",
+        },
+        {
+            "name": "max_features",
+            "description": "Share of the predictors each split chooses from",
+            "required": False,
+            "default": 0.5,
+            "kind": "float",
+        },
+        {
+            "name": "random_state",
+            "description": "Seed of the feature subsets",
+            "required": False,
+            "default": 0,
+            "kind": "int",
+        },
+        {
+            "name": "newest_target",
+            "description": "Newest training target: d-1, or every target published by the issue time (needs an issue time)",
+            "required": False,
+            "default": "d-1",
+            "kind": "select",
+            "choices": ["d-1", "published"],
+        },
+        {
+            "name": "binary_mask",
+            "description": "Which rows decide the binary 0/1 columns: empty for each refit unit's own rows",
+            "required": False,
+            "default": None,
+            "kind": "text",
+        },
+    ],
     "MAEEvaluator": [],
     "RMSEEvaluator": [],
     "rMAEEvaluator": [
@@ -1739,12 +1825,14 @@ _MODELS = [
     "RidgeModel",
     "LEARModel",
     "NaiveModel",
+    "HistGBModel",
     "MLPDailyModel",
     "MLPHourlyModel",
     "TorchModel",
 ]
 # Not offered: `PooledModel` (registered in `COMPONENT_REGISTRY`, saved and loaded from YAML) fits over the frames of
-# `ModelPipeline.run(data={zone: frame})`, and the wizard builds and runs a pipeline on one CSV.
+# `ModelPipeline.run(data={zone: frame})`, and the wizard builds and runs a pipeline on one CSV. `ResidualModel` holds two
+# models (a base and a learner), which the wizard's one-model-at-a-time questions don't build; it loads from YAML.
 _EVALUATORS = [
     "MAEEvaluator",
     "RMSEEvaluator",
