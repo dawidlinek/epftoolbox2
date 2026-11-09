@@ -308,13 +308,14 @@ def scaled(scale):
 
 @pytest.mark.parametrize("pool", ["in process", "forked"])
 def test_two_local_classes_of_one_name_each_forecast_with_their_own(market, monkeypatch, pool):
-    """Classes without an import path share a key when they share a name (so a notebook cell run again resumes); each run hands
-    its workers its own class, in this process or in a pool of forked processes."""
+    """Classes without an import path are keyed by a token of each class object, so two of one name are two keys: each run
+    hands its workers its own class, in this process or in a pool of forked processes (which inherit the registry)."""
     if pool == "forked":
         monkeypatch.undo()
         monkeypatch.setenv("MAX_PROCESSES", "2")
     one, two = (TorchModel(module=scaled(s), predictors=DAY, name="s", **FAST) for s in (1.0, 2.0))
-    assert one._model_kwargs["module"] == two._model_kwargs["module"]
+    assert one._model_kwargs["module"] != two._model_kwargs["module"]
+    assert one.module_hash.startswith(tm.SESSION) and one.module_hash != two.module_hash
     first, second, again = (keyed(run(m, market, test=("2023-03-20", "2023-03-21"))._results) for m in (one, two, one))
     assert first and first == again and first != second
     if pool == "forked":
@@ -348,9 +349,8 @@ def test_a_module_reloaded_since_builds_its_new_class_and_the_old_model_its_old(
     importlib.reload(module)
     new = TorchModel(module=module.Net, predictors=["a_d-1"], name="new")
     assert new._model_kwargs["module"] == "user_nets_reload:Net"
-    assert (
-        old._model_kwargs["module"] == "<unsaved>user_nets_reload:Net"
-    )  # its class is no longer what the path imports
+    # Its class is no longer what the path imports: a key of its own, with the hash it was built with (the old file's).
+    assert old._model_kwargs["module"] == f"<unsaved>user_nets_reload:Net@{old.module_hash}"
     assert old.module_hash != new.module_hash
     with warnings.catch_warnings():
         warnings.simplefilter(
@@ -366,6 +366,8 @@ def test_a_module_reloaded_since_builds_its_new_class_and_the_old_model_its_old(
 NOTEBOOK_CELL = textwrap.dedent(
     """
     class CellNet(torch.nn.Module):
+        SCALE = 2.0
+
         def __init__(self, n_inputs, n_outputs):
             super().__init__()
             self.l = nets.Linear(n_inputs, n_outputs)
@@ -379,7 +381,7 @@ NOTEBOOK_CELL = textwrap.dedent(
 @pytest.fixture
 def kernel(monkeypatch):
     """A Jupyter kernel's `__main__`: a module with no file, each cell compiled under a name whose source `linecache` holds (as
-    IPython keeps it). `run_cell(n, source)` runs a cell and returns its `CellNet`; with `kept=False` its source isn't kept."""
+    IPython keeps it). `run_cell(n, source)` runs a cell and returns its `CellNet`; `kept=False` compiles it as `exec` does."""
     import linecache
     import types
 
@@ -397,39 +399,106 @@ def kernel(monkeypatch):
     return run_cell
 
 
-def test_a_notebook_class_is_hashed_by_its_cell_s_source(kernel):
-    """`__main__` has no file in a kernel: the hash reads each method's source through `linecache`, so the same cell run again
-    hashes alike and a changed one differently (both hashed the name before review 6l, and a resume mixed two networks); a
-    class whose source isn't kept gets a hash of its own, with a warning."""
-    first = tm.module_source_hash(kernel(1, NOTEBOOK_CELL))
-    again = tm.module_source_hash(kernel(2, NOTEBOOK_CELL))
-    changed = tm.module_source_hash(kernel(3, NOTEBOOK_CELL.replace("return self.l(x)", "return 3.0 * self.l(x)")))
-    assert first == again != changed
-    lost = kernel(4, NOTEBOOK_CELL, kept=False)
-    with pytest.warns(UserWarning, match="can't be read"):
-        model = TorchModel(module=lost, predictors=DAY, **FAST)
-    assert model.module_hash.startswith("unsourced-") and model.module_hash != tm.module_source_hash(
-        kernel(5, NOTEBOOK_CELL, kept=False)
-    )
+def test_a_class_without_a_module_file_is_a_token_of_its_class_object(kernel):
+    """A notebook's, `exec`'s or a function's class has no file to hash: its hash is a token of the class object, the same while
+    it stands as it is and another after the cell runs again (identical source or not) or after it is changed in place. Its
+    source can't say what it calls (another cell's layer, a global, a decorator), so two definitions are never alike."""
+    net = kernel(1, NOTEBOOK_CELL)
+    token = tm.module_source_hash(net)
+    assert token.startswith(tm.SESSION) and len(token) == 16 and tm.module_source_hash(net) == token
+    rerun = tm.module_source_hash(kernel(2, NOTEBOOK_CELL))
+    lost = tm.module_source_hash(kernel(3, NOTEBOOK_CELL, kept=False))
+    assert len({token, rerun, lost}) == 3
+    net.SCALE = 3.0
+    scaled_token = tm.module_source_hash(net)
+    net.forward = lambda self, x: -self.l(x)
+    assert len({token, scaled_token, tm.module_source_hash(net)}) == 3
 
 
-def test_a_notebook_cell_run_again_resumes_and_a_changed_one_refuses(market, tmp_path, kernel):
-    """The cell that defines a `__main__` class runs again (a new class of the same name and source): the run resumes into its
-    save_dir to the bit. A cell that changes the class refuses the resume (`module_hash`), never mixing two networks."""
+def test_a_notebook_run_resumes_in_its_session_and_refuses_once_the_class_is_defined_again(market, tmp_path, kernel):
+    """The same class object resumes an interrupted run to the bit; after the cell runs again, even unchanged, or after the
+    class is changed in place, a resume refuses (`ManifestMismatchError`, saying why), never mixing two networks in a file."""
     save_dir = tmp_path / "nb"
-    first = TorchModel(module=kernel(1, NOTEBOOK_CELL), predictors=DAY, name="t", **FAST)
-    ModelPipeline().add_model(first).run(market, "2023-03-20", "2023-03-21", horizon=1, save_dir=save_dir)
-    again = TorchModel(module=kernel(2, NOTEBOOK_CELL), predictors=DAY, name="t", **FAST)
-    assert again.module is not first.module and again._model_kwargs == first._model_kwargs
-    results = ModelPipeline.results_path(save_dir, again, "jsonl")
+    net = kernel(1, NOTEBOOK_CELL)
+
+    def resume(cls):
+        model = TorchModel(module=cls, predictors=DAY, name="t", **FAST)
+        ModelPipeline().add_model(model).run(market, "2023-03-20", "2023-03-21", horizon=1, save_dir=save_dir)
+        return ModelPipeline.results_path(save_dir, model, "jsonl")
+
+    results = resume(net)
     before = lines(results)
-    results.write_text("".join(f"{line}\n" for line in before[::2]))  # cut short
-    ModelPipeline().add_model(again).run(market, "2023-03-20", "2023-03-21", horizon=1, save_dir=save_dir)
+    results.write_text("".join(f"{line}\n" for line in before[::2]))  # interrupted
+    resume(net)
     assert lines(results) == before
-    edited = NOTEBOOK_CELL.replace("return self.l(x)", "return 3.0 * self.l(x) + 1.0")
-    changed = TorchModel(module=kernel(3, edited), predictors=DAY, name="t", **FAST)
-    with pytest.raises(ManifestMismatchError, match="module_hash"):
-        ModelPipeline().add_model(changed).run(market, "2023-03-20", "2023-03-21", horizon=1, save_dir=save_dir)
+    with pytest.raises(ManifestMismatchError, match="no module file.*allow_manifest_mismatch=True only if you know"):
+        resume(kernel(2, NOTEBOOK_CELL))  # the cell, unchanged, run again
+    net.SCALE = 3.0  # changed in place
+    with pytest.raises(ManifestMismatchError, match="no module file"):
+        resume(net)
+
+
+FILE_NET = textwrap.dedent(
+    """
+    import torch
+    from epftoolbox2 import nets
+    {imports}
+
+    class Block(torch.nn.Module):
+        def forward(self, x):
+            return torch.{act}(x)
+
+    class Net(torch.nn.Module):
+        SCALE = 2.0
+
+        def __init__(self, n_inputs, n_outputs):
+            super().__init__()
+            self.l = nets.Linear(n_inputs, n_outputs)
+            self.b = Block()
+
+        @torch.no_grad()
+        def reset(self):
+            pass
+
+        def forward(self, x):
+            return self.b(self.l(x)) * self.SCALE
+
+    {method}
+    """
+)
+
+
+DOUBLED = """
+    @doubled  # a decorator from another file that keeps no __wrapped__: this method's code is that file's
+    def head(self, x):
+        return x
+"""
+
+
+@pytest.mark.parametrize("elsewhere", [False, True], ids=["own code", "a method compiled elsewhere"])
+def test_a_file_class_is_its_file_s_hash_and_a_decorated_method_never_hides_it(tmp_path, monkeypatch, elsewhere):
+    """A class in a module file is that file's hash: a method under a decorator from another file is unwrapped to the file's own
+    code (`torch.no_grad()` keeps `__wrapped__`), and one whose code is the other file's (`doubled` keeps none) adds that code's
+    source to the file's hash, never replaces it, so a change to a layer next to the class in its file still shows. Without such
+    a method the hash is one by path (without torch) and as a class, class attributes and all."""
+    import importlib
+
+    monkeypatch.syspath_prepend(str(tmp_path))
+    (tmp_path / "plain_decorator.py").write_text(
+        "def doubled(f):\n    def inner(self, x):\n        return 2.0 * f(self, x)\n\n    return inner\n"
+    )
+    imports, method = (
+        ("from plain_decorator import doubled", textwrap.indent(textwrap.dedent(DOUBLED), "    "))
+        if elsewhere
+        else ("", "")
+    )
+    hashes = []
+    for act in ("relu", "tanh"):
+        name = f"file_net_{act}_{int(elsewhere)}"
+        (tmp_path / f"{name}.py").write_text(FILE_NET.format(act=act, imports=imports, method=method))
+        hashes.append(tm.module_source_hash(importlib.import_module(name).Net))
+        assert (tm.module_source_hash(f"{name}:Net") == hashes[-1]) is not elsewhere
+    assert hashes[0] != hashes[1] and not hashes[0].startswith(tm.SESSION)
 
 
 # --- 3. YAML round trip and a changed module (prototype) ------------------------------------------------------------------

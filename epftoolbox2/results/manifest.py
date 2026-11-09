@@ -211,6 +211,19 @@ class ManifestMismatchError(ValueError):
     """An existing results directory was produced with a different configuration than this run."""
 
 
+def _session_module_note(theirs: Any, mine: Any) -> str:
+    """Why a network whose class has no module file refuses a resume (`models.torch_model.SESSION` hashes), or ""."""
+    hashes = [params.get("module_hash") if isinstance(params, dict) else None for params in (theirs, mine)]
+    if hashes[0] == hashes[1] or not any(isinstance(h, str) and h.startswith("session-") for h in hashes):
+        return ""
+    return (
+        " (the network's class has no module file, as in a notebook, so its runs resume only in the same session with the "
+        "same, unchanged class object: a cell run again, a class changed in place or a restart makes it another class to a "
+        "resume. Define the network in a module file to resume across sessions; pass allow_manifest_mismatch=True only if you "
+        "know the class is unchanged)"
+    )
+
+
 # Entries of a carded family's `runtime` recorded but never compared: a resume where one differs warns. The device's model
 # (`models._torch.runtime.device_name`): bits are not known to hold across GPU models, nor known to differ across CPUs whose
 # kernels (`cpu_capability`, compared) are the same.
@@ -380,6 +393,8 @@ class Manifest:
                 note = _OLD_RESULTS_NOTE if name == "training_cut" and theirs is None else ""
                 if name == "save_coefficients":
                     note = " (None: records with their coefficients; False: written with save_coefficients=False)"
+                if name == "model_params":
+                    note = _session_module_note(theirs, mine)
                 if name == "fit_path":
                     note = (
                         " (None: the model path, engine off or a model the engine fits on it; 'engine-1': fits from shared "
