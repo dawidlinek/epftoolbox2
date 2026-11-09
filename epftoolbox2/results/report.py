@@ -1142,13 +1142,16 @@ class EvaluationReport:
 
     def availability(self) -> pd.DataFrame:
         """The inputs of each model that its rule puts after the issue time or that have no rule, as a run with
-        `availability="warn"` found them. Empty, with the same columns, when there is nothing to list.
+        `availability="warn"` found them, and every series a sequence model reads (`models._history`), late or not. Empty, with
+        the same columns, when there is nothing to list.
 
         Columns: `model`, `predictor`, `role` (`predictor`, `training target`, or what a predictor function read it with:
-        `ctx.value`, `ctx.published`), `status` (`late` or `no rule`), `list` (the hash of a predictor function's list; empty
-        for fixed lists and for what the function only read), `periods` and `horizons` (the exact uses of the row, such as
-        `10-23` and `1-7`), `rule`, `known` and `issued` (relative to the issue day D, on the day and period it comes
-        latest), and `note` (an assumption or setting that would make it known in time).
+        `ctx.value`, `ctx.published`; a sequence model's `target`, `past` or `known_ahead`), `status` (`late`, `no rule`, or
+        `ok` for a sequence model's series read in time), `list` (the hash of a predictor function's list; empty for fixed lists
+        and for what the function only read), `periods` and `horizons` (the exact uses of the row, such as `10-23` and `1-7`),
+        `rule`, `known` and `issued` (relative to the issue day D, on the day and period it comes latest), and `note` (an
+        assumption or setting that would make it known in time). With a sequence model's rows also `newest` (how far each series
+        is read, relative to D) and `vintage` (its rule's class), empty on the other rows.
 
         A report built from `save_dir` shows what the manifests hold, for every test period the results were run on.
         """

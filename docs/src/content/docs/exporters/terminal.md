@@ -40,9 +40,10 @@ exporter = TerminalExporter(show=["summary"])
 
 ## Output
 
-If the run has anything in [`report.availability()`](/epftoolbox2/model-pipeline/information-set/#what-warn-lists), it comes first,
-whatever `show` says: inputs not known at the issue time, or without a rule, with their periods and horizons. The rule itself is left
-out for width. With nothing to list this table isn't printed.
+If the run has anything late or without a rule in [`report.availability()`](/epftoolbox2/model-pipeline/information-set/#what-warn-lists),
+it comes first, whatever `show` says: inputs not known at the issue time, or without a rule, with their periods and horizons. The rule
+itself is left out for width. With nothing to list this table isn't printed. The series a sequence model reads in time (status `ok`)
+follow in a table of their own, with how far each is read (`newest`) and its vintage class.
 
 After it come the inputs read from an archive of revised values, the rows of
 [`report.vintages()`](/epftoolbox2/model-pipeline/results/#vintage-classes-of-the-inputs) whose class is `latest_revision` or
