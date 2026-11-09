@@ -303,8 +303,9 @@ class ResidualModel(BaseModel):
             )
         if not getattr(type(learner), "_residual_learner_ok", True):
             raise ValueError(
-                f"{where}: {type(learner).__name__} isn't supported as a learner in this step (the learner runs in the "
-                "ResidualModel's pool, without its own executor config and torch threads): use HistGBModel or a linear model"
+                f"{where}: {type(learner).__name__} isn't supported as a learner in this step (the learner stage runs in the "
+                "ResidualModel's pool, which doesn't pin torch's threads): use a tree (HistGBModel, LightGBMModel, "
+                "XGBoostModel, CatBoostModel) or a linear model"
             )
         given = [key for key in _row_target.PARAMETERS if getattr(learner, key, None) is not None]
         if given:
@@ -397,6 +398,11 @@ class ResidualModel(BaseModel):
 
     def _runtime_fields(self) -> Dict[str, Any]:
         return self.learner._runtime_fields()
+
+    def _executor_config(self) -> tuple:
+        """The learner's: the learner stage's pool runs its fits (a tree of `threads` threads per fit takes fewer processes,
+        XGBoost on a GPU one). The base runs with its own, as a plain run."""
+        return self.learner._executor_config()
 
     def _preflight(self, seen: Optional[Dict] = None) -> List[Any]:
         """The learner's and the base's: the run fits both."""
@@ -722,6 +728,8 @@ class ResidualModel(BaseModel):
             base, base_check = self._base_check  # the copy `_check_inputs` checked, for this base as it is now
         self._base_check = None
         start = self._warmup_start(base, data, target, largest, planned, freq, rules, span)
+        # What the learner stage's pool can't run (a tree's `threads > 1` where pools fork) refuses before the base runs.
+        getattr(self.learner, "_check_pool_settings", lambda: None)()
         if save_to is not None and not allow_manifest_mismatch:
             self._refuse_before_the_base(save_to, start)
         self._warn_about_the_base_s_masks(base)

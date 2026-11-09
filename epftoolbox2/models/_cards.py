@@ -382,17 +382,44 @@ def version_matches(version: str, specifiers: Iterable[Tuple[str, str]]) -> bool
     return candidate is not None and all(_matches(candidate, operator, text) for operator, text in specifiers)
 
 
+# Distributions that install a runtime distribution's module under another name, each of which may stand in for it:
+# `xgboost-cpu` is XGBoost's CPU-only build, of the same versions but other forecasts (its column sampling differs). A pin and
+# the manifest's key keep the runtime distribution's name, and the version recorded names the stand-in, `"3.4.1
+# (xgboost-cpu)"`, so a resume across builds refuses. Only these: a module's other providers are never looked up.
+RUNTIME_ALIASES: Dict[str, Tuple[str, ...]] = {"xgboost": ("xgboost-cpu",)}
+
+
+def runtime_providers(name: str, seen: Optional[Dict] = None) -> List[str]:
+    """The installed distributions among `name` and its stand-ins (`RUNTIME_ALIASES`), in that order: one where the runtime is
+    installed, none where it isn't, two or more where builds that overwrite one another's module are installed together (the
+    pre-flight refuses that)."""
+    key = ("providers", name)
+    if seen is not None and key in seen:
+        return seen[key]
+    found = []
+    for candidate in (name, *RUNTIME_ALIASES.get(name, ())):
+        try:
+            importlib.metadata.distribution(candidate)
+        except importlib.metadata.PackageNotFoundError:
+            continue
+        found.append(candidate)
+    if seen is not None:
+        seen[key] = found
+    return found
+
+
 def installed_distribution(name: str, seen: Optional[Dict] = None) -> Optional[Tuple[str, Optional[str]]]:
-    """(version, VCS commit or None) of an installed distribution, or None when it isn't installed. The commit is PEP 610's
-    `vcs_info.commit_id` (`direct_url.json`) of a package installed from a repository. `seen` keeps answers for one pre-flight."""
+    """(version, VCS commit or None) of an installed distribution, or of its installed stand-in (`RUNTIME_ALIASES`) where it
+    isn't, or None. The commit is PEP 610's `vcs_info.commit_id` (`direct_url.json`) of a package installed from a repository.
+    `seen` keeps answers for one pre-flight."""
     key = ("distribution", name)
     if seen is not None and key in seen:
         return seen[key]
-    try:
-        distribution = importlib.metadata.distribution(name)
-    except importlib.metadata.PackageNotFoundError:
+    providers = runtime_providers(name, seen)
+    if not providers:
         found = None
     else:
+        distribution = importlib.metadata.distribution(providers[0])
         commit = None
         try:
             direct = distribution.read_text("direct_url.json")
@@ -407,12 +434,19 @@ def installed_distribution(name: str, seen: Optional[Dict] = None) -> Optional[T
 
 def runtime_versions(card: ModelCard, seen: Optional[Dict] = None) -> Dict[str, Optional[str]]:
     """Each runtime distribution of the card -> its version, `version@commit` for one installed from a repository, None when it
-    isn't installed: what a manifest records and a resume compares."""
+    isn't installed: what a manifest records and a resume compares. A stand-in build is named after the version, `"3.4.1
+    (xgboost-cpu)"` (and builds installed together, which the pre-flight refuses, all of them)."""
     out: Dict[str, Optional[str]] = {}
     for pin in card.runtime:
         name = parse_pin(pin)[0]
         found = installed_distribution(name, seen)
-        out[name] = None if found is None else (found[0] if found[1] is None else f"{found[0]}@{found[1]}")
+        if found is None:
+            out[name] = None
+            continue
+        text = found[0] if found[1] is None else f"{found[0]}@{found[1]}"
+        providers = runtime_providers(name, seen)
+        stand_ins = [provider for provider in providers if provider != name]
+        out[name] = f"{text} ({' + '.join(providers)})" if stand_ins else text
     return out
 
 
@@ -511,7 +545,18 @@ def card_problems(model: Any, seen: Optional[Dict] = None) -> List[Problem]:
             name, specifiers, commit = parse_pin(pin)
             found = installed_distribution(name, seen)
             install = f"pip install 'epftoolbox2[{card.extra}]'" if card.extra else f"pip install '{pin}'"
-            if found is None:
+            providers = runtime_providers(name, seen)
+            if len(providers) > 1:
+                problems.append(
+                    Problem(
+                        who,
+                        "runtime",
+                        f"{' and '.join(providers)} are both installed: they write the same module and give other numbers, "
+                        "so which one runs is unknown; uninstall all but one",
+                        card.extra,
+                    )
+                )
+            elif found is None:
                 problems.append(Problem(who, "runtime", f"needs {pin}, which is not installed: {install}", card.extra))
             elif commit is not None and not (found[1] or "").startswith(commit):
                 where = f"commit {found[1]}" if found[1] else "not from a repository"

@@ -188,6 +188,9 @@ COMPONENT_REGISTRY = {
         "MLPHourlyModel": "epftoolbox2.models.mlp",
         "MLPDailyModel": "epftoolbox2.models.mlp",
         "HistGBModel": "epftoolbox2.models.hgb",
+        "LightGBMModel": "epftoolbox2.models.gbm",
+        "XGBoostModel": "epftoolbox2.models.gbm",
+        "CatBoostModel": "epftoolbox2.models.gbm",
         "ResidualModel": "epftoolbox2.models.residual",
     },
     "ensembles": {

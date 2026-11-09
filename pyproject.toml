@@ -62,6 +62,22 @@ fast = [
 torch = [
     "torch>=2.9",
 ]
+# The gradient-boosted tree families (epftoolbox2/models/gbm.py), one extra per package, so each class's pre-flight asks for its
+# own: LightGBMModel, XGBoostModel, CatBoostModel; `gbm` installs the first two. XGBoost's Linux wheel depends on NVIDIA's
+# NCCL (about 300 MB, used only by multi-GPU training), and its releases from 3.3 need Python 3.12 (3.11 gets 3.2).
+lightgbm = [
+    "lightgbm>=4.5",
+]
+xgboost = [
+    "xgboost>=2.1",
+]
+# catboost has no 3.15 and no free-threaded (3.14t) wheels; a marker can't tell 3.14t from 3.14, so CI never installs it there.
+catboost = [
+    "catboost>=1.2.9; python_version < '3.15'",
+]
+gbm = [
+    "epftoolbox2[lightgbm,xgboost]",
+]
 dev = [
     "pytest>=7.4.0",
     "pytest-cov>=4.1.0",
