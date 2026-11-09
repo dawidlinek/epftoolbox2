@@ -385,6 +385,11 @@ class ResidualModel(BaseModel):
     def _runtime_fields(self) -> Dict[str, Any]:
         return self.learner._runtime_fields()
 
+    def _executor_config(self) -> tuple:
+        """The learner's: the learner stage's pool runs its fits (a tree of `threads` threads per fit takes fewer processes,
+        XGBoost on a GPU one). The base runs with its own, as a plain run."""
+        return self.learner._executor_config()
+
     def _preflight(self, seen: Optional[Dict] = None) -> List[Any]:
         """The learner's and the base's: the run fits both."""
         base = self.base if isinstance(self.base, BaseModel) else self._named_base
