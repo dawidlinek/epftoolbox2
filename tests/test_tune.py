@@ -141,6 +141,31 @@ def test_the_cut_is_on_local_days():
     assert len(cut) == 7 * 24 - 1  # 26 March has 23 hours in Warsaw
 
 
+def test_a_frame_too_short_for_a_trials_window_stops_the_search(df):
+    """28 days before the validation start and windows of 56 to 364 days: the first validation forecasts would train on 28
+    days whatever the window, so the search raises at the first such trial, naming the day the frame must start on; one
+    that reaches runs."""
+    short = df[df.index.tz_localize(None).normalize() >= pd.Timestamp("2023-02-20")]
+    windowed = BayesSearch(lambda p: make({"window": p["window"], "drivers": ["load"]}), {"window": [56, 84, 364]}, n_trials=3,
+                           sampler="random", seed=0)  # fmt: skip
+    with pytest.raises(ValueError, match=r"training window of \d+ days .* but the frame starts on 2023-02-20"):
+        windowed.run(short, horizon=2, validation=V)
+
+    # window 27 at horizon 1: rows from 20 February, the first day of the frame; a lag of a day needs the 19th
+    def lagging(params):
+        return OLSModel(params["lists"] + FIXED, training_window=27, name="ols")
+
+    plain = BayesSearch(lagging, {"lists": [["load_d+{horizon}"]]}, n_trials=1, rungs=[{"every_nth_day": 7}])
+    assert plain.run(short, horizon=1, validation=V).table()["validation_mae"].notna().all()
+    lagged = BayesSearch(
+        lagging, {"lists": [["load_d+{horizon}", "price_d-1"]]}, n_trials=1, rungs=[{"every_nth_day": 7}]
+    )
+    with pytest.raises(
+        ValueError, match="and its price_d-1 reads 1 day before that, but the frame starts on 2023-02-20"
+    ):
+        lagged.run(short, horizon=1, validation=V)
+
+
 @pytest.mark.parametrize(
     "kwargs, error, message",
     [

@@ -774,6 +774,9 @@ class BayesSearch:
             return _Score(None, error=reason)
         rung = self._rungs[r]
         model, fingerprint = self._model(values, rung.seeds, f"rungs[{r}]")
+        short = _reach_problem(model, run.frame, run.validation[0], run.horizons)
+        if short is not None:
+            raise ValueError(f"The trial of the settings {values}: {short}")
         if r == 0:  # every rung's seeds against this model, before the dear rungs run
             for i, other in enumerate(self._rungs):
                 if other.seeds is not None:
@@ -1065,6 +1068,42 @@ def requeue(journal: Union[str, Path]) -> Dict[str, Any]:
                 _set_up_rung(storage, study, int(name.rsplit("rung", 1)[1]), keep)
                 notes.append(f"Set up {name!r}, whose creator stopped before it did.")
     return {"requeued": requeued, "notes": notes}
+
+
+def _reach_problem(model: Any, frame: pd.DataFrame, first_day: str, horizons: Sequence[int]) -> Optional[str]:
+    """Why the frame is too short for a model of `refit=None` (a run checks a refit model's itself, `_check_reaches_back`):
+    the first validation forecasts train on the rows of their window, back to `training_span`'s first row (the newest target
+    on D-1), and a predictor's day lag reads that many days before it. A frame starting later trains them on fewer days
+    than the window says, silently, so the windows of a search would compare on different terms. None if it reaches."""
+    from ..models._calendar import EXPANDING, training_span
+    from ..models._contract import wall_clock
+    from ..models.base import _days_back
+
+    if getattr(model, "refit", None) is not None or not len(frame.index):
+        return None
+    widths = [m for m in getattr(model, "_members", ()) if m != EXPANDING and isinstance(m, (int, np.integer))]
+    if not widths:
+        return None
+    day = pd.Timestamp(first_day).date().toordinal()
+    first_row, width, horizon = min(
+        (int(training_span(day, int(w), int(h), -1)[0]), int(w), int(h)) for w in widths for h in horizons
+    )
+    predictors = getattr(model, "predictors", None)
+    names = [
+        name.replace("{horizon}", str(h)) for name in (predictors if isinstance(predictors, list) else []) for h in horizons
+    ]
+    lag, lagged = _days_back(name for name in names if isinstance(name, str))
+    needed = pd.Timestamp.fromordinal(first_row - lag).date()
+    starts = wall_clock(frame.index).min().date()
+    if starts <= needed:
+        return None
+    back = "" if not lag else f", and its {lagged} reads {lag} day{'s' if lag > 1 else ''} before that"
+    return (
+        f"{model.name}'s training window of {width} days at horizon {horizon} trains the first validation forecast "
+        f"({pd.Timestamp(first_day).date()}) on rows from {pd.Timestamp.fromordinal(first_row).date()}{back}, but the frame "
+        f"starts on {starts}: it would train on fewer days than its window says. Start the frame on {needed} or earlier, or "
+        "search smaller windows."
+    )
 
 
 def cut_frame(data: pd.DataFrame, validation_end: Any) -> pd.DataFrame:
