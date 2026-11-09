@@ -107,7 +107,46 @@ def _torch_fields(seeds: int) -> list[dict]:
             "choices": ["d-1", "published"],
         },
         {"name": "random_state", "description": "Base seed", "required": False, "default": 0, "kind": "int"},
+        {
+            "name": "batch_size",
+            "description": "Rows per training step",
+            "required": False,
+            "default": 64,
+            "kind": "int",
+        },
+        {
+            "name": "weight_decay",
+            "description": "Adam's L2 weight decay",
+            "required": False,
+            "default": 0.0,
+            "kind": "float",
+        },
+        {
+            "name": "stack",
+            "description": "auto (one network after another on a CPU, a padded stack on a GPU), loop or vmap",
+            "required": False,
+            "default": "auto",
+            "kind": "select",
+            "choices": ["auto", "loop", "vmap"],
+        },
+        {
+            "name": "tf32",
+            "description": "TF32 products on a GPU",
+            "required": False,
+            "default": False,
+            "kind": "confirm",
+        },
     ]
+
+
+_ACTIVATION_FIELD = {
+    "name": "activation",
+    "description": "Activation of the hidden layers",
+    "required": False,
+    "default": "relu",
+    "kind": "select",
+    "choices": ["relu", "gelu", "tanh", "sigmoid", "softplus", "elu", "selu", "silu", "leaky_relu"],
+}
 
 
 PARAM_SCHEMAS: dict[str, list[dict]] = {
@@ -1187,7 +1226,7 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
             "name": "hidden",
             "description": "Hidden layer widths as a JSON list",
             "required": False,
-            "default": [256, 128],
+            "default": (256, 128),
             "kind": "json",
         },
         {
@@ -1197,6 +1236,7 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
             "default": 0.1,
             "kind": "float",
         },
+        _ACTIVATION_FIELD,
         *_torch_fields(4),
     ],
     "MLPHourlyModel": [
@@ -1218,7 +1258,7 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
             "name": "hidden",
             "description": "Hidden layer widths as a JSON list",
             "required": False,
-            "default": [64],
+            "default": (64,),
             "kind": "json",
         },
         {
@@ -1228,6 +1268,7 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
             "default": 0.0,
             "kind": "float",
         },
+        _ACTIVATION_FIELD,
         *_torch_fields(3),
     ],
     "TorchModel": [
