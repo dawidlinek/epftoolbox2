@@ -22,6 +22,7 @@ from epftoolbox2.models import (
     PooledModel,
     ResidualModel,
     RidgeModel,
+    ShapeModel,
     TorchModel,
     XGBoostModel,
 )
@@ -874,6 +875,13 @@ class TestModelPipelineParameterFidelity:
                     RidgeModel(["price_d-1"], training_window=40, alphas=[2.0], name="b"),
                     HistGBModel(["price_d-1", "base_fc_h05_d+{horizon}"], max_iter=12),  # its name isn't written
                     name="Res2",
+                ),
+                # The learner nested in it, with its own window, refit rule and newest target.
+                ShapeModel(
+                    "price_1h_fc_d+{horizon}",
+                    OLSModel(["load_hour_dev_d+{horizon}"], training_window=[56, 91], refit="7D", fit_intercept=True),
+                    native="2025-10-01",
+                    name="Shape2",
                 ),
             ],
             "ensembles": [AverageEnsemble(["O", "L"], top=1, by="validation", name="best")],
