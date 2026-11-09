@@ -522,12 +522,15 @@ def test_stacked_records_equal_each_model_s_own(market, monkeypatch, stacks, cas
 
 
 def test_a_pool_of_forked_processes_gives_each_model_s_own_records(market, monkeypatch):
+    """Two refit blocks, so jobs of each block, and of either, in either process."""
     models = loop_of(6)
-    own = alone(models, market, monkeypatch)
+    two_blocks = ("2023-03-13", "2023-03-26")
+    own = alone(models, market, monkeypatch, test=two_blocks)
+    assert len({key[0] for key in own["m00"]}) == 14  # run days of both blocks
     monkeypatch.setenv("MAX_PROCESSES", "2")
     monkeypatch.setattr(groups, "ProcessPoolExecutor", concurrent.futures.ProcessPoolExecutor)
     monkeypatch.setenv(groups.STACK_MEMBERS_VAR, "8")  # several jobs, so both processes work
-    same(own, records(run_pipeline(models, market)))
+    same(own, records(run_pipeline(models, market, test=two_blocks)))
 
 
 # --- resume, crash ---------------------------------------------------------------------------------------------------------
