@@ -1065,3 +1065,18 @@ def test_the_adapter_suite_s_calendar_counts(kind):
         return KINDS[kind](names, name=name, **params)
 
     suite.check_quarter_hours(make, quarter, ("2023-02-20", "2023-02-21"))
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_with_validation_each_window_is_a_plain_run_over_it(market, kind):
+    """A run with a validation and a test window: each window's records are those of a plain run over it alone, `window`
+    aside, as for a period unit (a call holds the block whatever the windows hold)."""
+    from epftoolbox2.pipelines import ModelPipeline
+
+    model = KINDS[kind]
+    validation, test = ("2023-03-13", "2023-03-21"), ("2023-03-24", "2023-04-02")
+    report = ModelPipeline().add_model(model(**SEES_CALL)).run(market, validation=validation, test=test, horizon=2)
+    records = report.refs["Model"]._results
+    for name, (start, end) in (("validation", validation), ("test", test)):
+        alone = keyed(model(**SEES_CALL).run(market, start, end, horizon=2)._results)
+        assert keyed([r for r in records if r["window"] == name], "window") == alone
