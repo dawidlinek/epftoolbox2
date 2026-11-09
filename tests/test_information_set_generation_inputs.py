@@ -46,13 +46,26 @@ def test_no_pattern_gives_another_sun_column_a_rule():
         assert info.resolve(name).rule is None, name
 
 
-def test_installed_capacity_is_static_with_its_archive_s_newest_revision():
-    """Decision 8: A68 is due a week before the year it is for begins, so every row holds a value out before its year did."""
+def test_installed_capacity_is_known_a_week_ahead_with_its_archive_s_newest_revision():
+    """Decision 8: A68 is due a week before the year it is for begins, so every row holds a value out before its year did, and
+    a lead of up to 7 days is known (on 31 December, next year's value, due on 25 December). A longer lead can read next
+    year's value before it is due: late at every period, refused at "raise". Read as out at 00:00 seven days before each date,
+    both of the data's zone, so in Lisbon as in Warsaw."""
     info = InformationSet()
     for name in ["installed_capacity_solar", "installed_capacity_wind_onshore_d+1", "installed_capacity_solar_d+7"]:
         col = info.resolve(name)
-        assert (col.key, col.rule.kind, col.rule.vintage) == ("installed_capacity_*", "static", "latest_revision")
-    assert violations(["installed_capacity_solar_d+{horizon}"], horizon=7) == (set(), set())
+        assert (col.key, col.rule.kind, col.rule.vintage) == ("installed_capacity_*", "published", "latest_revision")
+    names = ["installed_capacity_solar_d+7", "installed_capacity_solar_d-1", "installed_capacity_solar_d+8"]
+    for index in (
+        pd.date_range("2024-12-01", "2025-01-20", freq="h", tz=zone) for zone in ("Europe/Warsaw", "Europe/Lisbon")
+    ):
+        found, unknown = violations(names, horizon=1, start="2024-12-20", end="2025-01-05", index=index)
+        assert unknown == set()
+        assert _refused_periods(found) == {"installed_capacity_solar_d+8": set(range(24))}
+    with pytest.raises(InformationSetError, match="installed_capacity_solar_d\\+8"):
+        info.check(
+            expand(["installed_capacity_solar_d+8"], horizon=1), "price", "1h", index, "2024-12-27", "2024-12-27"
+        )
     # A plain `installed_capacity` (no production type) is no ENTSO-E column: no rule.
     assert info.resolve("installed_capacity").rule is None
 
@@ -60,10 +73,10 @@ def test_installed_capacity_is_static_with_its_archive_s_newest_revision():
 def test_a_prefixed_entsoe_source_s_capacity_gets_the_rule_from_its_source():
     prefixed = EntsoeSource("PL", "key", type=["installed_capacity"], prefix="pl")
     rules = source_rules([prefixed])
-    assert rules["pl_installed_capacity_*"].kind == "static"
+    assert rules["pl_installed_capacity_*"].kind == "published"
     assert rules["pl_installed_capacity_*"].vintage == "latest_revision"
     info = InformationSet().with_source_rules([prefixed])
-    assert info.resolve("pl_installed_capacity_solar_d+1").rule.kind == "static"
+    assert info.resolve("pl_installed_capacity_solar_d+1").rule.kind == "published"
     assert InformationSet().resolve("pl_installed_capacity_solar").rule is None  # outside a source-aware run, no rule
     # A source without the type, or without a prefix, adds nothing.
     assert "installed_capacity_*" not in source_rules([EntsoeSource("PL", "key", type=["installed_capacity"])])

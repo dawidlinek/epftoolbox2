@@ -74,9 +74,11 @@ refused; the benchmark above is its forecast of D, out on D-1. To score the D+1 
   The information set judges it at the end of D-1 by the rule of `generation_*`, and refuses the window ending on D
   (`lag_days=0`), whose last hour is out after midnight.
 - **The installed capacity.** `EntsoeSource(type=["installed_capacity"])` gives `installed_capacity_<type>`, one value a year
-  carried over every row of it by `ResampleTransformer`. Its built-in rule is `static` (vintage `latest_revision`): A68 is due a
-  week before the year it is for begins, so every row holds a value out before its year. A year's value moves only on 1 January,
-  so a proxy follows growth within the year better.
+  carried over every row of it by `ResampleTransformer`. A68 is due a week before the year it is for begins, so every row holds
+  a value out before its year, and the built-in rule knows a date's value seven days ahead: `installed_capacity_solar_d+7` is
+  known, a longer lead is refused. Its class is `latest_revision`: the archive serves each year's newest revision, which may be
+  a later correction than what was out when a backtest's forecast was issued. A year's value moves only on 1 January, so a
+  proxy follows growth within the year better.
 
 ## What the Parameters Do
 

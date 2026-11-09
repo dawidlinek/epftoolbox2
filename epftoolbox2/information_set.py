@@ -654,9 +654,16 @@ _A31_NOTE = "A65/A31 week-ahead load forecast: Fridays for the next week (Art. 6
 # at 10:00 Brussels, two hours before the 12:00 CET day-ahead gate closure, in every zone (Reg. 543/2013 Art. 6(2)(c)).
 _A31 = Availability.weekly("friday", "10:00", note=_A31_NOTE, vintage=_REVISED, week_zone=DATA_ZONE)
 # A68 installed capacity per production type: one value a year, due one week before the end of the year before (Reg. 543/2013
-# Art. 14(1)(a)), so every row of year Y holds a value out before Y began. The archive holds the newest revision of it.
-_CAPACITY = Availability.static(
-    note="A68 installed capacity: the year's value, due a week before the year begins (Art. 14(1)(a))", vintage=_REVISED
+# Art. 14(1)(a)), so every row of year Y holds a value out before Y began. Read as out at 00:00 seven days before each of its
+# dates, both of the data's zone (timezone None): so for 1 January on its deadline, early enough for every other day of the
+# year, and a lead of more than 7 days (`installed_capacity_solar_d+8`), which can reach next year's value before it is due, is
+# late. The archive holds the newest revision of it.
+_CAPACITY = Availability.published(
+    "00:00",
+    7,
+    timezone=None,
+    note="A68 installed capacity: the year's value, due a week before the year begins (Art. 14(1)(a))",
+    vintage=_REVISED,
 )
 # SolarGeometryTransformer's columns (`data.transformers.solar_geometry.COLUMNS`): functions of the row's instant and the
 # transformer's sites, so known at any time and at any shift.

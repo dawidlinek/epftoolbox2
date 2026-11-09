@@ -274,9 +274,12 @@ Installed generation capacity per production type (A68, year-ahead) in MW, as `i
 same type names as generation (e.g. `installed_capacity_solar`, `installed_capacity_wind_onshore`). There is one
 value per year, stamped at local midnight of 1 January. If that lies before `start`, the value is reported at
 `start`. A `ResampleTransformer(freq="1h")` after `TimezoneTransformer` carries each value forward over its year.
-Its built-in information-set rule is `static` with the vintage class `latest_revision`: A68 is due one week before the end of
-the year before (Art. 14(1)(a)), so every row of a year holds a value published before that year began, and the API serves the
-newest revision of it. A prefixed source's columns (`pl_installed_capacity_solar`) get the same rule through
+Its built-in information-set rule reads the value of a date as published at 00:00 seven days before it, both in the data's
+zone, with the vintage class `latest_revision`: A68 is due one week before the end of the year before (Art. 14(1)(a)), so
+every row of a year holds a value published before that year began, a lead of up to 7 days (`installed_capacity_solar_d+7`)
+is known, and a longer lead, which on a day in late December reads next year's value before it is due, is refused at
+`availability="raise"` and listed at `"warn"`. The API serves the newest revision of each year's value, which may have been
+revised after the forecast it feeds was issued. A prefixed source's columns (`pl_installed_capacity_solar`) get the same rule through
 `with_source_rules` (every `Workflow`). For a capacity that follows growth within the year, see the capacity proxy of
 [Generation Targets](/epftoolbox2/model-pipeline/generation/).
 
@@ -320,13 +323,13 @@ as produced by `LagTransformer` (`x_d-1` is yesterday, `x_d+1` tomorrow):
 | `generation_*` (actual, incl. `_consumption`) | No later than 1 hour after the operational period (Art. 16) | `_d-1` and older only |
 | `generation_*_forecast` | 18:00 Brussels time on the day before delivery, updated during intraday trading with at least one update at 08:00 on the delivery day (Art. 14) | `_d+0` and older. `_d+1` is published after gate closure: not guaranteed at issue time |
 | `transfer_capacity_*` | "Sufficiently in advance of the allocation process" (Art. 11): before the day-ahead gate closure, no fixed hour | `_d+0` and older. `_d+1` is known before 12:00 on D but at no guaranteed hour, so borderline for an early issue time |
-| `installed_capacity_*` | Annually, no later than one week before the end of the previous year (Art. 14) | The current year's value, and `_d+h` for the horizons of a day-ahead or week-ahead run (the next year's value is out a week before it). The API serves the latest revision |
+| `installed_capacity_*` | Annually, no later than one week before the end of the previous year (Art. 14) | The current year's value, and `_d+h` up to `_d+7` (the next year's value is out a week before it); a longer lead is refused. The API serves the latest revision |
 
 The API serves the latest revision of each series, not the version published at the deadline, so forecasts that
 are revised after the issue time (load forecasts, wind and solar forecasts) can still carry
 look-ahead even within these limits. The built-in information set rules class `load_actual`, `load_forecast` (and its daily min and max), `generation_*` and `installed_capacity_*` as `latest_revision` and `price` as `snapshot`
-([Vintage Classes](/epftoolbox2/model-pipeline/information-set/#vintage-classes)); `installed_capacity_*` is `static`, known
-in advance, and `transfer_capacity_*` has no built-in rule.
+([Vintage Classes](/epftoolbox2/model-pipeline/information-set/#vintage-classes)); `installed_capacity_*` is known a week ahead,
+and `transfer_capacity_*` has no built-in rule.
 
 ---
 
