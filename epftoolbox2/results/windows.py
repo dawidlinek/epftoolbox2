@@ -222,6 +222,12 @@ class RunWindows:
                     days.append(day.isoformat())
         return days
 
+    def calendar_days(self) -> List[str]:
+        """Every day of both windows, in order, whatever `validation_every`: the days a run plans on (a predictor function's
+        lists, its masks read on the first day a list is used, the newest targets), so that a forecast on a kept day is the one
+        a run of every day gives it. `issue_days()` is the days it forecasts."""
+        return RunWindows(self.validation, self.test, self.mode, self.segments).issue_days()
+
     def issues_on(self, run_date: Any) -> bool:
         """Whether a day of the run's windows is an issue day by `validation_every` (weekdays aside): every day of the test
         window, every k-th of the validation window. False for a day in neither."""

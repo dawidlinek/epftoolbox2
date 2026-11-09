@@ -364,3 +364,51 @@ def test_a_run_over_zones_thins_each_zone_as_a_run_alone(df):
         alone.validation.refs["m"].iter_records()
     )
     assert lines(zones.zones["PL"].refs["m"].iter_records()) == lines(alone.refs["m"].iter_records())
+
+
+def from_25_march(ctx):
+    """The flag's list is first used on 25 March, a day `validation_every=2` skips: its mask must still be read there."""
+    names = list(PREDICTORS)
+    if ctx.issue_day >= pd.Timestamp("2023-03-25").date():
+        names.append("flag")
+    return names
+
+
+def test_a_list_first_used_on_a_skipped_day_reads_its_mask_there():
+    """A list's binary-column mask is read on the first day it is used, which a thinned run doesn't issue on: it plans on
+    every day of the window, so the kept days' forecasts are the full run's to the bit."""
+    frame = with_flag(make_market_data(start="2023-01-01", days=120, horizon=3, noise=5.0, seed=3), "2023-03-24")
+
+    def run(k):
+        pipeline = ModelPipeline()
+        pipeline.add_model(RidgeModel(from_25_march, training_window=30, name="m"))
+        return pipeline.run(frame, validation=V, test=("2023-04-10", "2023-04-11"), horizon=1, validation_every=k)
+
+    full, thinned = run(1), run(2)
+    kept = {r["run_date"] for r in thinned.validation.refs["m"].iter_records()}
+    assert "2023-03-25" not in kept and "2023-03-26" in kept
+    assert lines(thinned.validation.refs["m"].iter_records()) == lines(
+        r for r in full.validation.refs["m"].iter_records() if r["run_date"] in kept
+    )
+
+
+def test_newest_targets_published_are_read_for_every_planned_day():
+    """`newest_target="published"` with a column that starts inside the window: the masks of skipped days need their newest
+    targets too, and the kept days' forecasts are the full run's."""
+    frame = make_market_data(start="2023-01-01", days=120, horizon=3, noise=5.0, seed=3)
+    day = frame.index.tz_localize(None).normalize()
+    frame["extra"] = np.where(
+        day >= pd.Timestamp("2023-03-15"), np.random.default_rng(1).normal(size=len(frame)), np.nan
+    )
+    info = InformationSet("11:45", "Europe/Warsaw", rules={**RULES, "extra": Availability.static()})
+
+    def run(k):
+        pipeline = ModelPipeline(information_set=info)
+        pipeline.add_model(RidgeModel(PREDICTORS + ["extra"], training_window=30, newest_target="published", name="m"))
+        return pipeline.run(frame, validation=V, horizon=1, validation_every=k)
+
+    full, thinned = run(1), run(2)
+    kept = {(pd.Timestamp(V[0]) + pd.Timedelta(days=d)).date().isoformat() for d in range(0, 20, 2)}
+    records = thinned.refs["m"]._results
+    assert {r["run_date"] for r in records} <= kept and len(records) > 0
+    assert lines(records) == lines(r for r in full.refs["m"]._results if r["run_date"] in kept)

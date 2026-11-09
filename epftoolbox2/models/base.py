@@ -1536,17 +1536,19 @@ class BaseModel(ABC):
         windows: RunWindows, first_day: datetime.date, weekdays: Optional[Sequence[int]] = None
     ) -> Dict[int, Tuple[str, int, int]]:
         """Each issue day of the run, counted from `first_day` -> (its window, calendar days since the window's start, place
-        among the run's issue days). With `weekdays` only the days of those weekdays are issue days, and of the validation window
-        every `validation_every`-th alone (`RunWindows.issue_days`)."""
+        among the days the run plans on, which a plan and the newest targets are indexed by). With `weekdays` only the days of
+        those weekdays are issue days, and planned. Of the validation window every `validation_every`-th day alone is an issue
+        day, and every day is planned (`RunWindows.calendar_days`), so a kept day keeps the place it has in a run of every day."""
         days = {}
         position = 0
         for name, (start, end) in windows.periods:
             first = (datetime.date.fromisoformat(start) - first_day).days
             last = (datetime.date.fromisoformat(end) - first_day).days
-            for day in range(first, last + 1, 1 if name == TEST else windows.validation_every):
+            for day in range(first, last + 1):
                 if weekdays is not None and (first_day + datetime.timedelta(days=day)).weekday() not in weekdays:
                     continue
-                days[day] = (name, day - first, position)
+                if name == TEST or (day - first) % windows.validation_every == 0:
+                    days[day] = (name, day - first, position)
                 position += 1
         return days
 
@@ -2525,9 +2527,10 @@ class BaseModel(ABC):
     def _days_of(
         test_start: Optional[str], test_end: Optional[str], windows: Optional[RunWindows]
     ) -> Optional[List[datetime.date]]:
-        """The issue days of a run, or None if it doesn't say."""
+        """The issue days of a run, or None if it doesn't say: with windows every day of them, also those `validation_every`
+        skips, which a run plans on (`RunWindows.calendar_days`)."""
         if windows is not None:
-            return [datetime.date.fromisoformat(day) for day in windows.issue_days()]
+            return [datetime.date.fromisoformat(day) for day in windows.calendar_days()]
         if test_start is None or test_end is None:
             return None
         return _test_days(test_start, test_end)
@@ -2625,7 +2628,7 @@ class BaseModel(ABC):
             return None
         self._set_freq(freq)
         if windows is not None:
-            calendar_days = [datetime.date.fromisoformat(day) for day in windows.issue_days()]
+            calendar_days = [datetime.date.fromisoformat(day) for day in windows.calendar_days()]
             days = listed_days(calendar_days, weekdays)
         elif issue_days is not None:
             days = calendar_days = [datetime.date.fromisoformat(day) for day in issue_days]
