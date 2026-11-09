@@ -225,6 +225,31 @@ def test_an_upstream_starting_mid_window_warns_with_its_counts_and_the_day_to_st
     assert expected == 15 * 24  # 15 whole days before the upstream's first forecast
 
 
+def test_with_refit_the_rows_read_are_those_of_the_refit_days(df, tmp_path):
+    """refit="7D": the forecasts of 04-05 to 04-14 use the fits of Mondays 04-03 and 04-10, whose rows run from 03-03 (04-03 - 31)
+    to 04-08: two more days before the upstream's first forecast than without refit."""
+    run_upstream(df, tmp_path / "up", test=("2023-03-20", "2023-04-20"))
+    source = ForecastSource(str(tmp_path / "up"), model="load_up", column="load_fc")
+    data = chained(df, source)
+    pipeline = downstream(
+        PREDICTORS + ["load_fc_d+1"], INFO.with_source_rules([source]), availability="warn", refit="7D"
+    )
+    with pytest.warns(UserWarning, match="has no value on"):
+        pipeline.run(data, *TEST, horizon=1, save_dir=str(tmp_path / "down"))
+    found = json.loads((tmp_path / "down" / "price_m.manifest.json").read_text())["chained_inputs"]["load_fc"][
+        "coverage"
+    ]
+    expected, read = independent_count(data, "load_fc_d+1", "2023-03-03", "2023-04-08")
+    assert found["load_fc_d+1"] == {
+        "read": read,
+        "uncovered": expected,
+        "first": "2023-03-03",
+        "last": "2023-03-19",
+        "run_from": "2023-03-03",
+    }
+    assert expected == 17 * 24
+
+
 def test_an_upstream_starting_mid_window_is_refused_at_raise(df, tmp_path):
     run_upstream(df, tmp_path / "up", test=("2023-03-20", "2023-04-20"))
     source = ForecastSource(str(tmp_path / "up"), model="load_up", column="load_fc")
