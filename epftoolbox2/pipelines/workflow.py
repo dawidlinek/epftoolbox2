@@ -276,6 +276,7 @@ class Workflow:
         if "engine" in self._mp_inline:
             mp.engine = engine_from_yaml(self._mp_inline["engine"])  # `engine: on` unquoted reads as True
         if isinstance(self.model_index, int) and not all_models:
+            mp._resolve_bases()  # a ResidualModel's base="name" is a model of the whole list, maybe of another task's slice
             mp.models = self._block_of(mp.models)
         return mp
 

@@ -177,6 +177,9 @@ _COMPARED_FIELDS += ("runtime", "weights")
 # What one fit of a model of day or pooled units holds (`models._units`): `unit_kind` "day" or "pooled", and how its targets
 # are transformed, "per_period" or "pooled"; no key for a period model. Either changes every forecast.
 _COMPARED_FIELDS += ("unit_kind", "target_transform")
+# A `ResidualModel` (`models.residual`): the hash of its base's configuration as the base's own manifest records it
+# (`base_manifest`), since the base's forecasts are the learner's inputs and targets; None (and no key) for any other model.
+_COMPARED_FIELDS += ("residual",)
 
 # How a run chooses a forecast's training rows: `Manifest.training_cut`.
 TRAINING_CUT_BY_DATE = {"rows": "dates"}
@@ -333,6 +336,9 @@ class Manifest:
     # own Invariant) or "pooled"; None (and no key) for a period model. Compared on resume.
     unit_kind: Optional[str] = None
     target_transform: Optional[str] = None
+    # A `ResidualModel`: {"base_manifest": the hash of its base's configuration (`configuration_digest` of the base's own
+    # manifest)}, or {} for a run of a base held in memory; None (and no key) for any other model. Compared on resume.
+    residual: Optional[Dict[str, Any]] = None
 
     def differences(self, existing: "Manifest", skip: Sequence[str] = ()) -> List[str]:
         """Human-readable list of compared fields that disagree with `existing`; empty if compatible."""
@@ -404,6 +410,8 @@ class Manifest:
         for name in ("unit_kind", "target_transform"):  # a period model
             if out[name] is None:
                 del out[name]
+        if out["residual"] is None:  # no ResidualModel
+            del out["residual"]
         return out
 
     @classmethod
@@ -663,6 +671,7 @@ def build_manifest(
         record_schema=RECORD_SCHEMA,
         fit_path=fit_path,
         pooled=getattr(model, "_pooled", None),  # a PooledModel's member (`models._pooled.member_of`)
+        residual=getattr(model, "_residual", None),  # a ResidualModel's base (`models.residual`)
         **carded,
         **units,
     )
@@ -711,6 +720,13 @@ def is_ensemble_manifest(path: Union[str, Path]) -> bool:
     """Whether the manifest at `path` exists and is an ensemble's."""
     path = Path(path)
     return path.exists() and json.loads(path.read_text()).get("kind") == ENSEMBLE_KIND
+
+
+def configuration_digest(manifest: Dict[str, Any]) -> str:
+    """A hash of what a resume compares of a manifest (its `_COMPARED_FIELDS`, as a dict read from its file): equal for two runs
+    of one configuration on the same data over the same last day, whichever days they ran."""
+    kept = {name: manifest.get(name) for name in _COMPARED_FIELDS}
+    return hashlib.sha256(json.dumps(kept, sort_keys=True, default=str).encode()).hexdigest()
 
 
 def manifest_digest(manifest: Dict[str, Any]) -> str:

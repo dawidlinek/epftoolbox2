@@ -36,6 +36,7 @@ from ..models._engine import (
 from ..models.context import PredictorPlan, importable_path, load_function
 from ..models.explain import explain_model
 from ..models.pooled import PooledModel, check_pooled_model
+from ..models.residual import ResidualModel
 from ..models._pooled import (
     check_horizon_lists,
     check_resumes,
@@ -182,6 +183,8 @@ COMPONENT_REGISTRY = {
         "LEARModel": "epftoolbox2.models.lear",
         "NaiveModel": "epftoolbox2.models.naive",
         "PooledModel": "epftoolbox2.models.pooled",
+        "HistGBModel": "epftoolbox2.models.hgb",
+        "ResidualModel": "epftoolbox2.models.residual",
     },
     "ensembles": {
         "AverageEnsemble": "epftoolbox2.ensembles.average",
@@ -1747,20 +1750,52 @@ class ModelPipeline:
         return parquet if parquet.is_dir() else jsonl
 
     def _check_save_format(self, save_dir: Union[str, Path], save_format: str) -> None:
-        """Before any fit: no model may have results in the other format than this run writes (`check_no_other_format`)."""
+        """Before any fit: no model may have results in the other format than this run writes (`check_no_other_format`), and a
+        `ResidualModel`'s records, which hold `base_prediction`, are JSONL."""
         for model in self.models:
+            if isinstance(model, ResidualModel) and save_format != "jsonl":
+                raise ValueError(
+                    f"{model.name}: a ResidualModel's records hold `base_prediction`, which the {save_format} results schema "
+                    "has no column for: run with save_format='jsonl'"
+                )
             check_no_other_format(self.results_path(save_dir, model, save_format))
 
+    def _resolve_bases(self) -> None:
+        """Give each `ResidualModel` with `base="name"` the model of that name added before it (`bind_base`; it runs a copy). A
+        model whose name is in the list after it, or nowhere, raises, unless it was resolved before (a `Workflow` array task
+        resolves on the whole list, then runs its slice)."""
+        for place, model in enumerate(self.models):
+            if not isinstance(model, ResidualModel) or not isinstance(model.base, str):
+                continue
+            earlier = {other.name: other for other in self.models[:place]}
+            if model.base in earlier:
+                model.bind_base(earlier[model.base])
+            elif model._named_base is None:
+                later = [other.name for other in self.models[place + 1 :]]
+                raise ValueError(
+                    f"{model.name}: base={model.base!r} "
+                    + ("is added after it" if model.base in later else "names no model of this pipeline")
+                    + f": a ResidualModel's base is a model added before it, or a model itself. Models: {[m.name for m in self.models]}"
+                )
+
     def _check_model_names(self) -> None:
+        """Every model's and ensemble's name, and the file of each `ResidualModel`'s base, once; and each `base="name"` resolved
+        (`_resolve_bases`)."""
         named = [*self.models, *self.ensembles]
         names = [m.name for m in named]
         stems = [self.results_path("", m, "jsonl").name for m in named]
+        stems += [
+            ResidualModel.base_path(self.results_path("", m, "jsonl")).name
+            for m in self.models
+            if isinstance(m, ResidualModel)
+        ]
         if len(set(names)) != len(names) or len(set(stems)) != len(stems):
             what = "Model and ensemble names" if self.ensembles else "Model names"
             raise ValueError(
                 f"{what} must be unique (also after lower-casing and replacing spaces, since they name the "
-                f"result files): {names}"
+                f"result files, and a ResidualModel's base writes <name>.base): {names}"
             )
+        self._resolve_bases()
 
     def _check_evaluators_for(self, freq: str) -> None:
         """An evaluator that can't score results at `freq` raises before any fit: `EconomicEvaluator` schedules a strategy over
@@ -1835,9 +1870,7 @@ class ModelPipeline:
         self._check_predictors_can_be_saved(component)
         label = f"{class_name}({component.name!r})" if isinstance(component, BaseModel) else class_name
         params = {
-            key: self._serialize_component(value)
-            if type(value).__name__ in COMPONENT_REGISTRY["strategies"]
-            else to_yaml_value(value, f"{label}.{key}")
+            key: self._serialize_param(value, f"{label}.{key}")
             for key, value in getattr(component, "__dict__", {}).items()
             if not key.startswith("_")
         }
@@ -1848,6 +1881,14 @@ class ModelPipeline:
                 if key in params and params[key] == default:
                     del params[key]  # written only when set, so files saved before it existed don't move
         return {"class": class_name, "params": params}
+
+    def _serialize_param(self, value: Any, where: str) -> Any:
+        """One parameter of a component as YAML: a component inside it (a model inside a `ResidualModel`, a strategy inside
+        an evaluator) as `{class, params}`, anything else as a plain value (`to_yaml_value`, which raises for what YAML can't
+        hold)."""
+        if isinstance(value, (BaseModel, PooledModel)) or type(value).__name__ in COMPONENT_REGISTRY["strategies"]:
+            return self._serialize_component(value)
+        return to_yaml_value(value, where)
 
     def to_dict(self) -> Dict[str, Any]:
         out = {
@@ -1884,7 +1925,12 @@ class ModelPipeline:
         if component_type == "models" and class_name == "PooledModel" and isinstance(params.get("model"), dict):
             params["model"] = cls._load_component("models", params["model"])
         module = importlib.import_module(COMPONENT_REGISTRY[component_type][class_name])
-        return getattr(module, class_name)(**params)
+        component_class = getattr(module, class_name)
+        # A model inside a model (`ResidualModel`'s base and learner), saved as {class, params}; a name stays a name.
+        for key in getattr(component_class, "_NESTED_MODELS", ()):
+            if isinstance(params.get(key), dict):
+                params[key] = cls._load_component("models", params[key])
+        return component_class(**params)
 
     @staticmethod
     def _load_predictor_function(class_name: str, saved: Dict[str, Any]) -> Callable:

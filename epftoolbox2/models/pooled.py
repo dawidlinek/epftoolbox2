@@ -121,6 +121,10 @@ def check_pooled_model(model: Any) -> None:
     if not isinstance(model, BaseModel):
         raise TypeError(f"PooledModel pools a model such as OLSModel, got {type(model).__name__}")
     what = f"PooledModel({type(model).__name__}({model.name!r}))"
+    if not getattr(type(model), "_pooled_ok", True):
+        raise ValueError(
+            f"{what}: {type(model).__name__} can't be pooled over zones in this step. Run it in each zone."
+        )
     if model._fits_nothing:
         raise ValueError(
             f"{what}: {type(model).__name__} fits nothing, so there is no fit to pool. Run it in each zone."

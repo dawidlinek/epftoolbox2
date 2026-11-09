@@ -1529,6 +1529,7 @@ class BaseModel(ABC):
         n_processes = min(n_processes, len(jobs))  # a worker runs whole days (blocks); more would sit idle
         if sys.platform == "win32":
             n_processes = min(n_processes, _WINDOWS_MAX_WORKERS)
+        model_cls, model_kwargs = self._worker_model()
 
         mp_context = multiprocessing.get_context("fork" if sys.platform != "win32" else "spawn")
         with (
@@ -1537,13 +1538,7 @@ class BaseModel(ABC):
                 max_workers=n_processes,
                 mp_context=mp_context,
                 initializer=_pool_init,
-                initargs=(
-                    hour_arrays,
-                    expanded_preds,
-                    config,
-                    type(self),
-                    self._model_kwargs,
-                ),
+                initargs=(hour_arrays, expanded_preds, config, model_cls, model_kwargs),
             ) as pool,
         ):
             run_job = _run_day if self.refit is None else _run_block
@@ -1573,6 +1568,11 @@ class BaseModel(ABC):
                 # yet started runs. Results already saved stay in the store, so a fixed rerun resumes from here.
                 pool.shutdown(wait=True, cancel_futures=True)
                 raise
+
+    def _worker_model(self) -> Tuple[type, Dict]:
+        """(the class, its keyword arguments) a worker rebuilds the model that fits the run's tasks from, with `predictors=[]`
+        (`_worker.task_inputs`): this model's own. `ResidualModel` gives its learner's."""
+        return type(self), self._model_kwargs
 
     def _worker_inputs(self, state: "_RunState", threads_per_process: int) -> Tuple[Dict, Dict]:
         """(the expanded lists, the config) a worker runs the run's tasks with (`_worker.TaskInputs`, with the period arrays of
@@ -1839,8 +1839,7 @@ class BaseModel(ABC):
             return expanded
         self._check_frame(data, target, horizon, freq, test_start, test_end, windows, newest, shared)
         expanded = fixed
-        # What the frame's and the information set's checks read: a pooled unit's lists without the virtual `period`.
-        checked = expanded if kind != POOLED else without_feature(expanded)
+        checked = self._checked_lists(expanded)
         self._used_predictors = _contract.check_predictors(data, checked, target, horizon)
         _contract.warn_about_a_midnight_stamp(
             data.index,
@@ -1917,6 +1916,11 @@ class BaseModel(ABC):
                     )
                 self._window_listings[name] = listing_rows(uses)
         return expanded
+
+    def _checked_lists(self, expanded: Dict[Tuple[int, int], List[str]]) -> Dict[Tuple[int, int], List[str]]:
+        """What the frame's and the information set's checks read of the expanded lists: a pooled unit's without the virtual
+        `period`, known by construction (`_units.without_feature`). `ResidualModel` leaves out its base's forecasts too."""
+        return expanded if unit_kind(self) != POOLED else without_feature(expanded)
 
     def _checked_inputs(
         self,
