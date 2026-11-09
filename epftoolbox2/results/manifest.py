@@ -88,6 +88,16 @@ manifests are as before.
 A model of day or pooled units (`models._units`) adds `unit_kind` ("day" or "pooled") and `target_transform` ("per_period" or
 "pooled"), both compared: a change of either moves every forecast. A period model, every core model, has neither key.
 
+A model that reads another pipeline's stored forecasts (`ForecastSource`, through `InformationSet.with_source_rules`) adds
+`chained_inputs`: for each such column, its upstream's path, model, horizon, issue time and zone, data zone, `available` and
+manifest digest, and `coverage`, the rows its fits read where a predictor built from it had no value. A resume compares the
+model, horizon, issue time and zone, data zone and `available` of each (`chained_differences`): another upstream issue time can
+leave the column's values as they were and still change when they were known. Another upstream digest only warns: a changed
+upstream changes the column, which `data_columns_hash` refuses. A model that reads no such column has no key.
+
+A daily run (`freq="1D"`) records `daily_stamp`, the time of day its rows are stamped at ("12:00"), provenance: a downstream
+`ForecastSource` places each forecast there. Other runs have no key.
+
 An ensemble's file has a manifest of its own shape (`"kind": "ensemble"`, written by `epftoolbox2.ensembles._compute`). It says
 which results it was computed from and is never compared, as the file is recomputed from them every time. No model may
 resume into it.
@@ -108,12 +118,12 @@ from typing import Any, Callable, Dict, Iterable, List, Mapping, NamedTuple, Opt
 import numpy as np
 import pandas as pd
 
-from .._date_utils import zone_name
+from .._date_utils import daily_anchor, fmt_minutes, zone_name
 from ..models._calendar import issue_day_names, mask_members, resolve_issue_days
 from ..models._cards import manifest_fields, window_starts
 from ..logging import get_logger
 from .availability import LISTING_TIMES, merge_listings
-from .store import RECORD_SCHEMA
+from .store import RECORD_SCHEMA, outside_stacklevel
 from .vintages import merge_vintages
 from .windows import TEST, RunWindows, mask_key
 
@@ -150,6 +160,9 @@ _PROVENANCE_FIELDS += ("weights_history",)
 # `residual_base`: a `ResidualModel`'s base's card, runtime and weights, with its first issue day (the warm-up's), for
 # `report.provenance()`; the base's own manifest compares them, and this one's `residual` field its configuration.
 _PROVENANCE_FIELDS += ("residual_base",)
+# `daily_stamp`: a daily run's row time ("12:00"), where a downstream `ForecastSource` places its forecasts; the frame's hash
+# (`data_columns_hash`, of the instants) already refuses a resume on rows stamped elsewhere.
+_PROVENANCE_FIELDS += ("daily_stamp",)
 
 # Compared to decide whether an existing manifest is compatible with the current run. Order is the
 # order differences are reported in.
@@ -392,6 +405,11 @@ class Manifest:
     # A model that reads history: [{"through": day, "columns", "hash"}] of what it reads after `test_end`; None (and no key)
     # otherwise.
     history_ahead: Optional[List[Dict[str, Any]]] = None
+    # A model reading another pipeline's stored forecasts: column -> its upstream (`ChainedInput.record()`) and "coverage"; None
+    # (and no key) otherwise. Its identity is compared on resume (`chained_differences`), its digest warns.
+    chained_inputs: Optional[Dict[str, Dict[str, Any]]] = None
+    # A daily run's row time, "HH:MM"; None (and no key) at any other freq. Provenance.
+    daily_stamp: Optional[str] = None
 
     def differences(self, existing: "Manifest", skip: Sequence[str] = ()) -> List[str]:
         """Human-readable list of compared fields that disagree with `existing`; empty if compatible."""
@@ -471,6 +489,10 @@ class Manifest:
                 del out[name]
         if out["history_ahead"] is None:  # a model that reads no history
             del out["history_ahead"]
+        if out["chained_inputs"] is None:  # no column of another pipeline's forecasts
+            del out["chained_inputs"]
+        if out["daily_stamp"] is None:  # not a daily run
+            del out["daily_stamp"]
         return out
 
     @classmethod
@@ -645,6 +667,7 @@ def build_manifest(
     vintages: Optional[List[Dict[str, Any]]] = None,
     kernels: Optional[str] = None,
     fit_path: Optional[str] = None,
+    chained_inputs: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> Manifest:
     """The manifest for one model's run.
 
@@ -678,6 +701,7 @@ def build_manifest(
     `vintages` are the rows of `results.vintages.vintage_rows`, recorded as they are. `kernels` is the backend of the LEAR
     kernels the model fits with (`BaseModel._kernel_backend`), None for a model without them. `fit_path` is the numeric path of
     the fits ("engine-2" in an engine group whose fits come from shared statistics, None for the model path).
+    `chained_inputs` are the model's chained columns as its input check found them (`models._chained`), None without any.
     """
     now = datetime.now(timezone.utc).isoformat()
     hashes = FrameHashes(data) if frame_hashes is None else frame_hashes
@@ -737,6 +761,8 @@ def build_manifest(
         pooled=getattr(model, "_pooled", None),  # a PooledModel's member (`models._pooled.member_of`)
         residual=getattr(model, "_residual", None),  # a ResidualModel's base (`models.residual`)
         residual_base=getattr(model, "_residual_base", None),
+        chained_inputs=chained_inputs or None,
+        daily_stamp=fmt_minutes(daily_anchor(data.index)) if freq == "1D" and len(data.index) else None,
         **carded,
         **units,
     )
@@ -998,6 +1024,7 @@ def check_and_write(
         diffs = [
             *(data_diffs or []),
             *manifest.differences(existing, skip=skip),
+            *chained_differences(existing.chained_inputs, manifest.chained_inputs),
             *unrecorded_masks(existing, manifest, has_existing_results),
         ]
         if diffs and not allow_mismatch:
@@ -1011,6 +1038,8 @@ def check_and_write(
             )
         if diffs:
             logger.warning(f"{model_name}: manifest mismatch at {path} overridden: {'; '.join(diffs)}")
+        else:
+            _warn_about_changed_upstreams(existing.chained_inputs, manifest.chained_inputs, model_name)
         if check_stored is not None:
             check_stored()
         manifest.kernels = _kernels_on_file(existing, manifest, model_name, path, has_existing_results)
@@ -1056,6 +1085,55 @@ def check_and_write(
         manifest.data_unverified = True
         _mark_rows_unverified(manifest, model_name, path, "they have no manifest")
     manifest.write(path)
+
+
+# What a resume compares of each chained column (`information_set.ChainedInput.IDENTITY`).
+CHAINED_IDENTITY = ("model", "horizon", "issue_time", "issue_timezone", "data_timezone", "available")
+
+
+def chained_differences(
+    existing: Optional[Dict[str, Dict[str, Any]]], mine: Optional[Dict[str, Dict[str, Any]]]
+) -> List[str]:
+    """What refuses a resume in the chained columns of two manifests: a column chained in one and not the other, or another
+    model, horizon, issue time or zone, data zone or `available` of its upstream."""
+    existing, mine = existing or {}, mine or {}
+    out = []
+    for column in sorted(set(existing) | set(mine)):
+        theirs, ours = existing.get(column), mine.get(column)
+        if theirs is None or ours is None:
+            out.append(
+                f"chained_inputs.{column}: {None if theirs is None else _chain_label(theirs)} (existing results) vs "
+                f"{None if ours is None else _chain_label(ours)} (this run)"
+            )
+            continue
+        out.extend(
+            f"chained_inputs.{column}.{key}: {theirs.get(key)!r} (existing results) vs {ours.get(key)!r} (this run)"
+            for key in CHAINED_IDENTITY
+            if theirs.get(key) != ours.get(key)
+        )
+    return out
+
+
+def _warn_about_changed_upstreams(
+    existing: Optional[Dict[str, Dict[str, Any]]], mine: Optional[Dict[str, Dict[str, Any]]], model_name: str
+) -> None:
+    """A warning for each chained column whose upstream's manifest digest changed (rerun, extended, another level) under a
+    resume that goes on: where its forecasts moved, the data hash refused already; where they didn't, the stored forecasts
+    read the same values, from an upstream that is not quite the one they were made with."""
+    for column, ours in sorted((mine or {}).items()):
+        theirs = (existing or {}).get(column)
+        if theirs is not None and theirs.get("digest") != ours.get("digest"):
+            warnings.warn(
+                f"{model_name}: the upstream of {column} ({ours.get('model')} in {ours.get('path')}) changed since these results "
+                "were made (another manifest digest), though not on the rows they read: the data hash would refuse that. "
+                "The resume goes on.",
+                UserWarning,
+                stacklevel=outside_stacklevel(),
+            )
+
+
+def _chain_label(entry: Dict[str, Any]) -> str:
+    return f"{entry.get('model')!r} horizon {entry.get('horizon')} issued {entry.get('issue_time')} {entry.get('issue_timezone')}"
 
 
 def _earliest_base(existing: Optional[Dict[str, Any]], mine: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:

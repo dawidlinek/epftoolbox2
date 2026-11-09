@@ -121,7 +121,7 @@ from ..information_set import (
 )
 from ._cards import ModelCard, Problem, card_problems, run_provenance
 from ._history import history_batches, history_spec_of, reads_history
-from . import _row_target
+from . import _chained, _row_target
 from ._units import (
     DAY,
     PERIOD,
@@ -304,6 +304,7 @@ class _Checked(NamedTuple):
     listing: List[Dict]
     window_listings: Dict[str, List[Dict]]
     run: Tuple[Tuple[Any, ...], Tuple[Any, ...]]
+    chained: Optional[Dict[str, Dict]] = None  # the manifest's `chained_inputs` (`models._chained`)
 
     @staticmethod
     def run_of(
@@ -622,6 +623,8 @@ class BaseModel(ABC):
         self._used_predictors: List[str] = []
         self._availability_listing: List[Dict] = []
         self._window_listings: Dict[str, List[Dict]] = {}
+        # The chained columns the last input check found (`models._chained`), for the manifest; None without any.
+        self._chained_record: Optional[Dict[str, Dict]] = None
         # A run's newest targets with newest_target="published", by issue day and period; None otherwise.
         self._newest: Optional[NewestTargets] = None
 
@@ -1006,6 +1009,7 @@ class BaseModel(ABC):
             self._used_predictors = list(checked.used_predictors)
             self._availability_listing = checked.listing
             self._window_listings = checked.window_listings
+            self._chained_record = checked.chained
         else:
             expanded = self._check_inputs(
                 data,
@@ -1132,6 +1136,7 @@ class BaseModel(ABC):
                     vintages=vintages,
                     kernels=kernels,
                     fit_path=fit_path,
+                    chained_inputs=getattr(self, "_chained_record", None),
                 )
 
                 def check_stored():
@@ -1947,6 +1952,7 @@ class BaseModel(ABC):
             self._check_history(
                 data, target, horizons, freq, information_set, test_start, test_end, availability, windows, weekdays
             )
+            self._check_chained(data, back, information_set, availability, issued, weekdays, newest)
             return expanded
         self._check_frame(data, target, horizon, freq, test_start, test_end, windows, newest, shared)
         expanded = fixed
@@ -2004,7 +2010,33 @@ class BaseModel(ABC):
         self._check_history(
             data, target, horizons, freq, information_set, test_start, test_end, availability, windows, weekdays
         )
+        self._check_chained(data, checked, information_set, availability, issued, weekdays, newest)
         return expanded
+
+    def _check_chained(
+        self,
+        data: pd.DataFrame,
+        lists: Dict[Tuple[int, int], List[str]],
+        information_set: Optional["InformationSet"],
+        availability: str,
+        issued: Optional[Sequence[datetime.date]],
+        weekdays: Optional[Sequence[int]],
+        newest: Optional[NewestTargets],
+    ) -> None:
+        """The checks of columns read from another pipeline's forecasts (`models._chained`): their coverage of the rows the fits
+        read, on the run's issue days (those of `weekdays`), and their upstream's own lateness, listed at "warn" beside the
+        model's listing. What it finds of them goes to the manifest (`_chained_record`)."""
+        days = None if issued is None else listed_days(issued, weekdays)
+        rows = None
+        if days:
+            rows = self._training_rows(newest, self._reach_window(data, days), frame_first_day(data.index))
+        found = _chained.check(self.name, data, lists, information_set, availability, days, rows)
+        self._chained_record = found.record
+        if found.listing:  # every issue day reads the upstream: each window's listing has its rows too
+            self._availability_listing = sort_rows([*self._availability_listing, *found.listing])
+            self._window_listings = {
+                name: sort_rows([*rows, *found.listing]) for name, rows in self._window_listings.items()
+            }
 
     def _judge_lists(
         self,
@@ -2311,7 +2343,14 @@ class BaseModel(ABC):
             cut_rules,
             weekdays,
         )
-        return _Checked(expanded, tuple(self._used_predictors), self._availability_listing, self._window_listings, run)
+        return _Checked(
+            expanded,
+            tuple(self._used_predictors),
+            self._availability_listing,
+            self._window_listings,
+            run,
+            getattr(self, "_chained_record", None),
+        )
 
     def _check_settings(self) -> Tuple[Any, ...]:
         """What of the model its inputs' check reads, or could, frozen for comparing by value (`_Checked.run_of`): its class,

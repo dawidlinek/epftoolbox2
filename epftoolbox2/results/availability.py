@@ -34,6 +34,9 @@ from ..information_set import (
 
 LATE = "late"
 NO_RULE = "no rule"
+# A column read from another pipeline's forecasts (`ForecastSource`) whose upstream used inputs after its own issue time, or ran
+# at level "none" (`models._chained`): its forecasts are no honest input, whatever this run's rule says of them.
+LATE_UPSTREAM = "late upstream"
 # How a manifest's listing compared times. Listings without it were written on the wall clock, which next to a clock change
 # lists other periods than a fresh run would: such a listing is replaced on resume (`manifest._keep_listing`) and read with
 # a warning (`read_listing`).
@@ -75,6 +78,17 @@ def listing_rows(uses: Iterable[Violation], list_hash: str = "") -> List[Dict[st
         status = NO_RULE if use.column.rule is None else LATE
         details = _details(use) if status == LATE else _NOTHING_KNOWN
         _keep_latest(cells, (use.predictor, use.role, status, list_hash), (use.horizon, use.period), details)
+    return _rows(cells)
+
+
+def late_upstream_rows(uses: Iterable[Tuple[str, int, int, str, str]]) -> List[Dict[str, Any]]:
+    """The rows of chained columns whose upstream is not vouched for (`models._chained`), from (predictor, period, horizon, rule,
+    note) of each use: one row per predictor and distinct set of periods, status `late upstream`, the upstream's late inputs or
+    unchecked models in `note`."""
+    cells: Dict[_Key, Dict[_Cell, Dict[str, Any]]] = {}
+    for predictor, period, horizon, rule, note in uses:
+        details = dict(_NOTHING_KNOWN, rule=rule, note=note)
+        _keep_latest(cells, (predictor, ROLE_PREDICTOR, LATE_UPSTREAM, ""), (horizon, period), details)
     return _rows(cells)
 
 
@@ -297,6 +311,8 @@ def _describe(row: Mapping[str, Any]) -> str:
     where = f"periods {row['periods']}, horizons {row['horizons']}"
     if row["status"] == NO_RULE:
         return f"{row['predictor']} has no rule ({where})"
+    if row["status"] == LATE_UPSTREAM:
+        return f"{row['predictor']} is a forecast whose upstream is late ({where}; {row['note']})"
     return f"{row['predictor']} is late ({where}; known {row['known']}, issued {row['issued']})"
 
 
@@ -328,6 +344,7 @@ __all__ = [
     "COLUMNS",
     "HISTORY_COLUMNS",
     "LATE",
+    "LATE_UPSTREAM",
     "LISTING_TIMES",
     "NO_RULE",
     "ON_TIME",
@@ -336,6 +353,7 @@ __all__ = [
     "ROLE_PAST",
     "history_rows",
     "is_flagged",
+    "late_upstream_rows",
     "listing_frame",
     "listing_rows",
     "merge_listings",
