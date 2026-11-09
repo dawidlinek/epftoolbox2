@@ -71,6 +71,7 @@ ENV_WAIT_NOTE = "EPF_TUNE_WAIT_NOTE"
 # Trial user attributes.
 _WARM = "warm_start"
 _SURPLUS = "surplus"
+_REJECTED = "rejected"  # a proposal of a Subset under its min_size: proposed again, never scored
 _INTERRUPTED = "interrupted"
 _PARENT = "trial"
 _ERROR = "error"
@@ -115,7 +116,8 @@ class Subset:
     min_size: int = 0
 
     def __init__(self, items: Sequence[Any], min_size: int = 0):
-        items = tuple(items)
+        items = tuple(_native(list(items)))
+        min_size = _native(min_size)
         if not items:
             raise ValueError("Subset needs at least one item")
         if len({_canonical(item) for item in items}) != len(items):
@@ -230,12 +232,31 @@ class _Dimension:
         return {name: key in wanted for name, key in zip(self.names(), known)}
 
 
+def _native(value: Any) -> Any:
+    """`value` with numpy scalars and arrays as Python ones (`np.linspace(...)` choices, `np.int64` bounds), which the saved
+    result holds as YAML and reads back equal."""
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, list):
+        return [_native(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_native(item) for item in value)
+    if isinstance(value, dict):
+        return {key: _native(item) for key, item in value.items()}
+    return value
+
+
 def _dimension(key: Any, spec: Any) -> _Dimension:
     if not isinstance(key, str) or not key or "[" in key or "]" in key:
         raise ValueError(f"A space key must be a non-empty string without '[' or ']', got {key!r}")
     where = f"space[{key!r}]"
     if isinstance(spec, Subset):
         return _Dimension(key, "subset", spec.items, min_size=spec.min_size)
+    if isinstance(spec, np.ndarray):
+        spec = spec.tolist()
+    spec = _native(spec)
     if isinstance(spec, list):
         if not spec:
             raise ValueError(f"{where}: a choice needs at least one value")
@@ -254,7 +275,8 @@ def _dimension(key: Any, spec: Any) -> _Dimension:
         if log and low <= 0:
             raise ValueError(f"{where}: a log range needs low > 0, got {spec!r}")
         kind = "int" if isinstance(low, int) and isinstance(high, int) else "float"
-        return _Dimension(key, kind, low=int(low) if kind == "int" else float(low), high=high, log=log)
+        cast = int if kind == "int" else float
+        return _Dimension(key, kind, low=cast(low), high=cast(high), log=log)
     raise TypeError(
         f"{where} must be a list of choices, a range (low, high) or (low, high, 'log'), or a Subset, got "
         f"{type(spec).__name__}: {spec!r}"
@@ -699,6 +721,20 @@ class BayesSearch:
                 return
             study.sampler = self._sampler(trial.number)  # read when the settings are suggested, below
             values = self._space.suggest(trial)
+            reason = self._space.too_small(values)
+            if reason is not None:
+                # A Subset under its min_size: no setting of the search, so it takes no slot and the sampler proposes again.
+                # Told the worst value there is, so that TPE learns where they are (it ignores failed trials and would keep
+                # proposing them when fewer items score better); every reader of the trials leaves it out (`_dropped`).
+                trial.set_user_attr(_REJECTED, reason)
+                study.tell(trial, math.inf)
+                rejected = sum(1 for t in study.get_trials(deepcopy=False) if t.user_attrs.get(_REJECTED))
+                if rejected > max(1000, 20 * self.n_trials):
+                    raise ValueError(
+                        f"{rejected} proposals were subsets under their min_size ({reason}): the sampler hardly ever proposes "
+                        "enough items. Lower min_size, or search fewer items."
+                    )
+                continue
             self._evaluate(study, trial, values, 0, run)
 
     def _work_rung(self, storage: Any, r: int, run: _Run) -> None:
@@ -925,6 +961,8 @@ class BayesSearch:
                 "storage": None if self.storage is None else str(self.storage),
             },
             "trials": trials,
+            # How many proposals were Subsets under their min_size: proposed again, never part of the trials.
+            "rejected": sum(1 for t in first.get_trials(deepcopy=False) if t.user_attrs.get(_REJECTED)),
             "promoted": promoted,
             "chosen": [],
         }
@@ -940,8 +978,9 @@ def _warm_label(warm: Any) -> Optional[str]:
 
 
 def _dropped(trial: Any) -> bool:
-    """A trial that is no trial of the search: one asked for past `n_trials` (or past a rung's queue), or interrupted."""
-    return bool(trial.user_attrs.get(_SURPLUS) or trial.user_attrs.get(_INTERRUPTED))
+    """A trial that is no trial of the search: one asked for past `n_trials` (or past a rung's queue), interrupted, or a
+    rejected proposal (a Subset under its min_size)."""
+    return bool(trial.user_attrs.get(_SURPLUS) or trial.user_attrs.get(_INTERRUPTED) or trial.user_attrs.get(_REJECTED))
 
 
 def _has_params(trial: Any, space: _Space) -> bool:

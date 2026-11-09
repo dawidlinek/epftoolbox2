@@ -167,8 +167,11 @@ def make(params):
 search = BayesSearch(make, {"groups": Subset(list(weather_groups), min_size=1), "window": [364, 728]}, n_trials=60)
 ```
 
-A proposal with fewer than `min_size` items fails at once without a run. Settings, choices and subset items must be what a YAML
-file holds (None, bools, numbers, strings, and lists or dicts of them), since the saved result holds them.
+A proposal with fewer than `min_size` items is no setting of the search: it runs nothing, takes none of the `n_trials`, and the
+sampler proposes again (it is told the worst value, so TPE learns to avoid them; the record counts them as `rejected`). After
+`max(1000, 20 x n_trials)` such proposals the search raises: lower `min_size`. Settings, choices and subset items must be what
+a YAML file holds (None, bools, numbers, strings, and lists or dicts of them), since the saved result holds them; numpy values
+(`np.linspace(...)`, `np.int64`) are taken as the Python ones.
 
 ### How a search runs
 

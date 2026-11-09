@@ -285,17 +285,55 @@ def test_a_trial_that_skips_a_key_gets_no_score(df):
     assert set(result.ranking()) == set(table.loc[~reads_wind, "trial"])
 
 
-def test_a_subset_under_its_min_size_fails_without_a_run(df, monkeypatch):
+def test_a_subset_under_its_min_size_is_proposed_again_and_takes_no_slot(df, monkeypatch):
+    """A proposal under min_size is no setting of the search: it is told failed, takes none of the n_trials slots and runs
+    nothing, and the record counts it."""
     runs = []
     real = ModelPipeline.run
     monkeypatch.setattr(ModelPipeline, "run", lambda self, *a, **k: runs.append(1) or real(self, *a, **k))
     result = BayesSearch(
-        make, {"window": [28], "drivers": Subset(["load", "wind"], min_size=2)}, sampler="random", n_trials=10, seed=0
+        make, {"window": [28], "drivers": Subset(["load", "wind"], min_size=2)}, sampler="random", n_trials=6, seed=0
     ).run(df, horizon=1, validation=V)
     table = result.table()
-    small = table["drivers"].map(len) < 2
-    assert small.any() and table.loc[small, "error"].str.contains("min_size=2").all()
-    assert len(runs) == (~small).sum()
+    assert len(table) == 6 and (table["drivers"].map(len) == 2).all() and table["validation_mae"].notna().all()
+    assert len(runs) == 6 and result.record["rejected"] > 0
+
+
+@pytest.mark.parametrize("sampler", ["random", "tpe"])
+def test_a_strict_min_size_still_gives_every_trial(df, monkeypatch, sampler):
+    def score(self, values, r, run):
+        return bayes._Score(float(len(values["g"])), 1, 1, None)
+
+    monkeypatch.setattr(BayesSearch, "_score", score)
+    table = (
+        BayesSearch(make, {"g": Subset(list("abcdef"), min_size=5)}, sampler=sampler, n_trials=40, rungs=None)
+        .run(df, horizon=1, validation=V)
+        .table()
+    )
+    assert len(table) == 40 and table["validation_mae"].notna().all() and (table["g"].map(len) >= 5).all()
+
+
+def test_a_min_size_no_proposal_reaches_raises(df, monkeypatch):
+    monkeypatch.setattr(BayesSearch, "_score", fake_score)
+    impossible = BayesSearch(make, {"g": Subset(list("abcdefghijkl"), min_size=12)}, sampler="random", n_trials=2)
+    with pytest.raises(ValueError, match="hardly ever proposes enough items"):
+        impossible.run(df, horizon=1, validation=V)
+
+
+def test_numpy_values_in_a_space_are_saved_as_python_ones(df, monkeypatch, tmp_path):
+    monkeypatch.setattr(BayesSearch, "_score", fake_score)
+    space = {"x": (np.float64(0.0), np.float64(1.0)), "k": list(np.arange(4)), "s": Subset(np.array(["a", "b"]))}
+    result = BayesSearch(make, space, n_trials=4, rungs=None).run(df, horizon=1, validation=V)
+    result.save(tmp_path / "np.yaml")
+    loaded = SearchResult.load(tmp_path / "np.yaml")
+    assert loaded.record == result.record
+    assert {
+        type(value) for trial in loaded.record["trials"] for value in (trial["params"]["x"], trial["params"]["k"])
+    } == {
+        float,
+        int,
+    }
+    assert loaded.record["search"]["space"]["k"] == {"choice": [0, 1, 2, 3]}
 
 
 class FakeReport:
