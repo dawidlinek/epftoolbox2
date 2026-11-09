@@ -47,8 +47,6 @@ import pandas as pd
 
 from .._date_utils import shift_calendar_days
 from ..data.transformers.period_stats import hour_starts
-from ..information_set import frame_first_day
-from ..results.availability import sort_rows
 from ..results.store import outside_stacklevel
 from . import _chained, _contract, _row_target
 from ._calendar import (
@@ -61,7 +59,7 @@ from ._calendar import (
     training_span,
 )
 from ._history import reads_history
-from ._units import DAY, PER_PERIOD, PERIOD, unit_kind
+from ._units import DAY, PER_PERIOD, unit_kind
 from .base import BaseModel, _without_repeats, hour_arrays_of
 
 # `native`: a target date is native when some hour of it has quarter-hours that aren't all equal.
@@ -488,7 +486,9 @@ class ShapeModel(BaseModel):
             newest = self._newest_of(period, day)
             low, high = training_span(day, member_window(member, day), hz, newest)
             low, high = low + hz + self._first_ordinal, high + hz + self._first_ordinal  # the target dates, as ordinals
-            native = 0 if first is None else max(0, high - max(low, first) + 1)
+            # From the first native date on, and from the frame's first row on: a target date no row is dated h days before
+            # holds no training row.
+            native = 0 if first is None else max(0, high - max(low, first, self._first_ordinal + hz) + 1)
             expanding = member == EXPANDING
             if not expanding and (first is None or low < first):
                 reaches = True
@@ -679,42 +679,14 @@ class ShapeModel(BaseModel):
         self._check_base_chained(data, bases, names, information_set, cut_rules, availability, issued, weekdays)
         return expanded
 
-    def _check_chained(
-        self,
-        data: pd.DataFrame,
-        lists: Dict[Tuple[int, int], List[str]],
-        information_set: Any,
-        availability: str,
-        issued: Optional[Sequence[datetime.date]],
-        weekdays: Optional[Sequence[int]],
-        newest: Any,
-    ) -> None:
-        """BaseModel's checks of chained inputs, their coverage counted on the rows whose target date is native alone: the
-        others drop from every fit whatever the upstream holds (`_chained.check(kept=)`)."""
-        days = None if issued is None else listed_days(issued, weekdays)
-        rows = None
-        if days:
-            rows = self._training_rows(newest, self._reach_window(data, days), frame_first_day(data.index))
-        horizons = sorted({hz for _, hz in lists})
-        kept = None if self._check_target is None else self._kept_rows(data, self._check_target, horizons)
-        found = _chained.check(
-            self.name,
-            data,
-            lists,
-            information_set,
-            availability,
-            days,
-            rows,
-            self._freq,
-            unit_kind(self) != PERIOD,
-            kept,
-        )
-        self._chained_record = found.record
-        if found.listing:
-            self._availability_listing = sort_rows([*self._availability_listing, *found.listing])
-            self._window_listings = {
-                window: sort_rows([*listed, *found.listing]) for window, listed in self._window_listings.items()
-            }
+    def _chained_kept(
+        self, data: pd.DataFrame, lists: Dict[Tuple[int, int], List[str]]
+    ) -> Optional[Dict[int, np.ndarray]]:
+        """The rows the coverage of chained inputs counts (`BaseModel._check_chained`): those whose target date is native, per
+        horizon of `lists`; the others drop from every fit whatever the upstream holds."""
+        if self._check_target is None:
+            return None
+        return self._kept_rows(data, self._check_target, sorted({hz for _, hz in lists}))
 
     def _kept_rows(self, data: pd.DataFrame, target: str, horizons: Sequence[int]) -> Dict[int, np.ndarray]:
         """Horizon -> which rows of `data` (in its order) have a native target date at that horizon: with a date rule those
