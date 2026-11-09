@@ -21,21 +21,23 @@ from epftoolbox2.models import HistGBModel, LEARModel, ResidualModel
 from epftoolbox2.pipelines import ModelPipeline
 from epftoolbox2.presets import lear_predictors, tree_predictors
 
-lear = LEARModel(lear_predictors(["load_forecast"]), training_window=728, name="lear")
+lear = LEARModel(lear_predictors(["load_forecast"]), training_window=728, binary_mask="fit", name="lear")
 base_forecasts = [f"base_fc_h{h:02d}_d+{{horizon}}" for h in range(24)] + ["base_fc_d+{horizon}"]
 learner = HistGBModel(tree_predictors(["load_forecast"]) + base_forecasts)
 
 pipeline = (
     ModelPipeline(issue_time="11:45")
     .add_model(lear)
-    .add_model(ResidualModel(base="lear", learner=learner, name="lear_hgb"))
+    .add_model(ResidualModel(base="lear", learner=learner, warmup="2024-10-01", name="lear_hgb"))
 )
 report = pipeline.run(df, test=("2025-10-01", "2026-09-30"), horizon=1, save_dir="runs/hybrid")
 ```
 
 `base="lear"` runs a copy of the model `lear` added before it (and saves as the name); `base=LEARModel(...)` nests the base in
 the residual model instead. Either way the residual model runs **its own** base: `lear` above is fitted twice, once as itself and
-once as the base.
+once as the base. `warmup="2024-10-01"` starts the base's forecasts on that date, whatever days a run forecasts (see
+[Warm-up](#warm-up)), and `binary_mask="fit"` makes each of them its own fit's, so the base's forecasts are the pipeline's `lear`
+records to the bit (see [The base's forecasts](#the-bases-forecasts-and-the-base-models-own)).
 
 ## Parameters
 
@@ -43,11 +45,11 @@ once as the base.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `base` | model or str | Required | The model whose forecasts are corrected, or the name of a model added to the pipeline before this one. Fixed lists only (no predictor function of `ctx`); not a `ResidualModel` |
-| `learner` | model | Required | The model fitted on the residuals: a pooled or per-period model with `_fit_model` (`HistGBModel`), whose predictors (a list of names, `{horizon}` allowed, which may name the base's forecasts), scaler, newest target and estimator settings are used. Its own `training_window`, `refit` and `name` are not: a warning says so where they were set otherwise |
+| `base` | model or str | Required | The model whose forecasts are corrected, or the name of a model added to the pipeline before this one. Fixed lists only (no predictor function of `ctx`); not a `ResidualModel` or a `PooledModel`; an expanding one needs `warmup=` |
+| `learner` | model | Required | The model fitted on the residuals: a pooled or per-period model with `_fit_model` (`HistGBModel`), whose predictors (a list of names, `{horizon}` allowed, which may name the base's forecasts), scaler, newest target and estimator settings are used. Its own `training_window`, `refit` and `name` are not, nor saved: a warning says so where they were set to other than their class's defaults |
 | `training_window` | int or `"expanding"` | `"expanding"` | The learner's days of rows: every row with a base forecast, or the last W days. Not a list |
 | `refit` | str | `"7D"` | The learner's refit calendar (`"7D"`, Mondays; `"1D"`, every day; `"1MS"`, monthly). Required: `None` raises |
-| `warmup` | int or None | `None` | Days of base forecasts before the first issue day. `None` works it out (see [Warm-up](#warm-up)) |
+| `warmup` | str, int or None | `None` | Where the base's forecasts start: a date, `"2024-10-01"` (recommended: no forecast then depends on the first issue day), or days before the first issue day. `None` works it out (see [Warm-up](#warm-up)) |
 | `name` | str | `"residual"` | The model's name; its base's results are `<name>.base` |
 
 `HistGBModel`, scikit-learn's
@@ -93,21 +95,45 @@ The learner's list may name the base's forecasts, issued on the row's date:
 | `base_fc_h05_d+{horizon}` | The base's forecast of 05:00 on D+h issued on D, the same on every row of the date (`base_fc_s20_d+{horizon}` for the 20th slot at 15 or 30 minutes) |
 
 They are known at the issue time by construction, so the frame's and the information set's checks leave them out; another
-horizon than the list's (`base_fc_d+1` at horizon 2), another form, or a frame column of such a name raises before any fit. On an
-issue day whose target day the clock skips an hour (spring), `base_fc_h02_d+1` has no value, and a list naming it forecasts
-nothing that day (`missing_test_predictors`).
+horizon than the list's (`base_fc_d+1` at horizon 2), another form (two digits: `base_fc_h05`, not `base_fc_h5`), or a frame
+column of such a name raises before any fit, and `explain()` shows them as the base's forecasts, with the base's own inputs.
+
+<Aside type="caution">
+  A spring switch takes the base's forecast of the hour it skips (`base_fc_h02_d+{horizon}` in Europe/Warsaw) from **two** issue
+  days at each horizon: the one whose target day is the switch day, whose 02:00 isn't on the clock, and the switch day itself,
+  which has no 02:00 row to issue a forecast from. A list naming it forecasts nothing on those days (`missing_test_predictors`, 23
+  periods each), though the base forecasts them, so the residual model and its base are then compared on different keys: compare
+  on their common keys (`report.forecast_counts()`), or leave that slot out of the list. The training rows of those dates drop out
+  too.
+</Aside>
 
 ### Warm-up
 
 The learner's first fit needs base forecasts of its training rows, so the base starts before the first issue day:
 
-- An int learner window W: on the first issue day's refit day less W and the largest horizon, the oldest row the first fit
-  reads. The base must forecast with a full training window by then, or the run raises, naming the day the frame must start on.
-- `"expanding"`: on the base's first day with a full training window, the frame's first date plus the base's largest window (none
-  for an expanding base or a `NaiveModel`), its predictors' deepest lag and the largest horizon, moved to the base's next refit day
-  if it refits. The first issue day must not come before it.
+- `warmup="2024-10-01"` (recommended): on that date, whatever days the run forecasts. A forecast then depends on its issue day,
+  never on where the test starts: two runs from other first days, a live daily run and a backtest give one key the same bits.
+  The date must be in the frame and no later than the first issue day.
 - `warmup=k`: k days before the first issue day, whatever the base's window; its first forecasts may then train on fewer rows, as
-  a plain run's do. The research's hybrid did so: its LEAR base forecast from 364 days into the frame, on fewer than 728 days of rows.
+  a plain run's do. The research's hybrid did so: its LEAR base forecast from 364 days into the frame, on fewer than 728 days of
+  rows. **Every forecast then depends on the first issue day**, and with validation windows on the validation's: an expanding
+  learner trains on the last k days before the run plus the run's own, so a run from another first day, or a live daily run that
+  moves its start each day, forecasts each key otherwise. Its manifest records the base's start (`residual.base_start`), so a
+  resume from another start refuses rather than mix the two.
+- None, with an int learner window W: on the first issue day's refit day less W and the largest horizon, the oldest row the first
+  fit reads. The base's largest window must be filled by then, or the run raises, naming the day the frame must start on.
+- None, with `"expanding"`: on the base's first day with its largest window filled, the frame's first date plus that window, its
+  predictors' deepest lag and the largest horizon, moved to the base's next refit day if it refits. The first issue day must not
+  come before it. An **expanding base** has no such day: its first fits would train on a handful of rows from the frame's first
+  dates, and every later learner fit would include their residuals. It needs `warmup=`.
+
+### The base's forecasts and the base model's own
+
+The base starts at the warm-up, not where the pipeline's own copy of it starts. A base with `refit=None` and `binary_mask=None`
+reads each forecast's binary-column mask on its run's first day (a known issue: a forecast depends on the day its test starts), so
+its forecasts, and `base_prediction`, can differ from the records of the same model run beside the residual model, and a run warns.
+With `binary_mask="fit"` or `refit` they are those records to the bit, and comparing the two models compares what the learner
+adds.
 
 ## Leakage and verification
 
@@ -125,16 +151,26 @@ co-batch and cut-frame checks too.
 
 ## Resume and what refuses
 
-The base resumes from `<name>.base.jsonl` and the learner from `<name>.jsonl`, each to the bits of a fresh run. A changed base
-refuses through the base's own manifest; where the base's files were removed, through the residual model's: its `model_params`
-describe the base and the learner, and its `residual` field holds the hash of the base's configuration as its manifest recorded
-it. The base is a plain run over the warm-up and the run's days, so a resume over another last day refuses as a plain run's does.
+The base resumes from `<name>.base.jsonl` and the learner from `<name>.jsonl`, each to the bits of a fresh run. Before the base
+runs, the residual model's own manifest is compared: its `model_params` describe the base and the learner, and with `warmup=` its
+`residual` field the base's start, so another base, learner or start refuses with nothing written. The base's own manifest then
+refuses a changed base whose results are on file, and the residual's `residual` field holds the hash of the base's configuration
+as its manifest recorded it. The base is a plain run over the warm-up and the run's days, so a resume over another last day
+refuses as a plain run's does.
 
 In this step a `ResidualModel` refuses: `refit=None`, a list of training windows, a learner of day units or of a predictor
-function, a base with a predictor function of `ctx`, `PooledModel(ResidualModel(...))`, and Parquet results (its records hold
-`base_prediction`, which the Parquet schema has no column for: `save_format="jsonl"`). With `ModelPipeline(engine="on")` it runs
-on its own path, as with `"off"`, its base too. `verify` of a model whose base has `newest_target="published"` needs the learner
-`"published"` too: a probe gives the information set only to a model that says it reads it.
+function, a base with a predictor function of `ctx`, a `PooledModel` as its base and `PooledModel(ResidualModel(...))`, an expanding
+base without `warmup=`, and Parquet results (its records hold `base_prediction`, which the Parquet schema has no column for:
+`save_format="jsonl"`; `epf results convert --to parquet` refuses a directory that holds one, before converting anything). A
+`Workflow` refuses Parquet and a `base="name"` that names no earlier model before its data pipeline runs, also in an array task
+whose slice holds the base alone; an array task's ResidualModel runs a base that is another task's model, resolved on the whole
+list. With `ModelPipeline(engine="on")` it runs on its own path, as with `"off"`, its base too. `verify` of a model whose base has
+`newest_target="published"` needs the learner `"published"` too: a probe gives the information set only to a model that says it
+reads it.
+
+`report.provenance()` shows the learner's card (`HistGBModel`'s: scikit-learn's version) as the residual model's row and a carded
+base's as a row of its own, `<name>.base`, its contamination verdict judged from the base's first issue day: the learner trains on
+its forecasts from the warm-up on.
 
 ## HistGBModel
 
