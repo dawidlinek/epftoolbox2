@@ -148,9 +148,11 @@ class FlatNet(torch.nn.Module):
 
 
 class BlockNet(torch.nn.Module):
-    """Named blocks: one small layer per block, their outputs concatenated. `seen` keeps each forward's block widths."""
+    """Named blocks: one small layer per block, their outputs concatenated. `seen` keeps each forward's block widths and
+    `binary` which blocks hold 0/1 values only (a scaler leaves binary columns as they are)."""
 
     seen: list = []
+    binary: list = []
 
     def __init__(self, input_sizes, n_outputs, width=4):
         super().__init__()
@@ -159,6 +161,7 @@ class BlockNet(torch.nn.Module):
 
     def forward(self, blocks):
         BlockNet.seen.append({name: tuple(t.shape[-1:]) for name, t in blocks.items()})
+        BlockNet.binary.append({name: bool(((t == 0) | (t == 1)).all()) for name, t in blocks.items()})
         return self.head(torch.relu(torch.cat([self.blocks[name](t) for name, t in blocks.items()], dim=-1)))
 
 
@@ -465,12 +468,12 @@ def test_the_adapter_suite(market, tmp_path, monkeypatch, registered, kind):
 
 
 @pytest.mark.filterwarnings("ignore:overflow encountered in sinh")  # the control's 1e6 noise, mapped back by sinh
-@pytest.mark.parametrize("kind", ["daily", "hourly"])
+@pytest.mark.parametrize("kind", ["daily", "hourly", "blocks"])
 def test_verify_is_ok_with_its_control_rerun_and_co_batch(market, kind):
     """`verify` on a block's first and last (spring) day: nothing moves under the probe, everything under the control, two
     runs agree, and a day model's six other block days replaced by noise move nothing (a block rule of 7 days)."""
     days = [WEEK[0], WEEK[1]]
-    suite.check_verify(MAKERS[kind], market, VERIFY_INFO, days, items=6 if kind == "daily" else None)
+    suite.check_verify(MAKERS[kind], market, VERIFY_INFO, days, items=None if kind == "hourly" else 6)
 
 
 @pytest.mark.parametrize("kind", ["daily", "hourly"])
@@ -535,10 +538,13 @@ def test_named_blocks_reach_the_module_by_name_and_their_split_is_in_the_manifes
     """The module gets one tensor per block, in the order given; the flattened list is what every check reads (an input the
     information set calls late is refused); two splits of the same columns are different models to a resume."""
     BlockNet.seen.clear()
+    BlockNet.binary.clear()
     model = blocks()
     assert model.predictors == DAY
     assert keyed(run(model, market)._results)
     assert {"price": (4,), "load": (4,), "calendar": (1,)} in BlockNet.seen
+    # Each block holds its own columns: the weekend flag (binary, left unscaled) is the calendar block's alone.
+    assert {"price": False, "load": False, "calendar": True} in BlockNet.binary
     late = blocks(inputs={**BLOCKS, "calendar": ["is_weekend_d+{horizon}", "price_h08_d+{horizon}"]})
     data = market.assign(**{"price_h08_d+1": market["price_h08_d-1"]})
     with pytest.raises(InformationSetError, match="price_h08_d"):
@@ -760,3 +766,57 @@ def test_without_torch_the_models_build_save_and_load_and_the_run_names_the_extr
     root = Path(__file__).resolve().parents[2]
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, cwd=root)
     assert out.stdout.strip().splitlines()[-1:] == ["ok"], out.stderr[-3000:]
+
+
+def test_the_steps_of_an_epoch_come_from_a_full_window_and_each_window_of_a_list_fits_on_its_own(market, monkeypatch):
+    """A fit whose span starts before the data trains as many steps as a full window (nominal rows: the window's days); an
+    expanding window's are its rows. With a list of windows each is its own fit, its first member the model with that window
+    alone."""
+    calls = []
+    real = trainer.train_members
+
+    def spy(factory, x, y, y_mask, members, **kw):
+        calls.append((len(x), kw["nominal_rows"]))
+        return real(factory, x, y, y_mask, members, **kw)
+
+    monkeypatch.setattr(trainer, "train_members", spy)
+    gappy = market.copy()  # three dates of the span without an input, so the fit has 25 rows of a 28-day window
+    gappy.loc[
+        gappy.index.tz_localize(None).normalize().isin(pd.to_datetime(["2023-03-01", "2023-03-05", "2023-03-09"])),
+        DAY[0],
+    ] = np.nan
+    run(daily(), gappy)
+    run(daily(training_window="expanding"), market)
+    run(daily(), market)
+    (short, nominal), (rows, expanding), (full, full_nominal) = calls
+    assert short == WINDOW - 3 and nominal == WINDOW
+    assert expanding == rows > WINDOW
+    assert full == WINDOW and full_nominal == WINDOW
+    both = run(daily(training_window=[21, 28]), market)._results
+    alone = keyed(run(daily(training_window=21), market)._results)
+    assert all(len(r["member_predictions"]) == 2 for r in both)
+    assert {(r["run_date"], r["hour"], r["horizon"]): r["member_predictions"][0] for r in both} == alone
+
+
+def test_a_period_network_trains_on_its_target_s_invariant(market, monkeypatch):
+    """The scaler hands a period unit its standardised targets; the network trains on their Invariant, which is the raw
+    targets' asinh((y - median) / MAD) (median and MAD move with an affine map), as a day unit's outputs do."""
+    seen = []
+    real = trainer.train_members
+
+    def spy(factory, x, y, y_mask, members, **kw):
+        seen.append(np.asarray(y)[:, 0].copy())
+        return real(factory, x, y, y_mask, members, **kw)
+
+    monkeypatch.setattr(trainer, "train_members", spy)
+    records = run(hourly(predictors=PERIOD[:3]), market, test=("2023-03-21", "2023-03-21"))._results
+    assert records and len(seen) == 24
+    local = market.index.tz_localize(None)
+    raw = market["price"].to_numpy()
+    # Period 0's training targets: the prices at 00:00 of the 28 days up to the anchor's eve (anchor Monday 20 March, newest
+    # target 19 March), each the target of the row of the day before.
+    days = pd.date_range("2023-02-20", "2023-03-19")
+    targets = np.array([raw[(local == day).argmax()] for day in days])
+    median = np.median(targets)
+    mad = np.median(np.abs(targets - median)) / 0.6744897501960817
+    np.testing.assert_allclose(np.sort(seen[0]), np.sort(np.arcsinh((targets - median) / mad)), rtol=0, atol=1e-12)
