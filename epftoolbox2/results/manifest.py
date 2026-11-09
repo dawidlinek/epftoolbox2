@@ -690,6 +690,8 @@ def build_manifest(
     from ..models._units import manifest_fields as unit_fields  # the models import this module
 
     units = unit_fields(model)  # nothing for a period model
+    from ..models._row_target import manifest_params as row_target_params  # the models import this module
+
     return Manifest(
         history_ahead=_history_ahead(model, data, target, test_end, horizon, horizons, freq, information_set, hashes),
         model_class=type(model).__name__,
@@ -703,6 +705,8 @@ def build_manifest(
             "scaler": getattr(model, "scaler", "standard"),
             **dict(model._model_kwargs),
             **_block_params(model),
+            # `normalise_by`, `bounds` and `zero_when` where set (`models._row_target`): nothing without them.
+            **row_target_params(model),
         },
         data_columns_hash=hashes.of_columns(test_end, used_columns),
         data_timezone=zone_name(data.index.tz) or str(data.index.tz),
