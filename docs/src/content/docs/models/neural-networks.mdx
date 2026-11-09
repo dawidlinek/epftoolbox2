@@ -409,10 +409,12 @@ Here the models of each width are one group, their 4 seeds of every weekly fit t
 
 - **The key**: the module (its import path, or a notebook class's own token, so only models of the same class object of the
   session stack together) and its hash, `module_params` but `dropout` (the defaults filled in), `output`, `training_window`,
-  `refit`, `loss`, `batch_size`, `max_epochs`, `patience`, `early_stopping`, `weight_decay`, the device, `tf32` and `pad_to`.
-  Models that differ in anything else (`lr`, `dropout`, `seeds`, `random_state`, the predictors, the scaler) share stacks. A
-  stack also holds networks of one structure only: two widths, a dropout of 0 (no `Dropout` layer) or another number of inputs
-  are other stacks of the group.
+  `refit`, `loss`, `batch_size`, `max_epochs`, `patience`, `early_stopping`, `weight_decay`, the device, `tf32`, `pad_to` and
+  the sizes of named blocks.
+  Models that differ in anything else (`lr`, `dropout`, `seeds`, `random_state`, the predictors, the scaler) share stacks. Within
+  a group a stack holds networks of one structure only (every layer's class and settings, every weight's shape): a dropout of 0
+  (no `Dropout` layer) or another number of inputs is another stack, and so is a module of your own that keeps a setting of its
+  own as a plain attribute rather than in a buffer.
 - **Who runs alone**: a model whose key no other model of the run has, a loop (`stack="auto"` on a CPU: a loop's arithmetic
   isn't a stack's, so stacking it would move its numbers), a `forecast_only` run, and a subclass that changes how a fit is made
   or read. `TORCH_STACKS=off`, an environment variable read when a run runs, runs every model on its own.
