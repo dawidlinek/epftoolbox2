@@ -95,7 +95,9 @@ and `x_day_max_d-1` when D-1's last slot is; `is_day_*` is Open-Meteo's `is_day`
 after the shifts after it (10:45 for 10:00, `_hour_aggregate_available`, `_hour_last_slot`), in that row's occurrence of a
 repeated autumn hour, which the transformer aggregates as two hours; under rules over time at the latest of the hour's slots; on
 a daily row (`daily`) as a day aggregate, at the date's last slot, since the row stands for its date: judged at the stamp's
-hour, `load_actual_hour_mean` after `ResampleTransformer("1D")` passed at 11:45 though it holds all of D).
+hour, `load_actual_hour_mean` after `ResampleTransformer("1D")` passed at 11:45 though it holds all of D; whatever shift follows
+it, so `x_hour_mean_h-3` on a noon-stamped frame is refused where `x_h-3` passes, stricter than needed; and so the midnight-stamp
+warning, `_contract._counts_hours`, leaves hour aggregates out).
 Such a column resolves through the column it was built from: a user's rule on its own name first, which describes that
 series and replaces only the timing, else the built-from column's whole resolution, including the assumptions, the
 source's rule and its zone guard (`InformationSet.resolve`, `ResolvedColumn.built_from`). An hour lag of one is read

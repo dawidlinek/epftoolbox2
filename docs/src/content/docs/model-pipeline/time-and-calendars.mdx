@@ -496,7 +496,7 @@ before it runs. Left at midnight, `load_actual_h-1` reads as 23:00 on D-1, known
 load of 11:00 on D, known at 13:00, and neither the information-set check nor `verify` can see the look-ahead. Restamp on the wall
 clock: adding twelve hours to a midnight that has a time zone gives 13:00 on the day the clocks go forward, and the frame is refused.
 
-A run warns (`UserWarning`) when the rows are stamped at 00:00, or within the offset of a rule's zone from midnight (01:00 in Helsinki against a Brussels rule), and a predictor counts hours from the stamp (an hour lag, or an hour aggregate such as `price_hour_mean` at any level of what it was built from): it can't tell a frame cut with `at_time("00:00")`, which is right as it is, from one stamped at midnight that holds noon's values, so it refuses nothing and moves nothing.
+A run warns (`UserWarning`) when the rows are stamped at 00:00, or within the offset of a rule's zone from midnight (01:00 in Helsinki against a Brussels rule), and a predictor counts hours from the stamp: it can't tell a frame cut with `at_time("00:00")`, which is right as it is, from one stamped at midnight that holds noon's values, so it refuses nothing and moves nothing.
 
 ```python
 import pandas as pd

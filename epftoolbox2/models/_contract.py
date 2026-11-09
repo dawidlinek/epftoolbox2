@@ -15,7 +15,7 @@ import numpy as np
 import pandas as pd
 
 from .._date_utils import daily_anchor, fmt_minutes, is_utc_index
-from ..information_set import _built_from_name, _is_hour_aggregate, parse_predictor, rule_elements
+from ..information_set import parse_predictor, rule_elements
 from ._calendar import DAILY, FREQ_STEPS, clock_periods
 
 DayRange = Tuple[pd.Timestamp, pd.Timestamp]
@@ -257,20 +257,9 @@ def warn_about_a_midnight_stamp(
 
 
 def _counts_hours(name: Any) -> bool:
-    """Whether a column name shifts its row by hours, minutes or seconds (`x_h-1`), counted from a daily row's stamp, or is
-    built at any level from an hour aggregate (`x_hour_mean`, `x_hour_mean_day_max`), whose hour a frame cut at the stamp holds."""
-    if not isinstance(name, str):
-        return False
-    base, shifts = parse_predictor(name)[-1]
-    if any(shift.unit != "d" for shift in shifts):
-        return True
-    while True:
-        if _is_hour_aggregate(base):
-            return True
-        built = _built_from_name(base)
-        if built is None:
-            return False
-        base = parse_predictor(built)[-1][0]
+    """Whether a column name shifts its row by hours, minutes or seconds (`x_h-1`), counted from a daily row's stamp. An hour
+    aggregate (`x_hour_mean`) isn't: on a daily row it is read over its whole date, whatever the stamp."""
+    return isinstance(name, str) and any(shift.unit != "d" for shift in parse_predictor(name)[-1][1])
 
 
 def _checked_days(days: Optional[Sequence[DayRange]]) -> str:

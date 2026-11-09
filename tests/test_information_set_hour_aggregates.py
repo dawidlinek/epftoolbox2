@@ -284,25 +284,25 @@ def test_on_a_daily_row_an_hour_aggregate_is_judged_over_its_whole_date():
     assert {v.predictor for v in found} == {"px_d+1", "px_hour_mean_d+1", "px_d+1_hour_mean"}
 
 
-def test_a_midnight_stamped_daily_frame_of_hour_aggregates_warns():
-    """A daily frame cut at its stamp holds the stamp's hour in an hour aggregate, at any level of what a name was built from:
-    on rows stamped at midnight that may be another hour than the rows mean, as with an hour lag, so a run says so."""
+def test_a_midnight_stamp_doesn_t_warn_for_hour_aggregates_which_are_read_over_their_date():
+    """On a daily row an hour aggregate is read over its whole date, so the stamp can't make it pass early, and a midnight
+    stamp warns only for names that count hours from it (an `h` shift after everything), as before. On a noon-stamped frame
+    that is stricter than needed for `x_hour_mean_h-3`, the 09:00 hour: refused like the day's maximum, while `x_h-3` passes."""
     from epftoolbox2.models._contract import _counts_hours, warn_about_a_midnight_stamp
 
-    for name in [
-        "x_h-1",
-        "x_hour_mean",
-        "x_hour_dev_d-1",
-        "x_d-1_hour_mean",
-        "x_hour_mean_day_max",
-        "x_hour_mean_h05_d-1",
-    ]:
+    for name in ["x_h-1", "x_hour_mean_h-3", "x_day_max_h-12"]:
         assert _counts_hours(name), name
-    for name in ["x", "x_d-1", "x_day_max", "x_h05", "x_day_peak_d-1", "is_day_mean", "hour_mean", None]:
+    for name in ["x", "x_d-1", "x_hour_mean", "x_hour_dev_d-1", "x_hour_mean_day_max", "x_h-1_hour_mean", None]:
         assert not _counts_hours(name), name
     midnight = pd.date_range("2024-01-01", periods=30, freq="D", tz="Europe/Warsaw")
-    with pytest.warns(UserWarning, match="stamped at 00:00, midnight, and 1 predictor.*x_hour_mean_d-1"):
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
         warn_about_a_midnight_stamp(midnight, "1D", ["x_d-1", "x_hour_mean_d-1"], model_name="m")
+    noon = pd.date_range("2024-01-01 12:00", periods=40, freq="D", tz="Europe/Warsaw")
+    info = InformationSet(*ISSUE, rules={"load_actual*": Availability.realised("1h")})
+    names = ["load_actual_h-3", "load_actual_hour_mean_h-3"]
+    found, _ = info.violations({(0, 1): names}, "price", "1D", noon, "2024-01-20", "2024-01-22")
+    assert {v.predictor for v in found} == {"load_actual_hour_mean_h-3"}
 
 
 def test_delivered_span_of_an_hour_aggregate_is_its_hour():
