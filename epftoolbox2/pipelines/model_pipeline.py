@@ -228,7 +228,7 @@ def search_choices(refs: Mapping[str, ModelResultRef], test: Optional[Tuple[str,
     from every forecast it has there (every horizon it made), so a report of any part of the run shows the same."""
     out: Dict[str, List[Dict]] = {}
     for name, ref in refs.items():
-        search = (ref.provenance or {}).get("search")
+        search = (getattr(ref, "provenance", None) or {}).get("search")  # a stand-in ref may have none
         if not search:
             continue
         whole = replace(
