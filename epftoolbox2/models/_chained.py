@@ -33,14 +33,13 @@ import pandas as pd
 
 from .._date_utils import shift_calendar_days
 from ..information_set import (
-    _DAY_AGGREGATE,
     ChainedInput,
     InformationSet,
     InformationSetError,
     Shift,
     TrainingRows,
     _built_from_name,
-    _profile_slot,
+    _is_hour_aggregate,
     parse_predictor,
 )
 from ..results.availability import late_upstream_rows
@@ -232,20 +231,19 @@ def _off_the_clock(index: pd.DatetimeIndex, name: str, chained: ChainedInput) ->
     (`x`, `x_d+1`, `x_d-1`): the row reads a wall time its frame's clock skips (`x_d+1` at 02:00 the day before a spring
     switch), or a slot the upstream never plans, one its clock skips on the issue day it would be issued on (the forecast for
     02:00 of the day after a switch at horizon 1); of a day statistic (`ForecastSource(agg=)`), every row of a date with such a
-    slot. A name built from the chained column (an hour aggregate, `x_hour_mean_d-1`) is judged one level down: the column it
-    was built from, read at the same row through the shifts after it (`x_d-1`), as an hour is whole only with each of its slots.
-    A profile (another slot's value) and a day aggregate (every slot of its date), which the row's own slot doesn't decide, and
-    every other name are judged as they stand: no row is let off."""
+    slot. An hour aggregate of the chained column (`x_hour_mean_d-1`) is judged one level down: the column it was built from,
+    read at the same row through the shifts after it (`x_d-1`), as an hour is whole only with each of its slots, which are the
+    row's own hour. A profile (another slot's value), a day aggregate (every slot of its date), a rolling statistic (every day of
+    its window), which the row's own slot doesn't decide, and every other name are judged as they stand: no row is let off."""
     out = np.zeros(len(index), dtype=bool)
     if not len(index) or getattr(index, "tz", None) is None:
         return out
     shifts = next((shifts for candidate, shifts in parse_predictor(name) if candidate == chained.column), None)
     if shifts is None:
         base, outer = parse_predictor(name)[-1]
-        built = _built_from_name(base)
-        if built is None or _profile_slot(base) is not None or _DAY_AGGREGATE.match(base) is not None:
+        if not _is_hour_aggregate(base):
             return out
-        return _off_the_clock(index, built + "".join(_suffix(shift) for shift in outer), chained)
+        return _off_the_clock(index, _built_from_name(base) + "".join(_suffix(shift) for shift in outer), chained)
     if any(shift.unit != "d" for shift in shifts):
         return out
     days = sum(shift.offset for shift in shifts)

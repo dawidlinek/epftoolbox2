@@ -905,6 +905,32 @@ def test_an_hour_aggregate_of_a_chained_column_has_no_hole_where_the_upstream_pl
     assert not _off_the_clock(frame.index, "x_day_max_d-1", chained_x).any()
 
 
+def test_a_rolling_statistic_of_a_chained_column_is_counted_as_it_stands():
+    """`x_roll7max_d-1` holds the maximum of the seven days ending D-1 of an hourly chained x whose upstream has a gap day
+    (2024-03-27, no forecast) and, on 2024-04-01, no 02:00 (its issue day is the spring switch). Its NaN rows come from whole
+    days of its window, which the row's own slot doesn't decide: no row is let off, not even 04-02 02:00, whose `x_d-1` slot
+    is the unplanned one (read row by row as `x_d-1` it was, though its window also holds the gap day). An hour aggregate on
+    the same frame still lets that row off."""
+    from epftoolbox2.data.transformers import PeriodStatsTransformer, RollingStatsTransformer
+    from epftoolbox2.information_set import ChainedInput
+    from epftoolbox2.models._chained import _off_the_clock
+
+    chained_x = ChainedInput("x", "/p", "up", 1, "11:45", "Europe/Brussels", ZONE, None, "d", freq="1h")
+    index = pd.date_range("2024-03-18", "2024-04-12", freq="1h", tz=ZONE, inclusive="left")
+    wall = index.tz_localize(None)
+    x = pd.Series(np.arange(len(index), dtype=float), index=index)
+    x[wall.normalize() == pd.Timestamp("2024-03-27")] = np.nan  # a gap day of the upstream
+    x[(wall.normalize() == pd.Timestamp("2024-04-01")) & (wall.hour == 2)] = np.nan  # the slot it never plans
+    frame = RollingStatsTransformer("x", window_days=7, stat="max", lag_days=1).transform(pd.DataFrame({"x": x}))
+    frame = PeriodStatsTransformer("x", freq="1h").transform(frame)
+    frame = LagTransformer(["x_hour_mean"], [1], "day").transform(frame)
+    row = pd.Timestamp("2024-04-02 02:00", tz=ZONE)
+    assert np.isnan(frame.loc[row, "x_roll7max_d-1"]) and np.isnan(frame.loc[row, "x_hour_mean_d-1"])
+    assert frame["x_roll7max_d-1"].isna().sum() > 7 * 24
+    assert not _off_the_clock(frame.index, "x_roll7max_d-1", chained_x).any()
+    assert _off_the_clock(frame.index[frame.index == row], "x_hour_mean_d-1", chained_x).all()
+
+
 def test_a_model_reading_an_hour_mean_of_a_chained_column_runs_at_raise(df, shared, tmp_path):
     """End to end over the spring switch: `load_fc_hour_mean_d-1` of the hourly upstream reads the hour mean of 03-26 02:00
     (no row) and of 03-27 02:00 (no forecast planned) and no other hole, so the run goes through at raise, with those rows
