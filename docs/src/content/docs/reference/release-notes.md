@@ -196,6 +196,13 @@ an issue day it didn't sample.
 
 ### New
 
+- **What a sequence model reads, cut by the information set (internal).** The foundation models to come read series, not lagged
+  columns: `epftoolbox2.models._history` gives each forecast the target's context of a fixed number of steps in physical time,
+  ending at its newest value known at the issue time, its past and known-ahead covariates on the same steps (the known-ahead ones
+  to the end of the target day), and the (date, period) each step ahead forecasts. The cut reads every value through the per-cell
+  rule `verify`'s probe perturbs by. Such a model's `report.availability()` has one row per series it reads, with the newest step
+  known at the issue time and the series' vintage class in two more columns, `newest` and `vintage`, which only such a model's rows
+  bring; nothing of a model of predictors moves. See [Extending](/epftoolbox2/reference/extending/#sequence-models-series-instead-of-rows-internal).
 - **The `[torch]` extra and `epftoolbox2.nets`.** `pip install 'epftoolbox2[torch]'` installs torch (`uv.lock` takes it from
   PyTorch's CPU index); `epftoolbox2.nets` has `MLP(n_inputs, n_outputs, hidden=(256, 128), dropout=0.0, activation="relu")`, a
   counter-based `Dropout(p)` (its mask a hash of the member's key, the step, the layer and the element), `Linear(in_features,
