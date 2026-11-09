@@ -351,9 +351,9 @@ def test_a_chunk_keeps_only_the_mask_verdicts_more_than_one_model_reads(frames, 
     held = []
     real = _engine._run_chunk
 
-    def capture(prepared, bar):
+    def capture(prepared, bar, *args, **kwargs):
         held.append({key for key in prepared[0][0]._memo if key[0] == "mask"})
-        return real(prepared, bar)
+        return real(prepared, bar, *args, **kwargs)
 
     monkeypatch.setattr(_engine, "_run_chunk", capture)
     for on in (True, False):

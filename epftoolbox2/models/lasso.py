@@ -11,6 +11,12 @@ from .base import BaseModel
 class LassoCVModel(BaseModel):
     # What the step-5 engine must put in the `ScaledStats` it hands `_fit_stats`: the CV blocks (`_cv_stats.block_stats`).
     _ENGINE_NEEDS = frozenset({"blocks"})
+    # The engine hands back a fit two of whose columns are near twins, 1 - |cos| of their centred values at most this (not
+    # exact twins): the coordinate descent stops at a tolerance, so along such a pair it follows its Gram's last bits (to
+    # 2e-8 EUR/MWh apart with a pair 1e-3 of a standard deviation apart, `engine_vst_cv/sweep.py`; 4.2e-8 at 1 - |cos| 5e-6 in
+    # short windows, `sweep_dense.py`); within it the dense sweep's worst kept gap is 1.9e-9 against the engine's 1e-8
+    # (`_engine_worker.EngineFits`, `near_twin`).
+    _ENGINE_NEAR_TWIN = 1e-5
     # Saved to YAML only when not at these values, so files saved before the option existed don't move.
     _WRITTEN_WHEN_SET = {**BaseModel._WRITTEN_WHEN_SET, "fit_intercept": True}
 

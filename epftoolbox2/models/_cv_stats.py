@@ -130,12 +130,16 @@ def block_rows(rows, folds: int = CV_FOLDS) -> Tuple[np.ndarray, ...]:
 
 
 def block_stats(
-    raw: RawSums, blocks: Sequence[RawSums], params: StandardParams, values: Values
+    raw: RawSums, blocks: Sequence[RawSums], params: StandardParams, values: Values, *, absolute: bool = False
 ) -> Tuple[ScaledStats, ...]:
     """The CV blocks of a fit as `ScaledStats` (see the module): `raw` the fit's sums over ρ, `blocks` those over each of
     `block_rows(ρ)` (same columns, same span), `params` the fit's scaler parameters from `standard_stats(raw, ...)`, and
     `values` its rows on ρ as `standard_stats` takes them (the pair (x, y), or `values(j)` and `values(None)`), read only for
     the columns a block's sums can't call varying.
+
+    `absolute=True` is for rows already in scaled space (`_stats.transformed_stats`, a VST's output, `params` its identity):
+    each block's target mean is then its own, c_y + Σ_b(y - c_y)/r_b, as the window's ȳ there is, not about ρ's mean (the
+    frame of `standard_stats`, whose ȳ is 0); a fit without an intercept reads the uncentred sums, so the frame matters.
 
     Raises `StatsFallback` where the blocks can't be formed to the model path's digits (a sum that isn't finite, a
     cancellation in a block or a fold), and ValueError where `blocks` aren't KFold's blocks of `raw`'s rows (a caller's bug)."""
@@ -199,7 +203,7 @@ def block_stats(
             G = C / np.outer(sigma, sigma)
             q = cq / (sigma * ystd)
             yy = 0.0 if rb == 1 else cyy / (ystd * ystd)
-            ybar = (sy / rb - yoffset) / ystd
+            ybar = float(raw.yshift) + sy / rb if absolute else (sy / rb - yoffset) / ystd
             noise[k] = np.where(constant, 0.0, square / (sigma * sigma))
             ynoise[k] = 0.0 if rb == 1 else syy / (ystd * ystd)
         G[constant, :] = 0.0

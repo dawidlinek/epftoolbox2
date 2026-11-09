@@ -21,6 +21,7 @@ import numpy as np
 import pandas as pd
 import pytest
 from sklearn.linear_model import LinearRegression
+from sklearn.model_selection import KFold
 from threadpoolctl import threadpool_limits
 
 from epftoolbox2.information_set import Availability, InformationSet
@@ -46,7 +47,7 @@ PROVENANCE = ("package_version", "git_sha", "created_at", "updated_at", "record_
 PUBLISHED = {"price": Availability.published("13:00", 1)}
 STANDARD = {"name": "standard", "params": {"scale_binary": True}}
 # Engine against off, per class, in EUR/MWh (the step 5 spec's tolerance table); coefficients (scaled units) alike.
-TOLERANCE = {"OLSModel": 1e-8, "RidgeModel": 1e-9, "LEARModel": 1e-9}
+TOLERANCE = {"OLSModel": 1e-8, "RidgeModel": 1e-9, "LEARModel": 1e-8, "LassoCVModel": 1e-8}
 NUMBERS = ("prediction", "coefficients", "member_predictions")
 
 
@@ -154,8 +155,9 @@ def lear(*args, **kwargs):
 
 
 def test_which_models_fit_from_statistics():
-    """OLS, Ridge and LEAR with exactly `StandardScaler` (any `scale_binary`); not a VST, not CV blocks (5j), not LEAR's
-    coordinate descent (it stops at a tolerance, so it follows its Gram's last bits), not a model that declares no needs."""
+    """OLS, Ridge, LassoCV and LEAR with exactly `StandardScaler` (any `scale_binary`) or one of the library's VSTs (5j),
+    LEAR's `"cv"` and LassoCV's KFold blocks (5j); not LEAR's coordinate descent (it stops at a tolerance, so it follows its
+    Gram's last bits), not a LassoCV whose folds aren't KFold's, not a model that declares no needs."""
     path = _engine_worker.ENGINE_FIT_PATH
     assert path == "engine-1"
     for model in (
@@ -165,15 +167,20 @@ def test_which_models_fit_from_statistics():
         lear(PREDICTORS),
         lear(PREDICTORS, criterion="aic"),
         EveryOtherBack(PREDICTORS),
+        LEARModel(PREDICTORS),  # asinh
+        lear(PREDICTORS, criterion="cv"),
+        LassoCVModel(PREDICTORS),
+        LassoCVModel(PREDICTORS, cv=None),
+        OLSModel(PREDICTORS, scaler="npit"),
+        RidgeModel(PREDICTORS, scaler="asinh"),
+        OLSModel(PREDICTORS, scaler={"name": "poly", "params": {"apply_to": ["load*"]}}),
+        LassoCVModel(PREDICTORS, scaler="mlog"),
     ):
         assert _engine_worker.fit_path_of(model) == path, model
     for model in (
-        LEARModel(PREDICTORS),  # asinh
-        lear(PREDICTORS, criterion="cv"),
         lear(PREDICTORS, criterion="aic", solver="cd"),
-        LassoCVModel(PREDICTORS),
-        OLSModel(PREDICTORS, scaler="npit"),
-        RidgeModel(PREDICTORS, scaler="asinh"),
+        LEARModel.lago(["load_d+1"]),  # "cd"
+        LassoCVModel(PREDICTORS, cv=KFold(3)),
     ):
         assert _engine_worker.fit_path_of(model) is None, model
 
@@ -590,12 +597,29 @@ def with_second_load(data, ratio, seed):
     return data
 
 
-def test_an_ill_conditioned_lear_fit_goes_back_to_the_model_path(spring, tmp_path):
-    """Two near-collinear inputs (the second 1e-4 of the first's standard deviation apart) that a LEAR fit keeps both of: its
-    active columns' Gram is ill-conditioned (`_ENGINE_CONDITION_MAX`), so the fit goes back to the model path
-    (`ill_conditioned`), to the bit. Before, LEAR fitted it from the sums, 3e-8 EUR/MWh from engine off at ordinary rows."""
-    data = with_second_load(spring, 1e-4, 93)
-    names = [*PREDICTORS, "load2_d+1"]
+def with_load_mix(data, ratio, seed):
+    """`mix_d+1`: the mean of `load_d+1` and `wind_d+1` scaled to load's, plus noise of `ratio` of its sd, and the next day's
+    price carrying that noise: three inputs nearly linearly dependent though no two are near twins."""
+    data = data.copy()
+    load, wind = data["load_d+1"], data["wind_d+1"]
+    mix = 0.5 * load + 0.5 * (wind - wind.mean()) * (load.std() / wind.std())
+    noise = pd.Series(np.random.default_rng(seed).normal(0, ratio * mix.std(), len(data)), index=data.index)
+    data["mix_d+1"] = mix + noise
+    data["price"] = data["price"] + 3.0 * calendar_shift(noise, -1).fillna(0.0).to_numpy() / (ratio * mix.std())
+    return data
+
+
+@pytest.mark.parametrize("kind", ["pair", "three"])
+def test_an_ill_conditioned_lear_fit_goes_back_to_the_model_path(spring, tmp_path, kind):
+    """Nearly collinear inputs that a LEAR fit keeps all of go back to the model path, to the bit. Two inputs 1e-4 of a sd
+    apart are near twins (`_ENGINE_NEAR_TWIN`, `near_twin`); a third input that is nearly the mean of two others is no near
+    twin of either, but the active columns' Gram is ill-conditioned (`_ENGINE_CONDITION_MAX`, `ill_conditioned`). Before,
+    LEAR fitted both from the sums, 3e-8 EUR/MWh from engine off at ordinary rows."""
+    if kind == "pair":
+        data, extra, reason = with_second_load(spring, 1e-4, 93), "load2_d+1", "near_twin"
+    else:
+        data, extra, reason = with_load_mix(spring, 1e-4, 94), "mix_d+1", "ill_conditioned"
+    names = [*PREDICTORS, extra]
 
     def models():
         return [lear(names, 56, name="lear"), lear(names, 56, criterion="aic", name="lear_aic")]
@@ -604,7 +628,7 @@ def test_an_ill_conditioned_lear_fit_goes_back_to_the_model_path(spring, tmp_pat
     compare(tmp_path / "off", tmp_path / "on", models())
     for model in models():
         engine = json.loads((tmp_path / "on" / f"{model.name}.manifest.json").read_text())["engine"]
-        assert engine["fallbacks"].get("ill_conditioned", 0) > 0, (model.name, engine)
+        assert engine["fallbacks"].get(reason, 0) > 0, (model.name, engine)
 
 
 def test_an_issue_row_far_out_along_two_columns_difference_goes_back(spring, tmp_path):
@@ -1032,7 +1056,7 @@ def keep_first_day(path):
 def test_switching_the_engine_refuses_a_resume(spring, tmp_path):
     """`fit_path` is compared: engine on then off, or off then on, refuses for a model fitted from statistics, and
     `allow_manifest_mismatch=True` overrides (the file then mixes the two paths, as it says); a model the engine keeps on
-    the model path (LassoCV) resumes either way."""
+    the model path (LEAR's coordinate descent) resumes either way."""
     days = ("2023-03-24", "2023-03-25")
 
     def pipeline(engine, model):
@@ -1055,11 +1079,11 @@ def test_switching_the_engine_refuses_a_resume(spring, tmp_path):
             "engine-1" if then == "on" else None
         )
         assert len(lines(save / "ols.jsonl")) == full
-        pipeline(first, LassoCVModel(PREDICTORS, 28, cv=3, name="lasso")).run(
+        pipeline(first, lear(PREDICTORS, 28, criterion="aic", solver="cd", name="lasso")).run(
             spring, *days, horizon=1, save_dir=str(save)
         )
         keep_first_day(save / "lasso.jsonl")
-        pipeline(then, LassoCVModel(PREDICTORS, 28, cv=3, name="lasso")).run(
+        pipeline(then, lear(PREDICTORS, 28, criterion="aic", solver="cd", name="lasso")).run(
             spring, *days, horizon=1, save_dir=str(save)
         )
         assert len(lines(save / "lasso.jsonl")) == full

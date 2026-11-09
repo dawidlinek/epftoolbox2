@@ -27,11 +27,19 @@ class LEARModel(BaseModel):
     # along the eigenvectors of the active columns' Gram (`_stats.issue_distance`; `OLSModel._ENGINE_ISSUE_Z`), and the largest
     # condition number of that Gram (`_stats.IssueMetric.condition`) the engine fits from the sums: the LARS solution's last
     # bits follow it (1.6e-5 apart at 1e10, near-collinear columns both active), so a fit beyond it goes back to the model
-    # path (`ill_conditioned`). The worst kept gap is 3.5e-10 EUR/MWh (the re-review's pipeline with a pair 1e-3 of a standard
-    # deviation apart; 2.2e-10 over the 540 designs of `engine_stats/far_sweep2.py`, which keep every plain Lago-shaped DE fit:
-    # their conditions reach 2.4e5), against the engine's 1e-9.
+    # path (`ill_conditioned`); every plain Lago-shaped DE fit is kept (their conditions reach 2.4e5). Against LEAR's 1e-8 in
+    # the engine (`_engine_worker.ENGINE_TOLERANCE`), the worst kept gap of the dense sweep (`engine_vst_cv/sweep_dense.py`:
+    # issue rows at every distance to the bound, conditions between the bounds, near-twin pairs) is 1.1e-9 EUR/MWh.
     _ENGINE_ISSUE_Z = 10.0
     _ENGINE_CONDITION_MAX = 1e6
+    # A fit two of whose columns are near twins, 1 - |cos| at most this but not exact twins, goes back to the model path
+    # (`near_twin`, `_stats.near_twins`), whatever the criterion: with "cv" the penalty is a kink of a fold's path, which such
+    # a pair makes follow the Gram's last bits, and the coefficients are the path there, with no refit (1e-8 EUR/MWh apart at
+    # ordinary rows with a pair 1e-5 of a sd apart); with an information criterion such a pair, both active, takes the active
+    # Gram near its condition bound, where with an issue row near its distance bound and a VST's inverse steep there the gap
+    # reached 1.4e-8 (the 5j review's design, 1 - |cos| 4.5e-6). At 1e-5 the dense sweep's worst kept LEAR gap is 9.1e-10
+    # (`engine_vst_cv/sweep_dense.py`); the closest pair of the Lago DE inputs is 5.8e-4 apart, so no plain DE fit goes back.
+    _ENGINE_NEAR_TWIN = 1e-5
 
     @property
     def _ENGINE_FROM_STATS(self) -> bool:

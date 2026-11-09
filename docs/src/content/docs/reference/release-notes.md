@@ -266,20 +266,31 @@ an issue day it didn't sample.
   writes every model's results into its own file as before, through one writer. A model's per-run cost beyond its fits drops (the
   pool start, the `gc.collect()` and the read of the data are once per group, and the checks of the frame and of the information
   set and each column's binary mask once for the models that share them): about 0.23 s per OLS model on its own, 0.005 s in a
-  group of 1,000 (one test day, 24 periods). **OLS, Ridge and LEAR with `scaler="standard"` are fitted from exact sums shared
-  across the group**: the same bits alone and in any group, order or process count, within 1e-8 EUR/MWh of `"off"` for OLS and 1e-9
-  for Ridge and LEAR (the same penalty, the same kink), not to the bit, with the same counts of forecasts and skips; a fit the sums
+  group of 1,000 (one test day, 24 periods). **OLS, Ridge, LassoCV and LEAR are fitted from exact sums shared across the group**,
+  with `scaler="standard"` or a variance-stabilising scaler (`asinh`, LEAR's default, `npit`, `mlog`, `poly`: the scaler's own
+  transform runs once per set of models with the same training rows, and every transformed column is the model's own to the bit),
+  LassoCV and LEAR's `criterion="cv"` scored on the KFold blocks of those rows: the same bits alone and in any group, order or
+  process count, within 1e-8 EUR/MWh of `"off"` for OLS, LassoCV and LEAR and 1e-9 for Ridge (the same penalty, the same kink),
+  not to the bit, with the same counts of forecasts and skips; a fit the sums
   can't give to those digits is fitted as with `"off"`, to the bit, and so is the forecast of an issue row far outside its
-  training values (more than 30 training standard deviations out for OLS and 10 for LEAR, along the eigenvectors of the fit's
-  Gram, past scikit-learn's rounding budget for Ridge) and a LEAR fit whose chosen columns are nearly collinear (their Gram's
-  condition number above 1e6); within those bounds the largest gaps measured were 2.2e-9 (OLS), 6.1e-10 (Ridge) and 3.5e-10
-  (LEAR) EUR/MWh. Their manifests record `fit_path: "engine-1"`, compared on resume, so results written with the engine on
-  refuse a resume with it off and the other way round (`allow_manifest_mismatch=True` overrides), and as provenance how many fits
-  came from the sums. LassoCV, LEAR's `solver="cd"` and the models with a variance-stabilising scaler (LEAR's default) are fitted as
-  with `"off"`, to the bit. `NaiveModel`, a `train_on="matching"` list, a subclass with its own fit and a `forecast_only` run go through their own run as
+  training values (more than 30 training standard deviations out for OLS and 10 for LEAR and LassoCV, along the eigenvectors of
+  the fit's Gram; for Ridge, which has no distance bound, past scikit-learn's rounding budget at the row; with a
+  variance-stabilising scaler also where its inverse is more than three times as steep as the median of its slopes at the
+  training targets), a LEAR fit whose chosen columns are nearly collinear (their Gram's condition number above 1e6) and a
+  LassoCV or LEAR fit with two near-copy inputs (1 − |correlation| at most 1e-5); within those bounds the largest gaps measured
+  were 8.6e-9 (OLS), 4.6e-9 (LassoCV), 6.1e-10 (Ridge) and 1.1e-9 (LEAR) EUR/MWh. Their manifests record
+  `fit_path: "engine-1"`, compared on resume, so results written with the engine on refuse a resume with it off and the other way
+  round (`allow_manifest_mismatch=True` overrides), and as provenance how many fits came from the sums. LEAR's `solver="cd"`
+  (`LEARModel.lago()`'s) is fitted as with `"off"`, to the bit. **`engine="check"`** is `"on"` with one fit in about 50 also
+  fitted as `"off"` fits it: the results are `"on"`'s, the manifest records the gaps as provenance (`engine_check`: fits, largest
+  absolute and relative gap, gaps that aren't finite, how many chose another kink or penalty, fits `"off"` couldn't fit), and a
+  warning names a model whose largest gap is above its class's tolerance or that has either of the last two. On 1,000 LEAR
+  variants (asinh) the engine spends 1.45-1.54 times fewer core-seconds than `"off"` where the inputs have no gaps, and runs at
+  0.84-0.98 times its speed (2-19 % more core-seconds) where every variant's gaps give it rows of its own; LassoCV spends 1.64
+  times fewer; a run's wall time is 5-14 times shorter. `NaiveModel`, a `train_on="matching"` list, a subclass with its own fit and a `forecast_only` run go through their own run as
   with `"off"`, the default, which runs nothing new. `ENGINE_MAX_MODELS` (20,000)
   and `ENGINE_MAX_COLUMNS` (4,096) bound how many models and columns a group reads at once; `verify` runs each model through the
-  engine too. YAML writes `engine` only when it is `"on"`. See
+  engine too. YAML writes `engine` only when it is `"on"` or `"check"`. See
   [Many Models: the Engine](/epftoolbox2/model-pipeline/forecasting/#many-models-the-engine).
 - **`PseSource`: the Polish TSO's reports API, no key.** `PseSource(datasets=["kse-load", "csdac-pln"], columns=None, prefix="pse")` loads
   `kse-load` (`load_actual`, `load_fcst`), `his-wlk-cal` (`demand`, `wi`, `pv`, `jg` and more on request), `csdac-pln` (the SDAC price in
