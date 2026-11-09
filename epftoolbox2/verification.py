@@ -596,7 +596,8 @@ def verify_model(
     checked._check_inputs(built, target, horizon, freq, plan=plan, cut_rules=information_set, horizons=horizons)
     used = sorted({*checked._used_predictors, *plan.queried}) if plan is not None else list(checked._used_predictors)
     # A `zero_when` flag is probed by flipping its unknown cells (below), never by noise, which only ever makes it "not 1" and
-    # which the run refuses as a flag on an issue row; nor by the control, whose forecasts of 0 read the flag alone.
+    # which the run refuses as a flag on an issue row: `leakage_probe` and `positive_control` leave it out (and put it back as
+    # `rebuild` builds it), and the control's forecasts of 0, which read the flag alone, needn't move.
     flags = zero_columns(checked, horizons)
     not_sampled: List[str] = []
     late_in_period: List[str] = []
@@ -626,11 +627,7 @@ def verify_model(
     if features is None:
         data = built = _booleans_as_numbers(data, [target, *used])
         columns = _probe_columns(data, information_set, target, used)
-        if flags:
-            columns = [name for name in columns if name not in flags]
     else:
-        if flags:
-            columns = [name for name in data.columns if name not in flags]
         not_from_frame = _inputs_not_from_frame(data, built, features, used, information_set, seed)
 
     # A forecast of D+1 may read today's published price, so a model can list its target as an input. What it reads as an

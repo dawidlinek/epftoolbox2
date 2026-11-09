@@ -2363,7 +2363,9 @@ def leakage_probe(
 
     `flip` turns each unknown value v of `columns` into 1 - v instead of noise (`perturb_unknown`): the probe of a 0/1 flag such
     as a model's `zero_when` column, which noise would only ever make "not 1", so a flag that is 0 on the issue day would move
-    nothing.
+    nothing. Without `flip` a model's `zero_when` columns get no noise at all (a run refuses a flag that isn't 0 or 1), and with
+    `rebuild` they are put back as `rebuild(data)` builds them, in the daily pass too: probe them with `flip=True`, as `verify`
+    does.
     """
     run_day = str(pd.Timestamp(run_day).date())
     horizon = _horizon_arguments(horizon, horizons, 1)
@@ -2374,6 +2376,8 @@ def leakage_probe(
             "model the target's rule is the boundary, and the probe perturbs what it calls unknown. Leave it False."
         )
     target_from_issue = target if check_target_boundary else None
+    flags = [] if flip else _flags_of(model, horizon)
+    columns = _without(columns, data, flags)
     perturbed, counts, unchecked = (
         perturb_unknown(
             data, run_day, information_set, freq, columns, seed, target_from_issue=target_from_issue, flip=True
@@ -2387,9 +2391,10 @@ def leakage_probe(
         if _daily_rows(perturbed.index, freq):
             # The source was read by its hours, so a value of a whole date it already holds (a daily maximum repeated on every
             # hour) was perturbed only on the hours known late. The daily rows are read here as `violations` reads them.
-            ruled = [name for name in perturbed.columns if _has_rule(information_set, name, freq)]
+            ruled = [name for name in perturbed.columns if _has_rule(information_set, name, freq) and name not in flags]
             perturbed, more, _ = perturb_unknown(perturbed, run_day, information_set, freq, ruled, seed)
             counts = {**counts, **{name: max(counts.get(name, 0), n) for name, n in more.items()}}
+        perturbed = _flags_put_back(perturbed, base, flags)
 
     common = (run_day, target, horizon, freq, information_set, availability, span)
     original, read, late = _issue_day_forecasts(model, base, *common)
@@ -2612,7 +2617,10 @@ def positive_control(
     run_day = str(pd.Timestamp(run_day).date())
     horizon = _horizon_arguments(horizon, horizons, 1)
     first_row_day = 0 if _newest_target_of(model) == "published" else -1
+    # A model's `zero_when` flags get no noise (a run refuses a flag that isn't 0 or 1); its forecasts of 0 are `exempt`.
+    flags = _flags_of(model, horizon)
     names = list(data.columns) if columns is None else list(columns)
+    names = [name for name in names if name not in flags]
     # A model that reads history reads its target's context as an input (`models._history`): its fresh values are perturbed too.
     history = reads_history(model() if callable(model) and not hasattr(model, "run") else model)
     if rebuild is None and not history:
@@ -2647,6 +2655,7 @@ def positive_control(
         perturbed = _with_training_data_of(
             base, rebuild(perturbed), run_day, None if history else target, first_row_day
         )
+        perturbed = _flags_put_back(perturbed, base, flags)
     common = (run_day, target, horizon, freq, information_set, availability, span)
     zeros_before: set = set()
     zeros_after: set = set()
@@ -3047,6 +3056,38 @@ def _newest_target_of(model: Any) -> str:
     """The `newest_target` of a model instance or of one a zero-argument factory makes; `"d-1"` for one that has none."""
     m = model() if callable(model) and not hasattr(model, "run") else model
     return getattr(m, "newest_target", "d-1")
+
+
+def _flags_of(model: Any, horizon: Dict[str, Any]) -> List[str]:
+    """The `zero_when` columns (`models._row_target`) of a model instance or of one a zero-argument factory makes, at each horizon
+    a probe runs (`horizon`, what `_horizon_arguments` gives); empty for a model without `zero_when`. A 0/1 flag gets no noise: a
+    run refuses any other value on an issue row, and only flipping it (`flip`) probes it."""
+    from .models._row_target import zero_columns  # models import this module
+
+    m = model() if callable(model) and not hasattr(model, "run") else model
+    if getattr(m, "zero_when", None) is None:
+        return []
+    horizons = horizon.get("horizons") or range(1, horizon["horizon"] + 1)
+    return zero_columns(m, horizons)
+
+
+def _without(columns: Optional[Sequence[str]], data: pd.DataFrame, flags: Sequence[str]) -> Optional[List[str]]:
+    """`columns` (every column of `data` if None) less `flags`; `columns` as given without flags."""
+    if not flags:
+        return columns
+    return [name for name in (data.columns if columns is None else columns) if name not in flags]
+
+
+def _flags_put_back(perturbed: pd.DataFrame, base: pd.DataFrame, flags: Sequence[str]) -> pd.DataFrame:
+    """`perturbed` with each of `flags` it has as `base` holds it: a flag `rebuild` built from perturbed source columns is put
+    back, so no noise reaches it."""
+    present = [name for name in flags if name in perturbed.columns and name in base.columns]
+    if not present:
+        return perturbed
+    out = perturbed.copy()
+    for name in present:
+        out[name] = base[name].to_numpy()
+    return out
 
 
 def _with_training_data_of(
