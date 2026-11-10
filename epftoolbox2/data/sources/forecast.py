@@ -351,7 +351,9 @@ class ForecastSource(DataSource):
             )
         visible = store.visible("latest", cutoff=self._cutoff(upstream))
         everything = store.visible("latest", cutoff=None)
-        later = sorted(day for day, revisions in everything.items() if max(revisions) > max(visible.get(day, {0: None})))
+        later = sorted(
+            day for day, revisions in everything.items() if max(revisions) > max(visible.get(day, {0: None}))
+        )
         if later:
             time = self.available or upstream.issue_time
             warnings.warn(
