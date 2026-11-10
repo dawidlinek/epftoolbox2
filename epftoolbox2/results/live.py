@@ -949,10 +949,13 @@ class LiveRevision:
         self._close_stores()
 
 
-def live_reading(path: Any, policy: Optional[str], cutoff: Any) -> Optional[Dict[str, Dict[int, pd.Timestamp]]]:
+def live_reading(
+    path: Any, policy: Optional[str], cutoff: Any, days: Optional[Tuple[str, str]] = None
+) -> Optional[Dict[str, Dict[int, "Commit"]]]:
     """What a reader of the results at `path` may see (`LiveStore.visible`, `policy` "latest" by default) when they are a live
     directory's; None for a backtest's, where `policy` raises `LiveDirectoryError` (and for results held in memory, `path`
-    None, a ValueError)."""
+    None, a ValueError). A cut-off that leaves out committed revisions of the issue days `days` (first, last; every day
+    without) warns with how many, so a reader that fails closed never does so silently."""
     if path is None:
         if policy is not None:
             raise ValueError(f"policy={policy!r} reads a live directory's revisions: results held in memory have none")
@@ -965,7 +968,46 @@ def live_reading(path: Any, policy: Optional[str], cutoff: Any) -> Optional[Dict
                 f"{LIVE_FILE}): read it without a policy"
             )
         return None
-    return LiveStore(directory).visible(policy or "latest", cutoff)
+    store = LiveStore(directory)
+    seen = store.visible(policy or "latest", cutoff)
+    if cutoff is not None:
+        _warn_dropped(path, store, policy or "latest", cutoff, seen, days)
+    return seen
+
+
+def _warn_dropped(
+    path: Any,
+    store: "LiveStore",
+    policy: str,
+    cutoff: Any,
+    seen: Dict[str, Dict[int, Any]],
+    days: Optional[Tuple[str, str]],
+) -> None:
+    """Warn when the cut-off leaves out committed revisions that the same policy without one reads, of the issue days from
+    `days[0]` to `days[1]` (the reader's; every day without): a cut-off that fails closed (no deadline on file, a mapping that
+    doesn't name a day) would otherwise show only as fewer forecasts."""
+    every = store.visible(policy, None)
+    if days is not None:
+        every = {day: revisions for day, revisions in every.items() if days[0] <= day <= days[1]}
+    dropped = {day: set(revisions) - set(seen.get(day, {})) for day, revisions in every.items()}
+    dropped = {day: revisions for day, revisions in dropped.items() if revisions}
+    if not dropped:
+        return
+    empty = sorted(day for day in dropped if not seen.get(day))
+    warnings.warn(
+        f"{path}: cutoff={cutoff!r} leaves out {sum(map(len, dropped.values()))} committed revisions of "
+        f"{len(dropped)} issue days (e.g. {min(dropped)})"
+        + (f", and {len(empty)} of those days read nothing" if empty else "")
+        + ". "
+        + (
+            f"{store.identity_path.name} records no deadline, so only commits made by a deadline of their own count. "
+            if cutoff == DEADLINE and "deadline" not in store.identity()
+            else ""
+        )
+        + "Pass cutoff=None to read every committed revision.",
+        UserWarning,
+        stacklevel=outside_stacklevel(),
+    )
 
 
 def live_fingerprint(path: Any, policy: Optional[str], cutoff: Any) -> Tuple[Any, ...]:

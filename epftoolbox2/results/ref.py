@@ -138,7 +138,8 @@ class ModelResultRef:
         for `read_records(committed=...)`; None for a backtest's or results held in memory."""
         from .live import live_reading
 
-        return live_reading(self.path, self.policy, self.cutoff)
+        days = (self.test_start, self.test_end) if self.test_start and self.test_end else None
+        return live_reading(self.path, self.policy, self.cutoff, days)
 
     def _keep_rows(self, clock: bool) -> Callable[[Any, Any], Any]:
         """`_records`' filter (and the clock's, with `clock` and a zone) over rows of a Parquet table: a boolean per row."""
