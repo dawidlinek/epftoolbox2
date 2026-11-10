@@ -58,5 +58,6 @@ print(report.error_split())                            # level, hour profile and
 - It is taken on each model's own forecasts, like the MAE: compare models on the same keys (`report.forecast_counts()`).
 - `report.error_split()` divides the squared error into the same three parts: the level of the day, the hour profile and the shape
   within the hour. See [Working with Results](/epftoolbox2/model-pipeline/results/#hourly-aggregates-shape-and-the-error-split).
-- This is the shape MAE of the resolution study; `tests/reproductions/test_resolution_scoring.py` reproduces its R1 table.
+- This is the shape MAE of the resolution study, whose R1 table it reproduces from the stored forecasts: see
+  [Resolution Study](/epftoolbox2/reproductions/resolution/#tier-s-the-published-tables-from-the-stored-forecasts).
 - Serializable to YAML: `{class: ShapeMAEEvaluator, params: {period: 1h}}`.

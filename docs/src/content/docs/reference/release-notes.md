@@ -434,7 +434,7 @@ an issue day it didn't sample.
   `CsvExporter(extra_columns=)` joins, from a source in the results' time zone, which `CsvExporter(extra_columns=)` now checks too (a UTC frame under Europe/Berlin results gave every row another hour's value). A column an evaluator reads is checked before any fit, and `Workflow.report()` (`epf report`) loads the data for it. **No existing number moves**: the four daily aggregates, every table and the goldens are bit
   for bit as before. They reproduce the resolution study's R1 table (MAE15, MAEh, shape MAE, the error split), its DM list and R3's
   derived daily rows, and the renewables study's price and generation tables, from the studies' stored forecasts
-  (`tests/reproductions/`). See [Working with Results](/epftoolbox2/model-pipeline/results/#hourly-aggregates-shape-and-the-error-split).
+  (the reproduction pages, such as [Resolution Study](/epftoolbox2/reproductions/resolution/#tier-s-the-published-tables-from-the-stored-forecasts)). See [Working with Results](/epftoolbox2/model-pipeline/results/#hourly-aggregates-shape-and-the-error-split).
 - **`ResidualModel` and `HistGBModel`: a base model's forecasts corrected by gradient boosting.** `ResidualModel(base, learner,
   training_window="expanding", refit="7D", warmup=None, name="residual")` runs its own copy of a base model (a model, or the name of
   one added to the pipeline before it) over a warm-up, stores its out-of-sample forecasts in `<name>.base.jsonl`, and fits the
