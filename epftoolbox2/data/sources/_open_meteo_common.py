@@ -10,7 +10,7 @@ import pandas as pd
 import requests
 from rich.console import Console
 
-from epftoolbox2._clock import current_clock
+from epftoolbox2._clock import current_clock, settled_now
 from epftoolbox2.logging import get_logger
 from .._market_timezone import resolve as _resolve_timezone
 from .base import DataSource
@@ -351,8 +351,9 @@ class OpenMeteoBase(DataSource):
             self.session.proxies = {"http": self.proxy_url, "https": self.proxy_url}
 
     def _now(self) -> pd.Timestamp:
-        """Now on the current clock (`epftoolbox2.clock`), UTC."""
-        return current_clock().now()
+        """The instant rows are final against (`epftoolbox2._clock.settled_now`: the clock's now, never later than the
+        machine's), UTC."""
+        return settled_now()
 
     @staticmethod
     def _to_utc(ts: pd.Timestamp) -> pd.Timestamp:

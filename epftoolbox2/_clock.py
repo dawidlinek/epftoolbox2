@@ -2,11 +2,16 @@
 
 `current_clock()` is the clock in use: `SYSTEM`, the machine's, unless code runs inside `use_clock(clock)`, a context
 variable, so a block of code (a test, a simulated week) sees another clock and the rest of the process doesn't. Every time
-of day the package reads (the per-source cache's unsettled boundary, a source's Retry-After, Open-Meteo's cut between final
-and provisional rows, manifest timestamps, `"today"`), every interval it times and every wait it makes goes through it. A
-`FakeClock` stands still until it is advanced: its `sleep` advances it and returns at once, so code that waits never waits.
+of day the package reads (a source's Retry-After, manifest timestamps, `"today"`), every interval it times and every wait it
+makes for itself (a retry's backoff, a Retry-After) goes through it. A `FakeClock` stands still until it is advanced: its
+`sleep` advances it and returns at once, so code that waits never waits.
 
-What doesn't read it, on purpose:
+What settles data reads `settled_now()`, the earlier of the clock's now and the machine's: the per-source cache's unsettled
+boundary and tail cap, the single-file cache's `settled_at`, Energy-Charts' response cache and Open-Meteo's cut between final
+and provisional rows. A clock behind real time (a simulated week in the past) settles on its own now; one ahead of it can't
+call days settled that the world hasn't settled yet, which a real cache would then keep.
+
+What doesn't read the current clock, on purpose:
 
 - Pool workers. They never read the clock (a forked worker would see the parent's clock, a spawned one `SYSTEM`).
 - `time.perf_counter`, which times compute (a plan's `seconds`, a torch fit's), never a time of day or a wait.

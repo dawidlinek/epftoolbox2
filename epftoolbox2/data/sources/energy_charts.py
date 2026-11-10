@@ -18,7 +18,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 import pandas as pd
 import requests
 
-from epftoolbox2._clock import Clock, current_clock
+from epftoolbox2._clock import Clock, current_clock, settled_now
 from epftoolbox2.logging import get_logger
 from .base import DataSource
 
@@ -286,7 +286,8 @@ class EnergyChartsSource(DataSource):
         if hasattr(self, "session") and self.session:
             self.session.close()
 
-    # The current clock (`epftoolbox2.clock`): the rate limit's seconds, its waits and the cache's "now".
+    # The current clock (`epftoolbox2.clock`): the rate limit's seconds and its waits; the response cache settles against
+    # `settled_now` (never later than the machine's now).
     def _clock(self) -> float:
         return current_clock().monotonic()
 
@@ -294,7 +295,7 @@ class EnergyChartsSource(DataSource):
         current_clock().sleep(seconds)
 
     def _now(self) -> pd.Timestamp:
-        return current_clock().now()
+        return settled_now()
 
     # -- configuration --------------------------------------------------------
 
