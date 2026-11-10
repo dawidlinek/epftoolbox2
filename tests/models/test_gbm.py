@@ -251,7 +251,34 @@ def test_every_setting_reaches_the_workers(cls):
 
     parent_side = {"predictors", "training_window", "refit", "name", "scaler", "newest_target", "binary_mask"}
     parent_side |= {"normalise_by", "bounds", "zero_when"}  # a per-row target: the worker reads them from its config
+    parent_side |= {"target_transform"}  # a pooled unit's: the worker reads it from its config (`config["units"]`)
     assert set(cls(INPUTS)._model_kwargs) == set(inspect.signature(cls).parameters) - parent_side
+
+
+@pytest.mark.parametrize("cls", [LightGBMModel, XGBoostModel, CatBoostModel])
+def test_target_transform_is_a_pooled_fit_s_and_saved_only_when_set(cls, tmp_path):
+    """Without the package: a pooled fit takes "per_period", "pooled" and "none", `periods="each"` the default alone (when
+    built and when set later), another value raises; a default model's YAML has no `target_transform`, a set one's has it after
+    `periods` and loads back to it."""
+    for value in ("pooled", "none"):
+        with pytest.raises(ValueError, match="with periods='each' each period's target goes through scaler="):
+            cls(EACH_INPUTS, periods="each", target_transform=value)
+        each = cls(EACH_INPUTS, periods="each")
+        with pytest.raises(ValueError, match="with periods='each'"):
+            each.target_transform = value
+    with pytest.raises(ValueError, match="target_transform must be one of"):
+        cls(INPUTS, target_transform="asinh")
+    texts = {}
+    for value in ("per_period", "none"):
+        path = tmp_path / f"{value}.yaml"
+        ModelPipeline().add_model(cls(INPUTS, target_transform=value, name="tree")).save(path)
+        texts[value] = path.read_text()
+        (loaded,) = ModelPipeline.load(path).models
+        assert type(loaded) is cls and loaded.target_transform == value
+    assert "target_transform" not in texts["per_period"]
+    assert texts["none"] == texts["per_period"].replace(
+        "    periods: pooled\n", "    periods: pooled\n    target_transform: none\n"
+    )
 
 
 @pytest.mark.parametrize("cls", [LightGBMModel, XGBoostModel, CatBoostModel])
@@ -528,6 +555,28 @@ def test_a_pooled_fit_is_the_package_s_on_the_stacked_rows_by_hand(family, objec
     expected = {int(p): centers[p][0] + centers[p][1] * np.sinh(v) for p, v in zip(issue["period"], z)}
     assert {r["hour"]: r["prediction"] for r in made} == expected
     assert list(tmp_path.iterdir()) == []
+
+
+def test_a_pooled_fit_with_target_transform_none_is_the_package_s_on_the_raw_stacked_rows_by_hand(family, market):
+    """`target_transform="none"`: the same stacked rows, the package's estimator fitted on their raw targets (no centre, no
+    scale, no asinh), a forecast its row's prediction as it is. To the bit; every forecast moves against the default's."""
+    package, make = family
+    made = {r["hour"]: r["prediction"] for r in records(make(target_transform="none"), market, ("2023-03-14",) * 2)}
+    local = pd.DatetimeIndex(market.index.tz_localize(None))
+    names = [name.replace("{horizon}", "1") for name in INPUTS]
+    target = calendar_shift(market["price"], 1).to_numpy()
+    table = market.assign(period=local.hour, date=local.normalize(), target=target)
+    span = (table["date"] >= pd.Timestamp("2023-02-12")) & (table["date"] <= pd.Timestamp("2023-03-11"))
+    train = table[span].dropna(subset=[*names, "target"]).sort_values(["date", "period"], kind="stable")
+    issue = table[table["date"] == pd.Timestamp("2023-03-14")].groupby("period").tail(1)
+    estimator = _by_hand(package, "l1", **HAND_PARAMS[package])
+    with threadpool_limits(limits=1, user_api="openmp"):  # XGBoost leaves an OpenMP team behind otherwise
+        fitted = estimator.fit(train[names].to_numpy(), train["target"].to_numpy(dtype=np.float64))
+        z = np.asarray(fitted.predict(issue[names].to_numpy()), dtype=np.float64)
+    expected = {int(p): float(v) for p, v in zip(issue["period"], z)}
+    assert made == expected and len(made) == 24
+    default = records(make(), market, ("2023-03-14",) * 2)
+    assert all(r["prediction"] != made[r["hour"]] for r in default)
 
 
 def test_the_estimator_has_the_research_s_fixed_settings(family):

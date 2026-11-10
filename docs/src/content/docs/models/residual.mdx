@@ -61,12 +61,13 @@ with the research's defaults (`ztree.py`):
 | `predictors` | list | Required | Full names, `{horizon}` allowed. With `periods="pooled"` each is read on the row's own period, so one list serves every period, and `"period"` (0 to 23 hourly) is a feature where listed. `presets.tree_predictors` gives the research's 183 |
 | `training_window` | int or `"expanding"` | `"expanding"` | Days of rows, or every row from the frame's first date |
 | `refit` | str | `"7D"` | The refit calendar; a pooled fit needs one |
-| `periods` | str | `"pooled"` | `"pooled"`: one fit over the (date, period) rows of every period, each period's target through its own Invariant; `"each"`: one fit per period, as the linear models do |
+| `periods` | str | `"pooled"` | `"pooled"`: one fit over the (date, period) rows of every period, its targets transformed by `target_transform`; `"each"`: one fit per period, as the linear models do |
 | `loss` | str | `"l1"` | `"l1"` (absolute error) or `"l2"` (squared error) |
 | `max_iter`, `learning_rate`, `max_leaf_nodes`, `min_samples_leaf`, `l2_regularization`, `max_features` | | `500`, `0.05`, `31`, `20`, `1.0`, `0.5` | scikit-learn's. `early_stopping` is always off, so every row of the window trains |
 | `random_state` | int | `0` | The seed of the feature subsets, the same in every fit |
 | `name` | str | `"hgb"` | Display name |
-| `scaler` | scaler spec | `INVARIANT_TARGET` | Keyword-only. The predictors as they are and the target as epftoolbox's Invariant (`{"name": "asinh", "params": {"apply_to": "target", "standardise": False}}`); a pooled fit gives each period's target its own Invariant whatever this says |
+| `scaler` | scaler spec | `INVARIANT_TARGET` | Keyword-only. The predictors as they are and the target as epftoolbox's Invariant (`{"name": "asinh", "params": {"apply_to": "target", "standardise": False}}`); a pooled fit transforms its targets by `target_transform` whatever this says |
+| `target_transform` | str | `"per_period"` | Keyword-only. How a pooled fit transforms its targets: `"per_period"`, each period's own Invariant (the research's); `"pooled"`, one Invariant over every row; `"none"`, the raw target, which the estimator fits as it is and whose prediction is the forecast. `periods="each"` takes the default alone. Written to YAML only when set; recorded in the manifest and compared on resume ([Target transform](/epftoolbox2/models/trees/#target-transform)) |
 | `newest_target`, `binary_mask` | | `"d-1"`, `None` | Keyword-only, as for every model ([Time and Calendars](/epftoolbox2/model-pipeline/time-and-calendars/)) |
 | `normalise_by`, `bounds`, `zero_when` | | `None` | Keyword-only. A per-row target, as for every model, with either `periods`: a pooled fit divides each row's target by its own period row's scale ([Generation targets](/epftoolbox2/models/common-parameters/#generation-targets)). They aren't supported on a `ResidualModel` in this step, on itself or on its learner |
 
@@ -78,8 +79,9 @@ with the research's defaults (`ztree.py`):
    the base over those days writes, bit for bit.
 2. **The learner** is fitted per refit unit on the rows of the issue days in its span that have a base forecast. A row dated D'
    at horizon h has the target `price_d+h` less the base's forecast of its period and horizon issued on D' (its own stored
-   record: an out-of-sample forecast, never a fitted value), each period's residuals through their own Invariant. The span ends
-   at the learner's cut (`newest_target`), so every residual a fit trains on is of a target known when the fit is made.
+   record: an out-of-sample forecast, never a fitted value), each period's residuals through their own Invariant (a pooled
+   learner's `target_transform`: `"none"` fits the raw residuals). The span ends at the learner's cut (`newest_target`), so every
+   residual a fit trains on is of a target known when the fit is made.
 3. **A forecast** is the issue day's base forecast plus the learner's prediction, mapped back. A key whose base forecast is
    missing on its issue day is skipped as `no_base_forecast`, before any fit.
 
@@ -184,7 +186,10 @@ after a resume and with `engine="on"`. Its card (`model.card`, licence BSD-3-Cla
 scikit-learn's version in the manifest's `runtime`, compared on resume: the algorithm has moved between releases.
 
 With `periods="pooled"` the rows of a fit are the (date, period) rows of every period, each predictor read on its period's own
-row, stacked by date then period, and a period with no training row skips its forecasts (`no_finite_training_rows`). See
+row, stacked by date then period, and a period with no training row skips its forecasts (`no_finite_training_rows`). Their
+targets go through each period's Invariant by default, one over every row with `target_transform="pooled"`, or as they are with
+`"none"` (a capacity factor from `normalise_by` can be better fitted raw, and the inputs must then tell the periods apart: see
+[Target transform](/epftoolbox2/models/trees/#target-transform), measured on `HistGBModel`). See
 [Day and pooled units](/epftoolbox2/reference/extending/#day-and-pooled-units) for the unit kinds.
 
 ## Reproducing the research's hybrid

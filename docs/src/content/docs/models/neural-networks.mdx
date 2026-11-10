@@ -85,7 +85,10 @@ inputs only, never dates or targets, and its outputs are in the scaled target sp
   `output="period"`: the rows of one period, as every model fits. Both on the fixed refit calendar: a forecast issued on D uses
   the fit of its refit day, whose targets end the day before it, never warm-started from an earlier fit.
 - **Scaling.** The inputs are standardised, binary columns kept, on each fit's own rows (each window of a list on its own); the
-  target of each output goes through its own Invariant, `asinh((y - median) / MAD)`, and back.
+  target of each output goes through its own Invariant, `asinh((y - median) / MAD)`, and back. The module's outputs, the loss,
+  the learning rate and early stopping are in that space, so a network takes no other target transform: there is no
+  `target_transform` parameter (the trees' `"none"`, a raw target, isn't offered), and setting the attribute to anything but
+  `"per_period"` raises.
 - **Seeds and their mean.** Network s of a fit is seeded by a hash of `random_state`, the fit (period, horizon, refit day,
   window, and for a predictor function the content of its list, never the number its plan gave it) and s; never by the model's
   name, its place in a pipeline, the process, the shard, or the days, windows or weekdays a run holds. A forecast is the mean of

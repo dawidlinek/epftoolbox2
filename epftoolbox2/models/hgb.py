@@ -2,8 +2,9 @@
 
 `periods="pooled"` fits one model per (horizon, refit day) on the (date, period) rows of every period (`models._units`, the
 research's "global" rows, `zoo_classic/code/ztree.py`), each predictor read on its period's own row, the virtual `period` a
-feature where the list names it, and each period's target through its own Invariant (asinh of median and MAD); `periods="each"`
-fits one per period, horizon and refit day, as every core model does. Both run on the refit calendar and predict each block in
+feature where the list names it, and each period's target through its own Invariant (asinh of median and MAD), or another
+`target_transform` ("pooled": one Invariant over every row; "none": the raw target); `periods="each"` fits one per period,
+horizon and refit day, as every core model does. Both run on the refit calendar and predict each block in
 one call (`_predict_block`): a tree's prediction of a row reads that row alone.
 
 The defaults are the research's (`ztree.py:29-30`: 500 iterations, learning rate 0.05, 31 leaves, 20 rows a leaf, L2 1.0,
@@ -17,7 +18,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import numpy as np
 
 from ._cards import RUN_DATA, ModelCard
-from ._units import PERIOD, POOLED
+from ._units import PER_PERIOD, PERIOD, POOLED, check_periods_target_transform
 from .base import BaseModel
 
 # How a run of this class fits the periods of a day: one fit over every period's rows, or one per period.
@@ -25,7 +26,8 @@ PERIODS = ("pooled", "each")
 # `loss`: the name scikit-learn gives each.
 LOSSES = {"l1": "absolute_error", "l2": "squared_error"}
 # The target as epftoolbox's Invariant and the predictors as they are (a tree splits on order, not scale): a period unit's
-# `scaler`; a pooled unit gives its targets each period's Invariant itself (`scalers.target.MultiTargetAsinh`).
+# `scaler`; a pooled unit transforms its targets itself, by its `target_transform` (each period's Invariant by default,
+# `scalers.target.MultiTargetAsinh`).
 INVARIANT_TARGET = {"name": "asinh", "params": {"apply_to": "target", "standardise": False}}
 
 CARD = ModelCard(
@@ -70,8 +72,11 @@ class HistGBModel(BaseModel):
             research's values. `early_stopping` is always off, so every row of the window trains.
         random_state: The seed of the feature subsets (`max_features`), the same for every fit, so a forecast doesn't depend on
             which fits a run makes.
-        scaler: The predictors as they are and the target as the Invariant, by default (`periods="each"`; a pooled fit gives
-            each period's target its own Invariant whatever this says).
+        scaler: The predictors as they are and the target as the Invariant, by default (`periods="each"`; a pooled fit
+            transforms its targets by `target_transform` whatever this says).
+        target_transform: How a pooled fit transforms its targets: `"per_period"` (each period's own Invariant, the
+            default), `"pooled"` (one Invariant over every row) or `"none"` (the raw target: the estimator fits the stacked
+            targets as they are and its predictions are the forecasts). `periods="each"` takes the default alone.
         newest_target, binary_mask: As for every model (see `BaseModel`).
         normalise_by, bounds, zero_when: A per-row target, as for every model (see `BaseModel`), with either value of
             `periods`: a pooled fit divides each row's target by its own period row's scale.
@@ -79,6 +84,8 @@ class HistGBModel(BaseModel):
 
     _card = CARD
     _engine_ok = False
+    # `target_transform` is written only when set, so files saved before it existed don't move.
+    _WRITTEN_WHEN_SET = {**BaseModel._WRITTEN_WHEN_SET, "target_transform": PER_PERIOD}
 
     def __init__(
         self,
@@ -97,6 +104,7 @@ class HistGBModel(BaseModel):
         name: str = "hgb",
         *,
         scaler: Any = INVARIANT_TARGET,
+        target_transform: str = PER_PERIOD,
         newest_target: str = "d-1",
         binary_mask: Optional[str] = None,
         normalise_by: Optional[str] = None,
@@ -117,6 +125,7 @@ class HistGBModel(BaseModel):
             zero_when=zero_when,
         )
         self.periods = periods
+        self.target_transform = target_transform
         self.loss = loss
         self.max_iter = max_iter
         self.learning_rate = learning_rate
@@ -134,6 +143,8 @@ class HistGBModel(BaseModel):
             raise ValueError(f"loss must be one of {list(LOSSES)}, got {value!r}")
         if key == "periods" and "periods" in vars(self):
             raise ValueError("periods can't change after the model is made: build another HistGBModel")
+        if key == "target_transform":
+            check_periods_target_transform(self, value, self.periods)
         super().__setattr__(key, value)
 
     @property
