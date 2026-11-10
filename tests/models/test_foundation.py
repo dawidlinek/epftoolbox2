@@ -29,7 +29,7 @@ from epftoolbox2.models._history import HistorySpec, history_batch
 from epftoolbox2.models.foundation import FINE_TUNE_DEFAULTS, check_fine_tune
 from epftoolbox2.pipelines import ModelPipeline
 from epftoolbox2.results.manifest import ManifestMismatchError
-from tests.import_stubs import run_without
+from tests.import_stubs import FAMILY_PACKAGES, run_without
 from tests.models import adapter_suite as suite
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -303,7 +303,7 @@ def test_importing_the_package_or_building_these_models_imports_no_model_package
         "ModelPipeline().add_model(models[0]).add_model(models[1]).to_dict()\n"
         "[model.card for model in models]\n"
     )
-    heavy = ("torch", "t0", "chronos", "huggingface_hub", "transformers", "safetensors")
+    heavy = FAMILY_PACKAGES
     result, attempted = run_without(code, heavy, tmp_path)
     assert result.returncode == 0, result.stderr
     assert attempted == [], f"tried to import {attempted}"

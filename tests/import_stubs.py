@@ -13,6 +13,22 @@ import sys
 from pathlib import Path
 from typing import List, Sequence, Tuple
 
+# The packages no import of the core, a data source or a model class may try: torch and the hub stack every family loads with,
+# and each foundation family's own package (6i: t0, chronos; 6j: granite-tsfm's `tsfm_public`, timesfm's `timesfm` and
+# `timesfm3`, `timestral`).
+FAMILY_PACKAGES: Tuple[str, ...] = (
+    "torch",
+    "huggingface_hub",
+    "transformers",
+    "safetensors",
+    "t0",
+    "chronos",
+    "tsfm_public",
+    "timesfm",
+    "timesfm3",
+    "timestral",
+)
+
 
 def run_without(code: str, names: Sequence[str], tmp_path: Path) -> Tuple[subprocess.CompletedProcess, List[str]]:
     """(the finished subprocess that ran `code`, the stubbed packages it tried to import, in order). The subprocess runs in

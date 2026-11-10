@@ -990,6 +990,10 @@ ROW_TARGET_EXCEPTIONS = {
     "ShapeModel": (set(), "its learner's target is already the target less its hour's mean, through the same seam"),
     "T0Model": (set(), "a foundation model reads series (history), not the rows a per-row target divides"),
     "ChronosModel": (set(), "a foundation model reads series (history), not the rows a per-row target divides"),
+    # 6j's foundation families
+    "PatchTSTFMModel": (set(), "a foundation model reads series (history), not the rows a per-row target divides"),
+    "TimestralModel": (set(), "a foundation model reads series (history), not the rows a per-row target divides"),
+    "TimesFMModel": (set(), "a foundation model reads series (history), not the rows a per-row target divides"),
 }
 
 
