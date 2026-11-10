@@ -50,9 +50,8 @@ import uuid
 import warnings
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import date, datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterator, List, Mapping, Optional, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
 import pandas as pd
 
@@ -62,6 +61,7 @@ from .store import (
     LIVE_LOCK_STEM,
     LIVE_LOG_STEMS,
     MODE_LIVE,
+    NOTHING_VISIBLE,
     SAVE_FORMATS,
     LiveDirectoryError,
     ResultStore,
@@ -73,7 +73,9 @@ from .store import (
     _Store,
     check_no_other_format,
     check_save_format,
+    cutoff_of_day,
     is_live_dir,
+    issue_day,
     is_parquet_path,
     max_revision,
     outside_stacklevel,
@@ -108,20 +110,6 @@ class LiveLateError(RuntimeError):
 def now_utc() -> pd.Timestamp:
     """The instant now, UTC (the clock step 8a routes)."""
     return pd.Timestamp.now(tz="UTC")
-
-
-def issue_day(issue: Any) -> str:
-    """An issue day as an ISO date: a `date`, a `datetime`/`Timestamp` (its date), or ISO text."""
-    if isinstance(issue, (datetime, pd.Timestamp)):
-        return issue.date().isoformat()
-    if isinstance(issue, date):
-        return issue.isoformat()
-    if isinstance(issue, str):
-        try:
-            return date.fromisoformat(issue.strip()).isoformat()
-        except ValueError:
-            pass
-    raise ValueError(f"an issue day is a date or an ISO date such as '2026-10-21', got {issue!r}")
 
 
 def local_instant(day: str, time: str, zone: str) -> pd.Timestamp:
@@ -363,7 +351,16 @@ class LiveStore:
         return self.save_dir / DELIVERED
 
     def revision_dir(self, issue: Any, revision: int) -> Path:
-        return self.save_dir / REVISIONS_DIR / issue_day(issue) / f"r{int(revision)}"
+        return self.save_dir / REVISIONS_DIR / self.day(issue) / f"r{int(revision)}"
+
+    def zone(self) -> Optional[str]:
+        """The issue zone `live.json` records (`issue_timezone`), None without one."""
+        return self.identity().get("issue_timezone") if self.is_live() else None
+
+    def day(self, issue: Any) -> str:
+        """`issue` as an issue day (`results.store.issue_day`): an aware instant is read in the issue zone, and raises without
+        one."""
+        return issue_day(issue, self.zone())
 
     def is_live(self) -> bool:
         return is_live_dir(self.save_dir)
@@ -479,7 +476,7 @@ class LiveStore:
     def committed(self, issue: Any = None) -> Dict[str, Dict[int, Commit]]:
         """Issue day -> revision -> its `Commit`, from the lines with `committed: true` (of `issue` alone, if given). A revision
         committed twice, or a commit line without its issue, revision or instant, raises ValueError: the log was damaged."""
-        wanted = None if issue is None else issue_day(issue)
+        wanted = None if issue is None else self.day(issue)
         out: Dict[str, Dict[int, Commit]] = {}
         for number, line in enumerate(self.calls(), 1):
             if line.get("committed") is not True:
@@ -539,7 +536,7 @@ class LiveStore:
         self._require_held("begin()")
         if not self.is_live():
             raise LiveDirectoryError(f"{self.save_dir} is no live directory (no {LIVE_FILE}): init() it first")
-        day = issue_day(issue)
+        day = self.day(issue)
         issued = _instant(now_utc() if issued_at is None else issued_at, "issued_at")
         revision = self.next_revision(day)
         folder = self.revision_dir(day, revision)
@@ -578,7 +575,7 @@ class LiveStore:
             )
         end = _instant(now_utc() if finished is None else finished, "finished")
         line = {
-            "issue": issue_day(issue),
+            "issue": self.day(issue),
             "call": call or uuid.uuid4().hex[:12],
             "started": _iso(end if started is None else _instant(started, "started")),
             "finished": _iso(end),
@@ -596,7 +593,7 @@ class LiveStore:
     def deliveries(self, issue: Any = None) -> List[Dict[str, Any]]:
         """The lines of `delivered.jsonl` in order (of `issue` alone, if given)."""
         lines = _read_log(self.delivered_path)
-        return lines if issue is None else [line for line in lines if line.get("issue") == issue_day(issue)]
+        return lines if issue is None else [line for line in lines if line.get("issue") == self.day(issue)]
 
     def mark_delivered(
         self, issue: Any, revision: int, receipt: Any, *, dry_run: bool = False, delivered_at: Any = None
@@ -608,7 +605,7 @@ class LiveStore:
             self._require_held("mark_delivered()")
         if not self.is_live():
             raise LiveDirectoryError(f"{self.save_dir} is no live directory (no {LIVE_FILE})")
-        day = issue_day(issue)
+        day = self.day(issue)
         if isinstance(revision, bool) or not isinstance(revision, int) or revision < 1:
             raise ValueError(f"revision must be a positive integer, got {revision!r}")
         if revision not in self.committed(day).get(day, {}):
@@ -634,28 +631,23 @@ class LiveStore:
 
     # -- what a reader sees -----------------------------------------------------------------------------------------------
 
-    def _cutoff(self, cutoff: Any) -> Callable[[str], Optional[pd.Timestamp]]:
-        """The cut-off of each issue day (None: none) a reader's `cutoff` gives."""
-        if cutoff is None:
-            return lambda day: None
+    def _cutoff(self, cutoff: Any) -> Tuple[Callable[[str], Any], bool]:
+        """The cut-off of each issue day a reader's `cutoff` gives (an instant, None for none, `NOTHING_VISIBLE` for a day a
+        mapping doesn't name), and whether a commit needs a deadline of its own, made by it ("deadline" with no deadline in
+        `live.json`: the cut-off fails closed, never open)."""
         if isinstance(cutoff, str) and (cutoff == DEADLINE or _TIME.match(cutoff.strip())):
             identity = self.identity() if self.is_live() else {}
             time = identity.get("deadline") if cutoff == DEADLINE else cutoff.strip()
             if time is None:
-                return lambda day: None  # no deadline on file: each commit's own (below) alone
+                return (lambda day: None), True
             zone = identity.get("issue_timezone")
             if not zone:
                 raise ValueError(
                     f"cutoff={cutoff!r} is a time of each issue day, and {self.identity_path} records no issue_timezone to "
                     "read it in: pass an instant, or a function of the issue day"
                 )
-            return lambda day: local_instant(day, time, zone)
-        if callable(cutoff):
-            return lambda day: None if (limit := cutoff(day)) is None else _instant(limit, "cutoff")
-        if isinstance(cutoff, Mapping):
-            return lambda day: None if (limit := cutoff.get(day)) is None else _instant(limit, "cutoff")
-        limit = _instant(cutoff, "cutoff")
-        return lambda day: limit
+            return (lambda day: local_instant(day, time, zone)), False
+        return cutoff_of_day(cutoff, self.zone()), False
 
     def visible(
         self, policy: str = "latest", cutoff: Any = DEADLINE, *, pending: Optional["LiveRevision"] = None
@@ -665,7 +657,7 @@ class LiveStore:
         too, by its own writer alone (an ensemble of the revision reads its members' records of it), with `policy="latest"`."""
         if policy not in POLICIES:
             raise ValueError(f"policy must be one of {list(POLICIES)}, got {policy!r}")
-        limit_of = self._cutoff(cutoff)
+        limit_of, own_deadline = self._cutoff(cutoff)
         deliveries: Dict[str, List[Dict[str, Any]]] = {}
         if policy == "delivered":
             for line in self.deliveries():
@@ -673,10 +665,13 @@ class LiveStore:
         out: Dict[str, Dict[int, pd.Timestamp]] = {}
         for day, revisions in self.committed().items():
             limit = limit_of(day)
+            if limit is NOTHING_VISIBLE:
+                continue
             seen = {
                 revision: commit
                 for revision, commit in revisions.items()
                 if (limit is None or commit.finished <= limit)
+                and (not own_deadline or commit.deadline is not None)
                 and (cutoff != DEADLINE or commit.deadline is None or commit.finished <= commit.deadline)
             }
             if not seen:

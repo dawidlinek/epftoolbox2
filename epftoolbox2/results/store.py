@@ -11,7 +11,7 @@ import time
 import uuid
 import sys
 import warnings
-from typing import Any, BinaryIO, Callable, Dict, Iterable, Iterator, List, Optional, Sequence, Set, Tuple
+from typing import Any, BinaryIO, Callable, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Set, Tuple
 from threading import Lock
 
 # What every record written from record schema 2 on ends with (D4 of the forecasting plan), after the keys it had before, whose
@@ -58,31 +58,81 @@ def _instant(value: Any, what: str = "an instant") -> Any:
     return stamp.tz_convert("UTC")
 
 
+def issue_day(issue: Any, zone: Optional[str] = None) -> str:
+    """An issue day as an ISO date: a `date`, ISO text, or a naive `datetime`/`Timestamp` (its wall date). An aware instant is
+    the date it has in `zone` (a live directory's `issue_timezone`); without a zone it raises ValueError, as 23:30 UTC is
+    already the next day in Berlin."""
+    import pandas as pd
+
+    if isinstance(issue, (datetime.datetime, pd.Timestamp)):
+        stamp = pd.Timestamp(issue)
+        if stamp.tzinfo is not None:
+            if zone is None:
+                raise ValueError(
+                    f"{issue!r} is an instant, which is a different date in different zones, and no issue_timezone says which "
+                    "one: pass the issue day as a date, such as '2026-10-21'"
+                )
+            stamp = stamp.tz_convert(zone)
+        return stamp.date().isoformat()
+    if isinstance(issue, datetime.date):
+        return issue.isoformat()
+    if isinstance(issue, str):
+        try:
+            return datetime.date.fromisoformat(issue.strip()).isoformat()
+        except ValueError:
+            pass
+    raise ValueError(f"an issue day is a date or an ISO date such as '2026-10-21', got {issue!r}")
+
+
+# What a mapping cut-off gives a day it doesn't name: that day sees nothing (a cut-off fails closed).
+NOTHING_VISIBLE = object()
+
+
+def cutoff_of_day(issued_by: Any, zone: Optional[str] = None) -> Callable[[str], Any]:
+    """Each issue day's cut-off (an instant, None for none, or `NOTHING_VISIBLE`) that `issued_by` gives: None (none), one
+    instant for every day, a function of the issue day (its None: none that day), or a mapping of issue day (a date, ISO text, a
+    naive Timestamp, keys normalised by `issue_day`) to instant, where a day the mapping doesn't name sees nothing and a None
+    value is no cut-off that day."""
+    if issued_by is None:
+        return lambda day: None
+    if callable(issued_by):
+        return lambda day: None if (limit := issued_by(day)) is None else _instant(limit, "cutoff")
+    if isinstance(issued_by, Mapping):
+        limits = {issue_day(key, zone): value for key, value in issued_by.items()}
+
+        def of_day(day: str) -> Any:
+            if day not in limits:
+                return NOTHING_VISIBLE
+            return None if limits[day] is None else _instant(limits[day], "cutoff")
+
+        return of_day
+    limit = _instant(issued_by, "cutoff")
+    return lambda day: limit
+
+
 def visible_revisions(committed: Optional[Any], issued_by: Any = None) -> Optional[frozenset]:
     """The (run_date, revision) pairs a reader of live records may see, or None for a backtest's reader.
 
-    `committed` maps each issue day (ISO date, a record's `run_date`) to its committed revisions, each to the instant it was
-    committed (None where that isn't known). `issued_by` is the reader's cut-off: None for none, one instant for every issue
-    day, a mapping of issue day to instant (None: no cut-off that day), or a function of the issue day giving one. A revision
-    committed after its day's cut-off, or of unknown instant under one, isn't seen."""
+    `committed` maps each issue day (a record's `run_date`; keys normalised by `issue_day`) to its committed revisions, each to
+    the instant it was committed (None where that isn't known). `issued_by` is the reader's cut-off (`cutoff_of_day`): a revision
+    committed after its day's cut-off, or of unknown instant under one, isn't seen, and neither is any revision of a day a
+    mapping cut-off doesn't name. Of what is seen, a reader takes per issue day the highest revision that has a record of that
+    day in the file it reads, never a key of a lower one (`read_records`)."""
     if committed is None:
         if issued_by is not None:
             raise ValueError("issued_by is a cut-off of live records: it needs committed=")
         return None
-    if callable(issued_by):
-        limit_of = issued_by
-    elif isinstance(issued_by, dict):
-        limit_of = issued_by.get
-    else:
-        limit_of = lambda day: issued_by  # noqa: E731 (one instant, or None)
+    limit_of = cutoff_of_day(issued_by)
     pairs = set()
     for run_date, revisions in committed.items():
-        limit = limit_of(str(run_date))
-        limit = None if limit is None else _instant(limit, "issued_by")
+        day = issue_day(run_date)
+        limit = limit_of(day)
+        if limit is NOTHING_VISIBLE:
+            continue
         for revision, at in revisions.items():
             if limit is not None and (at is None or _instant(at) > limit):
                 continue
-            pairs.add((str(run_date), int(revision)))
+            pairs.add((day, int(revision)))
     return frozenset(pairs)
 
 
