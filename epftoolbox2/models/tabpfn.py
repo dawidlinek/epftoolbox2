@@ -1,0 +1,154 @@
+"""`TabPFNModel`: Prior Labs' TabPFN v2 regressor as an in-context model (step 6e; `models/_in_context.py` holds what it shares
+with `TabICLModel`).
+
+Only the v2 regression weights (`Prior-Labs/TabPFN-v2-reg`, `tabpfn-v2-regressor.ckpt`, Prior Labs License 1.1: Apache-2.0
+with an attribution clause) are ever used: the regressor is built with `ModelVersion.V2` and the checkpoint the run resolved,
+and a weights file whose name the package reads as another version is refused, since the package's newer default weights
+(2.5 and later) are under non-commercial licences. The research's settings (`zoo_tabfm/scripts/tabfm_run.py`,
+`mlgpu/code/tabpfn_run.py`): 728 days of context, a weekly refit, the target as the Invariant, raw predictors, 4 estimators
+(8 gave 19.56 against 19.58 EUR/MWh MAE on DE, not significant), seed 0 for every fit, one preprocessing job, the median.
+"""
+
+from datetime import date
+from typing import Any, Dict, List, Optional, Tuple, Union
+
+import numpy as np
+
+from ._cards import ModelCard, WeightsRef
+from ._in_context import INVARIANT_TARGET, InContextModel, package, torch_fit_scope
+
+REPO = "Prior-Labs/TabPFN-v2-reg"
+# The repository's main at 2026-11-10; the checkpoint itself last changed on 2025-01-05 (commit 230d61748bae).
+REVISION = "02a44705ff7790b50cded404bc59adb94da456a1"
+CHECKPOINT = "tabpfn-v2-regressor.ckpt"
+
+CARD = ModelCard(
+    family="tabpfn-v2",
+    extra="tabpfn",
+    licence="Prior-Labs-1.1",
+    licence_url="https://huggingface.co/Prior-Labs/TabPFN-v2-reg/blob/main/LICENSE.txt",
+    commercial_use=True,
+    revenue_cap=None,
+    attribution=(
+        "Built with PriorLabs-TabPFN (Prior Labs License 1.1, section 10: shown wherever a product or its documentation built "
+        "on the weights or their outputs is made available; internal benchmarking needs none)"
+    ),
+    weights=WeightsRef(REPO, REVISION, {CHECKPOINT: None}, bytes=44_390_977),
+    runtime=("tabpfn>=6,<10", "torch"),
+    corpus="synthetic priors",
+    corpus_end=None,
+    released=date(2025, 1, 5),
+    stated_verdict="clean (synthetic)",
+)
+
+
+class _Backend:
+    """TabPFN v2 on one device: a regressor per fit, built from the resolved checkpoint (the package keeps the loaded
+    checkpoint per process), its context shown by `fit`, the median asked of `predict`."""
+
+    def __init__(self, model: "TabPFNModel", path: str, device: str):
+        package("tabpfn", model)
+        from tabpfn import TabPFNRegressor
+        from tabpfn.constants import ModelVersion
+
+        try:
+            from tabpfn.model_loading import resolve_model_version
+        except ImportError:  # pragma: no cover - older releases name the version by the file the same way
+            resolve_model_version = None
+        if resolve_model_version is not None and resolve_model_version(path) != ModelVersion.V2:
+            raise RuntimeError(
+                f"TabPFNModel: tabpfn reads {path} as {resolve_model_version(path).value} weights, not v2: only the v2 "
+                f"regressor ({REPO}, {CHECKPOINT}) is used, whose licence allows commercial use"
+            )
+        self.regressor = TabPFNRegressor
+        self.version = ModelVersion.V2
+        self.path = path
+        self.device = device
+        self.n_estimators = model.n_estimators
+        self.random_state = model.random_state
+
+    def scope(self):
+        return torch_fit_scope(self.device)
+
+    def fit(self, x: np.ndarray, y: np.ndarray) -> Any:
+        regressor = self.regressor.create_default_for_version(
+            self.version,
+            model_path=self.path,
+            device=self.device,
+            n_estimators=self.n_estimators,
+            random_state=self.random_state,
+            n_preprocessing_jobs=1,
+        )
+        return regressor.fit(x, y)
+
+    def predict(self, regressor: Any, rows: np.ndarray) -> np.ndarray:
+        return regressor.predict(rows, output_type="median")
+
+
+class TabPFNModel(InContextModel):
+    """TabPFN v2 (`Prior-Labs/TabPFN-v2-reg`) on the refit calendar: one model per period, horizon and refit day, whose
+    context is the unit's rows and whose forecast is the median of its predictive distribution (`[tabpfn]` extra; fetch the
+    weights first with `epf weights fetch TabPFNModel`).
+
+    Args:
+        predictors: Full column names (`{horizon}` allowed), saved verbatim, as raw inputs: `presets.lear_predictors(...)` gives
+            the research's rows. TabPFN v2 was pretrained on up to 500 columns and 10,000 rows; on a CPU the package refuses
+            contexts of more than 1,000 rows unless `TABPFN_ALLOW_CPU_LARGE_DATASET=1` is set.
+        training_window: Days of context (728 by default).
+        refit: How often the context is refreshed, on the fixed calendar (`"7D"`, Mondays, by default); every issue day of a
+            block is predicted in one call (`block_predict`).
+        n_estimators: Ensemble members of one call (preprocessed views of the context), 4 by default.
+        random_state: The seed of every fit's preprocessing.
+        device: "auto" (CUDA if a matmul runs on it, else the CPU), "cpu", "cuda" or "cuda:N". The device type is recorded
+            and compared on resume; CPU and GPU forecasts differ in their last digits.
+        weights: None (the cache `epf weights fetch` filled), a path to the checkpoint, or `"Prior-Labs/TabPFN-v2-reg@<rev>"`.
+        block_predict: Predict a block's issue days in one call (True), or one row at a time.
+        name: Display name.
+        scaler: The target as the Invariant and the inputs raw, by default.
+        newest_target, binary_mask, normalise_by, bounds, zero_when: As for every model (see `BaseModel`).
+    """
+
+    _card = CARD
+
+    def __init__(
+        self,
+        predictors: List[str],
+        training_window: Union[int, str] = 728,
+        refit: Optional[str] = "7D",
+        n_estimators: int = 4,
+        random_state: int = 0,
+        device: str = "auto",
+        weights: Optional[str] = None,
+        block_predict: bool = True,
+        name: str = "TabPFN",
+        *,
+        scaler: Any = INVARIANT_TARGET,
+        newest_target: str = "d-1",
+        binary_mask: Optional[str] = None,
+        normalise_by: Optional[str] = None,
+        bounds: Optional[Tuple[Optional[float], Optional[float]]] = None,
+        zero_when: Optional[str] = None,
+    ):
+        super().__init__(
+            predictors,
+            training_window,
+            name,
+            scaler=scaler,
+            newest_target=newest_target,
+            refit=None,
+            binary_mask=binary_mask,
+            normalise_by=normalise_by,
+            bounds=bounds,
+            zero_when=zero_when,
+        )
+        self.n_estimators = n_estimators
+        self._setup(refit, random_state, device, weights, block_predict)
+
+    def _family_kwargs(self) -> Dict[str, Any]:
+        return {"n_estimators": self.n_estimators}
+
+    def _load_backend(self, resolved, device: str) -> _Backend:
+        return _Backend(self, str(resolved.path(CHECKPOINT if CHECKPOINT in resolved.files else None)), device)
+
+
+__all__ = ["TabPFNModel", "CARD"]

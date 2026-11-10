@@ -193,6 +193,85 @@ def _row_target_fields(bounds_only: bool = False) -> list[dict]:
     ]
 
 
+def _in_context_fields(name: str, estimators: int, weights_ref: str) -> list[dict]:
+    """The fields of an in-context model (`TabPFNModel`, `TabICLModel`, step 6e), in their constructor's order."""
+    return [
+        {"name": "name", "description": "Model display name", "required": False, "default": name, "kind": "text"},
+        {
+            "name": "predictors",
+            "description": "Predictor column names, raw inputs of the context (presets.lear_predictors gives the research's)",
+            "required": True,
+            "default": None,
+            "kind": "column_select",
+        },
+        {
+            "name": "training_window",
+            "description": "Days of context",
+            "required": False,
+            "default": 728,
+            "kind": "window",
+        },
+        {
+            "name": "refit",
+            "description": "Refresh the context on a fixed calendar: 7D once a week (Mondays), 1D every day, 1MS once a month",
+            "required": False,
+            "default": "7D",
+            "kind": "text",
+        },
+        {
+            "name": "n_estimators",
+            "description": "Ensemble members of one call (preprocessed views of the context)",
+            "required": False,
+            "default": estimators,
+            "kind": "int",
+        },
+        {
+            "name": "random_state",
+            "description": "Seed of every fit, the same in each",
+            "required": False,
+            "default": 0,
+            "kind": "int",
+        },
+        {
+            "name": "device",
+            "description": "auto (CUDA if it runs, else the CPU), cpu, cuda or cuda:N; recorded and compared on resume",
+            "required": False,
+            "default": "auto",
+            "kind": "text",
+        },
+        {
+            "name": "weights",
+            "description": f"Empty for the cache (epf weights fetch), a path to the checkpoint, or {weights_ref}@<revision>",
+            "required": False,
+            "default": None,
+            "kind": "text",
+        },
+        {
+            "name": "block_predict",
+            "description": "Predict a refit block's issue days in one call",
+            "required": False,
+            "default": True,
+            "kind": "confirm",
+        },
+        {
+            "name": "newest_target",
+            "description": "Newest training target: d-1, or every target published by the issue time (needs an issue time)",
+            "required": False,
+            "default": "d-1",
+            "kind": "select",
+            "choices": ["d-1", "published"],
+        },
+        {
+            "name": "binary_mask",
+            "description": "Which rows decide the binary 0/1 columns: empty for each refit unit's own rows",
+            "required": False,
+            "default": None,
+            "kind": "text",
+        },
+        *_row_target_fields(),
+    ]
+
+
 _ACTIVATION_FIELD = {
     "name": "activation",
     "description": "Activation of the hidden layers",
@@ -1919,6 +1998,9 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
         },
         *_row_target_fields(),
     ],
+    # The in-context families (step 6e).
+    "TabPFNModel": _in_context_fields("TabPFN", 4, "Prior-Labs/TabPFN-v2-reg"),
+    "TabICLModel": _in_context_fields("TabICL", 8, "jingang/TabICL"),
     "MAEEvaluator": [],
     "RMSEEvaluator": [],
     "rMAEEvaluator": [
@@ -2383,6 +2465,9 @@ _MODELS = [
     "MLPDailyModel",
     "MLPHourlyModel",
     "TorchModel",
+    # The in-context families (step 6e).
+    "TabPFNModel",
+    "TabICLModel",
 ]
 # Not offered: `PooledModel` (registered in `COMPONENT_REGISTRY`, saved and loaded from YAML) fits over the frames of
 # `ModelPipeline.run(data={zone: frame})`, and the wizard builds and runs a pipeline on one CSV. `ResidualModel` holds two

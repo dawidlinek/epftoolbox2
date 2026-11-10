@@ -14,6 +14,10 @@ from .gbm import CatBoostModel, LightGBMModel, XGBoostModel
 from .residual import ResidualModel
 from .shape import ShapeModel
 
+# The in-context families (step 6e): their packages are imported by a worker's first fit, never here.
+from .tabpfn import TabPFNModel
+from .tabicl import TabICLModel
+
 __all__ = [
     "BaseModel",
     "OLSModel",
@@ -31,6 +35,8 @@ __all__ = [
     "CatBoostModel",
     "ResidualModel",
     "ShapeModel",
+    "TabPFNModel",
+    "TabICLModel",
     "PredictorContext",
     "PredictorPlan",
     "Use",

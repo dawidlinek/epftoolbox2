@@ -83,6 +83,21 @@ gbm = [
 tune = [
     "optuna>=4,<5",
 ]
+# The in-context tabular families (epftoolbox2/models/tabpfn.py, tabicl.py), one extra each, so each class's pre-flight asks
+# for its own: TabPFNModel's `tabpfn` (only the v2 weights are used, through ModelVersion.V2) and TabICLModel's `tabicl`, each
+# with torch (from PyTorch's CPU index, below) and huggingface_hub, through which `epf weights fetch` downloads the weights.
+# tabpfn needs safetensors, which has no free-threaded (3.14t) wheels, so CI installs neither there. MitraModel is not
+# shipped: its 1,000-bin head needs patches of AutoGluon's internals (docs, models/in-context).
+tabpfn = [
+    "tabpfn>=6,<10",
+    "torch>=2.9",
+    "huggingface_hub>=0.23",
+]
+tabicl = [
+    "tabicl>=2.2,<3",
+    "torch>=2.9",
+    "huggingface_hub>=0.23",
+]
 dev = [
     "pytest>=7.4.0",
     "pytest-cov>=4.1.0",
@@ -118,6 +133,7 @@ markers = [
     "integration: Integration tests that require real API keys and use real connections",
     "examples: Runs examples/*.py and the documentation quick start against the live APIs (also marked integration)",
     "gpu: Needs a CUDA GPU (also marked integration, so the fast suite never runs it)",
+    "weights: Needs a model family's real weights in EPFTOOLBOX2_WEIGHTS_DIR (also marked integration; skips without them)",
 ]
 filterwarnings = [
     "ignore::DeprecationWarning",

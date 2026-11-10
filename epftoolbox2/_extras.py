@@ -16,6 +16,9 @@ EXTRAS: Dict[str, Tuple[str, ...]] = {
     "xgboost": ("xgboost",),
     "catboost": ("catboost",),
     "tune": ("optuna",),
+    # The in-context families (step 6e), each with torch, which its package imports.
+    "tabpfn": ("tabpfn", "torch"),
+    "tabicl": ("tabicl", "torch"),
 }
 
 

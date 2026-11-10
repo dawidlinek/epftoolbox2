@@ -196,6 +196,9 @@ COMPONENT_REGISTRY = {
         "CatBoostModel": "epftoolbox2.models.gbm",
         "ResidualModel": "epftoolbox2.models.residual",
         "ShapeModel": "epftoolbox2.models.shape",
+        # The in-context families (step 6e).
+        "TabPFNModel": "epftoolbox2.models.tabpfn",
+        "TabICLModel": "epftoolbox2.models.tabicl",
     },
     "ensembles": {
         "AverageEnsemble": "epftoolbox2.ensembles.average",
