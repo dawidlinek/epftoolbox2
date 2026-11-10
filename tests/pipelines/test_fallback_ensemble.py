@@ -589,6 +589,11 @@ def test_allow_missing_passes_over_a_rung_without_results_and_keeps_the_ladder(t
     with pytest.warns(UserWarning, match=r"\['a'\] are not in this report"):
         rows = report.rungs("live").set_index("member")
     assert list(rows["forecasts"]) == [0, 3 * 24, 24] and rows.loc["a", "member_forecasts"] == 0
+    assert report.forecast_counts().attrs["passed_over"] == {"live": ["a"]}
+    assert (
+        "passed_over"
+        not in report_of(tmp_path, FallbackEnsemble(["b", "c"], name="live"), models=("b", "c")).forecast_counts().attrs
+    )
     assert counts(report, "live") == (5 * 24, 4 * 24, 0, 24)
 
 

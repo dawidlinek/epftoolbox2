@@ -65,6 +65,8 @@ class ModelResultRef:
     which `EvaluationReport.provenance()` shows; None for a model without a card and for an ensemble.
 
     `ladder` is a `FallbackEnsemble`'s members in rung order, which `EvaluationReport.rungs()` reads; None for anything else.
+    `passed_over` are the members of it that `report(allow_missing=True)` passed over for lack of results, which
+    `EvaluationReport.forecast_counts()` names.
     """
 
     name: str
@@ -91,6 +93,7 @@ class ModelResultRef:
     vintages: Optional[List[Dict]] = None
     provenance: Optional[Dict[str, Any]] = None
     ladder: Optional[Tuple[str, ...]] = None
+    passed_over: Tuple[str, ...] = ()
 
     def frame(self, columns: Sequence[str]) -> Optional["pd.DataFrame"]:
         """The forecasts `iter_records(columns)` gives, as a DataFrame of `columns` read without a dict per record, for results

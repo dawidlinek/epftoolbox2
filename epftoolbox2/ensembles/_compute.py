@@ -233,6 +233,7 @@ def compute(
             union_vintages(refs[leaf].vintages for leaf in leaves),
             tuple(ensemble.members) if isinstance(ensemble, FallbackEnsemble) else None,
             chosen_through,
+            tuple(absent),
         ),
         choices,
     )
@@ -725,6 +726,7 @@ def _ref(
     vintages: Optional[List[Dict[str, Any]]] = None,
     ladder: Optional[Tuple[str, ...]] = None,
     chosen_through: Optional[str] = None,
+    passed_over: Tuple[str, ...] = (),
 ) -> ModelResultRef:
     """The ref of the whole, with a ref per window of what this run or report names, as a model's has. `horizons` are the ones
     the members were run with, `weekdays` the weekdays they issued on (None for every day), `ladder` a fallback's members
@@ -751,6 +753,7 @@ def _ref(
         issue_days=weekdays,
         vintages=vintages,
         ladder=ladder,
+        passed_over=passed_over,
     )
     if like.windows is None:
         run = codes >> _RUN_SHIFT

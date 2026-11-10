@@ -1150,7 +1150,8 @@ class EvaluationReport:
         """Planned vs produced forecasts per model, with one column per skip reason.
 
         Models are only comparable on the forecasts they all produced; check this table before comparing.
-        `planned` equals `produced` for results passed in as plain lists.
+        `planned` equals `produced` for results passed in as plain lists. `df.attrs["passed_over"]`, only when there is one, names
+        per `FallbackEnsemble` the members `report(allow_missing=True)` passed over for lack of results.
         """
         reasons = sorted({reason for ref in self.refs.values() for reason in ref.skipped})
         rows = []
@@ -1162,7 +1163,11 @@ class EvaluationReport:
             row = {"model": name, "planned": planned, "produced": produced, "missing": planned - produced}
             row.update({reason: ref.skipped.get(reason, 0) for reason in reasons})
             rows.append(row)
-        return pd.DataFrame(rows, columns=["model", "planned", "produced", "missing", *reasons])
+        table = pd.DataFrame(rows, columns=["model", "planned", "produced", "missing", *reasons])
+        passed_over = {name: list(ref.passed_over) for name, ref in self.refs.items() if ref.passed_over}
+        if passed_over:
+            table.attrs["passed_over"] = passed_over
+        return table
 
     def availability(self) -> pd.DataFrame:
         """The inputs of each model that its rule puts after the issue time or that have no rule, as a run with
