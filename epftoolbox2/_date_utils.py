@@ -1,6 +1,6 @@
 import re
 from datetime import date, datetime, timedelta
-from typing import Any, Optional
+from typing import Any, List, Optional
 
 import numpy as np
 import pandas as pd
@@ -26,15 +26,28 @@ def resolve_date(s: Any, tz: Optional[str] = None) -> Any:
     "Today" is a date of `tz` at the current clock's now (`epftoolbox2.clock`), or the host's local date when `tz` is None:
     at 23:30 UTC on 2026-10-21, "today" is 2026-10-22 in "Europe/Warsaw" and 2026-10-21 in "UTC".
     """
-    if isinstance(s, date) and not isinstance(s, datetime):
-        return s.isoformat()
-    if not isinstance(s, str):
-        return s
-    m = _DATE_PATTERN.match(s.strip())
-    if not m:
-        return s
-    delta = int(m.group(2)) if m.group(2) else 0
-    return (today(tz) + timedelta(days=delta)).isoformat()
+    return resolve_dates([s], tz)[0]
+
+
+def resolve_dates(values: Any, tz: Optional[str] = None, at: Optional[pd.Timestamp] = None) -> List[Any]:
+    """Each of `values` as `resolve_date` resolves it, "today" read from the clock once for all of them (or at the instant
+    `at`): a period whose ends are both keywords ("today", "today") is one day even when the clock passes midnight between
+    them."""
+    day: Optional[date] = None
+    out: List[Any] = []
+    for s in values:
+        if isinstance(s, date) and not isinstance(s, datetime):
+            out.append(s.isoformat())
+            continue
+        m = _DATE_PATTERN.match(s.strip()) if isinstance(s, str) else None
+        if m is None:
+            out.append(s)
+            continue
+        if day is None:
+            day = today(tz, at)
+        delta = int(m.group(2)) if m.group(2) else 0
+        out.append((day + timedelta(days=delta)).isoformat())
+    return out
 
 
 def epoch_ns(index: pd.DatetimeIndex) -> np.ndarray:

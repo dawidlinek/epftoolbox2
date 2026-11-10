@@ -109,7 +109,7 @@ from ._worker import (
     training_row_days,
     training_rows,
 )
-from .._date_utils import is_utc_index, resolve_date, shift_calendar_days, zone_name
+from .._date_utils import is_utc_index, resolve_date, resolve_dates, shift_calendar_days, zone_name
 from ..information_set import (
     _STEP_MINUTES,
     DATA_ZONE,
@@ -952,8 +952,7 @@ class BaseModel(ABC):
             test_start, test_end = windows.first_day, windows.last_day
         elif forecast_only:
             zone = today_zone(information_set, data.index)
-            test_start = resolve_date(test_start or "today", zone)
-            test_end = resolve_date(test_end or "today", zone)
+            test_start, test_end = resolve_dates([test_start or "today", test_end or "today"], zone)
         else:
             if test_start is None or test_end is None:
                 raise ValueError("test_start and test_end are required unless forecast_only=True")

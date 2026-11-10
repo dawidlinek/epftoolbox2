@@ -24,7 +24,7 @@ import datetime
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from .._date_utils import resolve_date
+from .._date_utils import resolve_date, resolve_dates
 
 VALIDATION = "validation"
 TEST = "test"
@@ -41,6 +41,10 @@ Period = Tuple[str, str]
 
 def _iso_day(value: Any, label: str) -> str:
     value = resolve_date(value)
+    return _as_iso_day(value, label)
+
+
+def _as_iso_day(value: Any, label: str) -> str:
     if isinstance(value, datetime.datetime):  # a pd.Timestamp too
         value = value.date()
     if isinstance(value, datetime.date):
@@ -58,11 +62,13 @@ def check_validation_every(value: Any) -> int:
     return int(value)
 
 
-def to_period(value: Any, label: str) -> Period:
-    """`value` as (first day, last day) in ISO format; a `ValueError` naming `label` if it isn't such a pair."""
+def to_period(value: Any, label: str, tz: Optional[str] = None) -> Period:
+    """`value` as (first day, last day) in ISO format; a `ValueError` naming `label` if it isn't such a pair. Its date
+    keywords ("today", "now_d-7") are dates of `tz` (the host's when None), read from the clock once for both ends."""
     if isinstance(value, (str, bytes)) or not isinstance(value, Sequence) or len(value) != 2:
         raise ValueError(f"The {label} period must be (start, end), got {value!r}")
-    start, end = _iso_day(value[0], f"{label} start"), _iso_day(value[1], f"{label} end")
+    first, last = resolve_dates([value[0], value[1]], tz)
+    start, end = _as_iso_day(first, f"{label} start"), _as_iso_day(last, f"{label} end")
     if start > end:
         raise ValueError(f"The {label} period is reversed: it starts on {start} and ends on {end}")
     return start, end

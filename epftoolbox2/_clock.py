@@ -142,10 +142,15 @@ def use_clock(clock: Clock) -> Iterator[Clock]:
         _CURRENT.reset(token)
 
 
-def wall_time(tz: Optional[str] = None) -> pd.Timestamp:
-    """Now on the current clock: in `tz` (tz-aware), or with `tz` None the host's local wall-clock time, naive, as
-    `pd.Timestamp.now()` gives it."""
-    instant = current_clock().now()
+def settled_now() -> pd.Timestamp:
+    """The instant data is settled against: the current clock's now, but never later than the machine's (see the module)."""
+    return min(current_clock().now(), SYSTEM.now())
+
+
+def wall_time(tz: Optional[str] = None, at: Optional[pd.Timestamp] = None) -> pd.Timestamp:
+    """Now on the current clock (or the instant `at`): in `tz` (tz-aware), or with `tz` None the host's local wall-clock
+    time, naive, as `pd.Timestamp.now()` gives it."""
+    instant = current_clock().now() if at is None else at
     if tz is not None:
         return instant.tz_convert(tz)
     # The host's offset at that instant (`astimezone()` with no zone is the host's local zone, DST included).
@@ -153,6 +158,7 @@ def wall_time(tz: Optional[str] = None) -> pd.Timestamp:
     return instant.tz_convert(None) + pd.Timedelta(offset)
 
 
-def today(tz: Optional[str] = None) -> datetime.date:
-    """Today's date on the current clock: in `tz`, or the host's local date when `tz` is None (`date.today()`'s)."""
-    return wall_time(tz).date()
+def today(tz: Optional[str] = None, at: Optional[pd.Timestamp] = None) -> datetime.date:
+    """Today's date on the current clock (or at the instant `at`): in `tz`, or the host's local date when `tz` is None
+    (`date.today()`'s)."""
+    return wall_time(tz, at).date()
