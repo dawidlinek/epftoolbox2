@@ -1100,3 +1100,24 @@ def test_a_period_valid_in_every_zone_runs_though_the_host_reads_it_reversed(mon
     with host_zone("UTC"), use_clock(FakeClock(LATE)):
         panel = mp.run(frames, horizon=1, forecast_only=True, test=("2026-10-22", "today"))
     assert {zone: run_dates(panel.zones[zone]) for zone in frames} == {"DE": {"2026-10-22"}, "FR": {"2026-10-22"}}
+
+
+def test_a_report_over_zones_reads_today_once_for_every_zone(tmp_path, monkeypatch):
+    """The clock passes 22:00 UTC (midnight in Berlin and Paris) between two zones of one report: both still read the day the
+    report read, the day their run issued on."""
+    monkeypatch.setenv("MAX_PROCESSES", "1")
+    monkeypatch.setenv("THREADS_PER_PROCESS", "1")
+    frames = {
+        zone: make_market_data(start="2026-06-01", days=150, tz=tz, horizon=1)
+        for zone, tz in (("DE", "Europe/Berlin"), ("FR", "Europe/Paris"))
+    }
+    mp = ModelPipeline(information_set=DATA_ISSUE).add_model(OLSModel(PREDICTORS, training_window=28, name="ols"))
+    with use_clock(FakeClock("2026-10-21 21:59:59")):
+        mp.run(frames, horizon=1, forecast_only=True, save_dir=str(tmp_path))
+    clock = FakeClock(
+        "2026-10-21 21:59:59", tick=2.0
+    )  # 23:59:59 in Berlin and Paris, and two seconds later at every read
+    with use_clock(clock):
+        report = mp.report(str(tmp_path), horizon=1, forecast_only=True)
+    assert {zone: run_dates(report.zones[zone]) for zone in frames} == {"DE": {"2026-10-21"}, "FR": {"2026-10-21"}}
+    assert {zone: len(report.zones[zone].predictions()) for zone in frames} == {"DE": 24, "FR": 24}

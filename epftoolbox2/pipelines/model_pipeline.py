@@ -12,7 +12,7 @@ import warnings
 import pandas as pd
 import yaml
 
-from .._clock import current_clock
+from .._clock import current_clock, one_now
 from .._date_utils import resolve_date, resolve_span
 from ..information_set import DATA_ZONE, InformationSet, InformationSetError, check_level
 from ..models._calendar import (
@@ -1475,12 +1475,13 @@ class ModelPipeline:
             warnings.warn(f"Report: zone(s) {missing} of {root} have no results; they are left out", stacklevel=3)
         reports = {}
         target = None
-        for zone in expected:
-            if zone in missing:
-                continue
-            folder = root / zone
-            reports[zone] = self.report(folder, data=None if data is None else data.get(zone), **told)
-            target = target or self._stored_target(folder)
+        with one_now():  # every zone's "today" at one instant, as `_run_zones` resolves them
+            for zone in expected:
+                if zone in missing:
+                    continue
+                folder = root / zone
+                reports[zone] = self.report(folder, data=None if data is None else data.get(zone), **told)
+                target = target or self._stored_target(folder)
         if not reports:
             raise FileNotFoundError(
                 f"{root} is a run over the zones {expected}, and none holds this pipeline's results"

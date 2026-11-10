@@ -152,6 +152,34 @@ def use_clock(clock: Clock) -> Iterator[Clock]:
         _CURRENT.reset(token)
 
 
+class _OneNow(Clock):
+    """`base` with its now read once, when made: every `now()` is that instant; waits and intervals are `base`'s."""
+
+    def __init__(self, base: Clock):
+        self._base = base
+        self._now = base.now()
+
+    def now(self) -> pd.Timestamp:
+        return self._now
+
+    def sleep(self, seconds: float) -> None:
+        self._base.sleep(seconds)
+
+    def monotonic(self) -> float:
+        return self._base.monotonic()
+
+    def __repr__(self) -> str:
+        return f"one_now({self._base!r} at {self._now})"
+
+
+@contextlib.contextmanager
+def one_now() -> Iterator[Clock]:
+    """Read the current clock's now once for the whole block: every time of day read inside it is that instant, so the
+    zones of one report can't fall on two days when the clock passes midnight between them."""
+    with use_clock(_OneNow(current_clock())) as clock:
+        yield clock
+
+
 def settled_now() -> pd.Timestamp:
     """The instant data is settled against: the current clock's now, but never later than the machine's (see the module)."""
     return min(current_clock().now(), SYSTEM.now())
