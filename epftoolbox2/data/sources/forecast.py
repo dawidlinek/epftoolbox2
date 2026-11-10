@@ -26,8 +26,7 @@ import pandas as pd
 from ..._date_utils import _occurrences
 from .base import DataSource
 
-# The record keys `fetch` reads; a Parquet directory reads these columns alone (`issued_at` is not in its schema: no Parquet
-# record has one).
+# The record keys `fetch` reads; a Parquet directory reads these columns alone.
 _READ = ("target_date", "hour", "horizon", "freq", "prediction", "issued_at")
 _STEP_MINUTES = {"1h": 60, "15min": 15}
 _DAILY = "1D"
@@ -54,6 +53,7 @@ class Upstream:
     issue_time: str
     issue_timezone: str
     daily_stamp: Optional[float]  # minutes after midnight of a daily run's rows; None at any other freq
+    live: bool = False  # a live directory's revisions (`results.live`), read as committed by each issue day's cut-off
 
     def late_inputs(self) -> Tuple[str, ...]:
         """The inputs the upstream's leaf models listed as late or without a rule (`availability="warn"`'s listing), each once,
@@ -122,9 +122,13 @@ class ForecastSource(DataSource):
     the same instant, so the statistic is known exactly when its forecasts are, and its column takes the same rule.
 
     The upstream must have run with an issue time, so that its forecasts' availability can be stated; `available="HH:MM"` (in
-    the upstream issue zone) states a later time, for forecasts revised after it, never an earlier one. Records of a live
-    directory (with `issued_at`) are refused: which revision a cell may use depends on when it was issued, and that reading is
-    not here yet. An ensemble's results read their issue time from its members' manifests.
+    the upstream issue zone) states a later time, for forecasts revised after it, never an earlier one. An ensemble's results
+    read their issue time from its members' manifests.
+
+    A live upstream (a live directory, `results.live`, step 8c) holds revisions: each key is read from the newest revision
+    committed at or before `available` (else the issue time) on the key's issue day, in the issue zone, so a cell never holds a
+    forecast that wasn't out when the rule says it is known; a key with no such revision has no value. An upstream with no
+    committed revision raises. Live records (with `issued_at`) outside a live directory are refused.
 
     Its availability rule and its upstream's identity come from `InformationSet.with_source_rules` (a `Workflow` applies it):
     a model run outside one must pass `information_set.with_source_rules(data_pipeline.sources)`, else the column has no rule.
@@ -295,8 +299,55 @@ class ForecastSource(DataSource):
                 f"{issue_time} {issue_zone}: its forecasts can't be known before they were made"
             )
         return Upstream(
-            self.results_path(), manifest, tuple(leaves), freq, str(zone), issue_time, str(issue_zone), stamp
+            self.results_path(),
+            manifest,
+            tuple(leaves),
+            freq,
+            str(zone),
+            issue_time,
+            str(issue_zone),
+            stamp,
+            live=self._is_live(leaves),
         )
+
+    def _is_live(self, leaves: List[Tuple[str, Dict[str, Any]]]) -> bool:
+        """Whether the upstream is a live directory's: `live.json` there and every leaf's manifest "live"; one without the
+        other raises."""
+        from ...results.store import MODE_LIVE, is_live_dir
+
+        directory = is_live_dir(self._directory())
+        modes = {name: leaf.get("mode") == MODE_LIVE for name, leaf in leaves}
+        if any(live != directory for live in modes.values()):
+            raise UpstreamError(
+                f"ForecastSource({self.model!r}): {self.path} is "
+                + ("a live directory" if directory else "no live directory")
+                + f", and the manifests of {sorted(name for name, live in modes.items() if live != directory)} say "
+                + ("otherwise" if directory else "mode 'live'")
+                + ": live revisions and a backtest's results were mixed. Chain one run's results from its own directory."
+            )
+        return directory
+
+    def _cutoff(self, upstream: Upstream):
+        """Each issue day's cut-off of a live upstream: `available` (else the issue time) on that day in the issue zone."""
+        from ...results.live import local_instant
+
+        time = self.available or upstream.issue_time
+        return lambda day: local_instant(day, time, upstream.issue_timezone)
+
+    def _committed(self, upstream: Upstream):
+        """What `read_records(committed=...)` reads of a live upstream (`results.live.LiveStore.visible`, policy "latest" by
+        each issue day's cut-off), None for a backtest's; `UpstreamError` for a live one that committed nothing."""
+        if not upstream.live:
+            return None
+        from ...results.live import LiveStore
+
+        store = LiveStore(self._directory())
+        if not store.committed():
+            raise UpstreamError(
+                f"ForecastSource({self.model!r}): the live directory {self.path} has no committed revision (no "
+                f"`committed` line in {store.issues_path.name}): nothing it holds was ever out"
+            )
+        return store.visible("latest", cutoff=self._cutoff(upstream))
 
     def availability(self, upstream: Optional[Upstream] = None):
         """The column's rule: published at the upstream's issue time (or `available`) in its issue zone, `horizon` days before
@@ -324,7 +375,12 @@ class ForecastSource(DataSource):
         from ...results.manifest import manifest_digest
 
         upstream = self.upstream() if upstream is None else upstream
-        issued = {name: _issued_span(self._results_of(name), self.horizon) for name, _ in upstream.leaves}
+        # A live upstream's revisions are all made under its one live manifest, not over a test period: nothing to be outside.
+        issued = (
+            {}
+            if upstream.live
+            else {name: _issued_span(self._results_of(name), self.horizon) for name, _ in upstream.leaves}
+        )
         return ChainedInput(
             column=self.output_column,
             path=str(self._directory().resolve()),
@@ -353,6 +409,12 @@ class ForecastSource(DataSource):
         path = results / CATALOG if results.is_dir() else results
         identity = _file_digest(path) if path.exists() else None
         content = {"manifest": manifest_digest(manifest), "results": identity}
+        from ...results.live import ISSUES
+        from ...results.store import is_live_dir
+
+        if is_live_dir(self._directory()):  # a commit changes what is read without changing the results
+            log = self._directory() / ISSUES
+            content["commits"] = _file_digest(log) if log.exists() else None
         return hashlib.sha256(json.dumps(content, sort_keys=True).encode()).hexdigest()
 
     # -- the column ---------------------------------------------------------------------------------------------------------
@@ -369,12 +431,14 @@ class ForecastSource(DataSource):
         horizon = self.horizon
         found: Dict[str, set] = {"freq": set()}
 
+        committed = self._committed(upstream)
+
         def pick(record: Dict[str, Any]) -> Optional[Tuple[str, int, float]]:
-            if record.get("issued_at") is not None:
+            if record.get("issued_at") is not None and not upstream.live:
                 raise UpstreamError(
                     f"ForecastSource({self.model!r}): {results} holds live records (with `issued_at`, e.g. run_date "
-                    f"{record.get('run_date')}): which revision a chained value may use depends on when it was issued, which "
-                    "this source doesn't read yet. Chain a backtest's results."
+                    f"{record.get('run_date')}) outside a live directory: which revision a chained value may use depends on "
+                    "when it was committed, which only the live directory's issues.jsonl says. Chain them from it."
                 )
             if record.get("horizon") != horizon:
                 return None
@@ -382,11 +446,12 @@ class ForecastSource(DataSource):
             prediction = record.get("prediction")
             return record["target_date"], int(record["hour"]), math.nan if prediction is None else float(prediction)
 
-        picked = list(read_records(results, columns=_READ, transform=pick))
+        picked = list(read_records(results, columns=_READ, transform=pick, committed=committed))
         if not picked:
             raise UpstreamError(
-                f"ForecastSource({self.model!r}): {results} has no forecast of horizon {horizon}. The upstream's horizons "
-                f"are 1 to {upstream.manifest.get('horizon')} (or its `horizons`)."
+                f"ForecastSource({self.model!r}): {results} has no forecast of horizon {horizon}"
+                + (" in a revision committed by its issue day's cut-off" if upstream.live else "")
+                + f". The upstream's horizons are 1 to {upstream.manifest.get('horizon')} (or its `horizons`)."
             )
         freqs = found["freq"] - {None}
         if freqs - {upstream.freq}:
