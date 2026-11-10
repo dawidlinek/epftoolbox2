@@ -188,14 +188,14 @@ def today_zone(information_set: Optional["InformationSet"], index: Any) -> Optio
     """The zone whose date `forecast_only`'s "today" is: the issue zone of `information_set` (with `issue_timezone="data"`,
     that of a frame with this index), so that a run after midnight on a host in another zone issues for the market's day.
     None without an information set, or with "data" and an index that has no market's zone: "today" is then the host's
-    date, as it always was."""
+    date, as it always was. The zone is a name that reads back (`in_data_zone`'s, an IANA key for a dateutil zone too)."""
     if information_set is None:
         return None
     if information_set.issue_timezone != DATA_ZONE:
         return information_set.issue_timezone
     try:
-        return information_set._issue_zone(index)
-    except InformationSetError:
+        return information_set.in_data_zone(index).issue_timezone
+    except ValueError:  # a naive index, UTC or a fixed offset: no market's clock
         return None
 
 
