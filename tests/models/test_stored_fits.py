@@ -475,7 +475,7 @@ def test_a_model_s_fit_state_forecasts_to_the_bit(model):
 def test_an_engine_fit_s_state_forecasts_to_the_bit(tmp_path):
     """The engine's fits from shared statistics as stored (`engine_fit_state`) forecast each row as the fit made in the job,
     rows far enough out to go to the model path included: OLS's solve error, Ridge's rounding, LEAR's metric, a VST's row set."""
-    from epftoolbox2.models._fits import _section, engine_fit_from_state, read_fit
+    from epftoolbox2.models._fits import _npz_units, _section, engine_fit_from_state, read_fit
 
     data = frame(SPRING, "1h")
     rng = np.random.default_rng(0)
@@ -489,8 +489,7 @@ def test_an_engine_fit_s_state_forecasts_to_the_bit(tmp_path):
         directory = fit_dir(live, "m", datetime.date(2023, 3, 20))
         stored = read_fit(directory, model)
         meta = json.loads((directory / FIT_FILE).read_text())
-        with np.load(directory / UNITS_FILE, allow_pickle=False) as npz:
-            arrays = {name: npz[name] for name in npz.files}
+        groups = _npz_units(directory / UNITS_FILE, len(meta["units"]))
         made = 0
         for place, entry in enumerate(meta["units"]):
             unit = stored.units[tuple(entry["key"])]
@@ -498,7 +497,7 @@ def test_an_engine_fit_s_state_forecasts_to_the_bit(tmp_path):
             if unit.engine is None:
                 continue
             made += 1
-            again = engine_fit_from_state(_section(_section(arrays, f"u{place}"), "engine"), model)
+            again = engine_fit_from_state(_section(groups[place], "engine"), model)
             for scale in (1.0, 50.0, 1e4):
                 row = rng.normal(0, scale, (1, 4)) + np.array([[1000.0, 100.0, 0.0, 1.0]])
                 assert unit.engine.forecast(model, row) == again.forecast(model, row)

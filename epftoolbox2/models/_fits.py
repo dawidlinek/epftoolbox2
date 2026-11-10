@@ -630,15 +630,10 @@ def _fsync(path: Path) -> None:
 def write_fit(
     directory: Path, meta: Dict[str, Any], units: Sequence[Tuple[Dict[str, Any], Dict[str, np.ndarray]]]
 ) -> None:
-    """Write an anchor's fit: every unit's arrays into `units.npz` (`u<i>.<section>.<name>`, numpy's own format, no object
-    array), then `fit.json` with `meta`, each unit's entry and the sha256 of `units.npz`, both synced, in a directory of their
-    own that replaces `directory` whole (a reader finds the old fit, the new one or none, never a mix)."""
-    arrays: Dict[str, np.ndarray] = {}
-    for place, (_, unit_arrays) in enumerate(units):
-        for name, value in unit_arrays.items():
-            if value.dtype == object:
-                raise TypeError(f"a stored fit holds arrays of numbers or text only, got an object array {name}")
-            arrays[f"u{place}.{name}"] = value
+    """Write an anchor's fit: every unit's arrays into `units.npz` (`packed`: one array per name over the units, numpy's own
+    format, no object array), then `fit.json` with `meta`, each unit's entry and the sha256 of `units.npz`, both synced, in a
+    directory of their own that replaces `directory` whole (a reader finds the old fit, the new one or none, never a mix)."""
+    arrays = packed([unit_arrays for _, unit_arrays in units])
     directory.parent.mkdir(parents=True, exist_ok=True)
     token = uuid.uuid4().hex[:12]
     staging = directory.parent / f".{directory.name}.new-{token}"
@@ -669,6 +664,73 @@ def write_fit(
     finally:
         if staging.exists():
             shutil.rmtree(staging, ignore_errors=True)
+
+
+def packed(units: Sequence[Mapping[str, np.ndarray]]) -> Dict[str, np.ndarray]:
+    """The arrays of every unit by name, one flat array per name (`<name>/data`, in unit order, each array raveled in its own
+    memory order) with the units that have it (`/units`), where each one's values start (`/offsets`), its shape (`/shapes`, -1
+    padded) and whether it is Fortran-ordered (`/fortran`), so that `unpacked` gives back each array with its values, dtype kind,
+    shape and memory order (a BLAS call on a transposed copy could round otherwise): a few dozen arrays in the file whatever the
+    number of units, which keeps loading one anchor's fit to milliseconds."""
+    by_name: Dict[str, List[Tuple[int, np.ndarray]]] = {}
+    for place, arrays in enumerate(units):
+        for name, value in arrays.items():
+            value = np.asarray(value)
+            if value.dtype == object:
+                raise TypeError(f"a stored fit holds arrays of numbers or text only, got an object array {name}")
+            by_name.setdefault(name, []).append((place, value))
+    out: Dict[str, np.ndarray] = {}
+    for name, entries in by_name.items():
+        kinds = {value.dtype.kind for _, value in entries}
+        if len(kinds) != 1:
+            raise TypeError(f"a stored fit's {name} has values of several kinds {sorted(kinds)}")
+        fortran = [value.ndim > 1 and value.flags.f_contiguous and not value.flags.c_contiguous for _, value in entries]
+        flat = [value.ravel(order="F" if f else "C") for (_, value), f in zip(entries, fortran)]
+        ndim = max(value.ndim for _, value in entries)
+        shapes = np.full((len(entries), max(ndim, 1)), -1, dtype=np.int64)
+        for row, (_, value) in enumerate(entries):
+            shapes[row, : value.ndim] = value.shape
+        out[f"{name}/data"] = np.concatenate(flat) if flat else np.zeros(0)
+        out[f"{name}/units"] = np.array([place for place, _ in entries], dtype=np.int64)
+        out[f"{name}/offsets"] = np.concatenate([[0], np.cumsum([piece.size for piece in flat])]).astype(np.int64)
+        out[f"{name}/shapes"] = shapes
+        out[f"{name}/ndim"] = np.array([value.ndim for _, value in entries], dtype=np.int64)
+        out[f"{name}/fortran"] = np.array(fortran, dtype=bool)
+    return out
+
+
+def unpacked(arrays: Mapping[str, np.ndarray], count: int) -> List[Dict[str, np.ndarray]]:
+    """Each of `count` units' arrays, as `packed` stored them (views of the flat arrays, in their own memory order)."""
+    out: List[Dict[str, np.ndarray]] = [{} for _ in range(count)]
+    names = {key.rpartition("/")[0] for key in arrays if key.endswith("/data")}
+    for name in names:
+        data = arrays[f"{name}/data"]
+        units = arrays[f"{name}/units"]
+        offsets = arrays[f"{name}/offsets"]
+        shapes = arrays[f"{name}/shapes"]
+        ndims = arrays[f"{name}/ndim"]
+        fortran = arrays[f"{name}/fortran"]
+        if (
+            not (len(units) == len(ndims) == len(fortran) == len(shapes) == len(offsets) - 1)
+            or offsets[-1] != data.size
+        ):
+            raise StoredFitError(f"the stored arrays of {name} don't agree in length")
+        for row, place in enumerate(units.tolist()):
+            if not 0 <= place < count:
+                raise StoredFitError(f"the stored arrays of {name} name unit {place} of {count}")
+            shape = tuple(int(n) for n in shapes[row, : int(ndims[row])])
+            piece = data[int(offsets[row]) : int(offsets[row + 1])]
+            out[place][name] = piece.reshape(shape, order="F" if fortran[row] else "C")
+    return out
+
+
+def _npz_units(payload: Union[bytes, Path], count: int) -> List[Dict[str, np.ndarray]]:
+    import io
+
+    source = io.BytesIO(payload) if isinstance(payload, bytes) else payload
+    with np.load(source, allow_pickle=False) as npz:
+        arrays = {name: npz[name] for name in npz.files}
+    return unpacked(arrays, count)
 
 
 @dataclass
@@ -712,19 +774,17 @@ def read_fit(directory: Path, model: Any, digest: Optional[str] = None) -> Optio
             f"{path} isn't the file {directory / FIT_FILE} names (sha256 {expected}): it was changed after the fit was stored. "
             "Refit this anchor (ModelPipeline.refit(..., if_due=False))."
         )
-    import io
-
-    groups: Dict[int, Dict[str, np.ndarray]] = {}
-    with np.load(io.BytesIO(payload), allow_pickle=False) as npz:
-        for name in npz.files:
-            place, _, rest = name.partition(".")
-            groups.setdefault(int(place[1:]), {})[rest] = npz[name]
+    entries = meta.get("units", [])
+    try:
+        groups = _npz_units(payload, len(entries))
+    except (ValueError, KeyError, OSError) as exc:
+        raise StoredFitError(f"{path} can't be read: {exc}") from None
     anchor = datetime.date.fromisoformat(meta["anchor"])
     stored = StoredFit(directory, anchor, meta)
-    for place, unit_meta in enumerate(meta.get("units", [])):
+    for place, unit_meta in enumerate(entries):
         key = tuple(unit_meta["key"])
         try:
-            stored.units[key] = unit_from_arrays(key, anchor, unit_meta, groups.get(place, {}), model)
+            stored.units[key] = unit_from_arrays(key, anchor, unit_meta, groups[place], model)
         except (KeyError, ValueError, TypeError) as exc:
             raise StoredFitError(f"{directory}: unit {key_text(key)} doesn't build back: {exc}") from None
     return stored
@@ -1108,12 +1168,9 @@ def fitted_units(
 
 def _stored_entries(stored: StoredFit) -> List[Tuple[Dict, Dict[str, np.ndarray]]]:
     """A stored fit's units as `write_fit` takes them, read back from its own `units.npz` (checked by `read_fit`)."""
-    groups: Dict[int, Dict[str, np.ndarray]] = {}
-    with np.load(stored.directory / UNITS_FILE, allow_pickle=False) as npz:
-        for name in npz.files:
-            place, _, rest = name.partition(".")
-            groups.setdefault(int(place[1:]), {})[rest] = npz[name]
-    return [(unit_meta, groups.get(place, {})) for place, unit_meta in enumerate(stored.meta.get("units", []))]
+    entries = stored.meta.get("units", [])
+    groups = _npz_units(stored.directory / UNITS_FILE, len(entries))
+    return [(unit_meta, groups[place]) for place, unit_meta in enumerate(entries)]
 
 
 # ---------------------------------------------------------------------------------------------------------------------------
