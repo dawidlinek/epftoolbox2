@@ -2,7 +2,8 @@ import numpy as np
 from sklearn.linear_model import RidgeCV
 
 from . import _stats
-from ._stats import ScaledStats
+from ._fits import estimator_from_state, estimator_state, linear_fit_from_state, linear_fit_state
+from ._stats import LinearFit, ScaledStats
 from .base import BaseModel
 
 # The grid `alphas=None` stands for: `np.logspace(-3, 4, 36)`, 36 penalties from 1e-3 to 1e4, a factor of 10^0.2 = 1.585 apart,
@@ -135,6 +136,15 @@ class RidgeModel(BaseModel):
 
     def _predict_fitted(self, fitted, test_x):
         return fitted.predict(test_x)[0], fitted.coef_.tolist()
+
+    def _fit_state(self, fitted):
+        """The `RidgeCV` of `_fit_model` (its chosen `alpha_` with it), or the engine's `LinearFit`, as arrays (`models._fits`)."""
+        return linear_fit_state(fitted) if isinstance(fitted, LinearFit) else estimator_state(fitted)
+
+    def _from_state(self, state):
+        if str(state["kind"][()]) == "linear_fit":
+            return linear_fit_from_state(state)
+        return estimator_from_state(self._estimator(), state)
 
     def _fit_stats(self, stats: ScaledStats):
         """`RidgeCV(alphas, fit_intercept, cv=None)` from a unit's scaled sums and rows (`_stats.ridge_fit`: the eigendecomposition
