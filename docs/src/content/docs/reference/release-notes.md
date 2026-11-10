@@ -15,7 +15,8 @@ Notes for changes that need something from you. The full list of changes of a re
   `ModelPipeline.run` and `report()`, also with `test=("today", "today")`; without one it is the host's date, as before. A run
   reads the day once and issues every model on it. A run over zones issues each zone on its own zone's today, as a run of its frame
   alone does and its report reads it; a `PooledModel` over zones whose dates differ raises, asking for `test_start` and `test_end`.
-  Backtests, and runs with explicit dates, don't move.
+  A `forecast_only` period that is reversed in its issue zone (`test_start="today", test_end` a day before) raises `ValueError`, in
+  every zone of a run over zones, where it planned no forecast and said nothing. Backtests, and runs with explicit dates, don't move.
 - **A results file holds skip records, and every record ends with `status`, `list_hash`, `refit_anchor` and `revision`.** A key a
   run can't forecast is now a line too, with its reason as `status` (`"missing_test_predictors"`, `"not_published"`, ...), `prediction`
   null, the `actual` of its issue row and `detail` where the reason has one; a forecast has `status` `"ok"`, the hash of its predictor
