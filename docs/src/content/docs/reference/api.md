@@ -226,7 +226,7 @@ class EvaluationReport:
     windows: Optional[RunWindows]                   # The windows and segments of the run; None for a plain run
 
     def summary(self) -> pd.DataFrame: ...          # model, forecasts, one column per evaluator
-    def forecast_counts(self) -> pd.DataFrame: ...  # model, planned, produced, missing, skip reasons
+    def forecast_counts(self) -> pd.DataFrame: ...  # model, planned, produced, missing, skip reasons; attrs: passed_over (a fallback's members without results)
     def availability(self) -> pd.DataFrame: ...     # model, predictor, role, status, list, periods, horizons, rule, known, issued, note
     def vintages(self) -> pd.DataFrame: ...         # model, predictor, series, class, ctx
     def provenance(self) -> pd.DataFrame: ...       # model, family, licence, licence_url, commercial_use, revenue_cap, attribution, weights, sha256, runtime, corpus, corpus_end, released, validation_verdict, test_verdict

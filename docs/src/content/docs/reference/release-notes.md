@@ -222,9 +222,10 @@ an issue day it didn't sample.
   count it is over, its and the rung-0 member's MAE on the keys both hold (identical keys, with the count) and each member's own MAE.
   `ModelPipeline.frozen(save_dir)` returns the pipeline with every `top=` ensemble replaced by a plain `AverageEnsemble` of the
   members chosen for the newest segment, chosen again from the members' results on validation alone, after comparing each member's
-  manifest with the pipeline's model of its name, in `frozen_choices`. The frozen average has the new `chosen_through` (saved to
-  YAML): it makes no forecast issued on or before the last day its choice read, counted as `chosen_in_sample`, so a frozen
-  pipeline run over the study's days is never scored in sample. Nothing else moves: without a fallback or `chosen_through` every
+  manifest with the pipeline's model of its name (its `training_cut`'s refit, mask and newest-target settings too; a predictor
+  function's fingerprint only warns), in `frozen_choices`. The frozen average has the new `chosen_through` (saved to YAML): it makes
+  no forecast issued on or before the last day its choice read, counted as `chosen_in_sample`, and neither does any ensemble made of
+  it, so a frozen pipeline run over the study's days is never scored in sample. Nothing else moves: without a fallback or `chosen_through` every
   record, manifest, YAML file and table is bit for bit as before. See [Fallbacks](/epftoolbox2/model-pipeline/fallback/).
 - **`target_transform="none"`: a pooled tree fits the raw target.** `HistGBModel`, `LightGBMModel`, `XGBoostModel` and
   `CatBoostModel` take a keyword-only `target_transform`: `"per_period"` (each period's own Invariant, the default and the only

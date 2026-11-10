@@ -54,8 +54,8 @@ model's curve, whatever went wrong with the others.
 - **A day no member serves is missing.** It is counted in `forecast_counts()` under `member_missing`, as for an average, and the
   fallback never fills it in from parts of several members.
 - **A member without results** in `report(allow_missing=True)` is passed over with a warning that names it: it serves nothing,
-  keeps its rung number, and the rungs below serve its days. A ladder with no member left is left out, and an average with a
-  missing member is left out as before.
+  keeps its rung number, and the rungs below serve its days. `forecast_counts().attrs["passed_over"]` names it per fallback. A
+  ladder with no member left is left out, and an average with a missing member is left out as before.
 
 ### The day after a spring switch
 
@@ -131,10 +131,14 @@ live.save("live_pipeline.yaml")
   evaluator or exporter, and raises as a report would (a member without results, results made without validation). A
   `ResidualModel` member keeps the base it names, whose results aren't read.
 - **The members are the models that chose.** Before choosing, each member's manifest is compared with this pipeline's model of
-  that name: its class, its predictors (a fixed list's layout per period and horizon, a predictor function's import path), its
-  training window, its parameters, and the unit kind and target transform of day and pooled models. A difference raises
-  `ManifestMismatchError`: a choice made on another model's results is no choice of this one. A field a manifest lacks can't be
-  compared, and warns.
+  that name, in what a resume compares that the model alone decides: its class, its predictors (a fixed list's layout per period
+  and horizon, a predictor function's import path), its training window, its parameters, the unit kind and target transform of day
+  and pooled models, and of its `training_cut` what the model sets (`refit`, with the rules `"auto"` resolves to,
+  `binary_mask="fit"` without a refit, `newest_target`). A difference raises `ManifestMismatchError`: a choice made on another
+  model's results is no choice of this one. A predictor function's fingerprint (its source and the information set it answers
+  through) that differs only warns, since a comment edited in it changes it too. A field a manifest lacks can't be compared, and
+  warns. What the data, the information set or the run's dates decide (data hashes, the rules a `training_cut` reads, an
+  expanding window's first day) is the study's and isn't compared.
 - **No forecast in sample.** The frozen average gets `chosen_through`, the last day whose actual the choice read: the newest segment's
   validation end plus the largest horizon on file, at most the day before its test period (with `"previous_year"`, the day before it).
   It makes no forecast issued on or before that day, and `forecast_counts()` counts those keys as `chosen_in_sample`, with a warning.
@@ -142,6 +146,10 @@ live.save("live_pipeline.yaml")
   were chosen on, under the `top` ensemble's name, with nothing in `choices()` to say so: in a two-year study whose members' errors
   swapped between the years, an MAE of 1.25 against the honest 1.757 of the `top` ensemble on the same keys. `chosen_through` is
   saved to YAML, so the boundary goes wherever the pipeline goes.
+- **The boundary holds for what is made of it.** An ensemble with a frozen average among its members, however nested, makes nothing
+  issued on or before the latest such `chosen_through` either, and counts those keys as `chosen_in_sample`. Otherwise a fallback over
+  the frozen average would serve every in-sample day from its lower rungs (in the same study, 732 of 1444 forecasts from the
+  rung below, at an MAE of 1.123), and an average over it would count those days as `member_missing`.
 - **The newest segment** is the last of `report.windows.segments`, or the one validation period of a study without a test.
 - **Bit for bit.** The frozen average's forecasts equal the `top` ensemble's on that segment's test period, since a `top=k` ensemble
   is `AverageEnsemble(chosen)` there.
