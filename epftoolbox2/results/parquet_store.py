@@ -734,7 +734,8 @@ class ParquetResultStore(_Store):
         self._shared._write_now(self)
 
     def close(self) -> None:
-        """Write what is buffered and release the lock."""
+        """Write what is buffered and release the lock. Saving into the store afterwards raises."""
+        self._closed = True
         try:
             self.flush()
         finally:

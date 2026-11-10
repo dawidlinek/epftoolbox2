@@ -613,6 +613,7 @@ class _Store:
 
     save_format = DEFAULT_SAVE_FORMAT
     _live = False  # a live revision's store (`results.live`), which writes into live directories alone
+    _closed = False  # set by `close()`: a record saved after it would be written by nobody
 
     def __init__(
         self,
@@ -660,8 +661,9 @@ class _Store:
 
     def save(self, result: Dict) -> None:
         """Queue a record for writing. A key with a record of a higher revision than 1 on file gets that revision, so that what is
-        written is what a reader takes (`read_records`: the highest revision wins)."""
+        written is what a reader takes (`read_records`: the highest revision wins). A closed store raises."""
         self._raise_error()
+        self._refuse_closed()
         if not self._save_coefficients and result.get("coefficients"):
             result = {**result, "coefficients": []}  # the key keeps its place
         key = (result["hour"], result["horizon"], result["run_date"])
@@ -678,6 +680,7 @@ class _Store:
         """Write a skip record (`with_status` with a skip reason as `status`) unless its key has a forecast or its newest skip
         record has the same status. Returns whether it was written. The key stays pending: the next run retries it."""
         self._raise_error()
+        self._refuse_closed()
         key = (record["hour"], record["horizon"], record["run_date"])
         status = record["status"]
         with self._lock:
@@ -690,6 +693,10 @@ class _Store:
             self._latest[key] = status
         self._enqueue(record, layout)
         return True
+
+    def _refuse_closed(self) -> None:
+        if self._closed:
+            raise ValueError(f"{self.path}: the store is closed, so nothing would write this record")
 
     def _written(self, keys: Iterable[Optional[tuple]]) -> None:
         """The forecasts of these keys (None for a skip record) are on file: they count as done from now on. A record whose
@@ -844,24 +851,32 @@ class ResultStore(_Store):
 
         if writer is None:
             self._write_queue: queue.Queue = queue.Queue()
-            self._writer = threading.Thread(target=self._writer_loop, daemon=True, name="store-writer")
-            self._writer.start()
+            self._start_writer()
         else:
             self._pending: List[Dict] = []
             self._io_lock = Lock()
             writer._register(self)
 
+    def _start_writer(self) -> None:
+        self._writer = threading.Thread(target=self._writer_loop, daemon=True, name="store-writer")
+        self._writer.start()
+
     def flush(self) -> None:
+        """Write everything saved so far, and raise what failed. The store stays open: what is saved after it is written as
+        before (its own thread is started again; it used to stop here, leaving later records queued for nobody)."""
         if self._shared is not None:
             self._shared._write_now(self)
             return
         if self._writer.is_alive():
             self._write_queue.put(self._SENTINEL)
             self._writer.join()
+        if not self._closed:
+            self._start_writer()
         self._raise_error()
 
     def close(self) -> None:
-        """Write what is queued and release the lock."""
+        """Write what is queued and release the lock. Saving into the store afterwards raises."""
+        self._closed = True
         try:
             self.flush()
         finally:
