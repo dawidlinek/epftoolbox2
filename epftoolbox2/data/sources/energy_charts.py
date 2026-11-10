@@ -11,6 +11,7 @@ import json
 import os
 import re
 import threading
+import weakref
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
@@ -139,14 +140,30 @@ class _TokenBucket:
             self.stamp = now
 
 
-# By endpoint and clock: a bucket's stamps are seconds of one clock's `monotonic()` (a FakeClock's start at 0).
-_BUCKETS: Dict[Tuple[str, Clock], _TokenBucket] = {}
-_BUCKETS_LOCK = threading.Lock()
+# By endpoint and clock (its `id`): a bucket's stamps are seconds of one clock's `monotonic()` (a FakeClock's start at 0).
+# A clock's buckets go when it does (`_CLOCKS`: a finalizer, or the clock itself where it can't be weakly referenced, so that
+# its id isn't reused while its buckets are kept); the key is no clock, which may be unhashable (a dataclass with `__eq__`).
+_BUCKETS: Dict[Tuple[str, int], _TokenBucket] = {}
+_CLOCKS: Dict[int, Any] = {}
+_BUCKETS_LOCK = threading.RLock()  # a finalizer can run, and take it, while this thread holds it
+
+
+def _forget_clock(ident: int) -> None:
+    with _BUCKETS_LOCK:
+        _CLOCKS.pop(ident, None)
+        for key in [key for key in _BUCKETS if key[1] == ident]:
+            del _BUCKETS[key]
 
 
 def _bucket(endpoint: str, clock: Clock) -> _TokenBucket:
     with _BUCKETS_LOCK:
-        key = (endpoint, clock)
+        ident = id(clock)
+        if ident not in _CLOCKS:
+            try:
+                _CLOCKS[ident] = weakref.finalize(clock, _forget_clock, ident)
+            except TypeError:  # no weak reference to it (__slots__ without __weakref__): kept, with its buckets
+                _CLOCKS[ident] = clock
+        key = (endpoint, ident)
         if key not in _BUCKETS:
             _BUCKETS[key] = _TokenBucket(BURST.get(endpoint, DEFAULT_BURST), RATE_PER_MINUTE / 60.0)
         return _BUCKETS[key]
