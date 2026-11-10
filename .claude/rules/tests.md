@@ -5,6 +5,7 @@ paths:
 
 # Tests
 
+- Time in tests: `with use_clock(FakeClock(start)) as clock:` (`epftoolbox2.clock`) rather than patching `_now` or a module's `time.sleep`: every clock read and wait of the package's own goes through it, a fake sleep returns at once and is counted in `clock.sleeps`, and `tests/test_clock.py` fails on a clock read outside `_clock.py`. A test of waiting code can patch `time.sleep` to raise, so a real sleep fails it. A test that needs the host's date pins the host's zone (`host_zone(name)` in `tests/test_clock.py`: `TZ` and `time.tzset`, put back after), never assumes it. No test relies on a thread seeing the caller's clock or not: free-threaded 3.14 copies the context into new threads, the GIL builds don't.
 - No network in unit tests; mock the HTTP session. Real-API tests are `@pytest.mark.integration` and are excluded by `-m "not integration"`.
 - Anything that runs a model: `monkeypatch.setenv("MAX_PROCESSES", "1")` and `monkeypatch.setenv("THREADS_PER_PROCESS", "1")`.
 - Prefer synthetic data with a known answer (`tests/synthetic.py`) over hand-built frames: a generator with a seed, known coefficients and a local-time index spanning a DST switch.

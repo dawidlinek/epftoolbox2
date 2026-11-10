@@ -1,6 +1,5 @@
 import html
 import re
-import time
 import xml.etree.ElementTree as ET
 from email.utils import parsedate_to_datetime
 from typing import Dict, List, Optional, Tuple, Union
@@ -17,6 +16,7 @@ from rich.progress import (
     TaskProgressColumn,
     TimeRemainingColumn,
 )
+from epftoolbox2._clock import current_clock
 from epftoolbox2.logging import get_logger
 from .._market_timezone import resolve as _resolve_timezone
 from .base import DataSource
@@ -298,7 +298,7 @@ def _retry_after_seconds(value: Optional[str]) -> Optional[float]:
     except ValueError:
         pass
     try:
-        return max(0.0, (parsedate_to_datetime(value) - pd.Timestamp.now(tz="UTC")).total_seconds())
+        return max(0.0, (parsedate_to_datetime(value) - current_clock().now()).total_seconds())
     except (TypeError, ValueError):
         return None
 
@@ -468,7 +468,7 @@ class EntsoeSource(DataSource):
         if end <= start:
             raise ValueError(f"End timestamp ({end}) must be after start timestamp ({start})")
 
-        start_time = time.time()
+        start_time = current_clock().monotonic()
 
         chunks = self._generate_chunks(start, end, months=3)
 
@@ -538,7 +538,7 @@ class EntsoeSource(DataSource):
             self._warn_on_late_start(dtype, df, start)
             dataframes.append(df)
 
-        elapsed = time.time() - start_time
+        elapsed = current_clock().monotonic() - start_time
         if not dataframes:
             self.logger.warning(
                 f"ENTSOE [{self._area_name}]: no {', '.join(self.type)} data between {start} and {end} "
@@ -826,7 +826,7 @@ class EntsoeSource(DataSource):
                     f"({attempt + 1}/{self.MAX_RETRIES})"
                 )
             )
-            time.sleep(wait)
+            current_clock().sleep(wait)
 
         if fatal is not None:
             raise EntsoeApiError(fatal)

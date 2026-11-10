@@ -12,6 +12,7 @@ import requests
 
 import epftoolbox2.data.sources._openholidays as openholidays_module
 import epftoolbox2.data.sources.calendar as calendar_module
+from epftoolbox2.clock import FakeClock, use_clock
 from epftoolbox2.data import cache_manager as cache_manager_module
 from epftoolbox2.data.cache_manager import settled_until_of
 from epftoolbox2.data.sources import CalendarSource
@@ -308,8 +309,7 @@ class TestChunking:
 
 
 class TestHttp:
-    def test_retries_server_errors(self, monkeypatch):
-        monkeypatch.setattr(openholidays_module.time, "sleep", lambda s: None)
+    def test_retries_server_errors(self):
         api = FakeApi()
         responses = iter([_response({}, status=503)])
 
@@ -324,17 +324,19 @@ class TestHttp:
         source = _source()
         source.session = MagicMock()
         source.session.get.side_effect = flaky_get
-        df = source.fetch(*_range("2024-07-15", "2024-07-15"))
+        with use_clock(FakeClock("2024-07-16")) as clock:
+            df = source.fetch(*_range("2024-07-15", "2024-07-15"))
         assert df["is_school_holiday"].eq(1).all()
+        assert clock.sleeps == [1]
 
-    def test_gives_up_after_three_attempts(self, monkeypatch):
-        monkeypatch.setattr(openholidays_module.time, "sleep", lambda s: None)
+    def test_gives_up_after_three_attempts(self):
         source = _source()
         source.session = MagicMock()
         source.session.get.side_effect = requests.ConnectionError("offline")
-        with pytest.raises(RuntimeError, match="failed after 3 attempts"):
+        with use_clock(FakeClock("2024-01-16")) as clock, pytest.raises(RuntimeError, match="failed after 3 attempts"):
             source.fetch(*_range("2024-01-15", "2024-01-15"))
         assert source.session.get.call_count == 3
+        assert clock.sleeps == [1, 2]
 
     def test_client_errors_raise_immediately(self):
         source = _source()

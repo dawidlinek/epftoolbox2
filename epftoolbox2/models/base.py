@@ -109,9 +109,10 @@ from ._worker import (
     training_row_days,
     training_rows,
 )
-from .._date_utils import is_utc_index, resolve_date, shift_calendar_days, zone_name
+from .._date_utils import is_utc_index, resolve_date, resolve_span, shift_calendar_days, zone_name
 from ..information_set import (
     _STEP_MINUTES,
+    DATA_ZONE,
     InformationSetError,
     TrainingRows,
     check_level,
@@ -181,6 +182,21 @@ _SHARED = True
 # The `_Periods.memo` key of the (window, newest-target rule, column) whose binary-mask verdicts more than one model of an engine
 # chunk reads (`_engine.mask_readers`): only those are kept. Frames without it (a model alone) keep none.
 _MASK_READERS = ("mask readers",)
+
+
+def today_zone(information_set: Optional["InformationSet"], index: Any) -> Optional[str]:
+    """The zone whose date `forecast_only`'s "today" is: the issue zone of `information_set` (with `issue_timezone="data"`,
+    that of a frame with this index), so that a run after midnight on a host in another zone issues for the market's day.
+    None without an information set, or with "data" and an index that has no market's zone: "today" is then the host's
+    date, as it always was. The zone is a name that reads back (`in_data_zone`'s, an IANA key for a dateutil zone too)."""
+    if information_set is None:
+        return None
+    if information_set.issue_timezone != DATA_ZONE:
+        return information_set.issue_timezone
+    try:
+        return information_set.in_data_zone(index).issue_timezone
+    except ValueError:  # a naive index, UTC or a fixed offset: no market's clock
+        return None
 
 
 def _test_days(test_start: str, test_end: str) -> List[datetime.date]:
@@ -935,8 +951,8 @@ class BaseModel(ABC):
         if windows is not None:
             test_start, test_end = windows.first_day, windows.last_day
         elif forecast_only:
-            test_start = resolve_date(test_start or "today")
-            test_end = resolve_date(test_end or "today")
+            zone = today_zone(information_set, data.index)
+            test_start, test_end = resolve_span(test_start, test_end, zone)
         else:
             if test_start is None or test_end is None:
                 raise ValueError("test_start and test_end are required unless forecast_only=True")

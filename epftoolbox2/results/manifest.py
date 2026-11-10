@@ -117,13 +117,14 @@ import math
 import subprocess
 import warnings
 from dataclasses import dataclass, fields
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, NamedTuple, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import pandas as pd
 
+from .._clock import current_clock
 from .._date_utils import daily_anchor, fmt_minutes, zone_name
 from ..models._calendar import issue_day_names, mask_members, resolve_issue_days
 from ..models._cards import manifest_fields, window_starts
@@ -727,7 +728,7 @@ def build_manifest(
     the fits ("engine-2" in an engine group whose fits come from shared statistics, None for the model path).
     `chained_inputs` are the model's chained columns as its input check found them (`models._chained`), None without any.
     """
-    now = datetime.now(timezone.utc).isoformat()
+    now = current_clock().now().isoformat()
     hashes = FrameHashes(data) if frame_hashes is None else frame_hashes
     package_version, git_sha = hashes.provenance()
     actuals = None

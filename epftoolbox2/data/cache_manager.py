@@ -28,6 +28,7 @@ import numpy as np
 import pandas as pd
 from filelock import FileLock, SoftFileLock, Timeout
 
+from epftoolbox2._clock import settled_now
 from epftoolbox2.logging import get_logger
 
 # Bump when the on-disk layout or the meaning of cached ranges changes: every existing cache is then ignored.
@@ -56,7 +57,9 @@ logger = get_logger(__name__)
 
 
 def _now() -> pd.Timestamp:
-    return pd.Timestamp.now(tz="UTC")
+    """The instant the cache settles against (`epftoolbox2._clock.settled_now`: the clock's now, never later than the
+    machine's), UTC."""
+    return settled_now()
 
 
 def unsettled_boundary(period: pd.Timedelta = UNSETTLED_PERIOD, timezone: Optional[str] = None) -> pd.Timestamp:

@@ -11,6 +11,7 @@ import pandas as pd
 import pytest
 import requests
 
+from epftoolbox2.clock import FakeClock, use_clock
 from epftoolbox2.data.sources import PseSource
 from epftoolbox2.data.sources.pse import DATASET_COLUMNS, FLOW_COLUMNS, PseApiError
 from epftoolbox2.pipelines.data_pipeline import COMPONENT_REGISTRY, DataPipeline
@@ -37,8 +38,10 @@ def expected_index(first_day: str, last_day: str, step="15min") -> pd.DatetimeIn
 
 
 @pytest.fixture(autouse=True)
-def no_sleep(monkeypatch):
-    monkeypatch.setattr("epftoolbox2.data.sources.pse.time.sleep", lambda seconds: None)
+def clock():
+    """Every test on a fake clock: a retry's wait returns at once and is counted in `clock.sleeps`."""
+    with use_clock(FakeClock("2026-06-10 12:00")) as fake:
+        yield fake
 
 
 # ---------------------------------------------------------------------------
@@ -195,9 +198,8 @@ def test_a_next_link_to_another_host_is_refused():
     assert len(source.session.get.calls) == 1
 
 
-def test_transient_errors_are_retried_honouring_retry_after(monkeypatch):
-    waits = []
-    monkeypatch.setattr("epftoolbox2.data.sources.pse.time.sleep", waits.append)
+def test_transient_errors_are_retried_honouring_retry_after(clock):
+    waits = clock.sleeps
     ok = {"value": quarter_rows("csdac-pln", "2026-06-10")}
     source = make_source({}, ["csdac-pln"])
     source.session.get = FakeApi(

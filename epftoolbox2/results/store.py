@@ -7,12 +7,13 @@ import re
 import zlib
 import queue
 import threading
-import time
 import uuid
 import sys
 import warnings
 from typing import Any, BinaryIO, Callable, Dict, Iterable, Iterator, List, Optional, Sequence, Set, Tuple
 from threading import Lock
+
+from .._clock import SYSTEM
 
 # What every record written from record schema 2 on ends with (D4 of the forecasting plan), after the keys it had before, whose
 # order and values don't change: `status` ("ok" for a forecast, a skip reason's name for a key with none), `list_hash` (the hash
@@ -935,7 +936,7 @@ class StoreWriter:
 
     def _write_now(self, store: _Store) -> None:
         """Write all of `store`'s buffered records in this thread, and raise what failed in the background."""
-        self._write_due(store, time.monotonic(), force=True)
+        self._write_due(store, SYSTEM.monotonic(), force=True)
         store._raise_error()
 
     def _write_due(self, store: _Store, now: float, force: bool) -> None:
@@ -976,7 +977,7 @@ class StoreWriter:
                 pressed = self._buffered_rows > self._max_buffered
             if pressed:  # the largest buffers first, until half the cap is left
                 stores.sort(key=lambda s: s._buffered(), reverse=True)
-            now = time.monotonic()
+            now = SYSTEM.monotonic()  # real time: buffers are stamped and aged in several threads
             for store in stores:
                 force = stopping or (pressed and self._buffered_rows > self._max_buffered // 2)
                 self._write_due(store, now, force)  # a failure is the store's, raised by its next call
@@ -1241,7 +1242,7 @@ class _GroupLock:
                 except OSError as exc:
                     if exc.errno not in _HELD_ERRNOS:
                         return
-                    time.sleep(0.01)
+                    SYSTEM.sleep(0.01)  # the other process holds it on real time
             else:
                 return
             try:

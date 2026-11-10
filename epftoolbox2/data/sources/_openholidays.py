@@ -4,12 +4,13 @@ Data: OpenHolidays API (https://www.openholidaysapi.org), made available under t
 (ODbL 1.0, https://opendatacommons.org/licenses/odbl/1-0/). Publications and derived databases must credit it.
 """
 
-import time
 from typing import List, Optional
 
 import numpy as np
 import pandas as pd
 import requests
+
+from epftoolbox2._clock import current_clock
 
 ATTRIBUTION = "School holidays: OpenHolidays API (https://www.openholidaysapi.org), ODbL 1.0"
 
@@ -37,7 +38,7 @@ def get(session: requests.Session, path: str, params: dict) -> list:
                 return response.json()
             error = requests.HTTPError(f"HTTP {response.status_code}")
         if attempt < 2:
-            time.sleep(2**attempt)
+            current_clock().sleep(2**attempt)
     raise RuntimeError(f"OpenHolidays API request to {path} failed after 3 attempts: {error}") from error
 
 

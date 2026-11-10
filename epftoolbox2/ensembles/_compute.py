@@ -26,6 +26,7 @@ from typing import Any, Callable, Dict, Iterable, List, Mapping, NamedTuple, Opt
 
 import numpy as np
 
+from .._clock import current_clock
 from ..logging import get_logger
 from ..models._calendar import IssueCalendar
 from ..results.manifest import (
@@ -583,7 +584,7 @@ def _write_manifest(
 ) -> None:
     target = manifest_path(path)
     package_version, git_sha = (_package_version(), _git_sha()) if provenance is None else provenance()
-    now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    now = current_clock().now().isoformat()
     recorded = [manifest for manifest in manifests.values() if manifest is not None]
 
     def on_record(field: str) -> Any:

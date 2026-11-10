@@ -1,11 +1,11 @@
 import re
-import time
 from email.utils import parsedate_to_datetime
 from typing import Dict, List, Optional
 
 import pandas as pd
 import requests
 
+from epftoolbox2._clock import current_clock
 from epftoolbox2.logging import get_logger
 from .base import DataSource
 
@@ -79,7 +79,7 @@ def _retry_after_seconds(value: Optional[str]) -> Optional[float]:
     except ValueError:
         pass
     try:
-        return max(0.0, (parsedate_to_datetime(value) - pd.Timestamp.now(tz="UTC")).total_seconds())
+        return max(0.0, (parsedate_to_datetime(value) - current_clock().now()).total_seconds())
     except (TypeError, ValueError):
         return None
 
@@ -328,7 +328,7 @@ class PseSource(DataSource):
                 wait = self.RETRY_BACKOFF_SECONDS * 2**attempt
             wait = min(wait, self.MAX_RETRY_WAIT_SECONDS)
             self.logger.warning(f"PSE [{label}]: {error}; retrying in {wait:.0f} s ({attempt + 1}/{self.MAX_RETRIES})")
-            time.sleep(wait)
+            current_clock().sleep(wait)
         raise PseApiError(f"PSE [{label}] failed after {self.MAX_RETRIES + 1} attempts: {error}")
 
     @staticmethod
