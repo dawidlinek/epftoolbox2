@@ -124,6 +124,32 @@ def test_the_backend_reads_only_the_target_and_keeps_the_nineteen_levels(hourly,
     assert "autocast" not in make("p", tiny)._runtime_fields()  # float32 on the CPU
 
 
+def test_the_backend_sorts_the_levels_per_step_as_the_research_did(hourly, tiny, monkeypatch):
+    """The package's head can't cross its quantiles (a cumulative softplus), but the research sorted the 19 levels per step
+    before taking the middle one, and so does the backend: quantiles handed back in reverse order come out sorted."""
+    from tsfm_public.models.patchtst_fm.modeling_patchtst_fm import PatchTSTFMForPrediction
+
+    from epftoolbox2.models._fm.patchtst_fm import PatchTSTFMBackend
+    from epftoolbox2.models._weights import resolve
+
+    backend = PatchTSTFMBackend(resolve(PatchTSTFMModel._card, tiny), "cpu")
+    model = make("p", tiny)
+    batch = history_batch(model._history_spec("price"), hourly, ["2023-06-14"], INFO, "1h", 1)
+    (call,) = batch.batches(1)
+    plain = backend.predict(call, {})
+    real = PatchTSTFMForPrediction.forward
+
+    def reversed_levels(self, *args, **kwargs):
+        out = real(self, *args, **kwargs)
+        out.quantile_outputs = torch.flip(out.quantile_outputs, dims=[1])
+        return out
+
+    monkeypatch.setattr(PatchTSTFMForPrediction, "forward", reversed_levels)
+    crossed = backend.predict(call, {})
+    assert (np.diff(crossed, axis=-1) >= 0).all()
+    np.testing.assert_array_equal(crossed, plain)
+
+
 def test_verify_and_the_adapter_suite(hourly, tiny, tmp_path):
     def factory(name, **params):
         return make(name, tiny, **params)
