@@ -183,13 +183,12 @@ from epftoolbox2.pipelines import ModelPipeline
 source = EntsoeSource("DE_LU", api_key=key, type=["price"], price_exaa=True, prefix="de")  # de_price, de_price_exaa
 # After DailyProfileTransformer(columns=["de_price", "de_price_exaa"]) the frame has de_price_exaa_h00 ...
 
-HOURS = [f"h{h:02d}" for h in range(24)]
 base = presets.lear_predictors([], price="de_price")
 
 
 def lear_with_exaa(ctx):
     x = list(base)
-    exaa = [f"de_price_exaa_{h}_d+{{horizon}}" for h in HOURS]
+    exaa = presets.exaa_profile(prefix="de")  # de_price_exaa_h00_d+{horizon} .. de_price_exaa_h23_d+{horizon}
     if ctx.published(exaa):  # False before 11:15 on D-1, at horizon 2 and above (D+2 is out on D+1), and where missing
         x += exaa
     return x

@@ -37,28 +37,25 @@ The targets are the daily statistics of the row's own date, `actual_daily_min` a
 ## The lists
 
 ```python
-WEEKDAYS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+from epftoolbox2.presets import week_ahead_predictors
 
-calendar_x = (
-    ["is_holiday"] + [f"is_holiday_d-{k}" for k in range(1, 8)] + [f"is_holiday_d+{k}" for k in range(1, 10)]
-    + [f"is_{day}_d+{{horizon}}" for day in WEEKDAYS] + ["daylight_hours_d+{horizon}"]
-)
-regional_nwp = (  # 266 names; their order is the order coordinate descent visits them
-    calendar_x
-    + [f"load_actual_h-{h}" for h in range(1, 169)] + [f"load_forecast_h+{h}" for h in range(1, 36)]
-    + ["load_forecast"]
-    + [f"actual_daily_{stat}_d-{k}" for stat in ("min", "max") for k in range(1, 8)]
-    + [f"load_forecast_daily_{stat}_d+{k}" for stat in ("min", "max") for k in range(3, 10)]
-    + [f"all_avg_{var}_dmean_d+{{horizon}}" for var in ("2t", "wind_speed", "rh", "tcc", "sp", "ssr_inc", "tp")]
-    + ["all_avg_hdd_d+{horizon}", "all_avg_cdd_d+{horizon}"]
-)
+calendar_x = week_ahead_predictors("calendar_x")      # 25 names: holiday flags, weekday dummies, daylight hours
+regional_nwp = week_ahead_predictors("regional_nwp")  # 265 names, none late at noon; their order is the order coordinate descent visits them
+study_nwp = week_ahead_predictors("regional_nwp", study=True)  # the study's 266 names: only to reproduce its numbers (see below)
 
 
-def expert(stat):
-    return ["is_monday_d+{horizon}", "is_saturday_d+{horizon}", "is_sunday_or_holiday_d+{horizon}",
-            f"load_forecast_daily_{stat}_d+0", f"load_forecast_daily_{stat}_d+{{horizon}}",
-            f"actual_daily_{stat}_d-1", f"actual_daily_{stat}_d-6", "capital_2t_dmean_d+{horizon}"]
+def expert(stat):  # 8 names, stat is "min" or "max"
+    return week_ahead_predictors("expert", stat=stat)
 ```
+
+These are [`epftoolbox2.presets.week_ahead_predictors`](/epftoolbox2/model-pipeline/presets/#week-ahead-daily-minimum-and-maximum-load)
+(plain lists, with the evidence of each in that page). `regional_nwp` is `calendar_x`, then 168 hourly lags of the realised load
+(`load_actual_h-2` … `load_actual_h-168` in the default list; the study's also holds `load_actual_h-1`, which is late at noon, see [The late hour](#the-late-hour)), the TSO's next 35 hourly forecasts (`load_forecast_h+1` …) and `load_forecast`, the last
+seven daily minima and maxima (`actual_daily_{min,max}_d-1` … `_d-7`), the TSO's A31 forecasts for D+3 … D+9, seven ECMWF variables
+averaged over the market's regions (`all_avg_{2t,wind_speed,rh,tcc,sp,ssr_inc,tp}_dmean_d+{horizon}`) and the heating and cooling
+degree days. `expert(stat)` is Monday, Saturday and Sunday-or-holiday dummies, the TSO's forecast of the issue row's date
+(`_d+0`, which `LagTransformer` doesn't make: it skips lag 0) and of the target day, the actual statistic of D-1 and D-6 (`actual_daily_{stat}_d-1` and `_d-6`, relative to the issue day), and the
+capital's temperature.
 
 `load_forecast_daily_{min,max}_d+k` are the TSO's A31 forecasts, which have a built-in rule: published on Fridays at 10:00 Brussels time
 for the next Monday-to-Sunday week of the market's own local dates, those of the frame's zone. `all_avg_*` and `capital_*` are ECMWF forecasts averaged over a market's regions and read at its
@@ -123,18 +120,21 @@ availability level. On Fridays at noon every value of the next week is out, so t
 
 ### The late hour
 
-`load_actual_h-1` is late by the rules. The study's list holds the load of 11:00, which a realised value makes known at 13:00, after a noon issue.
-So this run lists it at `availability="warn"` (the default), `availability="raise"` refuses it, and `verify` calls the Lasso a
-`leak`. To reproduce the study's numbers keep it and read the listing; for a forecast that could have been issued at noon, drop that
-one name:
+`load_actual_h-1` is late by the rules. On a row stamped 12:00 it is the load of 11:00, which a realised value makes known at 13:00,
+after a noon issue. The study's list holds it. So `week_ahead_predictors("regional_nwp")` leaves it out (265 names, the study's
+order otherwise), and `week_ahead_predictors("regional_nwp", study=True)` returns the study's 266 names for reproducing its numbers
+only: with `availability="warn"` (the default) a run lists the name, `availability="raise"` refuses it, and `verify` calls the Lasso a
+`leak`. The Friday form above is the honest one. The reproduction of the study uses `study_nwp`:
 
 ```python
-honest_nwp = [name for name in regional_nwp if name != "load_actual_h-1"]
+reproduction = LassoCVModel(predictors=study_nwp, training_window=1092, name="lasso_study", **S02)
 ```
+
+The honest list against the study's, measured on Poland with the same LassoCV settings (`S02`), the 43 Fridays 2024-01-05 to 2024-10-25 of the repository's fixture (`tests/fixtures/week_ahead/PL_noon.parquet`), horizons 3 to 9: 301 forecasts of each statistic from each list, on identical keys. Minimum: MAE 326.94 MW (default) against 327.39 MW (study list). Maximum: 469.03 MW against 468.01 MW. So dropping `load_actual_h-1` changes the MAE by -0.14 % and +0.22 %, noise next to the 20 to 24 % gain over the TSO; the honest list has no measured advantage or loss. Caveat: the fixture starts on 2021-10-20, so the windows before 2024-10-16 are shorter than 1092 days (the same for both lists), and no TSO benchmark was run here, so the +37 % and 23.6 % / 20.3 % figures are not claimed for the default list.
 
 ### What the study needs
 
-Today's defaults don't reproduce the study. On its 1,456 forecasts for Poland a default `LassoCVModel` (5 folds, an intercept, binary
+Today's defaults don't reproduce the study. On its 1,456 forecasts for Poland (the study's list, `study_nwp`) a default `LassoCVModel` (5 folds, an intercept, binary
 columns left as they are) lands a median of 42 to 49 MW from the study's forecasts, with an MAE of 377.3 MW against 367.1, and a default
 `OLSModel` has no intercept, which an expert model whose three dummies aren't a one-hot needs: its MAE is 437.65 MW against the
 expert's 417.24. The settings in `S02` and `fit_intercept=True` on the OLS close both gaps, to the stored digits (see
@@ -216,17 +216,17 @@ check.table()
 Each model's status must be `ok`: perturbing what isn't known at noon moves no forecast, and perturbing the freshest known values moves
 every one. For the daily form that holds on every weekday, the TSO's included: a forecast that isn't out is no forecast in either run of
 the probe. For the Friday form (`issue_days=["friday"]`) the study's Lasso list is a `leak` through `load_actual_h-1` wherever the Lasso
-keeps it (on three sampled Fridays 3 of 21 forecasts of the minimum moved and 7 of 21 of the maximum), and `honest_nwp` is `ok`. See [Verifying a Pipeline](/epftoolbox2/model-pipeline/verification/).
+keeps it (on three sampled Fridays 3 of 21 forecasts of the minimum moved and 7 of 21 of the maximum), and the default `regional_nwp`, without that name, is `ok`. See [Verifying a Pipeline](/epftoolbox2/model-pipeline/verification/).
 
 ## Reproducing the study
 
 The library's test suite refits one Friday of the study for Poland (2024-10-25, a week with the autumn switch) from its own daily frame
-restamped at noon: the test allows the Lasso and the expert 0.01 MW from the stored forecasts (room for another scikit-learn), and
+restamped at noon, with the study's list `study_nwp`: the test allows the Lasso and the expert 0.01 MW from the stored forecasts (room for another scikit-learn), and
 0.0005 MW was measured, the rounding of the stored files' three decimals; the TSO's forecast and the actual are the stored ones. It then reports the stored forecasts of all 104 Fridays: the Lasso beats the TSO by a
 log-gain of 23.6 % on the daily minimum and 20.3 % on the maximum (100 ln of the TSO's MAE over the Lasso's, pooled over the seven
 horizons, 728 forecasts each), and the DM statistic of each horizon is the study's own, with 4 lags.
 
-Outside the test suite the Friday form above refitted all 1,456 Lasso and expert forecasts of Poland, then the 20 markets' 29,120 of each:
+Outside the test suite the Friday form above, with `study_nwp` in place of `regional_nwp`, refitted all 1,456 Lasso and expert forecasts of Poland, then the 20 markets' 29,120 of each:
 every one within 0.0005 MW of the stored forecast, the TSO's forecasts and the actuals equal to them. The Lasso beats the TSO in all
 40 market-statistics. The mean log-gain, 100 ln of the TSO's MAE over the Lasso's, depends on what a cell is: pooled over the seven
 horizons of each market and statistic (40 cells of 728 forecasts) it is +37.44 %, and per horizon (280 cells of 104 forecasts, the

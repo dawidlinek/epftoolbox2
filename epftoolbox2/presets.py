@@ -23,7 +23,7 @@ day-ahead forecasts are not.
 The functions return plain strings with a `{horizon}` template, so the lists can be saved to YAML.
 """
 
-from typing import Sequence
+from typing import Any, Optional, Sequence
 
 from .data.transformers._daily import parse_step, slot_names
 
@@ -33,6 +33,23 @@ WEEKDAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", 
 def profile_columns(column: str, freq: str = "1h") -> list[str]:
     """Names `DailyProfileTransformer(columns=column, freq=freq)` creates: price_h00..price_h23 for hourly data."""
     return slot_names(column, parse_step(freq))
+
+
+def exaa_profile(freq: str = "1h", prefix: str = "") -> list[str]:
+    """The EXAA auction's profile as predictors of the target day: `price_exaa_h00_d+{horizon}` .. `price_exaa_h23_d+{horizon}`.
+
+    The names `DailyProfileTransformer(columns="price_exaa", freq=freq)` creates (`profile_columns`), shifted to the target day with
+    `LagTransformer(columns=profile_columns("price_exaa", freq), lags=[-1], freq="day")`. `prefix` is the `EntsoeSource`
+    prefix: `prefix="de"` gives `de_price_exaa_h00_d+{horizon}`. Only AT and DE_LU have the column
+    (`EntsoeSource(price_exaa=True)`), and it is out at 11:15 on D (the legal bound), so the list is for horizon 1 and a
+    model that is a function of `ctx` should add it only where `ctx.published(exaa_profile())` is true.
+
+    Evidence: the docs' "Early auctions" section of the ENTSO-E page (DE_LU, EXAA added to a LEAR as a function of `ctx`). It
+    gives no accuracy gain for adding the column, only the serving lesson: a model always trained with EXAA and served
+    without it raised the DE error from 15.23 to 38.44 in earlier projects, so keep the list without it as the fallback.
+    """
+    head = f"{prefix}_" if prefix and not prefix.endswith("_") else prefix
+    return [f"{c}_d+{{horizon}}" for c in profile_columns(f"{head}price_exaa", freq)]
 
 
 def _weekday_columns(weekdays: Sequence[str], calendar_prefix: str) -> list[str]:
@@ -141,4 +158,125 @@ def expert_predictors(
     return own + exog + _weekday_columns(weekdays, calendar_prefix)
 
 
-__all__ = ["ORDERS", "WEEKDAYS", "expert_predictors", "lear_predictors", "profile_columns", "tree_predictors"]
+WEEK_AHEAD = ("calendar_x", "regional_nwp", "expert")
+LATE_AT_NOON = "load_actual_h-1"  # the load of 11:00, known at 13:00
+
+
+def week_ahead_predictors(which: str = "regional_nwp", stat: Optional[str] = None, study: bool = False) -> list[str]:
+    """The predictor lists of the week-ahead daily minimum and maximum load study (20 European markets, Friday 12:00 issues).
+
+    `which="calendar_x"` (25 names): holiday flags of D, D-1..D-7 and D+1..D+9, the seven weekday dummies of the target day
+    and its daylight hours. `which="regional_nwp"` (265 names, in the order coordinate descent visits them): `calendar_x`,
+    hourly lags of the realised load `load_actual_h-2` .. `load_actual_h-168`, the TSO's next 35 hourly forecasts and its
+    forecast of the issue row, the last seven daily minima and maxima, the TSO's A31 daily minima and maxima for D+3..D+9,
+    seven ECMWF variables averaged over the market's regions and their heating and cooling degree days. `which="expert"`
+    (8 names, `stat="min"` or `"max"` required): Monday, Saturday and Sunday-or-holiday dummies of the target day, the TSO's
+    forecast of the issue row's date (`_d+0`) and of the target day, the actual statistic of the
+    issue row's days D-1 and D-6 (`actual_daily_{stat}_d-1` and `_d-6`, relative to the issue day D, whatever the horizon; at
+    horizon 1 they are 2 and 7 days before the target D+1, the "same day last week" of a day-ahead model) and the capital's temperature.
+
+    `study=True` (only for `regional_nwp`) returns the study's exact 266 names, which hold `load_actual_h-1` as well. That
+    column is the load of 11:00, known at 13:00: after a noon issue it is a look-ahead (`availability="raise"` refuses it and
+    `verify` calls the Lasso a `leak`). It is for reproducing the study's numbers only; the default is the list that could
+    have been issued at noon.
+
+    Evidence, study list: the S02 project's study, reproduced by the library (docs "Week-ahead Forecasting", "Reproducing the
+    study"): 20 markets, 104 Friday issues each (2024-01-05 to 2025-12-26), horizons 3..9. `regional_nwp` with a LassoCV
+    (`cv=7`, `fit_intercept=False`, standardised, `training_window=1092`) beat the TSO's A31 forecast in all 40
+    market-statistics, by a mean log-gain of +37.44 % (29,120 forecasts of each statistic, within 0.0005 MW of the stored
+    forecasts); for Poland the log-gain is 23.6 % (minimum) and 20.3 % (maximum) over 728 forecasts each. Those numbers
+    were measured with the 266-name list, `study=True`. `expert` is the benchmark OLS (`fit_intercept=True`; Poland MAE
+    417.24 MW over 1,456 forecasts against the study-list Lasso's 367.1).
+
+    Evidence, default list: measured on Poland with the same LassoCV settings (`S02`), the 43 Fridays 2024-01-05 to 2024-10-25 of the repository's fixture (`tests/fixtures/week_ahead/PL_noon.parquet`), horizons 3 to 9: 301 forecasts of each statistic from each list, on identical keys. Minimum: MAE 326.94 MW (default) against 327.39 MW (study list). Maximum: 469.03 MW against 468.01 MW. So dropping `load_actual_h-1` changes the MAE by -0.14 % and +0.22 %, noise next to the 20 to 24 % gain over the TSO; the honest list has no measured advantage or loss. Caveat: the fixture starts on 2021-10-20, so the windows before 2024-10-16 are shorter than 1092 days (the same for both lists), and no TSO benchmark was run here, so the +37 % and 23.6 % / 20.3 % figures are not claimed for the default list.
+    The script is epftoolbox2-research/library_check_step8/feat-live-presets/honest_vs_study.py.
+    """
+    if which not in WEEK_AHEAD:
+        raise ValueError(f"which must be one of {list(WEEK_AHEAD)}, got {which!r}")
+    if study and which != "regional_nwp":
+        raise ValueError(f"study=True is only for which='regional_nwp', got which={which!r}")
+    if which == "expert":
+        if stat not in ("min", "max"):
+            raise ValueError(f'which="expert" needs stat="min" or "max", got {stat!r}')
+    elif stat is not None:
+        raise ValueError(f"stat is only for which='expert', got stat={stat!r} with which={which!r}")
+    if which == "expert":
+        return [
+            "is_monday_d+{horizon}",
+            "is_saturday_d+{horizon}",
+            "is_sunday_or_holiday_d+{horizon}",
+            f"load_forecast_daily_{stat}_d+0",
+            f"load_forecast_daily_{stat}_d+{{horizon}}",
+            f"actual_daily_{stat}_d-1",
+            f"actual_daily_{stat}_d-6",
+            "capital_2t_dmean_d+{horizon}",
+        ]
+    calendar_x = (
+        ["is_holiday"]
+        + [f"is_holiday_d-{k}" for k in range(1, 8)]
+        + [f"is_holiday_d+{k}" for k in range(1, 10)]
+        + [f"is_{d}_d+{{horizon}}" for d in WEEKDAYS]
+        + ["daylight_hours_d+{horizon}"]
+    )
+    if which == "calendar_x":
+        return calendar_x
+    names = (
+        calendar_x
+        + [f"load_actual_h-{h}" for h in range(1, 169)]
+        + [f"load_forecast_h+{h}" for h in range(1, 36)]
+        + ["load_forecast"]
+        + [f"actual_daily_{s}_d-{k}" for s in ("min", "max") for k in range(1, 8)]
+        + [f"load_forecast_daily_{s}_d+{k}" for s in ("min", "max") for k in range(3, 10)]
+        + [f"all_avg_{v}_dmean_d+{{horizon}}" for v in ("2t", "wind_speed", "rh", "tcc", "sp", "ssr_inc", "tp")]
+        + ["all_avg_hdd_d+{horizon}", "all_avg_cdd_d+{horizon}"]
+    )
+    return names if study else [name for name in names if name != LATE_AT_NOON]
+
+
+# zone -> (issue_timezone, name of the day-ahead load forecast column). Every docs example issues at 11:45 local time.
+_LIVE_ZONES = {
+    "DE_LU": ("Europe/Berlin", "load_forecast"),
+    "DE": ("Europe/Berlin", "load_forecast"),
+    "AT": ("Europe/Vienna", "load_forecast"),
+    "PL": ("Europe/Warsaw", "pse_load_fcst"),
+    "BE": ("Europe/Brussels", "load_forecast"),
+}
+_EXAA_ZONES = ("DE_LU", "AT")
+
+
+def live_defaults(zone: str, exaa: bool = False) -> dict[str, Any]:
+    """Live-run settings of a day-ahead model for `zone`, as a dict for the `forecast(**...)` of step 8e (which does not exist yet).
+
+    Keys: `issue_time` and `issue_timezone` (what `ModelPipeline(issue_time=, issue_timezone=)` takes today), `deadline` (no
+    revision is committed after it) and `wait_for` (per column, the local time to stop polling for its issue-row cells). The
+    values are those of the docs and the simulated week of the operations spec: issue at 11:45 local time for the next day,
+    wait for the day-ahead load forecast (published 10:00, ENTSO-E rule; PSE's `pse_load_fcst` for PL) until 10:45, commit
+    nothing after 11:55. `exaa=True` (DE_LU and AT) also waits for `price_exaa` until 11:40, the second call of the simulated
+    week (the legal bound for EXAA is 11:15).
+
+    Evidence: the issue times are those of the docs' examples (`InformationSet("11:45", ...)` for Berlin, Warsaw and
+    Brussels); `deadline` and `wait_for` are the operations spec's proposal, not measured on a live run yet. Unknown zones raise.
+    """
+    if zone not in _LIVE_ZONES:
+        raise ValueError(f"No live defaults for zone {zone!r}; known: {sorted(_LIVE_ZONES)}")
+    if exaa and zone not in _EXAA_ZONES:
+        raise ValueError(f"exaa=True needs one of {list(_EXAA_ZONES)}, got {zone!r}")
+    timezone, load = _LIVE_ZONES[zone]
+    wait_for = {load: "10:45"}
+    if exaa:
+        wait_for["price_exaa"] = "11:40"
+    return {"issue_time": "11:45", "issue_timezone": timezone, "deadline": "11:55", "wait_for": wait_for}
+
+
+__all__ = [
+    "ORDERS",
+    "WEEKDAYS",
+    "WEEK_AHEAD",
+    "exaa_profile",
+    "expert_predictors",
+    "lear_predictors",
+    "live_defaults",
+    "profile_columns",
+    "tree_predictors",
+    "week_ahead_predictors",
+]

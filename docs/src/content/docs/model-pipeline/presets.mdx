@@ -1,12 +1,14 @@
 ---
 title: Predictor Presets
-description: LEAR and expert-model inputs in this library's column naming
+description: LEAR, expert, tree, EXAA and week-ahead predictor lists in this library's column naming, and per-zone live defaults
 ---
 
 import { Aside } from '@astrojs/starlight/components';
 
-`epftoolbox2.presets` returns the inputs of two standard benchmark models, and of a tree pooled over the periods of a day, as
-predictor lists. The lists are plain strings with a `{horizon}` template, so they can be saved in a model pipeline YAML.
+`epftoolbox2.presets` returns example sets of variables that are known to work: the inputs of two standard benchmark models, of a
+tree pooled over the periods of a day, of the week-ahead load study, and the EXAA profile, as predictor lists. The lists are plain
+strings with a `{horizon}` template, so they can be saved in a model pipeline YAML. Each preset below says where its evidence comes
+from; none is a promise for another market or period. `live_defaults` is plain data too.
 
 ```python
 from epftoolbox2.presets import expert_predictors, lear_predictors, profile_columns, tree_predictors, WEEKDAYS
@@ -21,6 +23,9 @@ tree = tree_predictors(exogenous=["load_forecast"])  # 183 inputs, for HistGBMod
 | `lear_predictors` | `exogenous` (required), `price="price"`, `freq="1h"`, `calendar_prefix=""`, `order="library"` | LEAR inputs (Lago et al. 2021) |
 | `expert_predictors` | `exogenous=("load_forecast",)`, `price="price"`, `weekdays=WEEKDAYS`, `calendar_prefix=""` | Expert-model inputs (Ziel & Weron 2018) |
 | `tree_predictors` | `exogenous` (required), `price="price"`, `freq="1h"`, `calendar_prefix=""` | A pooled tree's inputs: `lear_predictors`, then `"period"`, then the row's own period of the same blocks (`price`, `price_d-1`, `price_d-2`, `price_d-6`, and per series `x_d+{horizon}`, `x`, `x_d-6`), the research's order ([Residual Model](/epftoolbox2/models/residual/)) |
+| `exaa_profile` | `freq="1h"`, `prefix=""` | The EXAA auction's profile of the target day, `price_exaa_h00_d+{horizon}` … (`prefix="de"` gives `de_price_exaa_…`) |
+| `week_ahead_predictors` | `which="regional_nwp"` (`"calendar_x"`, `"regional_nwp"` or `"expert"`), `stat=None` (`"min"` or `"max"`, only for `"expert"`), `study=False` (`True`: the study's exact list, only for `"regional_nwp"`) | The week-ahead daily minimum and maximum load lists |
+| `live_defaults` | `zone`, `exaa=False` | A dict of live-run settings for a zone |
 | `profile_columns` | `column`, `freq="1h"` | The names `DailyProfileTransformer` creates, e.g. `price_h00` … `price_h23` |
 
 ## From "Day d" to the Issue Day
@@ -141,6 +146,85 @@ steps = [
 ]
 model = OLSModel(expert_predictors(exogenous=["load_forecast"]), training_window=365, name="Expert")
 ```
+
+## EXAA Profile
+
+`exaa_profile()` is the 24 hourly names of the EXAA auction for the target day (`price_exaa_h00_d+{horizon}` … `h23`; 96 with
+`freq="15min"`; `prefix="de"` for an `EntsoeSource(prefix="de")`). It is the horizon-1 list of
+[`EntsoeSource(price_exaa=True)`](/epftoolbox2/data-sources/entsoe/#early-auctions-exaa-and-switzerland) after
+`DailyProfileTransformer` and a `LagTransformer(lags=[-1], freq="day")`, only for AT and DE_LU, and out at 11:15 on the issue day.
+
+```python
+from epftoolbox2.presets import exaa_profile, lear_predictors
+
+
+def lear_with_exaa(ctx):
+    base = lear_predictors([], price="de_price")
+    exaa = exaa_profile(prefix="de")
+    return base + exaa if ctx.published(exaa) else base  # the list without EXAA is the fallback
+```
+
+Evidence: the ENTSO-E page's serving lesson from earlier projects on German data, where a model always trained with EXAA and
+served without it raised its error from 15.23 to 38.44. So the profile is an addition to a base list, never the whole list. The
+docs give no accuracy gain for adding it and no forecast count; measure it on your own data on identical keys.
+
+## Week-ahead Daily Minimum and Maximum Load
+
+`week_ahead_predictors(which)` returns the lists of the [week-ahead study](/epftoolbox2/model-pipeline/week-ahead/):
+
+| `which` | Names | Contents |
+|---|---|---|
+| `"calendar_x"` | 25 | holiday flags of D, D-1 … D-7 and D+1 … D+9, the weekday dummies and daylight hours of the target day |
+| `"regional_nwp"` | 265, in the order coordinate descent visits them (`study=True`: the study's 266, with the late `load_actual_h-1`) | `calendar_x`, 167 hourly lags of the load (`load_actual_h-2` … `-168`), the TSO's next 35 hourly forecasts, the last 7 daily minima and maxima, the TSO's A31 forecasts for D+3 … D+9, seven ECMWF variables averaged over the market's regions, heating and cooling degree days |
+| `"expert"` (`stat="min"` or `"max"`) | 8 | Monday, Saturday and Sunday-or-holiday dummies, the TSO's forecast of the issue row's date (`_d+0`) and of the target day, the actual statistic of D-1 and D-6 (`actual_daily_{stat}_d-1`, `_d-6`, relative to the issue day), the capital's temperature |
+
+```python
+from epftoolbox2.models import LassoCVModel, OLSModel
+from epftoolbox2.presets import week_ahead_predictors
+
+S02 = dict(cv=7, max_iter=100_000, fit_intercept=False, scaler={"name": "standard", "params": {"scale_binary": True}})
+lasso = LassoCVModel(predictors=week_ahead_predictors("regional_nwp"), training_window=1092, name="lasso", **S02)
+expert = OLSModel(predictors=week_ahead_predictors("expert", stat="max"), training_window=1092, fit_intercept=True, name="expert")
+```
+
+The default `regional_nwp` leaves out `load_actual_h-1`, the load of 11:00 that is known at 13:00: after a noon issue it is a look-ahead
+(`availability="raise"` refuses it and `verify` calls the Lasso a `leak`). `study=True` gives the study's exact 266 names, to reproduce
+its numbers only.
+
+Evidence, **study list** (the [week-ahead page](/epftoolbox2/model-pipeline/week-ahead/#reproducing-the-study)): a published study of 20
+European markets, 104 Friday issues each (2024-01-05 to 2025-12-26), horizons 3 … 9, so 728 forecasts of each statistic per market. The
+Lasso on the 266 names beat the TSO's A31 forecast in all 40 market-statistics, by a mean log-gain of +37.44 % pooled over horizons
+(29,120 forecasts of each statistic). For Poland the log-gain is 23.6 % on the minimum and 20.3 % on the maximum, and the Lasso's MAE
+is 367.1 MW against the expert's 417.24 MW on 1,456 forecasts. The library refits the study's forecasts to within 0.0005 MW, but
+only with the settings above (`S02`, and `fit_intercept=True` on the OLS). These numbers were measured on the study list, not on the
+default one.
+
+Evidence, **default list**: Measured on Poland with the same LassoCV settings (`S02`), the 43 Fridays 2024-01-05 to 2024-10-25 of the repository's fixture (`tests/fixtures/week_ahead/PL_noon.parquet`), horizons 3 to 9: 301 forecasts of each statistic from each list, on identical keys. Minimum: MAE 326.94 MW (default) against 327.39 MW (study list). Maximum: 469.03 MW against 468.01 MW. So dropping `load_actual_h-1` changes the MAE by -0.14 % and +0.22 %, noise next to the 20 to 24 % gain over the TSO; the honest list has no measured advantage or loss. Caveat: the fixture starts on 2021-10-20, so the windows before 2024-10-16 are shorter than 1092 days (the same for both lists), and no TSO benchmark was run here, so the +37 % and 23.6 % / 20.3 % figures are not claimed for the default list.
+
+The all-Fridays form can't be issued as it is on other days: see the page's "Issued every day".
+
+## Live Defaults
+
+`live_defaults(zone, exaa=False)` returns the settings of a day-ahead live run as a plain dict, for the `forecast(**...)` of the
+live layer (step 8e), which this version does not have yet: until then it is only data.
+
+```python
+from epftoolbox2.presets import live_defaults
+
+live_defaults("DE_LU")
+# {'issue_time': '11:45', 'issue_timezone': 'Europe/Berlin', 'deadline': '11:55', 'wait_for': {'load_forecast': '10:45'}}
+live_defaults("DE_LU", exaa=True)["wait_for"]  # also {'price_exaa': '11:40'}
+```
+
+| Zone | `issue_timezone` | Day-ahead load forecast waited for |
+|---|---|---|
+| `DE_LU`, `DE`, `AT`, `BE` | `Europe/Berlin`, `Europe/Berlin`, `Europe/Vienna`, `Europe/Brussels` | `load_forecast` |
+| `PL` | `Europe/Warsaw` | `pse_load_fcst` |
+
+Evidence: the issue time is the 11:45 local time that the docs' examples use for Berlin, Warsaw and Brussels
+([Information Set](/epftoolbox2/model-pipeline/information-set/)). The load forecast is published at 10:00 (ENTSO-E's rule; PSE's
+`load_fcst`), hence the 10:45 give-up time. The 11:55 deadline and the 11:40 EXAA wait are the live layer's design values, not
+measured on a live run. `exaa=True` is for `DE_LU` and `AT` only; any other zone raises.
 
 ## Checking the Data
 
