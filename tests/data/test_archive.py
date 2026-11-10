@@ -589,6 +589,44 @@ def test_the_replay_gives_each_day_the_newest_fetch_by_known_at_the_day_before(w
     assert late["load_forecast"].notna().all() and len(late) == len(cells)
 
 
+def test_a_fetch_that_returned_exactly_at_the_cut_off_counts_and_one_a_microsecond_later_doesn_t(tmp_path):
+    class Counter(DataSource):
+        """Each fetch's value is its number: 1, 2, 3, ..."""
+
+        def __init__(self):
+            self._n = 0
+
+        def _validate_config(self):
+            return True
+
+        def get_cache_config(self):
+            return {"source_type": "counter"}
+
+        def fetch(self, start, end):
+            self._n += 1
+            return pd.DataFrame({"x": float(self._n)}, index=pd.date_range(start, end, freq="1h", inclusive="left"))
+
+    clock = FakeClock(local("2026-10-23 11:44"))
+    pipeline = DataPipeline(sources=[Counter()], timezone=ZONE)
+    archive = SnapshotArchive(tmp_path)
+    with use_clock(clock):
+        archive.record(pipeline)  # 11:44: fetch 1
+        clock.advance(60)
+        archive.record(pipeline)  # 11:45:00 exactly: fetch 2
+        clock.advance(1e-6)
+        archive.record(pipeline)  # a microsecond later: fetch 3
+    source = ArchiveSource(tmp_path, "Counter", known_at="11:45", days_before=1)
+    frame = source.fetch(local("2026-10-24 00:00"), local("2026-10-25 00:00"))
+    assert len(frame) == 24 and (frame["archive_x"] == 2.0).all()
+    # Read at 11:46, the third fetch is in.
+    assert (
+        ArchiveSource(tmp_path, "Counter", "11:46", 1).fetch(local("2026-10-24 00:00"), local("2026-10-24 01:00"))[
+            "archive_x"
+        ]
+        == 3.0
+    ).all()
+
+
 def test_the_replay_holds_for_any_known_at_days_before_and_zone(week):
     path, truth, made = week
     start, end = local("2026-10-21 00:00"), local("2026-10-29 00:00")
@@ -694,8 +732,8 @@ def test_an_archive_column_is_known_at_known_at_on_the_day_before_its_delivery_d
                 where = (window, name, known_at, days_before)
                 assert not early.any(), (*where, "early", np.argwhere(early)[:3])
                 assert not late.any(), (*where, "late", np.argwhere(late)[:3])
-                for d in delivered[~pd.isna(delivered)][:: max(1, len(periods) // 4)]:
-                    assert source.known_instant(d) == cut_off(d, known_at, days_before, archive_zone)
+                for d in pd.unique(delivered[~pd.isna(delivered)]):
+                    assert source.known_instant(d) == cut_off(pd.Timestamp(d), known_at, days_before, archive_zone)
 
 
 def test_an_archive_column_s_rule_comes_before_every_other_and_a_rule_naming_it_raises():
