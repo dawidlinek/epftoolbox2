@@ -14,6 +14,7 @@ from epftoolbox2.data.transformers import (
 from epftoolbox2.models import LassoCVModel, OLSModel
 from epftoolbox2.pipelines import ModelPipeline
 from epftoolbox2.data.sources import CalendarSource
+from epftoolbox2.information_set import Availability, InformationSet
 from epftoolbox2.presets import (
     WEEKDAYS,
     exaa_profile,
@@ -240,8 +241,10 @@ def plan_expert(stat):
 
 def test_week_ahead_lists_equal_the_plan_s():
     assert week_ahead_predictors("calendar_x") == PLAN_CALENDAR_X
-    assert week_ahead_predictors("regional_nwp") == PLAN_REGIONAL_NWP
-    assert week_ahead_predictors() == PLAN_REGIONAL_NWP
+    assert week_ahead_predictors("regional_nwp", study=True) == PLAN_REGIONAL_NWP
+    # the default is the study's list without the one late name, in the same order
+    assert week_ahead_predictors() == [n for n in PLAN_REGIONAL_NWP if n != "load_actual_h-1"]
+    assert week_ahead_predictors("regional_nwp") == week_ahead_predictors()
     for stat in ("min", "max"):
         assert week_ahead_predictors("expert", stat=stat) == plan_expert(stat)
 
@@ -249,7 +252,9 @@ def test_week_ahead_lists_equal_the_plan_s():
 def test_week_ahead_sizes_are_the_documented_ones():
     assert len(week_ahead_predictors("calendar_x")) == 25
     nwp = week_ahead_predictors("regional_nwp")
-    assert len(nwp) == len(set(nwp)) == 266
+    assert len(nwp) == len(set(nwp)) == 265 and "load_actual_h-1" not in nwp
+    study = week_ahead_predictors("regional_nwp", study=True)
+    assert len(study) == len(set(study)) == 266 and "load_actual_h-1" in study
     assert len(week_ahead_predictors("expert", stat="min")) == 8
 
 
@@ -268,6 +273,8 @@ def test_week_ahead_arguments_are_checked():
         week_ahead_predictors("expert", stat="mean")
     with pytest.raises(ValueError, match="stat"):
         week_ahead_predictors("regional_nwp", stat="min")
+    with pytest.raises(ValueError, match="study"):
+        week_ahead_predictors("calendar_x", study=True)
 
 
 # Names no library component builds from its source alone: weather averaged over a market's regions and read at its capital
@@ -313,7 +320,7 @@ def week_ahead_frame() -> pd.DataFrame:
 @pytest.mark.parametrize("horizon", [3, 9])
 def test_week_ahead_names_are_what_the_library_builds(horizon):
     df = week_ahead_frame()
-    lists = [week_ahead_predictors("calendar_x"), week_ahead_predictors("regional_nwp")]
+    lists = [week_ahead_predictors("calendar_x"), week_ahead_predictors("regional_nwp", study=True)]
     lists += [week_ahead_predictors("expert", stat=s) for s in ("min", "max")]
     for predictors in lists:
         missing = {p for p in predictors if p.replace("{horizon}", str(horizon)) not in df.columns}
@@ -321,6 +328,39 @@ def test_week_ahead_names_are_what_the_library_builds(horizon):
     # and the exception set is real: all of it appears in the lists
     everything = {p for lst in lists for p in lst}
     assert STUDY_FRAME_ONLY <= everything
+
+
+def test_the_default_list_has_nothing_late_at_a_noon_issue_and_the_study_s_has_one_name():
+    """By the rules of the docs page: a Friday 12:00 Warsaw issue refuses the study's list on exactly `load_actual_h-1`."""
+    index = pd.date_range("2024-10-01 12:00", periods=40, freq="1D", tz="Europe/Warsaw")
+    info = InformationSet(
+        "12:00",
+        "Europe/Warsaw",
+        rules={
+            "actual_daily_*": Availability.realised("1h"),
+            "all_avg_*": Availability.weather_cutoff("00", "8h"),
+            "capital_*": Availability.weather_cutoff("00", "8h"),
+            "is_sunday_or_holiday": Availability.static(),
+        },
+    )
+
+    def late(names):
+        expanded = {(0, 3): [n.replace("{horizon}", "3") for n in names]}
+        found, _ = info.violations(
+            expanded,
+            "actual_daily_max",
+            "1D",
+            index,
+            "2024-10-25",
+            "2024-10-25",
+            check_target=False,
+        )
+        return sorted({v.predictor for v in found})
+
+    assert late(week_ahead_predictors("regional_nwp")) == []
+    assert late(week_ahead_predictors("regional_nwp", study=True)) == ["load_actual_h-1"]
+    for stat in ("min", "max"):
+        assert late(week_ahead_predictors("expert", stat=stat)) == []
 
 
 # --------------------------------------------------------------------------- live defaults

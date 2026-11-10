@@ -159,31 +159,42 @@ def expert_predictors(
 
 
 WEEK_AHEAD = ("calendar_x", "regional_nwp", "expert")
+LATE_AT_NOON = "load_actual_h-1"  # the load of 11:00, known at 13:00
 
 
-def week_ahead_predictors(which: str = "regional_nwp", stat: Optional[str] = None) -> list[str]:
+def week_ahead_predictors(which: str = "regional_nwp", stat: Optional[str] = None, study: bool = False) -> list[str]:
     """The predictor lists of the week-ahead daily minimum and maximum load study (20 European markets, Friday 12:00 issues).
 
     `which="calendar_x"` (25 names): holiday flags of D, D-1..D-7 and D+1..D+9, the seven weekday dummies of the target day
-    and its daylight hours. `which="regional_nwp"` (266 names, in the order coordinate descent visits them): `calendar_x`,
-    168 hourly lags of the realised load, the TSO's next 35 hourly forecasts and its forecast of the issue row, the last
-    seven daily minima and maxima, the TSO's A31 daily minima and maxima for D+3..D+9, seven ECMWF variables averaged over
-    the market's regions and their heating and cooling degree days. `which="expert"` (8 names, `stat="min"` or `"max"`
-    required): Monday, Saturday and Sunday-or-holiday dummies, the TSO's forecast of D and of the target day, the actual
-    statistic of D-1 and D-7 and the capital's temperature.
+    and its daylight hours. `which="regional_nwp"` (265 names, in the order coordinate descent visits them): `calendar_x`,
+    hourly lags of the realised load `load_actual_h-2` .. `load_actual_h-168`, the TSO's next 35 hourly forecasts and its
+    forecast of the issue row, the last seven daily minima and maxima, the TSO's A31 daily minima and maxima for D+3..D+9,
+    seven ECMWF variables averaged over the market's regions and their heating and cooling degree days. `which="expert"`
+    (8 names, `stat="min"` or `"max"` required): Monday, Saturday and Sunday-or-holiday dummies of the target day, the TSO's
+    forecast of the issue row's date (`_d+0`) and of the target day, the actual statistic of the
+    issue row's days D-1 and D-6 (`actual_daily_{stat}_d-1` and `_d-6`, relative to the issue day D, whatever the horizon; at
+    horizon 1 they are 2 and 7 days before the target D+1, the "same day last week" of a day-ahead model) and the capital's temperature.
 
-    Evidence: the S02 project's study, reproduced by the library (docs "Week-ahead Forecasting", "Reproducing the study"): 20
-    markets, 104 Friday issues each (2024-01-05 to 2025-12-26), horizons 3..9. `regional_nwp` with a LassoCV (`cv=7`,
-    `fit_intercept=False`, standardised, `training_window=1092`) beats the TSO's A31 forecast in all 40 market-statistics, by a
-    mean log-gain of +37.44 % (29,120 forecasts of each statistic, within 0.0005 MW of the stored forecasts); for Poland the
-    log-gain is 23.6 % (minimum) and 20.3 % (maximum) over 728 forecasts each. `expert` is the benchmark OLS
-    (`fit_intercept=True`; Poland MAE 417.24 MW over 1,456 forecasts against the Lasso's 367.1).
+    `study=True` (only for `regional_nwp`) returns the study's exact 266 names, which hold `load_actual_h-1` as well. That
+    column is the load of 11:00, known at 13:00: after a noon issue it is a look-ahead (`availability="raise"` refuses it and
+    `verify` calls the Lasso a `leak`). It is for reproducing the study's numbers only; the default is the list that could
+    have been issued at noon.
 
-    The lists hold names of series that a daily frame stamped at noon builds (see the docs page); `{horizon}` is the
-    forecast's horizon. `load_actual_h-1` (11:00's load) is known only at 13:00: drop it for a noon issue, as the page says.
+    Evidence, study list: the S02 project's study, reproduced by the library (docs "Week-ahead Forecasting", "Reproducing the
+    study"): 20 markets, 104 Friday issues each (2024-01-05 to 2025-12-26), horizons 3..9. `regional_nwp` with a LassoCV
+    (`cv=7`, `fit_intercept=False`, standardised, `training_window=1092`) beat the TSO's A31 forecast in all 40
+    market-statistics, by a mean log-gain of +37.44 % (29,120 forecasts of each statistic, within 0.0005 MW of the stored
+    forecasts); for Poland the log-gain is 23.6 % (minimum) and 20.3 % (maximum) over 728 forecasts each. Those numbers
+    were measured with the 266-name list, `study=True`. `expert` is the benchmark OLS (`fit_intercept=True`; Poland MAE
+    417.24 MW over 1,456 forecasts against the study-list Lasso's 367.1).
+
+    Evidence, default list: measured on Poland with the same LassoCV settings (`S02`), the 43 Fridays 2024-01-05 to 2024-10-25 of the repository's fixture (`tests/fixtures/week_ahead/PL_noon.parquet`), horizons 3 to 9: 301 forecasts of each statistic from each list, on identical keys. Minimum: MAE 326.94 MW (default) against 327.39 MW (study list). Maximum: 469.03 MW against 468.01 MW. So dropping `load_actual_h-1` changes the MAE by -0.14 % and +0.22 %, noise next to the 20 to 24 % gain over the TSO; the honest list has no measured advantage or loss. Caveat: the fixture starts on 2021-10-20, so the windows before 2024-10-16 are shorter than 1092 days (the same for both lists), and no TSO benchmark was run here, so the +37 % and 23.6 % / 20.3 % figures are not claimed for the default list.
+    The script is epftoolbox2-research/library_check_step8/feat-live-presets/honest_vs_study.py.
     """
     if which not in WEEK_AHEAD:
         raise ValueError(f"which must be one of {list(WEEK_AHEAD)}, got {which!r}")
+    if study and which != "regional_nwp":
+        raise ValueError(f"study=True is only for which='regional_nwp', got which={which!r}")
     if which == "expert":
         if stat not in ("min", "max"):
             raise ValueError(f'which="expert" needs stat="min" or "max", got {stat!r}')
@@ -209,7 +220,7 @@ def week_ahead_predictors(which: str = "regional_nwp", stat: Optional[str] = Non
     )
     if which == "calendar_x":
         return calendar_x
-    return (
+    names = (
         calendar_x
         + [f"load_actual_h-{h}" for h in range(1, 169)]
         + [f"load_forecast_h+{h}" for h in range(1, 36)]
@@ -219,6 +230,7 @@ def week_ahead_predictors(which: str = "regional_nwp", stat: Optional[str] = Non
         + [f"all_avg_{v}_dmean_d+{{horizon}}" for v in ("2t", "wind_speed", "rh", "tcc", "sp", "ssr_inc", "tp")]
         + ["all_avg_hdd_d+{horizon}", "all_avg_cdd_d+{horizon}"]
     )
+    return names if study else [name for name in names if name != LATE_AT_NOON]
 
 
 # zone -> (issue_timezone, name of the day-ahead load forecast column). Every docs example issues at 11:45 local time.
