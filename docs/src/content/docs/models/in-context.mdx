@@ -101,8 +101,10 @@ Both classes take, in this order, `predictors`, `training_window`, `refit`, `n_e
 - **One call a block.** The issue rows of every day of the block that the frame has with finite inputs, padded to 7 rows with
   copies of the first, whichever of them the run forecasts. A row's forecast must not depend on the other rows of its call:
   `verify`'s co-batch check replaces them by noise and requires the forecast to stay where it is.
-- **Loaded once per worker.** Each worker process loads the checkpoint once, from the one file the run resolved, with
-  `HF_HUB_OFFLINE=1` and `TRANSFORMERS_OFFLINE=1` held, so neither package can fetch anything.
+- **Loaded once per worker.** Each worker process builds the network once, from the one file the run resolved, with
+  `HF_HUB_OFFLINE=1` and `TRANSFORMERS_OFFLINE=1` held, and hands it to every fit's regressor (TabPFN's `ModelSpecs`, TabICL's
+  loaded model), so no fit reaches the package's own loader or its download paths (tabpfn's include a direct URL the
+  variables don't stop); every fit and prediction runs with the variables held too.
 - **Errors stop the run.** Whatever the package raises in a fit or a prediction stops the run with the model's name, never a
   silently skipped forecast. A context whose targets are all equal (a night period of a solar target) predicts that value
   without calling the package.
@@ -118,16 +120,22 @@ Both classes take, in this order, `predictors`, `training_window`, `refit`, `n_e
 ## Devices, processes and determinism
 
 A run starts one fit at a time per process, each on one torch thread with TF32 off, in `MAX_PROCESSES` processes: every usable
-CPU by default, or 6 on a GPU (the research ran 4 to 6 per GPU). The seed is the same for every fit, so on a CPU a forecast is
-the same alone, in a loop, across array shards and after a resume, to the bit.
+CPU by default, or 6 per GPU (the research ran 4 to 6 per GPU). The run resolves its devices once, in the parent process:
+`device="auto"` is every GPU a matmul runs on (worker k fits on GPU k modulo their number) or else the CPU, `"cuda:N"` that GPU;
+a worker that can't use the device its parent resolved stops the run rather than fit elsewhere. The seed is the same for every
+fit, so on a CPU a forecast is the same alone, in a loop, across array shards and after a resume, to the bit.
 
 A CPU and a GPU forecast differ by more than rounding (up to 4.3 EUR/MWh for TabPFN and 0.5 for TabICL on the research's
-rows, below), and the manifest's `runtime` records the device type, its kernels (`cpu_capability`, `cuda_capability`) and the
-GPU's or CPU's name, so a resume on the other device refuses. On a GPU both packages compute in half precision: TabPFN autocasts,
-and TabICL does for contexts of 1,024 rows or more, or 60 columns or more (the research's); on a CPU neither does. A GPU's reruns
-are not guaranteed to be bitwise (on an H100 TabPFN's were and TabICL's moved by 2e-5): `verify` runs each issue day twice and
-calls a difference `inconclusive`, so verify on the CPU, `verify(..., device="cpu")`. The package's version moves forecasts too
-(tabpfn 9.1.0 against 9.2.0 by up to 0.42 EUR/MWh on the same rows), and the manifest compares it.
+rows, below). On a CPU both compute in float32, pinned: left to itself tabpfn autocasts to bfloat16 on CPUs with AVX512-BF16
+or AMX (Sapphire Rapids, Zen 4), whose capability reads "AVX512" as an older one's does. On a GPU both autocast to float16:
+TabPFN always, TabICL for contexts of 1,024 rows or more, or 60 columns or more (the research's). The manifest's `runtime`
+records the device type, its kernels (`cpu_capability`, `cuda_capability`), the precision (`precision`), the versions of the
+package, torch, numpy, scipy and scikit-learn (which preprocess every context), and the GPU's or CPU's name; a resume with
+another of any but the name refuses, and a fit whose package computes in another precision than the one recorded stops the
+run. A GPU's reruns are not guaranteed to be bitwise (on an H100 TabPFN's were and TabICL's moved by 2e-5): `verify` runs each
+issue day twice and calls a difference `inconclusive`, so verify on the CPU, `verify(..., device="cpu")`. The package's version
+moves forecasts too (tabpfn 9.1.0 against 9.2.0 by up to 0.42 EUR/MWh on the same rows). `[tabpfn]` needs tabpfn 9.1 or later
+(the first with `ModelSpecs`).
 
 ## Reproducing the research's members
 
@@ -155,7 +163,10 @@ row, the library on its block's 7 (the row and 6 copies), and TabPFN's output mo
 not with the other rows' values (verify's co-batch check), which is why every library call has its block's nominal length. The
 package version moves more: on the CPU tabpfn 9.1.0 (the research's) and 9.2.0 differed by up to 0.42 EUR/MWh on the same rows,
 which is why the manifest records it and a resume refuses another. The device moves most: both packages compute in half
-precision on a GPU (TabPFN's autocast, TabICL's for contexts of 1,024 rows or 60 columns) and never on a CPU.
+precision on a GPU (TabPFN's autocast, TabICL's for contexts of 1,024 rows or 60 columns) and in float32 on a CPU. The CPU and
+H100 rows differ in numpy, scipy and scikit-learn too (the lock's 2.4.6, 1.16.3 and 1.8.0 on S02, 2.5.4, 1.18.1 and 1.9.1 on the
+H100), whose preprocessing moves results in their last digits (a Yeo-Johnson transform by up to 2.9e-15), so most of the CPU
+and GPU gap is the device's, not all of it; the manifest compares the three as well.
 
 On the H100 TabPFN meets B1's tolerances (0.5 EUR/MWh per value and 0.1 % of the MAE). TabICL is 0.53 EUR/MWh from its stored
 member at most, 0.053 on average, against B1's 1e-3, on another torch and CUDA (2.15 with CUDA 13.2) than the research's (2.14.1
