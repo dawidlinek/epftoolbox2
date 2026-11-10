@@ -5,7 +5,7 @@ description: Produce operational forecasts for the next days without back-testin
 
 import { Steps, Tabs, TabItem, Aside, Code } from '@astrojs/starlight/components';
 
-`forecast_only=True` runs models in operational mode: trains on all available history and predicts the next `horizon` days from today. No evaluators run, no exporters fire, and `report.predictions()` returns a clean DataFrame with no "actual" column.
+`forecast_only=True` runs models in operational mode: trains on all available history and predicts the next `horizon` days from today, the issue zone's date when the pipeline has an information set. No evaluators run, no exporters fire, and `report.predictions()` returns a clean DataFrame with no "actual" column.
 
 ---
 
@@ -63,12 +63,17 @@ Both pipelines accept runtime date keywords so the script runs correctly every d
 
 | Keyword | Resolves to |
 |---------|-------------|
-| `"today"` / `"now"` | Today's local date |
+| `"today"` / `"now"` | Today's local date (see below for which zone's) |
 | `"today_d+7"` / `"now_d+7"` | Today + 7 days |
 | `"now_d-735"` | Today − 735 days |
 | `"2024-01-01"` | Passed through unchanged |
 
 The offset `N` in `_d±N` accepts **any integer**, so it can match any model's `training_window`.
+
+Which zone's date: `DataPipeline.run` counts its keywords in the pipeline's `timezone` (the host's without one).
+`forecast_only`'s default `test_start`/`test_end` is today in the information set's issue zone (`issue_timezone`, or the
+frame's zone with `"data"`), so a run at 00:30 Warsaw time on a host in UTC issues for the Warsaw day, not the UTC one; without
+an information set it is the host's date.
 
 <Aside type="tip">
   Set `end="today_d+6"` in `DataPipeline` so that `OpenMeteoSource` and `CalendarSource` fetch forecast data for the full prediction window. ENTSOE columns will be `NaN` beyond today, but lag features (price/load from past days) remain valid and are what models use as predictors.
@@ -145,6 +150,25 @@ for window in range(28, 365, 7):
 [The Engine](/epftoolbox2/model-pipeline/engine/) has the rest: what groups and when, what is bitwise and what isn't, the
 tolerance per class, every fit that goes back to `"off"`'s fit and its bound, memory and the `ENGINE_*` variables,
 `engine="check"`, resuming, and the measured speed.
+
+## The Clock
+
+Every "now" and "today" the library reads, and every wait, goes through one clock (see [Clock](/epftoolbox2/reference/api/#clock)).
+A test or a simulation runs code at another time with a `FakeClock`, which stands still until it is advanced: its `sleep`
+returns at once, so a source's retries and Retry-After waits take no time.
+
+```python
+from epftoolbox2.clock import FakeClock, use_clock
+from epftoolbox2.information_set import InformationSet
+from epftoolbox2.models import OLSModel
+
+clock = FakeClock("2026-10-21 23:30")  # UTC; 01:30 on 2026-10-22 in Warsaw
+with use_clock(clock):
+    ref = OLSModel(["price_d-1"], training_window=365).run(
+        df, target="price", horizon=1, forecast_only=True, information_set=InformationSet("11:45", "Europe/Warsaw")
+    )  # issued on 2026-10-22
+    clock.sleep(3600)  # returns at once; clock.now() is 00:30 UTC
+```
 
 ## See Also
 

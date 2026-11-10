@@ -111,7 +111,7 @@ model_pipeline:
 | `cache_path` | str | `None` | Cache directory (overrides `data_cache` if set) |
 | `model_index` | int \| str | `None` | Run only this array task: `models[model_index]`, or its block with `models_per_task`. All models run if omitted. Requires `model_save_dir`. `$VAR` reads the variable |
 | `models_per_task` | int | `None` | Models per array task: task `i` runs models `[i*k, (i+1)*k)` (YAML: `environment.models_per_task`). See [SLURM arrays](#slurm-arrays-one-model-or-a-block-per-task) |
-| `model_forecast_only` | bool | `False` | Skip evaluators/exporters. `test_start`/`test_end` default to `"today"` if omitted |
+| `model_forecast_only` | bool | `False` | Skip evaluators/exporters. `test_start`/`test_end` default to `"today"` if omitted: the issue zone's date with an information set, else the host's |
 | `model_save_dir` | str | `None` | Directory for one resumable JSONL per model (YAML: `model_pipeline.save_dir`), resolved from the YAML's directory |
 | `model_save_format` | str | `"jsonl"` | `"parquet"` writes each model's results as a [Parquet directory](/epftoolbox2/model-pipeline/caching/#parquet-results) (YAML: `model_pipeline.save_format`, written only when set) |
 | `model_save_coefficients` | bool | `True` | `False` writes each record's `coefficients` as `[]` and no other key differs; the manifest records it and a resume with the other setting raises (YAML: `model_pipeline.save_coefficients`, written only when `false`) |

@@ -67,7 +67,7 @@ class ModelPipeline:
         horizon: Optional[int] = None,    # Every horizon from 1 to it; 7 if neither it nor horizons is given
         freq: str = "1h",                 # "1h", "15min" or "1D" (one row per date at one time of day); must match the data
         save_dir: Optional[str] = None,   # Result cache directory (one JSONL file, or Parquet directory, per model)
-        forecast_only: bool = False,      # Skip evaluators/exporters; dates default to today
+        forecast_only: bool = False,      # Skip evaluators/exporters; dates default to today (the issue zone's)
         allow_manifest_mismatch: bool = False,  # Overwrite a disagreeing manifest and resume anyway
         require_manifest: bool = False,   # Refuse results in save_dir that have no manifest
         validation: Union[Tuple[Any, Any], str, None] = None,  # (start, end) or "previous_year"; alone, only those days
@@ -955,3 +955,30 @@ class CsvExporter(Exporter):
     def __init__(self, path: str, extra_columns: List[str] = None, summary_path: str = None): ...
     def export(self, report: EvaluationReport) -> None: ...
 ```
+
+---
+
+## Clock
+
+Every time of day the library reads (`"today"`, `"now_d-7"`, the cache's unsettled boundary, a source's Retry-After,
+Open-Meteo's cut between final and provisional rows, manifest timestamps), every interval it times and every wait it makes go
+through one clock: `SYSTEM`, the machine's, unless code runs inside `use_clock(clock)` (a context variable). Pool workers never
+read it.
+
+```python
+from epftoolbox2.clock import Clock, FakeClock, SYSTEM, current_clock, use_clock
+
+class Clock:                                # SYSTEM = Clock(), the machine's; subclass it for another clock
+    def now(self) -> pd.Timestamp: ...      # The current instant, UTC
+    def sleep(self, seconds: float) -> None: ...
+    def monotonic(self) -> float: ...       # Seconds for intervals, never going back
+
+class FakeClock(Clock):                     # Stands still until advanced: sleep() returns at once and advances it
+    def __init__(self, start: Any, *, tick: float = 0.0): ...  # A naive start is UTC; tick: seconds every read advances it
+    def advance(self, seconds: float) -> None: ...  # Forward only; a sleep is also counted in `sleeps`
+
+def use_clock(clock: Clock) -> ContextManager[Clock]: ...  # Every clock read inside the block reads `clock`
+def current_clock() -> Clock: ...           # The innermost use_clock's clock, else SYSTEM
+```
+
+See [Forecast-Only Mode](/epftoolbox2/model-pipeline/forecasting/#the-clock).
