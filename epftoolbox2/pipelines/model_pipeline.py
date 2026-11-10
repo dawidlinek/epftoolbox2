@@ -53,6 +53,7 @@ from ..models._pooled import (
 )
 from ..models._cards import preflight, read_provenance
 from ..ensembles._compute import compute
+from ..ensembles.average import AverageEnsemble
 from ..ensembles.base import Ensemble
 from ..evaluators.base import Evaluator
 from ..evaluators.dm import DMEvaluator
@@ -199,6 +200,7 @@ COMPONENT_REGISTRY = {
     },
     "ensembles": {
         "AverageEnsemble": "epftoolbox2.ensembles.average",
+        "FallbackEnsemble": "epftoolbox2.ensembles.fallback",
     },
     "evaluators": {
         "MAEEvaluator": "epftoolbox2.evaluators.mae",
@@ -380,6 +382,8 @@ class ModelPipeline:
         self.information_set: Optional[InformationSet] = information_set
         self.availability = availability
         self.engine = engine
+        # What `frozen()` froze, by ensemble name; empty for any other pipeline, and never saved to YAML.
+        self.frozen_choices: Dict[str, Dict[str, Any]] = {}
 
     @property
     def engine(self) -> str:
@@ -1614,6 +1618,63 @@ class ModelPipeline:
             return stored
         # A window of the run alone: the validation window keeps the days it was issued on (`validation_every`).
         return asked if asked.validation is None else replace(asked, validation_every=stored.validation_every)
+
+    def frozen(self, save_dir: Union[str, Path]) -> "ModelPipeline":
+        """This pipeline for live use, with every `top=` ensemble replaced by a plain `AverageEnsemble` of the members it chose
+        for the newest segment of the study in `save_dir`, under the same name and in the same place. Everything else is kept.
+
+        The choices are made again from the members' stored results, as `report(save_dir)` makes them, so a stale ensemble file
+        can't decide them: on validation forecasts alone (`AverageEnsemble(top=..., by="validation")`), each segment on the
+        validation period before its test period. That is a report of the `top` ensembles and their members, which writes those
+        ensembles' files again as every report does, runs no evaluator or exporter, and raises as a report would: a member
+        without results, results made without validation. The newest segment is the last of `report.windows.segments` (with
+        `validation="previous_year"`, the latest 12 months of test), or the one validation period of a study without a test. The
+        frozen ensemble's forecasts equal the `top` ensemble's on that segment's test period, bit for bit.
+
+        What was frozen is in the returned pipeline's `frozen_choices`, by ensemble name: `members` and `top` of the original,
+        `chosen`, `segment`, `validation` and `test` (its periods), `validation_mae`, `validation_forecasts` and `save_dir`. It is
+        not saved to YAML, where the frozen ensemble is a plain average. A `save_dir` of a run over zones raises: each zone chose
+        on its own, so freeze each zone's folder.
+        """
+        frozen = copy.copy(self)
+        frozen.models, frozen.ensembles = list(self.models), list(self.ensembles)
+        frozen.evaluators, frozen.exporters = list(self.evaluators), list(self.exporters)
+        frozen.frozen_choices = {}
+        tops = [ensemble for ensemble in self.ensembles if ensemble.needs_validation]
+        others = [ensemble.name for ensemble in tops if not isinstance(ensemble, AverageEnsemble)]
+        if others:
+            raise TypeError(f"frozen() replaces `top` averages by plain ones, and {others} choose otherwise")
+        if not tops:
+            return frozen
+        if read_zone_index(save_dir) is not None:
+            raise ValueError(
+                f"{save_dir} holds a run over zones, and each zone chose its members on its own: call frozen() on each zone's "
+                "folder."
+            )
+        self._check_ensembles(None)
+        members = {member for ensemble in tops for member in ensemble.members}
+        chooser = copy.copy(self)
+        chooser.models = [model for model in self.models if model.name in members]
+        chooser.ensembles, chooser.evaluators, chooser.exporters = tops, [], []
+        table = chooser.report(save_dir).choices()
+        for position, ensemble in enumerate(self.ensembles):
+            if not ensemble.needs_validation:
+                continue
+            rows = table[(table["ensemble"] == ensemble.name) & (table["kind"] == "ensemble")]
+            newest = rows.loc[rows["segment"].idxmax()]
+            frozen.ensembles[position] = AverageEnsemble(list(newest["chosen"]), name=ensemble.name)
+            frozen.frozen_choices[ensemble.name] = {
+                "members": list(ensemble.members),
+                "top": ensemble.top,
+                "chosen": list(newest["chosen"]),
+                "segment": int(newest["segment"]),
+                "validation": [newest["validation_start"], newest["validation_end"]],
+                "test": None if pd.isna(newest["test_start"]) else [newest["test_start"], newest["test_end"]],
+                "validation_mae": float(newest["validation_mae"]),
+                "validation_forecasts": int(newest["validation_forecasts"]),
+                "save_dir": str(save_dir),
+            }
+        return frozen
 
     def verify(
         self,

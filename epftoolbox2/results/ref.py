@@ -63,6 +63,8 @@ class ModelResultRef:
 
     `provenance` is a carded model's `card`, `runtime` and `weights` as its manifest records them (`models._cards.run_provenance`),
     which `EvaluationReport.provenance()` shows; None for a model without a card and for an ensemble.
+
+    `ladder` is a `FallbackEnsemble`'s members in rung order, which `EvaluationReport.rungs()` reads; None for anything else.
     """
 
     name: str
@@ -88,6 +90,7 @@ class ModelResultRef:
     issue_days: Optional[Tuple[int, ...]] = None
     vintages: Optional[List[Dict]] = None
     provenance: Optional[Dict[str, Any]] = None
+    ladder: Optional[Tuple[str, ...]] = None
 
     def frame(self, columns: Sequence[str]) -> Optional["pd.DataFrame"]:
         """The forecasts `iter_records(columns)` gives, as a DataFrame of `columns` read without a dict per record, for results

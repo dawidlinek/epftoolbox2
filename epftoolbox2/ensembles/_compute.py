@@ -11,6 +11,9 @@ days of a later segment are test days of the one before it, and stay tagged "tes
 What may be averaged is read from the manifests of the leaf models, the models under any nesting (`_check_members_agree`): one
 target, horizon, list of horizons, weekdays issued on, frequency, time zone and information set, and one value in every column two
 of them read.
+
+A `FallbackEnsemble` reads its members the same way, is checked the same way, and takes each day (or key) from the first member
+that has all of what the clock plans for it (`_fallback_forecasts`).
 """
 
 from __future__ import annotations
@@ -27,7 +30,7 @@ from typing import Any, Callable, Dict, Iterable, List, Mapping, NamedTuple, Opt
 import numpy as np
 
 from ..logging import get_logger
-from ..models._calendar import IssueCalendar
+from ..models._calendar import IssueCalendar, periods_per_day, skipped_periods
 from ..results.manifest import (
     ENSEMBLE_KIND,
     SCHEMA_VERSION,
@@ -44,6 +47,7 @@ from ..results.store import with_status
 from ..results.windows import SKIP_TARGET_IN_TEST, TEST, VALIDATION, RunWindows
 from ..results.vintages import union_vintages
 from .base import Choice, Ensemble
+from .fallback import MEMBER, RUNG, FallbackEnsemble
 
 logger = get_logger(__name__)
 
@@ -160,15 +164,19 @@ def compute(
     _check_members_agree(ensemble, members, leaf_manifests)
     grid = _on_one_grid(ensemble, members)
 
+    freq = next((member.freq for member in members.values() if member.freq is not None), like.freq)
     choices: List[Dict[str, Any]] = []
+    rung: Optional[np.ndarray] = None
     if ensemble.needs_validation:
         picked, prediction, choices = _chosen_forecasts(ensemble, grid, stored)
+    elif isinstance(ensemble, FallbackEnsemble):
+        picked, rung = _fallback_forecasts(ensemble, grid, stored, like.zone, freq, test_only)
+        prediction = grid.predictions[picked, rung]
     else:
         picked = np.flatnonzero(np.isfinite(grid.predictions).all(axis=1))
         prediction = ensemble.combine(grid.predictions[picked])
 
-    freq = next((member.freq for member in members.values() if member.freq is not None), like.freq)
-    records = _records(grid, picked, prediction, freq, stored)
+    records = _records(grid, picked, prediction, freq, stored, rung, ensemble.members)
     if path is not None:
         # In this order: results with no manifest of an ensemble are not an ensemble's, and nothing overwrites them.
         _write_manifest(path, ensemble, stored, freq, members, manifests, choices, provenance)
@@ -195,6 +203,7 @@ def compute(
             like.issue_days,
             # What its models read: an ensemble is compared as a model, and reads their inputs.
             union_vintages(refs[leaf].vintages for leaf in leaves),
+            tuple(ensemble.members) if isinstance(ensemble, FallbackEnsemble) else None,
         ),
         choices,
     )
@@ -439,6 +448,44 @@ def _chosen_forecasts(
     return np.concatenate(picked), np.concatenate(prediction), choices
 
 
+def _fallback_forecasts(
+    ensemble: FallbackEnsemble,
+    grid: _Grid,
+    stored: Optional[RunWindows],
+    zone: Any,
+    freq: str,
+    test_only: bool,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """(positions on the grid, the rung serving each) of what `ensemble` forecasts.
+
+    A day's planned keys are those the clock has on its issue day and its target day, as `IssueCalendar` plans them, whether any
+    member holds them or not: a key no member has leaves its day to no one under `per="day"`. With `test_only` (a member has test
+    forecasts only) only test days are served, or a lower rung would serve the validation days the top one lacks.
+    """
+    days, groups = np.unique(grid.codes >> _HORIZON_SHIFT, return_inverse=True)
+    groups = groups.reshape(-1)
+    run = days >> (_RUN_SHIFT - _HORIZON_SHIFT)
+    target = run + ((days >> (_TARGET_SHIFT - _HORIZON_SHIFT)) & _LOW_16) - _TARGET_ZERO
+    periods = periods_per_day(freq)
+    period = grid.codes & 0xFF
+    planned_key = period < periods
+    planned = np.full(len(days), periods, dtype=np.int64)
+    if zone is not None:
+        gaps = {day: skipped_periods(_iso(day), freq, zone) for day in np.unique(np.r_[run, target]).tolist()}
+        for g in np.flatnonzero([bool(gaps[r] or gaps[t]) for r, t in zip(run.tolist(), target.tolist())]).tolist():
+            gone = gaps[int(run[g])] | gaps[int(target[g])]
+            planned[g] -= len(gone)
+            first, end = np.searchsorted(groups, [g, g + 1])
+            planned_key[first:end] &= ~np.isin(period[first:end], list(gone))
+    if test_only and stored is not None:
+        windows = {day: stored.window_of(_iso(day)) for day in np.unique(run).tolist()}
+        planned_key &= np.asarray([windows[day] == TEST for day in run.tolist()], dtype=bool)[groups]
+    held = np.isfinite(grid.predictions) & planned_key[:, None]
+    rung = ensemble.serve(held, groups, planned)
+    picked = np.flatnonzero(rung >= 0)
+    return picked, rung[picked]
+
+
 def _choose(
     ensemble: Ensemble,
     grid: _Grid,
@@ -521,9 +568,16 @@ def _warn_if_thin(
 
 
 def _records(
-    grid: _Grid, picked: np.ndarray, prediction: np.ndarray, freq: str, stored: Optional[RunWindows]
+    grid: _Grid,
+    picked: np.ndarray,
+    prediction: np.ndarray,
+    freq: str,
+    stored: Optional[RunWindows],
+    rung: Optional[np.ndarray] = None,
+    members: Sequence[str] = (),
 ) -> List[Dict[str, Any]]:
-    """Records in key order, with the keys of a model's, in the same order, ending with `status` and `revision`."""
+    """Records in key order, with the keys of a model's, in the same order, ending with `status` and `revision`. A fallback's
+    (`rung` given, the rung serving each) have `rung` and `member` before those."""
     records = []
     days: Dict[int, Tuple[str, int, Optional[str]]] = {}
     targets: Dict[int, str] = {}
@@ -532,8 +586,9 @@ def _records(
         grid.day_in_test[picked].tolist(),
         prediction.tolist(),
         grid.actual[picked].tolist(),
+        [None] * len(picked) if rung is None else rung.tolist(),
     )
-    for code, day_in_test, predicted, actual in zip(*columns):
+    for code, day_in_test, predicted, actual, served_by in zip(*columns):
         run = code >> _RUN_SHIFT
         if run not in days:
             run_date = _iso(run)
@@ -556,6 +611,9 @@ def _records(
         }
         if window is not None:
             record["window"] = window
+        if served_by is not None:
+            record[RUNG] = served_by
+            record[MEMBER] = members[served_by]
         records.append(with_status(record))  # `status` and `revision`: an ensemble has no list or fit of its own
     return records
 
@@ -630,9 +688,11 @@ def _ref(
     horizons: Sequence[int],
     weekdays: Optional[Sequence[int]] = None,
     vintages: Optional[List[Dict[str, Any]]] = None,
+    ladder: Optional[Tuple[str, ...]] = None,
 ) -> ModelResultRef:
     """The ref of the whole, with a ref per window of what this run or report names, as a model's has. `horizons` are the ones
-    the members were run with, and `weekdays` the weekdays they issued on (None for every day)."""
+    the members were run with, `weekdays` the weekdays they issued on (None for every day), and `ladder` a fallback's members
+    in rung order."""
     horizons = tuple(horizons)
     weekdays = None if weekdays is None else tuple(weekdays)
     calendar = IssueCalendar(freq, like.zone, horizons, weekdays)
@@ -654,6 +714,7 @@ def _ref(
         else horizons,
         issue_days=weekdays,
         vintages=vintages,
+        ladder=ladder,
     )
     if like.windows is None:
         run = codes >> _RUN_SHIFT

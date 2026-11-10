@@ -2387,7 +2387,8 @@ _MODELS = [
 # Not offered: `PooledModel` (registered in `COMPONENT_REGISTRY`, saved and loaded from YAML) fits over the frames of
 # `ModelPipeline.run(data={zone: frame})`, and the wizard builds and runs a pipeline on one CSV. `ResidualModel` holds two
 # models (a base and a learner), which the wizard's one-model-at-a-time questions don't build; it loads from YAML. So does
-# `ShapeModel`, which holds a learner and runs on a 15-minute frame with a chained hourly forecast.
+# `ShapeModel`, which holds a learner and runs on a 15-minute frame with a chained hourly forecast. The wizard builds no ensembles
+# (`AverageEnsemble`, `FallbackEnsemble`): they name other models of the pipeline, and load from YAML.
 _EVALUATORS = [
     "MAEEvaluator",
     "RMSEEvaluator",

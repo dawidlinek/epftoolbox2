@@ -8,7 +8,7 @@ from epftoolbox2.pipelines import DataPipeline, ModelPipeline, Workflow
 from epftoolbox2.data.sources import CalendarSource, CsvSource
 from epftoolbox2.data.transformers import ResampleTransformer, LagTransformer
 from epftoolbox2.data.validators import CoverageValidator
-from epftoolbox2.ensembles import AverageEnsemble
+from epftoolbox2.ensembles import AverageEnsemble, FallbackEnsemble
 from epftoolbox2.models import (
     CatBoostModel,
     HistGBModel,
@@ -894,7 +894,10 @@ class TestModelPipelineParameterFidelity:
                     name="Shape2",
                 ),
             ],
-            "ensembles": [AverageEnsemble(["O", "L"], top=1, by="validation", name="best")],
+            "ensembles": [
+                AverageEnsemble(["O", "L"], top=1, by="validation", name="best"),
+                FallbackEnsemble(["best", "N"], per="key", name="live"),
+            ],
             "evaluators": [
                 MAEEvaluator(),
                 RMSEEvaluator(),
