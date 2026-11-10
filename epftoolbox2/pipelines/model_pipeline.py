@@ -62,6 +62,7 @@ from ..evaluators.dm import DMEvaluator
 from ..evaluators.economic import EconomicEvaluator
 from ..exporters.base import Exporter
 from ..results.availability import read_listing, warn_about
+from ..results.checks import ForecastChecks
 from ..results.manifest import (
     FrameHashes,
     ManifestMismatchError,
@@ -226,6 +227,10 @@ COMPONENT_REGISTRY = {
         "NMAEEvaluator": "epftoolbox2.evaluators.normalised",
         "ScaledMAEEvaluator": "epftoolbox2.evaluators.normalised",
     },
+    # Step 8f: `ModelPipeline(checks=...)`, saved as `checks: {class: ForecastChecks, params: ...}`.
+    "checks": {
+        "ForecastChecks": "epftoolbox2.results.checks",
+    },
     # What `EconomicEvaluator(strategy=...)` runs; saved inside the evaluator as `{class: ..., params: ...}`.
     "strategies": {
         "BatteryArbitrage": "epftoolbox2.evaluators.economic",
@@ -365,6 +370,12 @@ class ModelPipeline:
             one fit in about 50 also run as "off" runs it, its gaps in the manifest (`engine_check`) and a warning about a
             model over its class's tolerance. `ENGINE_MAX_MODELS` (20,000) and `ENGINE_MAX_COLUMNS` (4,096) bound how many
             models and columns a group reads at once. `verify` runs each model through the engine as well.
+        checks: Checks before export (`epftoolbox2.results.checks.ForecastChecks`), applied to every model's forecasts of each
+            (issue day, horizon) in every run, backtests included: a day failing one has none, each key a `check_failed` skip
+            record with the failing checks in `detail`, counted in `forecast_counts()`, so a `FallbackEnsemble` serves that day
+            from its next rung and an average counts it as `member_missing`. They read predictions and the clock alone. The
+            manifests record them, and a resume with others raises. None, the default, checks nothing. Saved to YAML. See the
+            docs page Checks Before Export.
 
     Whatever `engine`, the torch models of a run (`TorchModel`, the MLP presets) whose fits are vmap stacks on their device
     (`stack="vmap"`, or "auto" on a GPU) and that share a stack key (the module and its parameters but `dropout`, output,
@@ -382,6 +393,7 @@ class ModelPipeline:
         issue_timezone: str = "Europe/Brussels",
         availability: Optional[str] = None,
         engine: str = ENGINE_OFF,
+        checks: Optional[ForecastChecks] = None,
     ):
         if issue_time is not None:
             if information_set is not None:
@@ -394,6 +406,7 @@ class ModelPipeline:
         self.information_set: Optional[InformationSet] = information_set
         self.availability = availability
         self.engine = engine
+        self.checks = checks
         # What `frozen()` froze, by ensemble name; empty for any other pipeline, and never saved to YAML.
         self.frozen_choices: Dict[str, Dict[str, Any]] = {}
 
@@ -405,6 +418,17 @@ class ModelPipeline:
     @engine.setter
     def engine(self, engine: str) -> None:
         self._engine = check_engine(engine)
+
+    @property
+    def checks(self) -> Optional[ForecastChecks]:
+        """The checks before export every run applies (see the class docstring), or None."""
+        return self._checks
+
+    @checks.setter
+    def checks(self, checks: Optional[ForecastChecks]) -> None:
+        if checks is not None and not isinstance(checks, ForecastChecks):
+            raise TypeError(f"checks must be a ForecastChecks or None, got {type(checks).__name__}")
+        self._checks = checks
 
     @property
     def availability(self) -> str:
@@ -671,6 +695,7 @@ class ModelPipeline:
                 **planned,
                 checked=checks.pop(model.name),  # held no longer than the model's run
                 **({} if save_coefficients else {"save_coefficients": False}),
+                **({} if self.checks is None else {"checks": self.checks}),  # step 8f
             )
 
         ran: Dict[str, ModelResultRef] = {}
@@ -987,6 +1012,7 @@ class ModelPipeline:
                 **({"plan": plans[key]} if key in plans else {}),
                 checked=checks[key] if keep else checks.pop(key),  # held no longer than the model's run
                 **({} if save_coefficients else {"save_coefficients": False}),
+                **({} if self.checks is None else {"checks": self.checks}),  # step 8f
             )
 
         refs: Dict[str, Dict[str, ModelResultRef]] = {zone: {} for zone in zones}
@@ -2420,6 +2446,8 @@ class ModelPipeline:
             out["availability"] = self._availability
         if self.engine != ENGINE_OFF:  # written only when set, so files saved before it existed don't move
             out["engine"] = self.engine
+        if self.checks is not None:  # written only when set (step 8f)
+            out["checks"] = self._serialize_component(self.checks)
         return out
 
     def save(self, path: Union[str, Path]) -> None:
@@ -2467,6 +2495,7 @@ class ModelPipeline:
             information_set=InformationSet.from_dict(info) if info else None,
             availability=config.get("availability"),
             engine=engine_from_yaml(config.get("engine", ENGINE_OFF)),  # `engine: on` unquoted reads as True
+            checks=cls._load_component("checks", config["checks"]) if config.get("checks") else None,
         )
         for c in config.get("models", []):
             pipeline.add_model(cls._load_component("models", c))

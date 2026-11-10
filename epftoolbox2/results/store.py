@@ -736,6 +736,26 @@ class _Store:
         self._enqueue(record, layout)
         return True
 
+    def overrule(self, record: Dict) -> None:
+        """Write a skip record over the forecast its key has on file (step 8f: `check_failed` on a day a resume completes), one
+        revision above the key's highest on file, so that the readers take it: within one revision a forecast wins over a skip
+        record. The key is pending from then on, as any skipped key, and a later forecast of it is written at that revision. A
+        key whose forecast this store saved and hasn't written yet raises: what it saved is what it has to write."""
+        self._raise_error()
+        self._refuse_closed()
+        key = (record["hour"], record["horizon"], record["run_date"])
+        with self._lock:
+            if key in self._saved:
+                raise ValueError(f"{self.path}: the forecast of {key} was saved by this store and isn't written yet")
+            revision = self._revisions.get(key, BACKTEST_REVISION) + 1
+        record["revision"] = revision
+        layout = self._validate(record)
+        with self._lock:
+            self._completed.discard(key)
+            self._revisions[key] = revision
+            self._latest[key] = record["status"]
+        self._enqueue(record, layout)
+
     def _refuse_closed(self) -> None:
         if self._closed:
             raise ValueError(f"{self.path}: the store is closed, so nothing would write this record")

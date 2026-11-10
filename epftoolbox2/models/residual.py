@@ -717,10 +717,12 @@ class ResidualModel(BaseModel):
         issue_days: Optional[Sequence[str]] = None,
         checked: Any = None,
         save_coefficients: bool = True,
+        checks: Any = None,
     ):
         """The base over its warm-up and the run's days, then the learner on its residuals (see the module docstring); the
         arguments are `BaseModel.run`'s. The base gets the same target, horizons, freq, information set, level and store options,
-        and runs every day from its warm-up start to the last issue day."""
+        and runs every day from its warm-up start to the last issue day. `checks` are this model's forecasts', not the base's:
+        its forecasts are the learner's inputs, and only what this model delivers is checked."""
         if save_to is not None and is_parquet_path(save_to):
             raise ValueError(
                 f"{self.name}: a ResidualModel's records hold `base_prediction`, which the Parquet results schema has no "
@@ -792,6 +794,7 @@ class ResidualModel(BaseModel):
                 issue_days,
                 checked,
                 save_coefficients,
+                checks=checks,
             )
         finally:
             self._base_forecasts = None
