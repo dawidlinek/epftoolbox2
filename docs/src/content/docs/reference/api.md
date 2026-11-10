@@ -803,6 +803,20 @@ See [Scalers and VSTs](/epftoolbox2/models/scalers/).
 
 ---
 
+## Presets
+
+`epftoolbox2.presets`: predictor lists as plain data, see [Predictor Presets](/epftoolbox2/model-pipeline/presets/).
+
+```python
+def profile_columns(column: str, freq: str = "1h") -> list[str]: ...
+def exaa_profile(freq: str = "1h", prefix: str = "") -> list[str]: ...
+def lear_predictors(exogenous: Sequence[str], price: str = "price", freq: str = "1h", calendar_prefix: str = "", order: str = "library") -> list[str]: ...
+def tree_predictors(exogenous: Sequence[str], price: str = "price", freq: str = "1h", calendar_prefix: str = "") -> list[str]: ...
+def expert_predictors(exogenous: Sequence[str] = ("load_forecast",), price: str = "price", weekdays: Sequence[str] = WEEKDAYS, calendar_prefix: str = "") -> list[str]: ...
+def week_ahead_predictors(which: str = "regional_nwp", stat: Optional[str] = None) -> list[str]: ...  # which: "calendar_x" | "regional_nwp" | "expert"
+def live_defaults(zone: str, exaa: bool = False) -> dict[str, Any]: ...  # issue_time, issue_timezone, deadline, wait_for; for step 8e's forecast()
+```
+
 ## Hyper-parameter search
 
 ```python
