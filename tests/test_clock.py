@@ -364,6 +364,9 @@ class _Answer:
     def json(self):
         return self._body
 
+    def raise_for_status(self):
+        pass
+
 
 class _Session:
     def __init__(self, answers):
@@ -372,7 +375,10 @@ class _Session:
 
     def get(self, *args, **kwargs):
         self.calls += 1
-        return self.answers.pop(0)
+        answer = self.answers.pop(0)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
 
     def close(self):
         pass
@@ -448,6 +454,22 @@ def test_energy_charts_reads_its_clock_its_waits_and_its_rate_limit_on_the_clock
         assert source._request("price", {}, "price") == {"unix_seconds": [], "price": []}
     assert sum(clock.sleeps) >= 35  # the 30 s the server asked for, waited out in fake time
     assert all((endpoint, bucket_clock) == ("price", clock) for endpoint, bucket_clock in ec._BUCKETS)
+
+
+def test_open_meteo_backs_off_and_waits_out_its_rate_limit_on_the_clock(no_real_sleep):
+    import requests
+
+    from epftoolbox2.data.sources import OpenMeteoSource
+
+    source = OpenMeteoSource(latitude=52.23, longitude=21.01, timezone=WARSAW)
+    limited = {"error": True, "reason": "Minutely API request limit exceeded"}
+    source.session = _Session(
+        [requests.ConnectionError("reset"), _Answer(200, body=limited), _Answer(200, body={"ok": 1})]
+    )
+    clock = FakeClock(LATE)
+    with use_clock(clock):
+        assert source._request("https://example.invalid", {}) == {"ok": 1}
+    assert clock.sleeps == [source._backoff(0), source.BACKOFF_CAP_S]
 
 
 def test_open_meteo_cuts_final_from_provisional_rows_at_the_clock():
