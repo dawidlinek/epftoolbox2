@@ -14,6 +14,7 @@ import contextlib
 import datetime
 import json
 import os
+import threading
 import time
 from pathlib import Path
 
@@ -55,79 +56,234 @@ def no_real_sleep(monkeypatch):
 # The scan
 # ---------------------------------------------------------------------------------------------------------------------
 
-# time.<name> that reads the clock or waits, wherever it is referenced (called, passed or assigned).
-_TIME_READS = {"time", "time_ns", "sleep", "monotonic", "monotonic_ns"}
-# time.<name> that reads the clock when called without a time of its own.
-_TIME_NOW_IF_BARE = {"gmtime", "localtime", "ctime", "asctime"}
-# <owner>.<name>: datetime.now, datetime.datetime.now, date.today, pd.Timestamp.now, Timestamp.utcnow, ...
-_NOW_NAMES = {"now", "today", "utcnow"}
-_NOW_OWNERS = {"datetime", "date", "Timestamp"}
-# A parser given the string "now" or "today": pd.Timestamp("now"), pd.to_datetime("today"), np.datetime64("now").
-_PARSERS = {"Timestamp", "to_datetime", "datetime64", "DatetimeIndex"}
+# What reads the clock or waits wherever it is referenced (called, passed or assigned), by the name it is imported under:
+# `from datetime import datetime as dt; dt.now()` is `datetime.datetime.now`.
+_ALWAYS = {
+    "time.time",
+    "time.time_ns",
+    "time.sleep",
+    "time.monotonic",
+    "time.monotonic_ns",
+    "time.clock_gettime",
+    "time.clock_gettime_ns",
+    "datetime.datetime.now",
+    "datetime.datetime.today",
+    "datetime.datetime.utcnow",
+    "datetime.date.today",
+    "pandas.Timestamp.now",
+    "pandas.Timestamp.today",
+    "pandas.Timestamp.utcnow",
+    "pandas.Period.now",
+    "asyncio.sleep",
+    "threading.Timer",
+}
+# What reads the clock when called without a time of its own (no argument, or None).
+_BARE = {
+    "time.gmtime",
+    "time.localtime",
+    "time.ctime",
+    "time.asctime",
+    "email.utils.formatdate",
+    "email.utils.localtime",
+}
+# A parser given "now" or "today" (as an argument, a keyword, in a list, or through a name bound to it).
+_PARSERS = {
+    "pandas.Timestamp",
+    "pandas.to_datetime",
+    "pandas.date_range",
+    "pandas.DatetimeIndex",
+    "pandas.Period",
+    "pandas.period_range",
+    "numpy.datetime64",
+}
+_NOW_WORDS = {"now", "today"}
+# Where a bare call's time is given by keyword.
+_TIME_KEYWORDS = {"secs", "t", "timeval", "dt"}
+_FUNCTIONS = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
+_SCOPES = (*_FUNCTIONS, ast.ClassDef)
 
 
-def _dotted(node):
-    names = []
-    while isinstance(node, ast.Attribute):
-        names.append(node.attr)
-        node = node.value
+def _in_scope(scope):
+    """The nodes of `scope` outside its nested functions and classes (whose names it binds, so they are yielded, not
+    entered)."""
+    todo = list(ast.iter_child_nodes(scope))
+    while todo:
+        node = todo.pop()
+        yield node
+        if not isinstance(node, _SCOPES):
+            todo.extend(ast.iter_child_nodes(node))
+
+
+def _targets(node):
     if isinstance(node, ast.Name):
-        return [node.id, *reversed(names)]
+        yield node.id
+    elif isinstance(node, (ast.Tuple, ast.List)):
+        for element in node.elts:
+            yield from _targets(element)
+    elif isinstance(node, ast.Starred):
+        yield from _targets(node.value)
+
+
+def _bindings(scope):
+    """{name: what it is in `scope`}: the dotted name of what an import binds it to, or None for any other binding (an
+    argument, an assignment, a loop variable), which shadows an outer import. A comprehension's variable is its own scope's,
+    and left out: `time` used next to `[... for time in index]` is still read as the module (the stricter verdict)."""
+    out = {}
+    if isinstance(scope, _FUNCTIONS):
+        arguments = scope.args
+        for arg in [*arguments.posonlyargs, *arguments.args, *arguments.kwonlyargs, arguments.vararg, arguments.kwarg]:
+            if arg is not None:
+                out[arg.arg] = None
+    imported = {}
+    for node in _in_scope(scope):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.asname:
+                    imported[alias.asname] = alias.name
+                else:
+                    imported[alias.name.split(".")[0]] = alias.name.split(".")[0]
+        elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
+            for alias in node.names:
+                imported[alias.asname or alias.name] = f"{node.module}.{alias.name}"
+        elif isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+            for target in node.targets if isinstance(node, ast.Assign) else [node.target]:
+                out.update(dict.fromkeys(_targets(target)))
+        elif isinstance(node, (ast.For, ast.AsyncFor)):
+            out.update(dict.fromkeys(_targets(node.target)))
+        elif isinstance(node, ast.withitem) and node.optional_vars is not None:
+            out.update(dict.fromkeys(_targets(node.optional_vars)))
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            out[node.name] = None
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            out[node.name] = None
+        elif isinstance(node, ast.NamedExpr):
+            out.update(dict.fromkeys(_targets(node.target)))
+    out.update(imported)  # an import and another binding of one name: read as the import (the stricter verdict)
+    return out
+
+
+def _now_strings(tree):
+    """Names bound anywhere to the string "now" or "today"."""
+    return {
+        target.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Assign) and _is_now(node.value)
+        for target in node.targets
+        if isinstance(target, ast.Name)
+    }
+
+
+def _is_now(node, names=frozenset()):
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value.strip().lower() in _NOW_WORDS
+    if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
+        return any(_is_now(element, names) for element in node.elts)
+    return isinstance(node, ast.Name) and node.id in names
+
+
+def _qualified(node, chain):
+    """The dotted name `node` (a name or an attribute of one) stands for through the imports of `chain`, else None."""
+    attributes = []
+    while isinstance(node, ast.Attribute):
+        attributes.append(node.attr)
+        node = node.value
+    if not isinstance(node, ast.Name):
+        return None
+    for scope in reversed(chain):
+        if node.id in scope:
+            root = scope[node.id]
+            return None if root is None else ".".join([root, *reversed(attributes)])
     return None
 
 
+def _timed_wait(call):
+    """A call that waits for a time of its own: `x.wait(t)`, `x.wait_for(pred, t)`, a queue's `get(timeout=t)` or
+    `put(item, timeout=t)`, `x.join(timeout=t)`, `x.acquire(timeout=t)`, with t other than None and 0. An HTTP request's
+    `session.get(url, timeout=t)` bounds the network's answer and is no wait of its own (its first argument isn't `block`)."""
+    if not isinstance(call.func, ast.Attribute):
+        return False
+    name, positional = call.func.attr, call.args
+    timeout = next((kw.value for kw in call.keywords if kw.arg == "timeout"), None)
+    if name == "wait" and positional:
+        timeout = positional[0]
+    elif name == "wait_for" and len(positional) > 1:
+        timeout = positional[1]
+    elif name in {"get", "put"}:
+        queue_keywords = {"block", "timeout"} | ({"item"} if name == "put" else set())
+        blocks = positional[1:] if name == "put" else positional
+        if any(kw.arg not in queue_keywords for kw in call.keywords) or not all(
+            isinstance(arg, ast.Constant) and isinstance(arg.value, bool) for arg in blocks[:1]
+        ):
+            return False
+    elif name not in {"wait", "wait_for", "join", "acquire"}:
+        return False
+    return timeout is not None and not (isinstance(timeout, ast.Constant) and timeout.value in (None, 0))
+
+
 def clock_reads(source: str):
-    """(line, what) of every clock read or sleep in `source` that doesn't go through `current_clock()`. `time.perf_counter`
-    times compute and is not one (see `_clock.py`)."""
+    """(line, what) of every clock read, sleep or timed wait in `source` that doesn't go through `current_clock()`, by what
+    the names are imported as (a local named `time` is no module). `time.perf_counter` times compute and is not one (see
+    `_clock.py`). A timed wait is "timed wait: <the call>"."""
     tree = ast.parse(source)
-    modules = {"time"}
+    now_names = frozenset(_now_strings(tree))
     found = []
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            modules.update(alias.asname or alias.name for alias in node.names if alias.name == "time")
-        elif isinstance(node, ast.ImportFrom) and node.module == "time":
-            for alias in node.names:
-                if alias.name in _TIME_READS | _TIME_NOW_IF_BARE | {"strftime", "*"}:
-                    found.append((node.lineno, f"from time import {alias.name}"))
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Attribute):
-            chain = _dotted(node)
-            if not chain:
-                continue
-            if len(chain) == 2 and chain[0] in modules and chain[1] in _TIME_READS:
-                found.append((node.lineno, ".".join(chain)))
-            elif len(chain) >= 2 and chain[-1] in _NOW_NAMES and chain[-2] in _NOW_OWNERS:
-                found.append((node.lineno, ".".join(chain)))
-        elif isinstance(node, ast.Call):
-            chain = _dotted(node.func)
-            if not chain:
-                continue
-            if len(chain) == 2 and chain[0] in modules:
-                bare = not node.args and not node.keywords
-                if (chain[1] in _TIME_NOW_IF_BARE and bare) or (chain[1] == "strftime" and len(node.args) < 2):
-                    found.append((node.lineno, ".".join(chain) + "()"))
-            first = node.args[0] if node.args else None
-            if (
-                chain[-1] in _PARSERS
-                and isinstance(first, ast.Constant)
-                and isinstance(first.value, str)
-                and first.value.strip().lower() in {"now", "today"}
-            ):
-                found.append((node.lineno, f"{'.'.join(chain)}({first.value!r})"))
-    return sorted(found)
+
+    def visit(scope, chain):
+        chain = [*chain, _bindings(scope)]
+        for node in _in_scope(scope):
+            if isinstance(node, _SCOPES):
+                visit(node, chain)
+            elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
+                found.extend(
+                    (node.lineno, f"from {node.module} import {alias.name}")
+                    for alias in node.names
+                    if f"{node.module}.{alias.name}" in _ALWAYS | _BARE
+                )
+            elif isinstance(node, (ast.Attribute, ast.Name)) and isinstance(node.ctx, ast.Load):
+                if _qualified(node, chain) in _ALWAYS:
+                    found.append((node.lineno, ast.unparse(node)))
+            if isinstance(node, ast.Call):
+                name = _qualified(node.func, chain)
+                first = (
+                    node.args[0]
+                    if node.args
+                    else next((kw.value for kw in node.keywords if kw.arg in _TIME_KEYWORDS), None)
+                )
+                bare = first is None or (isinstance(first, ast.Constant) and first.value is None)
+                if (name in _BARE and bare) or (name == "time.strftime" and len(node.args) < 2):
+                    found.append((node.lineno, ast.unparse(node)))
+                elif name in _PARSERS and any(
+                    _is_now(value, now_names) for value in [*node.args, *(kw.value for kw in node.keywords)]
+                ):
+                    found.append((node.lineno, ast.unparse(node)))
+                elif _timed_wait(node):
+                    found.append((node.lineno, f"timed wait: {ast.unparse(node)}"))
+
+    visit(tree, [])
+    return sorted(set(found))
 
 
 def package_files():
     return sorted(path for path in PACKAGE.rglob("*.py") if "__pycache__" not in path.parts)
 
 
+# The timed waits the package makes on real time: the results store's writer thread idles between its batches.
+REAL_TIME_WAITS = {
+    ("results/store.py", "timed wait: self._write_queue.get(timeout=0.1)"),
+    ("results/store.py", "timed wait: self._cond.wait(_TICK_SECONDS)"),
+}
+
+
 def test_the_package_reads_no_clock_but_through_current_clock():
     found = {
-        str(path.relative_to(PACKAGE)): reads
+        (str(path.relative_to(PACKAGE)), line, what)
         for path in package_files()
-        if path.name != "_clock.py" and (reads := clock_reads(path.read_text()))
+        if path.name != "_clock.py"
+        for line, what in clock_reads(path.read_text())
     }
-    assert found == {}, f"clock reads outside epftoolbox2/_clock.py (use current_clock()): {found}"
+    unexpected = sorted(item for item in found if item[::2] not in REAL_TIME_WAITS)
+    assert unexpected == [], f"clock reads outside epftoolbox2/_clock.py (use current_clock()): {unexpected}"
+    assert {item[::2] for item in found} == REAL_TIME_WAITS  # the list holds no stale entry
 
 
 @pytest.mark.parametrize(
@@ -154,6 +310,33 @@ def test_the_package_reads_no_clock_but_through_current_clock():
         "import pandas as pd\npd.Timestamp('now')",
         "import pandas as pd\npd.to_datetime(' Today ')",
         "import numpy as np\nnp.datetime64('now')",
+        # Aliases, and the forms of the code review's probe
+        "from datetime import datetime as dt\ndt.now()",
+        "from datetime import date as d\nd.today()",
+        "from pandas import Timestamp as T\nT.now()",
+        "import pandas as pd\npd.Period.now('D')",
+        "import pandas as pd\npd.Timestamp(ts_input='now')",
+        "import pandas as pd\npd.date_range(end='today', periods=3)",
+        "import pandas as pd\npd.to_datetime(['now'])",
+        "import pandas as pd\nx = 'now'\npd.Timestamp(x)",
+        "import numpy as np\nnp.datetime64('NOW')",
+        "import time\ntime.clock_gettime(time.CLOCK_REALTIME)",
+        "import time\ntime.localtime(None)",
+        "import email.utils\nemail.utils.formatdate()",
+        "from email.utils import formatdate\nformatdate(localtime=True)",
+        "import time\ndef f():\n    return time.time()",
+        "def f():\n    import time\n    return time.sleep(1)",
+        "import asyncio\nasyncio.sleep(1)",
+        "import threading\nthreading.Timer(5, print)",
+        # Timed waits
+        "import threading\nthreading.Event().wait(5)",
+        "cond.wait(timeout=0.5)",
+        "cond.wait_for(ready, 3)",
+        "q.get(timeout=1)",
+        "q.get(True, timeout=1)",
+        "q.put(item, timeout=1)",
+        "thread.join(timeout=2)",
+        "lock.acquire(timeout=1)",
     ],
 )
 def test_the_scan_flags_every_form_it_looks_for(code):
@@ -170,14 +353,32 @@ def test_the_scan_flags_every_form_it_looks_for(code):
         "import datetime\ndatetime.date.fromisoformat('2026-10-22')",
         "import pandas as pd\npd.Timestamp('2026-10-22')",
         "def now():\n    pass\nnow()",
+        "from time import perf_counter\nperf_counter()",
+        # Names that aren't the modules (the code review's false positives)
+        "ts = obj\nts.date.today",
+        "time = pd.Timestamp('2026-01-01')\ntime.time()",
+        "def f(time):\n    return time.time()",
+        "for time in index:\n    time.time()",
+        "import time\ndef f(index):\n    for time in index:\n        time.time()",
+        "import time\ndef f(time):\n    return time.time()",
+        "time.sleep(1)",
+        # Waits that wait for no time of their own, and an HTTP request's timeout
+        "cond.wait()",
+        "lock.acquire(timeout=0)",
+        "q.get()",
+        "session.get(url, timeout=30)",
+        "session.get(url=url, params=params, timeout=30)",
+        "', '.join(names)",
     ],
 )
 def test_the_scan_passes_what_reads_no_clock(code):
     assert clock_reads(code) == []
 
 
-def test_only_the_results_store_uses_the_system_clock_itself():
-    """`SYSTEM` directly, never faked, only where buffers are stamped in one thread and aged in another (the writer)."""
+def test_only_real_time_code_uses_the_system_clock_itself():
+    """`SYSTEM` directly, never faked, only where real time is the point: the results store's writer (buffers stamped in one
+    thread and aged in another) and its wait for another process's moment on a lock file, and the tuner's waits for its
+    workers' processes."""
     users = set()
     for path in package_files():
         if path.name in ("_clock.py", "clock.py"):
@@ -185,7 +386,7 @@ def test_only_the_results_store_uses_the_system_clock_itself():
         names = {node.id for node in ast.walk(ast.parse(path.read_text())) if isinstance(node, ast.Name)}
         if "SYSTEM" in names:
             users.add(str(path.relative_to(PACKAGE)))
-    assert users == {"results/store.py", "results/parquet_store.py"}
+    assert users == {"results/store.py", "results/parquet_store.py", "tune/bayes.py"}
 
 
 @pytest.mark.parametrize("module", ["models/_worker.py", "models/_engine_worker.py"])
@@ -460,7 +661,49 @@ def test_energy_charts_reads_its_clock_its_waits_and_its_rate_limit_on_the_clock
         )
         assert source._request("price", {}, "price") == {"unix_seconds": [], "price": []}
     assert sum(clock.sleeps) >= 35  # the 30 s the server asked for, waited out in fake time
-    assert all((endpoint, bucket_clock) == ("price", clock) for endpoint, bucket_clock in ec._BUCKETS)
+    assert list(ec._BUCKETS) == [("price", id(clock))]
+
+
+def test_energy_charts_buckets_go_with_their_clock_and_take_an_unhashable_one(monkeypatch):
+    """The rate limit's buckets are kept per clock (its stamps are that clock's seconds) and dropped with it, so a test's fake
+    clocks, with their `sleeps`, don't stay referenced; a clock that can't be hashed (a dataclass with `__eq__`) still works."""
+    import dataclasses
+    import gc
+    import weakref
+
+    from epftoolbox2.data.sources import energy_charts as ec
+
+    monkeypatch.setattr(ec, "_BUCKETS", {})
+    source = ec.EnergyChartsSource("de", type=["price"], use_cache=False)
+    body = {"unix_seconds": [], "price": []}
+    clock = FakeClock(LATE)
+    alive = weakref.ref(clock)
+    with use_clock(clock):
+        source.session = _Session([_Answer(200, body=body)])
+        source._request("price", {}, "price")
+    assert list(ec._BUCKETS) == [("price", id(clock))]
+    del clock
+    gc.collect()
+    assert alive() is None and ec._BUCKETS == {}
+
+    @dataclasses.dataclass
+    class Pinned(Clock):  # eq=True: no __hash__
+        instant: pd.Timestamp
+
+        def now(self):
+            return self.instant
+
+        def monotonic(self):
+            return 0.0
+
+        def sleep(self, seconds):
+            pass
+
+    with pytest.raises(TypeError):
+        hash(Pinned(pd.Timestamp(LATE, tz="UTC")))
+    with use_clock(Pinned(pd.Timestamp(LATE, tz="UTC"))):
+        source.session = _Session([_Answer(200, body=body)])
+        assert source._request("price", {}, "price") == body
 
 
 def test_open_meteo_backs_off_and_waits_out_its_rate_limit_on_the_clock(no_real_sleep):
@@ -498,7 +741,8 @@ def test_open_meteo_cuts_final_from_provisional_rows_at_the_clock():
 
 
 class _Recording(FakeClock):
-    """A fake clock that writes the process id of every read to `log` (a forked worker would see it too)."""
+    """A fake clock that writes the process and thread of every read to `log` (a forked worker would see it, and so would a
+    thread where threads inherit the context)."""
 
     def __init__(self, start, log: Path):
         super().__init__(start)
@@ -506,7 +750,7 @@ class _Recording(FakeClock):
 
     def _note(self):
         with open(self.log, "a") as handle:
-            handle.write(f"{os.getpid()}\n")
+            handle.write(f"{os.getpid()}:{threading.get_ident()}\n")
 
     def now(self):
         self._note()
@@ -551,8 +795,8 @@ def test_a_run_on_a_fake_clock_writes_the_same_records_and_its_workers_never_rea
     with use_clock(clock):
         pipeline(engine).run(save_dir=str(tmp_path / "fake"), **run)
 
-    pids = set(log.read_text().split())
-    assert pids == {str(os.getpid())}, "a pool worker read the clock"
+    readers = set(log.read_text().split())
+    assert readers == {f"{os.getpid()}:{threading.get_ident()}"}, "a pool worker or another thread read the clock"
     stamp = pd.Timestamp("2030-01-01 08:00", tz="UTC").isoformat()
     for name in ("ols", "ols_small", "avg"):
         assert sorted_lines(tmp_path / "system" / f"{name}.jsonl") == sorted_lines(tmp_path / "fake" / f"{name}.jsonl")
@@ -624,21 +868,59 @@ def test_a_residual_model_issues_on_the_issue_zones_today(
     assert ref.test_start == ref.test_end == expected and ref.produced == 24
 
 
-@pytest.mark.parametrize("host, expected", [("America/New_York", "2026-10-21"), ("Asia/Tokyo", "2026-10-22")])
-def test_forecast_only_over_zones_issues_on_one_day(host, expected, market, monkeypatch):
-    """issue_timezone="data" over markets in two zones whose dates differ at the clock's now (Warsaw on 10-22, Reykjavik on
-    10-21): the host's date for both, whichever of the two it is."""
+# At 23:30 UTC on 10-21: 01:30 on 10-22 in Berlin, Paris and Warsaw, 23:30 on 10-21 in Reykjavik.
+ZONE_TODAY = {
+    "Europe/Berlin": "2026-10-22",
+    "Europe/Paris": "2026-10-22",
+    WARSAW: "2026-10-22",
+    "Atlantic/Reykjavik": "2026-10-21",
+}
+DATA_ISSUE = InformationSet("11:45", "data", use_defaults=False, unknown="ignore")
+
+
+def run_dates(report):
+    return set(report.predictions()["run_date"].astype(str))
+
+
+@pytest.mark.parametrize(
+    "zones", [{"DE": "Europe/Berlin", "FR": "Europe/Paris"}, {"PL": WARSAW, "IS": "Atlantic/Reykjavik"}]
+)
+@pytest.mark.parametrize("host", ["UTC", "Asia/Tokyo"])
+def test_forecast_only_over_zones_issues_each_zone_on_its_issue_zones_today(zones, host, tmp_path, monkeypatch):
+    """issue_timezone="data" over zones: each zone issues on its own zone's today, as a run of its frame alone does and as the
+    report of its folder reads it, whatever the host's zone (dates are compared, not zone names: Berlin and Paris agree)."""
     monkeypatch.setenv("MAX_PROCESSES", "1")
     monkeypatch.setenv("THREADS_PER_PROCESS", "1")
-    reykjavik = make_market_data(start="2026-06-01", days=150, tz="Atlantic/Reykjavik", horizon=1)
-    info = InformationSet("11:45", "data", use_defaults=False, unknown="ignore")
-    mp = ModelPipeline(information_set=info).add_model(OLSModel(PREDICTORS, training_window=28, name="ols"))
+    frames = {zone: make_market_data(start="2026-06-01", days=150, tz=tz, horizon=1) for zone, tz in zones.items()}
+    mp = ModelPipeline(information_set=DATA_ISSUE).add_model(OLSModel(PREDICTORS, training_window=28, name="ols"))
     with host_zone(host), use_clock(FakeClock(LATE)):
-        report = mp.run({"PL": market, "IS": reykjavik}, horizon=1, forecast_only=True)
-        for zone in ("PL", "IS"):
-            assert set(report.zones[zone].predictions()["run_date"].astype(str)) == {expected}
-        report = mp.run({"PL": market, "PL2": market}, horizon=1, forecast_only=True)  # zones on one clock: its date
-        assert set(report.zones["PL2"].predictions()["run_date"].astype(str)) == {"2026-10-22"}
+        panel = mp.run(frames, horizon=1, forecast_only=True, save_dir=str(tmp_path))
+        again = mp.report(str(tmp_path), horizon=1, forecast_only=True)
+        by_tuple = mp.run(frames, horizon=1, forecast_only=True, test=("today", "today"))
+        for zone, tz in zones.items():
+            alone = mp.run(frames[zone], horizon=1, forecast_only=True)
+            expected = {ZONE_TODAY[tz]}
+            assert run_dates(panel.zones[zone]) == run_dates(alone) == expected, zone
+            assert run_dates(again.zones[zone]) == run_dates(by_tuple.zones[zone]) == expected, zone
+
+
+def test_a_pooled_model_over_zones_on_different_days_asks_for_the_dates(monkeypatch, host_in_new_york):
+    from epftoolbox2.models import PooledModel
+
+    monkeypatch.setenv("MAX_PROCESSES", "1")
+    monkeypatch.setenv("THREADS_PER_PROCESS", "1")
+    frames = {
+        zone: make_market_data(start="2026-06-01", days=150, tz=tz, horizon=1)
+        for zone, tz in (("PL", WARSAW), ("IS", "Atlantic/Reykjavik"))
+    }
+    mp = ModelPipeline(information_set=DATA_ISSUE).add_model(
+        PooledModel(OLSModel(PREDICTORS, training_window=28), name="pooled")
+    )
+    with (
+        use_clock(FakeClock(LATE)),
+        pytest.raises(ValueError, match=r"PL 2026-10-22, IS 2026-10-21.*pass test_start and test_end"),
+    ):
+        mp.run(frames, horizon=1, forecast_only=True)
 
 
 def test_forecast_only_checks_its_issue_days_on_the_issue_zones_today(market, monkeypatch, host_in_new_york):
@@ -652,3 +934,121 @@ def test_forecast_only_checks_its_issue_days_on_the_issue_zones_today(market, mo
         assert set(report.predictions()["run_date"].astype(str)) == {"2026-10-22"}
         with pytest.raises(ValueError, match="(?i)wednesday|weekday|issue day"):
             mp.run(market, horizon=1, forecast_only=True, issue_days=["wednesday"])
+
+
+def test_today_is_one_day_however_it_is_asked_for(market, tmp_path, monkeypatch, host_in_new_york):
+    """The default, test_start/test_end="today" and test=("today", "today") (a Workflow's `test: [today, today]`) give one
+    issue day, the issue zone's, in a run and in its report."""
+    monkeypatch.setenv("MAX_PROCESSES", "1")
+    monkeypatch.setenv("THREADS_PER_PROCESS", "1")
+    mp = ModelPipeline(information_set=WARSAW_ISSUE).add_model(OLSModel(PREDICTORS, training_window=28, name="ols"))
+    asked = [{}, {"test_start": "today", "test_end": "today"}, {"test": ("today", "today")}, {"test": ["now", "today"]}]
+    with use_clock(FakeClock(LATE)):
+        for kwargs in asked:
+            assert run_dates(mp.run(market, horizon=1, forecast_only=True, **kwargs)) == {"2026-10-22"}, kwargs
+        mp.run(market, horizon=1, forecast_only=True, save_dir=str(tmp_path))
+        for kwargs in asked:
+            assert run_dates(mp.report(str(tmp_path), horizon=1, forecast_only=True, **kwargs)) == {"2026-10-22"}, (
+                kwargs
+            )
+
+
+def test_a_dateutil_zone_issues_on_its_market_s_today(monkeypatch, host_in_new_york):
+    """A frame indexed in a dateutil zone (`str` of it doesn't read back) under issue_timezone="data": "today" is a date of
+    the zone's name, as `in_data_zone` gives it."""
+    import dateutil.tz
+
+    from epftoolbox2.models.base import today_zone
+
+    monkeypatch.setenv("MAX_PROCESSES", "1")
+    monkeypatch.setenv("THREADS_PER_PROCESS", "1")
+    frame = make_market_data(start="2026-06-01", days=150, tz=WARSAW, horizon=1)
+    frame.index = frame.index.tz_convert(dateutil.tz.gettz(WARSAW))
+    assert today_zone(DATA_ISSUE, frame.index) == WARSAW
+    mp = ModelPipeline(information_set=DATA_ISSUE).add_model(OLSModel(PREDICTORS, training_window=28, name="ols"))
+    with use_clock(FakeClock(LATE)):
+        assert run_dates(mp.run(frame, horizon=1, forecast_only=True)) == {"2026-10-22"}
+        ref = OLSModel(PREDICTORS, training_window=28).run(
+            frame, horizon=1, forecast_only=True, information_set=DATA_ISSUE
+        )
+        assert ref.test_start == ref.test_end == "2026-10-22"
+
+
+def test_a_run_issues_every_model_on_the_day_it_read_once(market, monkeypatch):
+    """A clock passing local midnight during a run (every read moves it a second, from 23:59:59.5 in Warsaw) issues every
+    model on the day the run read, so the ensemble has its members' forecasts."""
+    monkeypatch.setenv("MAX_PROCESSES", "1")
+    monkeypatch.setenv("THREADS_PER_PROCESS", "1")
+    clock = FakeClock("2026-10-21 21:59:59.5", tick=1.0)
+    with use_clock(clock):
+        report = pipeline(information_set=WARSAW_ISSUE).run(market, horizon=1, forecast_only=True)
+    predictions = report.predictions()
+    assert {model: set(rows["run_date"].astype(str)) for model, rows in predictions.groupby("model")} == {
+        "ols": {"2026-10-21"},
+        "ols_small": {"2026-10-21"},
+        "avg": {"2026-10-21"},
+    }
+    assert (predictions["model"] == "avg").sum() == 24
+    assert clock.now() > pd.Timestamp("2026-10-21 22:00", tz="UTC")  # it did pass Warsaw's midnight
+
+
+class _Provisional(DataSource):
+    """Hourly values up to `until` (the machine's now): the last day is provisional, and `revised` is its later revision."""
+
+    def __init__(self, until):
+        self.until, self.revised, self.calls = until, False, []
+
+    def fetch(self, start, end):
+        self.calls.append((start, end))
+        index = pd.date_range(self.until - pd.Timedelta(days=10), self.until, freq="1h", inclusive="left")
+        values = np.arange(len(index), dtype=float) + (np.arange(len(index)) >= len(index) - 24) * 1000.0 * self.revised
+        return pd.DataFrame({"load": values}, index=index).loc[start : end - pd.Timedelta("1ns")]
+
+    def _validate_config(self):
+        return True
+
+    def get_cache_config(self):
+        return {"source_type": "provisional"}
+
+
+@pytest.mark.parametrize("cache", [True, "cache.parquet"])
+def test_a_clock_ahead_of_the_machine_settles_no_day_the_world_hasnt(cache, tmp_path, monkeypatch):
+    """A FakeClock four years ahead: the cache still settles against the machine's now, so a later run on the machine's clock
+    fetches the last days again and gets their revision, where the fake now would have kept the provisional values."""
+    monkeypatch.chdir(tmp_path)
+    until = SYSTEM.now().floor("h")
+    first, last = (until - pd.Timedelta(days=9)).strftime("%Y-%m-%d"), until.strftime("%Y-%m-%d")
+    source = _Provisional(until)
+    with use_clock(FakeClock(until + pd.Timedelta(days=4 * 365))):
+        before = DataPipeline().add_source(source).run(first, last, cache=cache)
+    source.revised = True
+    after = DataPipeline().add_source(source).run(first, last, cache=cache)
+    assert after["load"].iloc[-1] == before["load"].iloc[-1] + 1000.0
+    assert len(source.calls) == 2
+
+
+def test_energy_charts_caches_no_answer_the_machine_hasnt_settled(tmp_path):
+    from epftoolbox2.data.sources import energy_charts as ec
+
+    source = ec.EnergyChartsSource("de", type=["price"], cache_dir=str(tmp_path))
+    real = SYSTEM.now().floor("D")
+    body = {"unix_seconds": [], "price": []}
+    with use_clock(FakeClock(real + pd.Timedelta(days=4 * 365))):
+        source.session = _Session([_Answer(200, body=body), _Answer(200, body=body)])
+        source._get("price", {"bzn": "DE-LU"}, real - pd.Timedelta(days=3), real - pd.Timedelta(days=1))  # not settled
+        assert list(tmp_path.glob("*.json")) == []
+        source._get("price", {"bzn": "DE-LU"}, real - pd.Timedelta(days=30), real - pd.Timedelta(days=20))
+        assert len(list(tmp_path.glob("*.json"))) == 1
+
+
+def test_open_meteo_calls_no_row_final_before_the_machine_does():
+    from epftoolbox2.data.sources import OpenMeteoSource
+
+    source = OpenMeteoSource(latitude=52.23, longitude=21.01, timezone=WARSAW, api="single_runs", run="00")
+    tomorrow = (SYSTEM.now().tz_convert(WARSAW) + pd.Timedelta(days=1)).normalize()
+    rows = pd.date_range(tomorrow, periods=3, freq="1h").tz_convert(
+        "UTC"
+    )  # their cutoff, tomorrow at 00:00 UTC, is ahead
+    with use_clock(FakeClock(SYSTEM.now() + pd.Timedelta(days=4 * 365))):
+        cutoff, final = source._cutoff_instants(rows)
+    assert not final.any() and (cutoff <= SYSTEM.now()).all()
