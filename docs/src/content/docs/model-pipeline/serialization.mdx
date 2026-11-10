@@ -49,6 +49,9 @@ default: `warn` with an `information_set`, `none` without one. Its `rules` are s
 column's [rules over time](/epftoolbox2/model-pipeline/information-set/#rules-over-time); an `Availability` writes `vintage`,
 `valid_from` and `valid_until` only when set.
 
+[Checks before export](/epftoolbox2/model-pipeline/checks/) are saved as a top-level `checks` key, `{class: ForecastChecks,
+params: {...}}` with every setting, only when the pipeline has them.
+
 ```yaml
 information_set:
   issue_time: "11:45"

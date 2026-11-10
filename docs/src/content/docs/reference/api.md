@@ -51,6 +51,7 @@ class ModelPipeline:
         issue_timezone: str = "Europe/Brussels",           # Zone of issue_time
         availability: Optional[str] = None,                # "none", "warn" or "raise"; default "warn" with an issue time, else "none"
         engine: str = "off",                               # "on": engine groups, fits from shared sums; "check": and a sample on the model path too
+        checks: Optional[ForecastChecks] = None,           # Checks before export of each model's target days; backtests too when set
     ): ...
 
     def add_model(self, model: Union[BaseModel, PooledModel]) -> "ModelPipeline": ...
@@ -385,6 +386,28 @@ class FallbackEnsemble(Ensemble):
 ```
 
 See [Ensembles](/epftoolbox2/model-pipeline/ensembles/) and [Fallbacks](/epftoolbox2/model-pipeline/fallback/).
+
+---
+
+## Checks Before Export
+
+```python
+from epftoolbox2.results import ForecastChecks
+
+class ForecastChecks:                     # ModelPipeline(checks=...): each model's forecasts of a target day
+    def __init__(
+        self,
+        *,
+        periods: bool = True,             # Every period the clock gives the day has a forecast
+        finite: bool = True,              # No NaN, infinite or missing prediction
+        range: Optional[Sequence[Optional[float]]] = None,  # (low, high), both included; either may be None
+        not_constant: bool = True,        # Not one value all day (a day of two or more periods)
+        max_step: Optional[float] = None, # No step between neighbouring periods above it
+    ): ...
+```
+
+A day that fails has `check_failed` skip records in place of its forecasts. See
+[Checks Before Export](/epftoolbox2/model-pipeline/checks/).
 
 ---
 

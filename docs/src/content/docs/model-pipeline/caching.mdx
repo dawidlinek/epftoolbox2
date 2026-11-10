@@ -218,8 +218,9 @@ don't affect any forecast in this run, so appending them between runs isn't a mi
 time zone (converting the same instants to a different zone keeps the same hash, since it's over each
 value's own representation, not the zone label), how the training rows are chosen (`training_cut`), and for a model an
 [engine group](/epftoolbox2/model-pipeline/engine/) fits from shared statistics `fit_path: "engine-2"`
-(those forecasts agree with the model path's within its tolerances, not to the bit): everything that defines what a forecast in
-the file actually *is*. A manifest without `training_cut` was [made with counted rows](/epftoolbox2/model-pipeline/time-and-calendars/#results-made-with-counted-rows)
+(those forecasts agree with the model path's within its tolerances, not to the bit), and with
+[checks before export](/epftoolbox2/model-pipeline/checks/) the `checks` (no key without them): everything that defines what a
+forecast in the file actually *is*. A manifest without `training_cut` was [made with counted rows](/epftoolbox2/model-pipeline/time-and-calendars/#results-made-with-counted-rows)
 and is refused; results accepted anyway are marked unverified, for good. It also records provenance (package version and git SHA if available, read once at the start of a pipeline
 run so that its model and ensemble manifests name the code the process runs, a SHA that can't be read being tried again at the
 next manifest; when it was first and last written, and for [`LEARModel`](/epftoolbox2/models/lear/#kernels) the backend of its kernels, `kernels`, a list once a resume

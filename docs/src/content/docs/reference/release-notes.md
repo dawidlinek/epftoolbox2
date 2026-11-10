@@ -249,11 +249,21 @@ an issue day it didn't sample.
   deadline is recorded. Backtest records, readers, manifests and Parquet parts are bit for bit as before (the live columns are in
   live parts alone). A JSONL store now writes records saved after its `flush()` (they were dropped; no backtest saves any), and
   saving into a closed store raises. See [Live records](/epftoolbox2/model-pipeline/caching/#live-records).
+- **Checks before export: `ModelPipeline(checks=ForecastChecks(...))`.** Each model's forecasts of a target day are checked before
+  anything uses them: `periods` (every period the clock gives the day: 23, 24 or 24 hours, 92, 96 or 96 quarter-hours, the autumn
+  hour one period; one at `"1D"`), `finite`, `range=(low, high)`, `not_constant` and `max_step`, on the predictions and the clock,
+  never an actual. A day that fails has `check_failed` skip records in place of its forecasts, with the failing checks in `detail`,
+  counted in `forecast_counts()` and the manifest, so a `FallbackEnsemble` serves it from its next rung and an average counts it as
+  `member_missing`. Off unless set (`checks=None`: every file and number as before); when set, backtests apply them too, so a
+  rung's backtest score counts its failures. The manifest records them and a resume with others raises; a day a resume completes is
+  checked with its forecasts on file, overruled one revision up when it fails. Saved to YAML (`checks: {class: ForecastChecks,
+  params: ...}`), and a `Workflow`'s `model_pipeline.checks` sets them. See
+  [Checks Before Export](/epftoolbox2/model-pipeline/checks/).
 - **`FallbackEnsemble`: a ladder of forecasts for the mornings an input is late.** `FallbackEnsemble(members, per="day", name=...)`
   takes each (issue day, horizon, target day) whole from the first member whose forecasts of every planned key of that day exist
   with a finite prediction (the clock's keys: 23 hours on a spring day), so a delivered day is never stitched from two models;
-  `per="key"` takes each key from the first member that has it. A skip record is no forecast (and `check_failed` will be one once
-  step 8f's checks write it), and a day no member serves is `member_missing`; so is the day after a spring switch for every rung
+  `per="key"` takes each key from the first member that has it. A skip record is no forecast (`check_failed` among them, from
+  checks before export), and a day no member serves is `member_missing`; so is the day after a spring switch for every rung
   reading `price_d-1`, so end a ladder with a rung that doesn't. `report(allow_missing=True)` passes over a member without results,
   with a warning. Its records are the member's with `rung` and `member`, `status` `"ok"`, computed from stored results like an
   average, in backtests and live alike. `report.rungs(name)` gives per rung the days and forecasts it served, its MAE there with the

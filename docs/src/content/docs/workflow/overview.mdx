@@ -144,7 +144,7 @@ model_pipeline:
 
 ## Inline Component Overrides
 
-Pipeline sections can be specified directly in the workflow YAML, overriding the corresponding section from the referenced `path`. If no `path` is given, the pipeline is built entirely from inline sections. `model_pipeline` also takes `information_set` and `availability` this way ([Information Set](/epftoolbox2/model-pipeline/information-set/#three-levels)).
+Pipeline sections can be specified directly in the workflow YAML, overriding the corresponding section from the referenced `path`. If no `path` is given, the pipeline is built entirely from inline sections. `model_pipeline` also takes `information_set` and `availability` this way ([Information Set](/epftoolbox2/model-pipeline/information-set/#three-levels)), and `checks` (`{class: ForecastChecks, params: {...}}`, or `null` for none: [Checks Before Export](/epftoolbox2/model-pipeline/checks/)).
 
 <Tabs>
   <TabItem label="Override transformers">
