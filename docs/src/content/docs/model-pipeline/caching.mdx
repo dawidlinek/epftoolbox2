@@ -26,7 +26,8 @@ report = pipeline.run(
 
 On one machine a resumed file is bit for bit a fresh run's. On another, the linear algebra library (BLAS) rounds sums differently, so
 records can differ in their last digits, by up to about 3e-9 EUR/MWh for [`LEARModel`](/epftoolbox2/models/lear/#kernels) on the
-benchmark data: resume where a file was started if it must be one machine's. A resume on the other backend of LEAR's kernels warns.
+benchmark data: resume where a file was started if it must be one machine's. A resume on the other backend of LEAR's kernels warns,
+and so does a resume of OLS, Ridge or LassoCV under another scikit-learn release than the file's (the manifest's `scikit_learn`).
 
 ## Cache Directory Structure
 

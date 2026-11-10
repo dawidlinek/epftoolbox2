@@ -6,6 +6,8 @@ from .base import BaseModel
 
 
 class OLSModel(BaseModel):
+    # Fits with scikit-learn: the manifest records the release (`BaseModel._uses_scikit_learn`).
+    _uses_scikit_learn = True
     # What the step-5 engine must put in the `ScaledStats` it hands `_fit_stats`: the sums alone.
     _ENGINE_NEEDS = frozenset()
     # The farthest an issue row may be from its training rows for the engine to forecast it, in training standard deviations

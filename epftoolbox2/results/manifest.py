@@ -190,6 +190,11 @@ _PROVENANCE_FIELDS += ("daily_stamp",)
 # number of candidates, the rung, validation period and validation MAE it was chosen on), for `report.choices()`. The model's
 # settings are the compared fields; where they were chosen says nothing about the forecasts.
 _PROVENANCE_FIELDS += ("search",)
+# `scikit_learn`: the scikit-learn release a core model that fits with it (OLS, Ridge, LassoCV: `BaseModel._uses_scikit_learn`)
+# ran on, or the releases in the order first used once a resume ran on another (`_scikit_learn_on_file`), which then warns.
+# Provenance, not compared: every manifest written before has none, and the lock holds two releases since `[patchtst-fm]`
+# resolves apart (1.7.2 there).
+_PROVENANCE_FIELDS += ("scikit_learn",)
 
 # Compared to decide whether an existing manifest is compatible with the current run. Order is the
 # order differences are reported in.
@@ -387,6 +392,10 @@ class Manifest:
     # a resume ran on another; None (and no key) for a model without them. Provenance: never compared, and a resume warns while
     # the file holds forecasts of another backend than its own.
     kernels: Optional[Union[str, List[str]]] = None
+    # The scikit-learn release of a core model that fits with it (OLS, Ridge, LassoCV), or the list of them in the order first
+    # used once a resume ran on another; None (and no key) for every other model. Provenance: never compared, and a resume warns
+    # while the file holds forecasts of another release than its own.
+    scikit_learn: Optional[Union[str, List[str]]] = None
     # The record schema of the records the last run wrote (`results.store.RECORD_SCHEMA`); None (and no key) before it.
     # Provenance: never compared.
     record_schema: Optional[int] = None
@@ -510,6 +519,8 @@ class Manifest:
             del out["vintages"]
         if out["kernels"] is None:  # a model that fits with no LEAR kernel
             del out["kernels"]
+        if out["scikit_learn"] is None:  # a model that doesn't fit with scikit-learn, or one with a card (its runtime)
+            del out["scikit_learn"]
         if out["record_schema"] is None:  # written before record schemas
             del out["record_schema"]
         if out["save_format"] is None:  # JSONL
@@ -728,6 +739,7 @@ def build_manifest(
     kernels: Optional[str] = None,
     fit_path: Optional[str] = None,
     chained_inputs: Optional[Dict[str, Dict[str, Any]]] = None,
+    scikit_learn: Optional[str] = None,
 ) -> Manifest:
     """The manifest for one model's run.
 
@@ -816,6 +828,7 @@ def build_manifest(
         issue_days=issue_day_names(issue_days),
         vintages=vintages,
         kernels=kernels,
+        scikit_learn=scikit_learn,
         record_schema=RECORD_SCHEMA,
         fit_path=fit_path,
         pooled=getattr(model, "_pooled", None),  # a PooledModel's member (`models._pooled.member_of`)
@@ -1163,6 +1176,7 @@ def check_and_write(
         if check_stored is not None:
             check_stored()
         manifest.kernels = _kernels_on_file(existing, manifest, model_name, path, has_existing_results)
+        manifest.scikit_learn = _scikit_learn_on_file(existing, manifest, model_name, path, has_existing_results)
         manifest.weights_history = _weights_on_file(existing, manifest, model_name, path, has_existing_results)
         manifest.created_at = existing.created_at  # keep the first run's provenance
         manifest.residual_base = _earliest_base(existing.residual_base, manifest.residual_base)
@@ -1361,6 +1375,29 @@ def _kernels_on_file(
             f"{model_name}: the results in {path.parent} hold forecasts fitted with the {' and '.join(stored)} kernels and this "
             f"run fits with the {manifest.kernels} ones, which agree within 1e-9 with the same kinks but not to the bit, so the "
             f"file mixes them (its manifest records kernels: {used}). Set EPFTOOLBOX2_KERNELS to one backend and use a new "
+            "save_dir for results of one.",
+            UserWarning,
+            stacklevel=5,
+        )
+    return used[0] if len(used) == 1 else used
+
+
+def _scikit_learn_on_file(
+    existing: Manifest, manifest: Manifest, model_name: str, path: Path, has_existing_results: bool
+) -> Optional[Union[str, List[str]]]:
+    """What the manifest records as `scikit_learn` after this run: every scikit-learn release the file's forecasts were fitted
+    with, a name while there is one and a list in the order first used once there are more. A resume warns whenever the file
+    then holds forecasts of another release than this run's, every time, as for the kernels. Not refused: the release is
+    provenance, and a manifest written before the field (none recorded) resumes as before and takes this run's."""
+    if not (has_existing_results and existing.scikit_learn and manifest.scikit_learn):
+        return manifest.scikit_learn
+    stored = [existing.scikit_learn] if isinstance(existing.scikit_learn, str) else list(existing.scikit_learn)
+    used = stored if manifest.scikit_learn in stored else [*stored, manifest.scikit_learn]
+    if used != [manifest.scikit_learn]:
+        warnings.warn(
+            f"{model_name}: the results in {path.parent} hold forecasts fitted with scikit-learn {' and '.join(stored)} and "
+            f"this run fits with scikit-learn {manifest.scikit_learn}, whose fits needn't agree to the bit, so the file mixes "
+            f"them (its manifest records scikit_learn: {used}). Install one release (the lock's, uv sync) and use a new "
             "save_dir for results of one.",
             UserWarning,
             stacklevel=5,

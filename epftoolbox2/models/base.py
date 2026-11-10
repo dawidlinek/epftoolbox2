@@ -777,6 +777,22 @@ class BaseModel(ABC):
     def _model_kwargs(self) -> Dict:
         return {}
 
+    # Whether the model fits with scikit-learn (OLS, Ridge, LassoCV): its manifest then records the release (`scikit_learn`,
+    # provenance; a resume under another warns). A carded family records its packages in `runtime` instead.
+    _uses_scikit_learn: bool = False
+
+    @property
+    def _scikit_learn_version(self) -> Optional[str]:
+        """The scikit-learn release a model that fits with it runs on (`_uses_scikit_learn`), None for every other model."""
+        if not self._uses_scikit_learn or self._card is not None:
+            return None
+        import importlib.metadata
+
+        try:
+            return importlib.metadata.version("scikit-learn")
+        except importlib.metadata.PackageNotFoundError:  # pragma: no cover - scikit-learn is a core dependency
+            return None
+
     @property
     def _kernel_backend(self) -> Optional[str]:
         """The backend of the LEAR kernels the model fits with (`models._lars._kernels`), None for one that uses none. A run
@@ -1157,6 +1173,7 @@ class BaseModel(ABC):
                     kernels=kernels,
                     fit_path=fit_path,
                     chained_inputs=getattr(self, "_chained_record", None),
+                    scikit_learn=self._scikit_learn_version,
                 )
 
                 def check_stored():
