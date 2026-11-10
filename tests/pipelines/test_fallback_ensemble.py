@@ -448,6 +448,7 @@ def test_rungs_per_day_against_hand_counts(tmp_path):
         "member",
         "days",
         "forecasts",
+        "mae_forecasts",
         "mae",
         "common_forecasts",
         "common_mae",
@@ -461,6 +462,7 @@ def test_rungs_per_day_against_hand_counts(tmp_path):
         "rung": 0,
         "days": 3,
         "forecasts": 72,
+        "mae_forecasts": 72,
         "mae": 1.0,
         "common_forecasts": 72,
         "common_mae": 1.0,
@@ -472,6 +474,7 @@ def test_rungs_per_day_against_hand_counts(tmp_path):
         "rung": 1,
         "days": 1,
         "forecasts": 24,
+        "mae_forecasts": 24,
         "mae": 2.0,
         "common_forecasts": 23,
         "common_mae": 2.0,
@@ -535,6 +538,29 @@ def test_rungs_refuses_what_is_not_a_fallback(tmp_path):
     assert (
         rows.attrs["absent"] == ["b"] and rows.loc[1, "member_forecasts"] == 0 and np.isnan(rows.loc[1, "member_mae"])
     )
+
+
+def test_rungs_count_what_each_mae_is_over(tmp_path):
+    """A key without an actual is served and counted in `forecasts`, and left out of `mae_forecasts`, which `mae` is over."""
+    keys = planned_keys(PLAIN, (1,), "1h")
+    sixth = "2024-05-06"
+    no_actual = {(sixth, 7), ("2024-05-08", 3)}
+
+    def written(error, lacking=()):
+        out = []
+        for k in keys:
+            if (k[0], k[2]) in lacking:
+                continue
+            r = record(k, actual_of(k[1], k[2]) + error, PLAIN)
+            out.append({**r, "actual": None} if (k[0], k[2]) in no_actual else r)
+        return out
+
+    write_member(tmp_path, "a", written(1.0, lacking={(sixth, 5)}), PLAIN)
+    write_member(tmp_path, "b", written(2.0), PLAIN)
+    rows = report_of(tmp_path, FallbackEnsemble(["a", "b"], name="live"), models=("a", "b")).rungs("live")
+    a, b = rows.set_index("member").loc["a"], rows.set_index("member").loc["b"]
+    assert (a["forecasts"], a["mae_forecasts"], a["mae"]) == (4 * 24, 4 * 24 - 1, 1.0)
+    assert (b["forecasts"], b["mae_forecasts"], b["mae"], b["common_forecasts"]) == (24, 23, 2.0, 22)
 
 
 def test_allow_missing_passes_over_a_rung_without_results_and_keeps_the_ladder(tmp_path):

@@ -124,6 +124,7 @@ RUNG_COLUMNS = [
     "member",
     "days",
     "forecasts",
+    "mae_forecasts",
     "mae",
     "common_forecasts",
     "common_mae",
@@ -1312,15 +1313,16 @@ class EvaluationReport:
         rung order, including rungs that served nothing.
 
         Columns: `rung` (0-based), `member`, `days` (the (issue day, horizon, target day) it served at least one forecast of; with
-        `per="day"` it served all of each), `forecasts` (the keys it served), `mae` (its MAE on those with an actual),
-        `common_forecasts` (those keys where the rung-0 member has a forecast too, both with an actual), `common_mae` and
-        `rung0_mae` (this rung's and the rung-0 member's MAE on exactly those keys: a comparison on identical keys, NaN on none),
-        `member_forecasts` and `member_mae` (the member's own forecasts in this window, all of them, served or not, and its MAE on
-        those with an actual). With `per="key"` a rung above 0 serves only keys rung 0 lacks, so it has no common keys.
-        `df.attrs["missing"]` is how many planned forecasts no member served (`member_missing` in `forecast_counts()`).
+        `per="day"` it served all of each), `forecasts` (the keys it served), `mae_forecasts` and `mae` (those of them with an
+        actual, and its MAE on them), `common_forecasts` (those keys where the rung-0 member has a forecast too, both with an
+        actual), `common_mae` and `rung0_mae` (this rung's and the rung-0 member's MAE on exactly those keys: a comparison on
+        identical keys, NaN on none), `member_forecasts` and `member_mae` (the member's own forecasts in this window, all of them,
+        served or not, and its MAE on those with an actual). With `per="key"` a rung above 0 serves only keys rung 0 lacks, so it
+        has no common keys. `df.attrs["missing"]` is how many planned forecasts no member served (`member_missing` in
+        `forecast_counts()`), and `df.attrs["absent"]` the members not in this report (a rung `report(allow_missing=True)` passed
+        over for lack of results): they served nothing here and have no forecasts of their own, with a warning.
 
-        Every MAE is an exact sum (the same whatever order the records are in). The members must be in the report, as they are in
-        what `run` and `ModelPipeline.report` return.
+        Every MAE is an exact sum (the same whatever order the records are in).
         """
         if name not in self.refs:
             raise ValueError(f"No model or ensemble {name!r} in this report: it has {sorted(self.refs)}")
@@ -1362,6 +1364,7 @@ class EvaluationReport:
                     "member": member,
                     "days": len(mine.index.droplevel("hour").unique()) if len(mine) else 0,
                     "forecasts": len(mine),
+                    "mae_forecasts": int(scored.sum()),
                     "mae": _exact_mae(prediction[scored], actual[scored]),
                     "common_forecasts": int(common.sum()),
                     "common_mae": _exact_mae(prediction[common], actual[common]),
