@@ -57,6 +57,7 @@ from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
 import pandas as pd
 
+from .._clock import current_clock
 from .store import (
     LIVE_FILE,
     LIVE_KEYS,
@@ -111,8 +112,8 @@ class LiveLateError(RuntimeError):
 
 
 def now_utc() -> pd.Timestamp:
-    """The instant now, UTC (the clock step 8a routes)."""
-    return pd.Timestamp.now(tz="UTC")
+    """The instant now, UTC, on the current clock (`epftoolbox2.clock`)."""
+    return current_clock().now()
 
 
 def local_instant(day: str, time: str, zone: str) -> pd.Timestamp:
