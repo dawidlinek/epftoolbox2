@@ -24,7 +24,7 @@ tree = tree_predictors(exogenous=["load_forecast"])  # 183 inputs, for HistGBMod
 | `expert_predictors` | `exogenous=("load_forecast",)`, `price="price"`, `weekdays=WEEKDAYS`, `calendar_prefix=""` | Expert-model inputs (Ziel & Weron 2018) |
 | `tree_predictors` | `exogenous` (required), `price="price"`, `freq="1h"`, `calendar_prefix=""` | A pooled tree's inputs: `lear_predictors`, then `"period"`, then the row's own period of the same blocks (`price`, `price_d-1`, `price_d-2`, `price_d-6`, and per series `x_d+{horizon}`, `x`, `x_d-6`), the research's order ([Residual Model](/epftoolbox2/models/residual/)) |
 | `exaa_profile` | `freq="1h"`, `prefix=""` | The EXAA auction's profile of the target day, `price_exaa_h00_d+{horizon}` … (`prefix="de"` gives `de_price_exaa_…`) |
-| `week_ahead_predictors` | `which="regional_nwp"` (`"calendar_x"`, `"regional_nwp"` or `"expert"`), `stat=None` (`"min"` or `"max"`, only for `"expert"`) | The week-ahead daily minimum and maximum load lists |
+| `week_ahead_predictors` | `which="regional_nwp"` (`"calendar_x"`, `"regional_nwp"` or `"expert"`), `stat=None` (`"min"` or `"max"`, only for `"expert"`), `study=False` (`True`: the study's exact list, only for `"regional_nwp"`) | The week-ahead daily minimum and maximum load lists |
 | `live_defaults` | `zone`, `exaa=False` | A dict of live-run settings for a zone |
 | `profile_columns` | `column`, `freq="1h"` | The names `DailyProfileTransformer` creates, e.g. `price_h00` … `price_h23` |
 
@@ -175,8 +175,8 @@ docs give no accuracy gain for adding it and no forecast count; measure it on yo
 | `which` | Names | Contents |
 |---|---|---|
 | `"calendar_x"` | 25 | holiday flags of D, D-1 … D-7 and D+1 … D+9, the weekday dummies and daylight hours of the target day |
-| `"regional_nwp"` | 266, in the order coordinate descent visits them | `calendar_x`, 168 hourly lags of the load, the TSO's next 35 hourly forecasts, the last 7 daily minima and maxima, the TSO's A31 forecasts for D+3 … D+9, seven ECMWF variables averaged over the market's regions, heating and cooling degree days |
-| `"expert"` (`stat="min"` or `"max"`) | 8 | Monday, Saturday and Sunday-or-holiday dummies, the TSO's forecast of D and of the target day, the actual statistic of D-1 and D-7, the capital's temperature |
+| `"regional_nwp"` | 265, in the order coordinate descent visits them (`study=True`: the study's 266, with the late `load_actual_h-1`) | `calendar_x`, 167 hourly lags of the load (`load_actual_h-2` … `-168`), the TSO's next 35 hourly forecasts, the last 7 daily minima and maxima, the TSO's A31 forecasts for D+3 … D+9, seven ECMWF variables averaged over the market's regions, heating and cooling degree days |
+| `"expert"` (`stat="min"` or `"max"`) | 8 | Monday, Saturday and Sunday-or-holiday dummies, the TSO's forecast of the issue row's date (`_d+0`) and of the target day, the actual statistic of D-1 and D-6 (`actual_daily_{stat}_d-1`, `_d-6`, relative to the issue day), the capital's temperature |
 
 ```python
 from epftoolbox2.models import LassoCVModel, OLSModel
@@ -187,13 +187,21 @@ lasso = LassoCVModel(predictors=week_ahead_predictors("regional_nwp"), training_
 expert = OLSModel(predictors=week_ahead_predictors("expert", stat="max"), training_window=1092, fit_intercept=True, name="expert")
 ```
 
-Evidence (the [week-ahead page](/epftoolbox2/model-pipeline/week-ahead/#reproducing-the-study)): a published study of 20 European
-markets, 104 Friday issues each (2024-01-05 to 2025-12-26), horizons 3 … 9, so 728 forecasts of each statistic per market. The Lasso on
-`regional_nwp` beat the TSO's A31 forecast in all 40 market-statistics, by a mean log-gain of +37.44 % pooled over horizons (29,120
-forecasts of each statistic). For Poland the log-gain is 23.6 % on the minimum and 20.3 % on the maximum, and the Lasso's MAE is
-367.1 MW against the expert's 417.24 MW on 1,456 forecasts. The library refits the study's forecasts to within 0.0005 MW, but only
-with the settings above (`S02`, and `fit_intercept=True` on the OLS). The all-Fridays form can't be issued as it is on other days:
-see the page's "Issued every day". `load_actual_h-1` is known at 13:00 and is late for a noon issue; drop it for a real one.
+The default `regional_nwp` leaves out `load_actual_h-1`, the load of 11:00 that is known at 13:00: after a noon issue it is a look-ahead
+(`availability="raise"` refuses it and `verify` calls the Lasso a `leak`). `study=True` gives the study's exact 266 names, to reproduce
+its numbers only.
+
+Evidence, **study list** (the [week-ahead page](/epftoolbox2/model-pipeline/week-ahead/#reproducing-the-study)): a published study of 20
+European markets, 104 Friday issues each (2024-01-05 to 2025-12-26), horizons 3 … 9, so 728 forecasts of each statistic per market. The
+Lasso on the 266 names beat the TSO's A31 forecast in all 40 market-statistics, by a mean log-gain of +37.44 % pooled over horizons
+(29,120 forecasts of each statistic). For Poland the log-gain is 23.6 % on the minimum and 20.3 % on the maximum, and the Lasso's MAE
+is 367.1 MW against the expert's 417.24 MW on 1,456 forecasts. The library refits the study's forecasts to within 0.0005 MW, but
+only with the settings above (`S02`, and `fit_intercept=True` on the OLS). These numbers were measured on the study list, not on the
+default one.
+
+Evidence, **default list**: Measured on Poland with the same LassoCV settings (`S02`), the 43 Fridays 2024-01-05 to 2024-10-25 of the repository's fixture (`tests/fixtures/week_ahead/PL_noon.parquet`), horizons 3 to 9: 301 forecasts of each statistic from each list, on identical keys. Minimum: MAE 326.94 MW (default) against 327.39 MW (study list). Maximum: 469.03 MW against 468.01 MW. So dropping `load_actual_h-1` changes the MAE by -0.14 % and +0.22 %, noise next to the 20 to 24 % gain over the TSO; the honest list has no measured advantage or loss. Caveat: the fixture starts on 2021-10-20, so the windows before 2024-10-16 are shorter than 1092 days (the same for both lists), and no TSO benchmark was run here, so the +37 % and 23.6 % / 20.3 % figures are not claimed for the default list.
+
+The all-Fridays form can't be issued as it is on other days: see the page's "Issued every day".
 
 ## Live Defaults
 
