@@ -13,6 +13,7 @@ from .hgb import HistGBModel
 from .gbm import CatBoostModel, LightGBMModel, XGBoostModel
 from .residual import ResidualModel
 from .shape import ShapeModel
+from .foundation import ChronosModel, FoundationModel, T0Model
 
 __all__ = [
     "BaseModel",
@@ -31,6 +32,9 @@ __all__ = [
     "CatBoostModel",
     "ResidualModel",
     "ShapeModel",
+    "FoundationModel",
+    "T0Model",
+    "ChronosModel",
     "PredictorContext",
     "PredictorPlan",
     "Use",

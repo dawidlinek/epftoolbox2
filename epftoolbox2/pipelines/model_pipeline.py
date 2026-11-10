@@ -196,6 +196,8 @@ COMPONENT_REGISTRY = {
         "CatBoostModel": "epftoolbox2.models.gbm",
         "ResidualModel": "epftoolbox2.models.residual",
         "ShapeModel": "epftoolbox2.models.shape",
+        "T0Model": "epftoolbox2.models.foundation",
+        "ChronosModel": "epftoolbox2.models.foundation",
     },
     "ensembles": {
         "AverageEnsemble": "epftoolbox2.ensembles.average",

@@ -83,6 +83,18 @@ gbm = [
 tune = [
     "optuna>=4,<5",
 ]
+# The foundation models (epftoolbox2/models/foundation.py), one extra per family, imported by the first forecast; weights come
+# from `epf weights fetch` (huggingface_hub). Both load safetensors, which has no free-threaded (3.14t) wheel, so CI never
+# installs them there. t0 is pinned: 0.5.0 against the git head moved single hours by up to 161 EUR/MWh.
+t0 = [
+    "tfc-t0==0.5.0",
+    "torch>=2.9",
+    "huggingface_hub>=1",
+]
+chronos = [
+    "chronos-forecasting>=2.3.2,<3",
+    "torch>=2.9",
+]
 dev = [
     "pytest>=7.4.0",
     "pytest-cov>=4.1.0",
@@ -118,6 +130,7 @@ markers = [
     "integration: Integration tests that require real API keys and use real connections",
     "examples: Runs examples/*.py and the documentation quick start against the live APIs (also marked integration)",
     "gpu: Needs a CUDA GPU (also marked integration, so the fast suite never runs it)",
+    "weights: Needs a family's pretrained weights in EPFTOOLBOX2_WEIGHTS_DIR (also marked integration); skips without them",
 ]
 filterwarnings = [
     "ignore::DeprecationWarning",
