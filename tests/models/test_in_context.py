@@ -623,6 +623,10 @@ def packaged(request, monkeypatch, tmp_path):
     pytest.importorskip(family)
     cls = FAMILIES[family]
     install_fake_weights(monkeypatch, tmp_path / "weights", cls, real_extra=True)
+    for (
+        name
+    ) in _weights.OFFLINE_VARIABLES:  # what a fit sees is the adapter's offline scope, not the caller's environment
+        monkeypatch.delenv(name, raising=False)
     seen = patch_package(monkeypatch, family)
 
     def make(name="icl", inputs=None, **params):
