@@ -125,10 +125,12 @@ class ForecastSource(DataSource):
     the upstream issue zone) states a later time, for forecasts revised after it, never an earlier one. An ensemble's results
     read their issue time from its members' manifests.
 
-    A live upstream (a live directory, `results.live`, step 8c) holds revisions: each key is read from the newest revision
-    committed at or before `available` (else the issue time) on the key's issue day, in the issue zone, so a cell never holds a
-    forecast that wasn't out when the rule says it is known; a key with no such revision has no value. An upstream with no
-    committed revision raises. Live records (with `issued_at`) outside a live directory are refused.
+    A live upstream (a live directory, `results.live`, step 8c) holds revisions: each issue day is read from the newest
+    revision committed at or before `available` (else the issue time) on that day, in the issue zone, so a cell never holds a
+    forecast that wasn't out when the rule says it is known; a day with no such revision has no value. A live upstream commits
+    until its deadline, after its issue time, so give it `available` at or after the deadline: without, its on-schedule
+    revisions are left out, which warns with the number of issue days. An upstream with no committed revision raises. Live
+    records (with `issued_at`) outside a live directory are refused.
 
     Its availability rule and its upstream's identity come from `InformationSet.with_source_rules` (a `Workflow` applies it):
     a model run outside one must pass `information_set.with_source_rules(data_pipeline.sources)`, else the column has no rule.
@@ -347,7 +349,22 @@ class ForecastSource(DataSource):
                 f"ForecastSource({self.model!r}): the live directory {self.path} has no committed revision (no "
                 f"`committed` line in {store.issues_path.name}): nothing it holds was ever out"
             )
-        return store.visible("latest", cutoff=self._cutoff(upstream))
+        visible = store.visible("latest", cutoff=self._cutoff(upstream))
+        everything = store.visible("latest", cutoff=None)
+        later = sorted(day for day, revisions in everything.items() if max(revisions) > max(visible.get(day, {0: None})))
+        if later:
+            time = self.available or upstream.issue_time
+            warnings.warn(
+                f"ForecastSource({self.model!r}): on {len(later)} issue days (e.g. {later[0]}) the upstream committed a newer "
+                f"revision after {time} {upstream.issue_timezone}, which this column doesn't read: each cell is the revision "
+                "out by "
+                + ("the upstream's issue time" if self.available is None else "`available`")
+                + ". A live upstream commits until its deadline: pass available= at or after it (its rule is then the "
+                "same time), or keep this cut-off knowingly.",
+                UserWarning,
+                stacklevel=4,
+            )
+        return visible
 
     def availability(self, upstream: Optional[Upstream] = None):
         """The column's rule: published at the upstream's issue time (or `available`) in its issue zone, `horizon` days before
