@@ -138,7 +138,10 @@ class ModelPipeline:
         dry_run: bool = False,            # Check everything, write nothing
     ) -> Dict[str, Any]: ...              # The delivered line; LiveBusyError while another call holds live.lock
 
+    def frozen(self, save_dir: Union[str, Path]) -> "ModelPipeline": ...  # Each top= ensemble as a plain average of its newest segment's choice
+
     availability: str                     # The level in force; assign None to go back to the default
+    frozen_choices: Dict[str, Dict[str, Any]]  # What frozen() froze, by ensemble; empty otherwise, never saved to YAML
     engine: str                           # "off", "on" or "check"; saved to YAML only when not "off"
 
     def save(self, path: Union[str, Path]) -> None: ...       # Save to YAML
@@ -232,12 +235,13 @@ class EvaluationReport:
     windows: Optional[RunWindows]                   # The windows and segments of the run; None for a plain run
 
     def summary(self) -> pd.DataFrame: ...          # model, forecasts, one column per evaluator
-    def forecast_counts(self) -> pd.DataFrame: ...  # model, planned, produced, missing, skip reasons
+    def forecast_counts(self) -> pd.DataFrame: ...  # model, planned, produced, missing, skip reasons; attrs: passed_over (a fallback's members without results)
     def availability(self) -> pd.DataFrame: ...     # model, predictor, role, status, list, periods, horizons, rule, known, issued, note
     def vintages(self) -> pd.DataFrame: ...         # model, predictor, series, class, ctx
     def provenance(self) -> pd.DataFrame: ...       # model, family, licence, licence_url, commercial_use, revenue_cap, attribution, weights, sha256, runtime, corpus, corpus_end, released, validation_verdict, test_verdict
     def training_days(self) -> pd.DataFrame: ...    # model, list, predictors, forecasts, periods, horizons, smallest_days, median_days, largest_days, thin_forecasts
     def choices(self) -> pd.DataFrame: ...          # ensemble, kind, segment, chosen, k, validation_mae, validation_forecasts, validation_share, validation_start, validation_end, test_start, test_end, candidates, test_mae, gap; a row per model a search chose; attrs: member_mae, k_mae, limited_by, search
+    def rungs(self, name: str) -> pd.DataFrame: ... # A FallbackEnsemble's rungs: rung, member, days, forecasts, mae_forecasts, mae, common_forecasts, common_mae, rung0_mae, member_forecasts, member_mae; attrs: missing, absent
     def by_hour(self) -> pd.DataFrame: ...
     def by_horizon(self) -> pd.DataFrame: ...
     def by_hour_horizon(self) -> pd.DataFrame: ...
@@ -357,7 +361,7 @@ def read_windows(path: Union[str, Path]) -> Optional[RunWindows]: ...  # From a 
 ## Ensembles
 
 ```python
-from epftoolbox2.ensembles import AverageEnsemble, Ensemble
+from epftoolbox2.ensembles import AverageEnsemble, Ensemble, FallbackEnsemble
 
 class AverageEnsemble(Ensemble):
     def __init__(
@@ -366,10 +370,21 @@ class AverageEnsemble(Ensemble):
         top: Union[int, str, None] = None,  # None: all of them; k: the best k on validation; "validation": chooses k as well
         by: str = "validation",             # Where top chooses, the only value
         name: str = "avg",                  # Unique across models and ensembles
+        *,
+        chosen_through: Optional[str] = None,  # A frozen average: no forecast issued on or before it (chosen_in_sample)
+    ): ...
+
+class FallbackEnsemble(Ensemble):
+    def __init__(
+        self,
+        members: Sequence[str],             # The ladder, best first: names of models or ensembles
+        *,
+        per: str = "day",                   # "day": a target day whole from one member; "key": each key from the first that has it
+        name: str,                          # Unique across models and ensembles
     ): ...
 ```
 
-See [Ensembles](/epftoolbox2/model-pipeline/ensembles/).
+See [Ensembles](/epftoolbox2/model-pipeline/ensembles/) and [Fallbacks](/epftoolbox2/model-pipeline/fallback/).
 
 ---
 

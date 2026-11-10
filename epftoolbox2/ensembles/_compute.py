@@ -11,6 +11,9 @@ days of a later segment are test days of the one before it, and stay tagged "tes
 What may be averaged is read from the manifests of the leaf models, the models under any nesting (`_check_members_agree`): one
 target, horizon, list of horizons, weekdays issued on, frequency, time zone and information set, and one value in every column two
 of them read.
+
+A `FallbackEnsemble` reads its members the same way, is checked the same way, and takes each day (or key) from the first member
+that has all of what the clock plans for it (`_fallback_forecasts`).
 """
 
 from __future__ import annotations
@@ -28,7 +31,7 @@ import numpy as np
 
 from .._clock import current_clock
 from ..logging import get_logger
-from ..models._calendar import IssueCalendar
+from ..models._calendar import IssueCalendar, periods_per_day, skipped_periods
 from ..results.manifest import (
     ENSEMBLE_KIND,
     SCHEMA_VERSION,
@@ -45,11 +48,15 @@ from ..results.store import with_status
 from ..results.windows import SKIP_TARGET_IN_TEST, TEST, VALIDATION, RunWindows
 from ..results.vintages import union_vintages
 from .base import Choice, Ensemble
+from .fallback import MEMBER, RUNG, FallbackEnsemble
 
 logger = get_logger(__name__)
 
 # In `forecast_counts()`: a planned forecast that a member the ensemble averages has no finite prediction for.
 SKIP_MEMBER_MISSING = "member_missing"
+# In `forecast_counts()`: a planned forecast of a frozen average (`AverageEnsemble(chosen_through=...)`) issued on or before the last
+# day its members' choice read, which it doesn't make: it would be scored on days its members were chosen on.
+SKIP_CHOSEN_IN_SAMPLE = "chosen_in_sample"
 
 # A choice below any of these is still made, with a warning: on the keys all members hold, as a share of those the fullest
 # member holds, on how many distinct target days, and on how many distinct issue days. A member's holes can decide what is left to
@@ -97,6 +104,13 @@ class _Member:
     prediction: np.ndarray
     actual: np.ndarray
     freq: Optional[str]
+    missing: bool = False
+
+    @classmethod
+    def absent(cls) -> "_Member":
+        """A member with no results at all, which a fallback passes over."""
+        empty = np.empty(0, dtype=np.int64)
+        return cls(empty, empty, np.empty(0), np.empty(0), None, missing=True)
 
     def digest(self) -> str:
         data = hashlib.sha256()
@@ -145,6 +159,7 @@ def compute(
     test_only: bool,
     leaves: Sequence[str],
     provenance: Optional[Callable[[], Tuple[str, Optional[str]]]] = None,
+    in_sample_through: Optional[str] = None,
 ) -> Computed:
     """Compute `ensemble` from `refs`, which hold its members and its `leaves`, and write it to `path`, if any.
 
@@ -153,23 +168,44 @@ def compute(
     has forecasts in the test window alone. `leaves` are the models under it, however nested. `provenance` gives the package
     version and git SHA its manifest records (a run's `FrameHashes.provenance`, so that a run's manifests agree), read now if
     not given.
+
+    A `FallbackEnsemble`'s member missing from `refs` (`report(allow_missing=True)` passed over it) serves nothing: its rung
+    stays in place, with no forecast.
+
+    `in_sample_through` is the latest `chosen_through` of a frozen average among its members, however nested: what is issued on
+    or before it was chosen on, for this ensemble too, which then makes no forecast of it (`chosen_in_sample`), so a fallback
+    over a frozen average doesn't serve those days from its lower rungs. Its own `chosen_through`, if it has one, counts as well.
     """
-    members = {name: _read_member(ensemble, name, refs[name], stored) for name in ensemble.members}
-    manifests = {name: _read_manifest(refs[name]) for name in ensemble.members}
+    absent = [name for name in ensemble.members if name not in refs] if isinstance(ensemble, FallbackEnsemble) else []
+    members = {
+        name: _Member.absent() if name in absent else _read_member(ensemble, name, refs[name], stored)
+        for name in ensemble.members
+    }
+    manifests = {name: None if name in absent else _read_manifest(refs[name]) for name in ensemble.members}
     # Results held in memory have no manifest to read, and they come from one frame.
     leaf_manifests = {leaf: _read_manifest(refs[leaf]) for leaf in leaves if refs[leaf].path is not None}
     _check_members_agree(ensemble, members, leaf_manifests)
     grid = _on_one_grid(ensemble, members)
 
+    freq = next((member.freq for member in members.values() if member.freq is not None), like.freq)
+    bounds = [day for day in (getattr(ensemble, "chosen_through", None), in_sample_through) if day is not None]
+    chosen_through = max(bounds) if bounds else None
     choices: List[Dict[str, Any]] = []
+    rung: Optional[np.ndarray] = None
     if ensemble.needs_validation:
         picked, prediction, choices = _chosen_forecasts(ensemble, grid, stored)
+    elif isinstance(ensemble, FallbackEnsemble):
+        picked, rung = _fallback_forecasts(ensemble, grid, stored, like.zone, freq, test_only)
+        prediction = grid.predictions[picked, rung]
     else:
         picked = np.flatnonzero(np.isfinite(grid.predictions).all(axis=1))
         prediction = ensemble.combine(grid.predictions[picked])
+    if chosen_through is not None:  # in sample for a frozen choice: nothing issued on or before the last day it read
+        kept = (grid.codes[picked] >> _RUN_SHIFT) > _ordinal(chosen_through)
+        picked, prediction = picked[kept], prediction[kept]
+        rung = None if rung is None else rung[kept]
 
-    freq = next((member.freq for member in members.values() if member.freq is not None), like.freq)
-    records = _records(grid, picked, prediction, freq, stored)
+    records = _records(grid, picked, prediction, freq, stored, rung, ensemble.members)
     if path is not None:
         # In this order: results with no manifest of an ensemble are not an ensemble's, and nothing overwrites them.
         _write_manifest(path, ensemble, stored, freq, members, manifests, choices, provenance)
@@ -196,6 +232,9 @@ def compute(
             like.issue_days,
             # What its models read: an ensemble is compared as a model, and reads their inputs.
             union_vintages(refs[leaf].vintages for leaf in leaves),
+            tuple(ensemble.members) if isinstance(ensemble, FallbackEnsemble) else None,
+            chosen_through,
+            tuple(absent),
         ),
         choices,
     )
@@ -440,6 +479,44 @@ def _chosen_forecasts(
     return np.concatenate(picked), np.concatenate(prediction), choices
 
 
+def _fallback_forecasts(
+    ensemble: FallbackEnsemble,
+    grid: _Grid,
+    stored: Optional[RunWindows],
+    zone: Any,
+    freq: str,
+    test_only: bool,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """(positions on the grid, the rung serving each) of what `ensemble` forecasts.
+
+    A day's planned keys are those the clock has on its issue day and its target day, as `IssueCalendar` plans them, whether any
+    member holds them or not: a key no member has leaves its day to no one under `per="day"`. With `test_only` (a member has test
+    forecasts only) only test days are served, or a lower rung would serve the validation days the top one lacks.
+    """
+    days, groups = np.unique(grid.codes >> _HORIZON_SHIFT, return_inverse=True)
+    groups = groups.reshape(-1)
+    run = days >> (_RUN_SHIFT - _HORIZON_SHIFT)
+    target = run + ((days >> (_TARGET_SHIFT - _HORIZON_SHIFT)) & _LOW_16) - _TARGET_ZERO
+    periods = periods_per_day(freq)
+    period = grid.codes & 0xFF
+    planned_key = period < periods
+    planned = np.full(len(days), periods, dtype=np.int64)
+    if zone is not None:
+        gaps = {day: skipped_periods(_iso(day), freq, zone) for day in np.unique(np.r_[run, target]).tolist()}
+        for g in np.flatnonzero([bool(gaps[r] or gaps[t]) for r, t in zip(run.tolist(), target.tolist())]).tolist():
+            gone = gaps[int(run[g])] | gaps[int(target[g])]
+            planned[g] -= len(gone)
+            first, end = np.searchsorted(groups, [g, g + 1])
+            planned_key[first:end] &= ~np.isin(period[first:end], list(gone))
+    if test_only and stored is not None:
+        windows = {day: stored.window_of(_iso(day)) for day in np.unique(run).tolist()}
+        planned_key &= np.asarray([windows[day] == TEST for day in run.tolist()], dtype=bool)[groups]
+    held = np.isfinite(grid.predictions) & planned_key[:, None]
+    rung = ensemble.serve(held, groups, planned)
+    picked = np.flatnonzero(rung >= 0)
+    return picked, rung[picked]
+
+
 def _choose(
     ensemble: Ensemble,
     grid: _Grid,
@@ -522,9 +599,16 @@ def _warn_if_thin(
 
 
 def _records(
-    grid: _Grid, picked: np.ndarray, prediction: np.ndarray, freq: str, stored: Optional[RunWindows]
+    grid: _Grid,
+    picked: np.ndarray,
+    prediction: np.ndarray,
+    freq: str,
+    stored: Optional[RunWindows],
+    rung: Optional[np.ndarray] = None,
+    members: Sequence[str] = (),
 ) -> List[Dict[str, Any]]:
-    """Records in key order, with the keys of a model's, in the same order, ending with `status` and `revision`."""
+    """Records in key order, with the keys of a model's, in the same order, ending with `status` and `revision`. A fallback's
+    (`rung` given, the rung serving each) have `rung` and `member` before those."""
     records = []
     days: Dict[int, Tuple[str, int, Optional[str]]] = {}
     targets: Dict[int, str] = {}
@@ -533,8 +617,9 @@ def _records(
         grid.day_in_test[picked].tolist(),
         prediction.tolist(),
         grid.actual[picked].tolist(),
+        [None] * len(picked) if rung is None else rung.tolist(),
     )
-    for code, day_in_test, predicted, actual in zip(*columns):
+    for code, day_in_test, predicted, actual, served_by in zip(*columns):
         run = code >> _RUN_SHIFT
         if run not in days:
             run_date = _iso(run)
@@ -557,6 +642,9 @@ def _records(
         }
         if window is not None:
             record["window"] = window
+        if served_by is not None:
+            record[RUNG] = served_by
+            record[MEMBER] = members[served_by]
         records.append(with_status(record))  # `status` and `revision`: an ensemble has no list or fit of its own
     return records
 
@@ -591,7 +679,12 @@ def _write_manifest(
         return next((manifest[field] for manifest in recorded if manifest.get(field) is not None), None)
 
     created = json.loads(target.read_text()).get("created_at", now) if is_ensemble_manifest(target) else now
-    params = {key: value for key, value in vars(ensemble).items() if not key.startswith("_") and key != "name"}
+    unset = getattr(type(ensemble), "_WRITTEN_WHEN_SET", {})
+    params = {
+        key: value
+        for key, value in vars(ensemble).items()
+        if not key.startswith("_") and key != "name" and not (key in unset and value == unset[key])
+    }
     manifest = {
         "kind": ENSEMBLE_KIND,
         "model_class": type(ensemble).__name__,
@@ -606,6 +699,7 @@ def _write_manifest(
             name: {
                 "manifest": None if manifests[name] is None else manifest_digest(manifests[name]),
                 "results": member.digest(),
+                **({"missing": True} if member.missing else {}),
             }
             for name, member in members.items()
         },
@@ -631,9 +725,13 @@ def _ref(
     horizons: Sequence[int],
     weekdays: Optional[Sequence[int]] = None,
     vintages: Optional[List[Dict[str, Any]]] = None,
+    ladder: Optional[Tuple[str, ...]] = None,
+    chosen_through: Optional[str] = None,
+    passed_over: Tuple[str, ...] = (),
 ) -> ModelResultRef:
     """The ref of the whole, with a ref per window of what this run or report names, as a model's has. `horizons` are the ones
-    the members were run with, and `weekdays` the weekdays they issued on (None for every day)."""
+    the members were run with, `weekdays` the weekdays they issued on (None for every day), `ladder` a fallback's members
+    in rung order, and `chosen_through` a frozen average's last day in sample, whose planned keys are `chosen_in_sample`."""
     horizons = tuple(horizons)
     weekdays = None if weekdays is None else tuple(weekdays)
     calendar = IssueCalendar(freq, like.zone, horizons, weekdays)
@@ -655,6 +753,8 @@ def _ref(
         else horizons,
         issue_days=weekdays,
         vintages=vintages,
+        ladder=ladder,
+        passed_over=passed_over,
     )
     if like.windows is None:
         run = codes >> _RUN_SHIFT
@@ -664,18 +764,28 @@ def _ref(
         if ref.issue_days is not None:  # and of the weekdays: an ordinal's weekday, 1 being a Monday
             read &= np.isin((run - 1) % 7, ref.issue_days)
         ref.produced = int(read.sum())
-        ref.skipped = _missing(ref.count - ref.produced)
+        in_sample = _in_sample(calendar, ref.test_start, ref.test_end, chosen_through)
+        ref.skipped = {**in_sample, **_missing(ref.count - ref.produced - sum(in_sample.values()))}
         _say_what_is_missing(ref.name, {None: ref})
         return ref
     parts = split_by_window(ref, like.windows, calendar, target_before=stored.target_before)
     if test_only:
         parts.pop(VALIDATION, None)
-    for part in parts.values():
-        part.skipped.update(_missing(part.count - part.produced - part.skipped.get(SKIP_TARGET_IN_TEST, 0)))
+    for window, part in parts.items():
+        every = like.windows.validation_every if window == VALIDATION else 1
+        in_sample = _in_sample(calendar, part.test_start, part.test_end, chosen_through, every)
+        part.skipped.update(in_sample)
+        part.skipped.update(
+            _missing(part.count - part.produced - part.skipped.get(SKIP_TARGET_IN_TEST, 0) - sum(in_sample.values()))
+        )
     ref.by_window = parts
     ref.count = sum(part.count for part in parts.values())
     ref.produced = sum(part.produced for part in parts.values())
-    ref.skipped = _missing(sum(part.skipped.get(SKIP_MEMBER_MISSING, 0) for part in parts.values()))
+    ref.skipped = {
+        reason: total
+        for reason in (SKIP_CHOSEN_IN_SAMPLE, SKIP_MEMBER_MISSING)
+        if (total := sum(part.skipped.get(reason, 0) for part in parts.values()))
+    }
     _say_what_is_missing(ref.name, parts)
     return ref
 
@@ -684,12 +794,31 @@ def _missing(count: int) -> Dict[str, int]:
     return {SKIP_MEMBER_MISSING: count} if count > 0 else {}
 
 
+def _in_sample(
+    calendar: IssueCalendar, start: str, end: str, chosen_through: Optional[str], every: int = 1
+) -> Dict[str, int]:
+    """What a frozen average plans from `start` to `end` on or before `chosen_through` and doesn't make, as a skip reason."""
+    if chosen_through is None or not start or start > chosen_through:
+        return {}
+    count = calendar.count(start, min(end, chosen_through), every)
+    return {SKIP_CHOSEN_IN_SAMPLE: count} if count else {}
+
+
 def _say_what_is_missing(name: str, parts: Mapping[Optional[str], ModelResultRef]) -> None:
-    """As loud as a model's shortfall: a warning for no forecast at all in a window, a log line for some missing."""
+    """As loud as a model's shortfall: a warning for no forecast at all in a window, a log line for some missing; and a warning
+    for the keys a frozen average leaves out as in sample."""
     for window, part in parts.items():
         where = "" if window is None else f" in the {window} window"
         missing = part.skipped.get(SKIP_MEMBER_MISSING, 0)
-        if part.produced == 0 and part.count > 0:
+        in_sample = part.skipped.get(SKIP_CHOSEN_IN_SAMPLE, 0)
+        if in_sample:
+            warnings.warn(
+                f"{name}: {in_sample} of {part.count} planned forecasts{where} are issued on or before the last day a frozen "
+                "choice of its members (or of theirs) read, so they would be scored on days it was made on: not made, and "
+                f"counted as {SKIP_CHOSEN_IN_SAMPLE}.",
+                stacklevel=2,
+            )
+        if part.produced == 0 and part.count > in_sample:
             warnings.warn(f"{name}: no forecasts{where}, for lack of a member's. See forecast_counts().", stacklevel=2)
         elif missing:
             logger.warning(
@@ -699,6 +828,7 @@ def _say_what_is_missing(name: str, parts: Mapping[Optional[str], ModelResultRef
 
 
 __all__ = [
+    "SKIP_CHOSEN_IN_SAMPLE",
     "Computed",
     "MIN_VALIDATION_DAYS",
     "MIN_VALIDATION_ISSUES",

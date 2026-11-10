@@ -77,6 +77,10 @@ class ModelResultRef:
     newest delivered one), of those committed at or before `cutoff` ("deadline", the default: the deadline `live.json` records,
     on each issue day; None for every committed revision; an instant, "HH:MM", a mapping or a function of the issue day). An
     uncommitted revision, or one committed after the cut-off, is never read. A `policy` on a backtest's results raises.
+
+    `ladder` is a `FallbackEnsemble`'s members in rung order, which `EvaluationReport.rungs()` reads; None for anything else.
+    `passed_over` are the members of it that `report(allow_missing=True)` passed over for lack of results, which
+    `EvaluationReport.forecast_counts()` names.
     """
 
     name: str
@@ -104,6 +108,8 @@ class ModelResultRef:
     provenance: Optional[Dict[str, Any]] = None
     policy: Optional[str] = None
     cutoff: Any = "deadline"
+    ladder: Optional[Tuple[str, ...]] = None
+    passed_over: Tuple[str, ...] = ()
 
     def frame(self, columns: Sequence[str]) -> Optional["pd.DataFrame"]:
         """The forecasts `iter_records(columns)` gives, as a DataFrame of `columns` read without a dict per record, for results

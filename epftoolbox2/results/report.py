@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import math
 import warnings
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterator, List, Mapping, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import pandas as pd
@@ -116,6 +117,25 @@ CHOICE_COLUMNS = [
     "test_mae",
     "gap",
 ]
+
+
+# The columns of `EvaluationReport.rungs()`.
+RUNG_COLUMNS = [
+    "rung",
+    "member",
+    "days",
+    "forecasts",
+    "mae_forecasts",
+    "mae",
+    "common_forecasts",
+    "common_mae",
+    "rung0_mae",
+    "member_forecasts",
+    "member_mae",
+]
+
+# What an ensemble counts in `skipped` for a planned forecast none of its members gave it (`ensembles._compute`).
+_MEMBER_MISSING = "member_missing"
 
 
 def metric_columns(table: pd.DataFrame) -> List[str]:
@@ -1131,7 +1151,8 @@ class EvaluationReport:
         """Planned vs produced forecasts per model, with one column per skip reason.
 
         Models are only comparable on the forecasts they all produced; check this table before comparing.
-        `planned` equals `produced` for results passed in as plain lists.
+        `planned` equals `produced` for results passed in as plain lists. `df.attrs["passed_over"]`, only when there is one, names
+        per `FallbackEnsemble` the members `report(allow_missing=True)` passed over for lack of results.
         """
         reasons = sorted({reason for ref in self.refs.values() for reason in ref.skipped})
         rows = []
@@ -1143,7 +1164,11 @@ class EvaluationReport:
             row = {"model": name, "planned": planned, "produced": produced, "missing": planned - produced}
             row.update({reason: ref.skipped.get(reason, 0) for reason in reasons})
             rows.append(row)
-        return pd.DataFrame(rows, columns=["model", "planned", "produced", "missing", *reasons])
+        table = pd.DataFrame(rows, columns=["model", "planned", "produced", "missing", *reasons])
+        passed_over = {name: list(ref.passed_over) for name, ref in self.refs.items() if ref.passed_over}
+        if passed_over:
+            table.attrs["passed_over"] = passed_over
+        return table
 
     def availability(self) -> pd.DataFrame:
         """The inputs of each model that its rule puts after the issue time or that have no rule, as a run with
@@ -1287,6 +1312,76 @@ class EvaluationReport:
                     k_mae.setdefault(ensemble, {})[row["segment"]] = row["k_mae"]
         table = pd.DataFrame(rows, columns=CHOICE_COLUMNS)
         table.attrs.update(member_mae=member_mae, k_mae=k_mae, limited_by=limited_by, search=searched)
+        return table
+
+    def rungs(self, name: str) -> pd.DataFrame:
+        """How each rung of the `FallbackEnsemble` `name` did on what it served, in this report's window: one row per member, in
+        rung order, including rungs that served nothing.
+
+        Columns: `rung` (0-based), `member`, `days` (the (issue day, horizon, target day) it served at least one forecast of; with
+        `per="day"` it served all of each), `forecasts` (the keys it served), `mae_forecasts` and `mae` (those of them with an
+        actual, and its MAE on them), `common_forecasts` (those keys where the rung-0 member has a forecast too, both with an
+        actual), `common_mae` and `rung0_mae` (this rung's and the rung-0 member's MAE on exactly those keys: a comparison on
+        identical keys, NaN on none), `member_forecasts` and `member_mae` (the member's own forecasts in this window, all of them,
+        served or not, and its MAE on those with an actual). With `per="key"` a rung above 0 serves only keys rung 0 lacks, so it
+        has no common keys. `df.attrs["missing"]` is how many planned forecasts no member served (`member_missing` in
+        `forecast_counts()`), and `df.attrs["absent"]` the members not in this report (a rung `report(allow_missing=True)` passed
+        over for lack of results): they served nothing here and have no forecasts of their own, with a warning.
+
+        Every MAE is an exact sum (the same whatever order the records are in).
+        """
+        if name not in self.refs:
+            raise ValueError(f"No model or ensemble {name!r} in this report: it has {sorted(self.refs)}")
+        ref = self.refs[name]
+        if ref.ladder is None:
+            raise ValueError(
+                f"{name!r} is not a FallbackEnsemble here, so it has no rungs (a report made by aggregate() has none either)"
+            )
+        absent = [member for member in ref.ladder if member not in self.refs]
+        if absent:
+            warnings.warn(
+                f"{name}: its member(s) {absent} are not in this report (passed over for lack of results): they are shown as "
+                "serving nothing, with no forecasts of their own.",
+                stacklevel=2,
+            )
+        columns = [*FORECAST_KEYS, "prediction", "actual"]
+
+        def frame_of(member: str) -> pd.DataFrame:
+            records = self._iter_ref(self.refs[member], cols=columns) if member in self.refs else []
+            return _keyed_frame(member, records)
+
+        served = _keyed_frame(name, self._iter_ref(ref, cols=[*columns, "rung"]), ("rung",))
+        rung_zero = frame_of(ref.ladder[0])["prediction"]
+        served = served.join(rung_zero.rename("rung0_prediction"), how="left")
+        rows = []
+        for rung, member in enumerate(ref.ladder):
+            mine = served[served["rung"].to_numpy() == rung]
+            prediction, actual, rung0 = (
+                mine[c].to_numpy(dtype=float) for c in ("prediction", "actual", "rung0_prediction")
+            )
+            scored = np.isfinite(prediction) & np.isfinite(actual)
+            common = scored & np.isfinite(rung0)
+            own = frame_of(member)
+            own_prediction, own_actual = (own[c].to_numpy(dtype=float) for c in ("prediction", "actual"))
+            own_scored = np.isfinite(own_prediction) & np.isfinite(own_actual)
+            rows.append(
+                {
+                    "rung": rung,
+                    "member": member,
+                    "days": len(mine.index.droplevel("hour").unique()) if len(mine) else 0,
+                    "forecasts": len(mine),
+                    "mae_forecasts": int(scored.sum()),
+                    "mae": _exact_mae(prediction[scored], actual[scored]),
+                    "common_forecasts": int(common.sum()),
+                    "common_mae": _exact_mae(prediction[common], actual[common]),
+                    "rung0_mae": _exact_mae(rung0[common], actual[common]),
+                    "member_forecasts": len(own),
+                    "member_mae": _exact_mae(own_prediction[own_scored], own_actual[own_scored]),
+                }
+            )
+        table = pd.DataFrame(rows, columns=RUNG_COLUMNS)
+        table.attrs["missing"] = int(ref.skipped.get(_MEMBER_MISSING, 0))
+        table.attrs["absent"] = absent
         return table
 
     def _result_freqs(self) -> Dict[str, str]:
@@ -1516,6 +1611,26 @@ _PAIR_COLUMNS = (
     "statistic",
     "p_value",
 )
+
+
+def _keyed_frame(name: str, records: Iterable[Dict], extra: Sequence[str] = ()) -> pd.DataFrame:
+    """`prediction`, `actual` and `extra` of `records`, indexed by the forecast key; a `ValueError` for a record without one, or
+    a key twice (results held in memory are never deduplicated), which would pair a forecast with two others."""
+    columns = [*FORECAST_KEYS, "prediction", "actual", *extra]
+    frame = pd.DataFrame([[r.get(c) for c in columns] for r in records], columns=columns)
+    if frame[list(FORECAST_KEYS)].isna().to_numpy().any():
+        raise ValueError(f"{name}: a record lacks a forecast key {FORECAST_KEYS}, so it can't be paired with another's")
+    for column in ("prediction", "actual"):
+        frame[column] = pd.to_numeric(frame[column], errors="coerce").astype(float)
+    frame = frame.set_index(list(FORECAST_KEYS))
+    if frame.index.has_duplicates:
+        raise ValueError(f"{name}: a forecast key is there twice, so its forecast there is not one number")
+    return frame
+
+
+def _exact_mae(prediction: np.ndarray, actual: np.ndarray) -> float:
+    """The MAE as an exact sum, the same whatever the order; NaN for none."""
+    return math.fsum(np.abs(prediction - actual).tolist()) / len(prediction) if len(prediction) else float("nan")
 
 
 def _pair_row(

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import datetime
 import numbers
 from typing import Dict, List, Optional, Sequence, Union
 
@@ -48,7 +49,14 @@ class AverageEnsemble(Ensemble):
         top: None, a number of members from 1 to `len(members)`, or `"validation"`.
         by: Where `top` chooses: `"validation"`, the only value. The test period never chooses anything.
         name: Names the ensemble in every table and its results file.
+        chosen_through: A plain average whose members were chosen on validation (what `ModelPipeline.frozen()` makes): the
+            last day whose actual that choice read, an ISO date. It forecasts nothing issued on or before it, which would be
+            scored on days its members were chosen on, and `forecast_counts()` counts those keys as `chosen_in_sample`. None,
+            the default, for an average whose members nobody chose; it is written to YAML only when set.
     """
+
+    # Written to YAML and to the ensemble's manifest only when set, so that files of averages without it don't move.
+    _WRITTEN_WHEN_SET = {"chosen_through": None}
 
     def __init__(
         self,
@@ -56,16 +64,32 @@ class AverageEnsemble(Ensemble):
         top: Union[int, str, None] = None,
         by: str = VALIDATION,
         name: str = "avg",
+        *,
+        chosen_through: Optional[str] = None,
     ):
         super().__init__(members, name)
         self.top = int(top) if isinstance(top, numbers.Integral) and not isinstance(top, bool) else top
         self.by = by
+        # A YAML date written by hand, unquoted, loads as a date.
+        plain_date = isinstance(chosen_through, datetime.date) and not isinstance(chosen_through, datetime.datetime)
+        self.chosen_through = chosen_through.isoformat() if plain_date else chosen_through
         self._check()
 
     def _check(self) -> None:
         super()._check()
         if self.by != VALIDATION:
             raise ValueError(f"by must be {VALIDATION!r}: the test period never chooses anything. Got {self.by!r}")
+        if self.chosen_through is not None:
+            if self.top is not None:
+                raise ValueError(
+                    f"chosen_through is for a plain average of members chosen elsewhere, and top={self.top!r} chooses its own"
+                )
+            try:
+                datetime.date.fromisoformat(self.chosen_through)
+            except (TypeError, ValueError):
+                raise ValueError(
+                    f"chosen_through must be an ISO date such as '2025-01-04', got {self.chosen_through!r}"
+                ) from None
         if self.top is None or self.top == VALIDATION:
             return
         if isinstance(self.top, bool) or not isinstance(self.top, int):

@@ -54,7 +54,9 @@ from ..models._pooled import (
 )
 from ..models._cards import preflight, read_provenance
 from ..ensembles._compute import compute
+from ..ensembles.average import AverageEnsemble
 from ..ensembles.base import Ensemble
+from ..ensembles.fallback import FallbackEnsemble
 from ..evaluators.base import Evaluator
 from ..evaluators.dm import DMEvaluator
 from ..evaluators.economic import EconomicEvaluator
@@ -63,6 +65,7 @@ from ..results.availability import read_listing, warn_about
 from ..results.manifest import (
     FrameHashes,
     ManifestMismatchError,
+    horizons_of,
     is_ensemble_manifest,
     manifest_path,
     read_freq,
@@ -93,6 +96,7 @@ from ..results.windows import SKIP_TARGET_IN_TEST, TEST, RunWindows, check_valid
 from ..results.vintages import read_vintages
 from ..verification import VerifyReport, sample_issue_days, verify_model
 from ..logging import get_logger
+from ._frozen import model_differences
 from ._yaml import class_path, dump_yaml, to_yaml_value
 
 logger = get_logger(__name__)
@@ -203,6 +207,7 @@ COMPONENT_REGISTRY = {
     },
     "ensembles": {
         "AverageEnsemble": "epftoolbox2.ensembles.average",
+        "FallbackEnsemble": "epftoolbox2.ensembles.fallback",
     },
     "evaluators": {
         "MAEEvaluator": "epftoolbox2.evaluators.mae",
@@ -384,6 +389,8 @@ class ModelPipeline:
         self.information_set: Optional[InformationSet] = information_set
         self.availability = availability
         self.engine = engine
+        # What `frozen()` froze, by ensemble name; empty for any other pipeline, and never saved to YAML.
+        self.frozen_choices: Dict[str, Dict[str, Any]] = {}
 
     @property
     def engine(self) -> str:
@@ -1593,12 +1600,22 @@ class ModelPipeline:
                 )
 
     def _ensembles_with_their_members(self, available: set) -> List[Ensemble]:
-        """The ensembles whose members all have results, in their order; the others are left out with a warning."""
+        """The ensembles whose members all have results, in their order; the others are left out with a warning, but a
+        `FallbackEnsemble` with some of its members, which passes over the others with a warning."""
         reported = []
         known = set(available)
         for ensemble in self._ordered_ensembles():
             lacking = [member for member in ensemble.members if member not in known]
-            if lacking:
+            if lacking and isinstance(ensemble, FallbackEnsemble) and len(lacking) < len(ensemble.members):
+                # A ladder's rung without results serves nothing, and the rungs below it serve its days.
+                warnings.warn(
+                    f"Report: fallback {ensemble.name!r} passes over its member(s) {lacking}, which have no results: they "
+                    "serve nothing, and the rungs below them serve their days. report.rungs() shows them as serving none.",
+                    stacklevel=3,
+                )
+                reported.append(ensemble)
+                known.add(ensemble.name)
+            elif lacking:
                 warnings.warn(
                     f"Report: ensemble {ensemble.name!r} is left out: no results for its member(s) {lacking}. It is never "
                     "averaged over the members that happen to be there.",
@@ -1623,6 +1640,7 @@ class ModelPipeline:
         held = dict(refs)
         leaves: Dict[str, List[str]] = {}
         test_only_names: set = set()
+        through: Dict[str, str] = {}  # each ensemble's latest `chosen_through`, its own or a member's
         computed: Dict[str, ModelResultRef] = {}
         choices: Dict[str, List[Dict]] = {}
         for ensemble in ensembles:
@@ -1631,9 +1649,30 @@ class ModelPipeline:
                 test_only_names.add(ensemble.name)
             path = self.results_path(save_dir, ensemble, "jsonl") if save_dir else None
             leaves[ensemble.name] = list(
-                dict.fromkeys(leaf for member in ensemble.members for leaf in leaves.get(member, [member]))
+                dict.fromkeys(
+                    # A fallback's member without results (`allow_missing`) has no leaves to read.
+                    leaf
+                    for member in ensemble.members
+                    if member in held
+                    for leaf in leaves.get(member, [member])
+                )
             )
-            result = compute(ensemble, held, stored, like, path, test_only, leaves[ensemble.name], provenance)
+            # A frozen choice's in-sample days stay in sample for every ensemble made of it, nested too.
+            bounds = [through[member] for member in ensemble.members if member in through]
+            bounds += [ensemble.chosen_through] if getattr(ensemble, "chosen_through", None) is not None else []
+            if bounds:
+                through[ensemble.name] = max(bounds)
+            result = compute(
+                ensemble,
+                held,
+                stored,
+                like,
+                path,
+                test_only,
+                leaves[ensemble.name],
+                provenance,
+                through.get(ensemble.name),
+            )
             held[ensemble.name] = result.ref
             # A ref with no window to show, as a `top` ensemble has in a validation report, is not a row of its tables.
             if result.ref.by_window is None or result.ref.by_window:
@@ -1675,6 +1714,134 @@ class ModelPipeline:
             return stored
         # A window of the run alone: the validation window keeps the days it was issued on (`validation_every`).
         return asked if asked.validation is None else replace(asked, validation_every=stored.validation_every)
+
+    def frozen(self, save_dir: Union[str, Path]) -> "ModelPipeline":
+        """This pipeline for live use, with every `top=` ensemble replaced by a plain `AverageEnsemble` of the members it chose
+        for the newest segment of the study in `save_dir`, under the same name and in the same place. Everything else is kept.
+
+        The choices are made again from the members' stored results, as `report(save_dir)` makes them, so a stale ensemble file
+        can't decide them: on validation forecasts alone (`AverageEnsemble(top=..., by="validation")`), each segment on the
+        validation period before its test period. That is a report of the `top` ensembles and their members, which writes those
+        ensembles' files again as every report does, runs no evaluator or exporter, and raises as a report would: a member
+        without results, results made without validation. A `ResidualModel` member keeps the base it names (resolved on this
+        pipeline's list), whose results aren't read. The newest segment is the last of `report.windows.segments` (with
+        `validation="previous_year"`, the latest 12 months of test), or the one validation period of a study without a test.
+
+        Before choosing, each member's manifest is compared with this pipeline's model of that name (`pipelines._frozen`: class,
+        predictors, training window, parameters, unit kind and target transform, and what of `training_cut` the model sets:
+        `refit`, `binary_mask`, `newest_target`), and a difference raises `ManifestMismatchError`: a choice made on another
+        model's results is no choice of this one. A field a manifest lacks can't be compared, and warns; so does a predictor
+        function's fingerprint that differs (its source or the information set it reads), which a comment edit changes too.
+
+        The frozen average has `chosen_through`, the last day whose actual the choice read (the newest segment's validation end
+        plus the largest horizon on file, at most the day before its test period): it makes no forecast issued on or before that
+        day, which would be scored on days its members were chosen on, and counts those keys as `chosen_in_sample`. It is
+        saved to YAML, so a frozen pipeline reloaded and run over the study's days is out of sample, and its forecasts equal the
+        `top` ensemble's on the newest segment's test period, bit for bit.
+
+        What was frozen is in the returned pipeline's `frozen_choices`, by ensemble name: `members` and `top` of the original,
+        `chosen`, `chosen_through`, `segment`, `validation` and `test` (its periods), `validation_mae`, `validation_forecasts`
+        and `save_dir`; it is not saved to YAML. A `save_dir` of a run over zones raises: each zone chose on its own, so freeze
+        each zone's folder.
+        """
+        frozen = copy.copy(self)
+        frozen.models, frozen.ensembles = list(self.models), list(self.ensembles)
+        frozen.evaluators, frozen.exporters = list(self.evaluators), list(self.exporters)
+        frozen.frozen_choices = {}
+        tops = [ensemble for ensemble in self.ensembles if ensemble.needs_validation]
+        others = [ensemble.name for ensemble in tops if not isinstance(ensemble, AverageEnsemble)]
+        if others:
+            raise TypeError(f"frozen() replaces `top` averages by plain ones, and {others} choose otherwise")
+        if not tops:
+            return frozen
+        if read_zone_index(save_dir) is not None:
+            raise ValueError(
+                f"{save_dir} holds a run over zones, and each zone chose its members on its own: call frozen() on each zone's "
+                "folder."
+            )
+        self._check_ensembles(None)
+        self._check_model_names()  # every base="name" resolved on the whole list, as a run resolves it
+        members = {member for ensemble in tops for member in ensemble.members}
+        chosen_from = [model for model in self.models if model.name in members]
+        manifests = self._refuse_other_models(chosen_from, save_dir)
+        chooser = copy.copy(self)
+        chooser.models = chosen_from
+        # A ResidualModel's base stays bound without being reported, as in an array task's slice: its records aren't read.
+        chooser._bases_from_the_whole_list = True
+        chooser.ensembles, chooser.evaluators, chooser.exporters = tops, [], []
+        chosen = chooser.report(save_dir)
+        table = chosen.choices()
+        for position, ensemble in enumerate(self.ensembles):
+            if not ensemble.needs_validation:
+                continue
+            rows = table[(table["ensemble"] == ensemble.name) & (table["kind"] == "ensemble")]
+            newest = rows.loc[rows["segment"].idxmax()]
+            test = None if pd.isna(newest["test_start"]) else [newest["test_start"], newest["test_end"]]
+            # The largest horizon on file: a choice pools every horizon its members hold.
+            largest = max(
+                [max(horizons_of(manifests[name]) or (1,)) for name in ensemble.members if name in manifests]
+                + [chosen.refs[name].horizon for name in ensemble.members if name in chosen.refs]
+            )
+            through = datetime.date.fromisoformat(newest["validation_end"]) + datetime.timedelta(days=largest)
+            if test is not None:
+                through = min(through, datetime.date.fromisoformat(test[0]) - datetime.timedelta(days=1))
+            frozen.ensembles[position] = AverageEnsemble(
+                list(newest["chosen"]), name=ensemble.name, chosen_through=through.isoformat()
+            )
+            frozen.frozen_choices[ensemble.name] = {
+                "members": list(ensemble.members),
+                "top": ensemble.top,
+                "chosen": list(newest["chosen"]),
+                "chosen_through": through.isoformat(),
+                "segment": int(newest["segment"]),
+                "validation": [newest["validation_start"], newest["validation_end"]],
+                "test": test,
+                "validation_mae": float(newest["validation_mae"]),
+                "validation_forecasts": int(newest["validation_forecasts"]),
+                "save_dir": str(save_dir),
+            }
+        return frozen
+
+    def _refuse_other_models(
+        self, models: Sequence[BaseModel], save_dir: Union[str, Path]
+    ) -> Dict[str, Dict[str, Any]]:
+        """{model: its manifest in `save_dir`} of `models`, after `ManifestMismatchError` for one whose manifest records another
+        model than this pipeline's of its name (`pipelines._frozen.model_differences`), and a warning naming what can't be
+        compared and what only may differ (a predictor function's fingerprint). A model with no manifest is left to the report,
+        which says so."""
+        manifests: Dict[str, Dict[str, Any]] = {}
+        differences: Dict[str, List[str]] = {}
+        lacking: Dict[str, List[str]] = {}
+        notes: List[str] = []
+        for model in models:
+            path = manifest_path(self.results_path(save_dir, model))
+            if not path.exists():
+                continue
+            manifests[model.name] = json.loads(path.read_text())
+            compared = model_differences(model, manifests[model.name], self.information_set)
+            if compared.differences:
+                differences[model.name] = compared.differences
+            if compared.lacking:
+                lacking[model.name] = compared.lacking
+            notes += [f"{model.name}: {note}" for note in compared.notes]
+        if differences:
+            shown = "; ".join(f"{name}: {', '.join(found)}" for name, found in differences.items())
+            raise ManifestMismatchError(
+                f"frozen(): the results in {save_dir} are of other models than this pipeline's of the same names ({shown}). A "
+                "choice made on them is no choice of these models: freeze the pipeline that ran them, or run these first."
+            )
+        if lacking:
+            warnings.warn(
+                f"frozen(): the manifests in {save_dir} don't record {lacking}, so those can't be compared with this pipeline's "
+                "models.",
+                stacklevel=3,
+            )
+        for note in notes:
+            warnings.warn(
+                f"frozen(): {note}. If the function now returns other lists, the choice was made on another model's results.",
+                stacklevel=3,
+            )
+        return manifests
 
     def verify(
         self,
@@ -2200,6 +2367,10 @@ class ModelPipeline:
             for key, default in component._WRITTEN_WHEN_SET.items():
                 if key in params and params[key] == default:
                     del params[key]  # written only when set, so files saved before it existed don't move
+        if isinstance(component, Ensemble):  # `AverageEnsemble.chosen_through` alike
+            for key, default in getattr(type(component), "_WRITTEN_WHEN_SET", {}).items():
+                if key in params and params[key] == default:
+                    del params[key]
         out = {"class": class_name, "params": params}
         search = getattr(component, "_search", None)
         if isinstance(component, BaseModel) and isinstance(search, dict):
