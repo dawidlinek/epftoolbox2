@@ -129,6 +129,15 @@ class ModelPipeline:
     ) -> Dict[str, pd.DataFrame]: ...     # "predictors", "grouped"; "lists" for a predictor function of ctx;
                                           # "newest_target" for newest_target="published"
 
+    def mark_delivered(                   # A live directory's revision delivered: the receipt's sha256 and path in delivered.jsonl
+        self,
+        save_dir: Union[str, Path],       # The live directory (live.json)
+        issue: Any,                       # The issue day: a date or "2026-10-21"
+        revision: int,                    # A committed revision of it; else ValueError
+        receipt: Union[str, Path],        # The platform's answer, saved as a file
+        dry_run: bool = False,            # Check everything, write nothing
+    ) -> Dict[str, Any]: ...              # The delivered line; LiveBusyError while another call holds live.lock
+
     availability: str                     # The level in force; assign None to go back to the default
     engine: str                           # "off", "on" or "check"; saved to YAML only when not "off"
 
@@ -745,7 +754,7 @@ class Use:                                  # What the function may return inste
     def __init__(self, predictors: Sequence[str], train_on: str = "all"): ...  # "matching": only the past days given this list
 ```
 
-`PredictorPlan` is what `ModelPipeline` builds before any fit (the distinct lists and which forecast uses which) and passes to `BaseModel.run(plan=...)`. `ModelResultRef.predictor_lists` describes those lists after a run, `ModelResultRef.availability_listing` holds the rows behind `report.availability()`, `ModelResultRef.vintages` those behind `report.vintages()` (None when no input has a class), and `ModelResultRef.matching_lists` the hash and number of predictors of each `train_on="matching"` list, which `report.training_days()` reads the records for. `ModelResultRef.zone` is the data's time zone, which says what periods a date has on the clock (see [Time and Calendars](/epftoolbox2/model-pipeline/time-and-calendars/#what-is-planned)). `ModelResultRef.horizon` is the largest horizon of a run and `ModelResultRef.horizons` the ones it lists, None for every one from 1 to `horizon`; only records of those horizons are read (see [Horizons](/epftoolbox2/model-pipeline/time-and-calendars/#some-horizons-only)). `ModelResultRef.issue_days` is the weekdays a run issued on, as `date.weekday()` numbers (Monday is 0), None for every day; only records issued on them (their `run_weekday`) are read (see [Weekdays](/epftoolbox2/model-pipeline/time-and-calendars/#some-weekdays-only)).
+`PredictorPlan` is what `ModelPipeline` builds before any fit (the distinct lists and which forecast uses which) and passes to `BaseModel.run(plan=...)`. `ModelResultRef.predictor_lists` describes those lists after a run, `ModelResultRef.availability_listing` holds the rows behind `report.availability()`, `ModelResultRef.vintages` those behind `report.vintages()` (None when no input has a class), and `ModelResultRef.matching_lists` the hash and number of predictors of each `train_on="matching"` list, which `report.training_days()` reads the records for. `ModelResultRef.zone` is the data's time zone, which says what periods a date has on the clock (see [Time and Calendars](/epftoolbox2/model-pipeline/time-and-calendars/#what-is-planned)). `ModelResultRef.horizon` is the largest horizon of a run and `ModelResultRef.horizons` the ones it lists, None for every one from 1 to `horizon`; only records of those horizons are read (see [Horizons](/epftoolbox2/model-pipeline/time-and-calendars/#some-horizons-only)). `ModelResultRef.issue_days` is the weekdays a run issued on, as `date.weekday()` numbers (Monday is 0), None for every day; only records issued on them (their `run_weekday`) are read (see [Weekdays](/epftoolbox2/model-pipeline/time-and-calendars/#some-weekdays-only)). `ModelResultRef.policy` (`"latest"`, the default in a live directory, `"first"` or `"delivered"`) and `ModelResultRef.cutoff` (`"deadline"` by default) say which committed revisions of a live directory's results are read; a policy on a backtest's results raises (see [Live records](/epftoolbox2/model-pipeline/caching/#live-records)).
 
 ### Model cards
 

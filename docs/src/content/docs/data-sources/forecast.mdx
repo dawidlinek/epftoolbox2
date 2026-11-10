@@ -158,7 +158,17 @@ The source has no per-source cache (`get_cache_config()` returns `None`): the up
 cache would serve stale forecasts. The single-file cache (`DataPipeline.run(..., cache="file.parquet")`) fingerprints the upstream's
 content through `content_digest()` (its manifest's digest and a hash of its JSONL's bytes, or of a Parquet catalog, which names its
 immutable parts),
-so it fetches again after the upstream changed and reuses the file otherwise.
+so it fetches again after the upstream changed and reuses the file otherwise. For a live upstream it hashes `issues.jsonl` too: a
+commit changes what the column holds without changing the results.
+
+## A Live Upstream
+
+An upstream in a [live directory](/epftoolbox2/model-pipeline/caching/#live-records) holds revisions of each issue day, visible once
+committed. Each key is read from the **newest revision committed at or before `available` (else the upstream's issue time) on the
+key's issue day**, in the issue zone: a revision committed at 11:50 is not in the column of a downstream that reads the upstream as
+known at 11:45, whether it runs live that morning or as a backtest a year later, so the column never holds a forecast that wasn't
+out when its rule says it is known. A key with no revision committed by then has no value, as a missing upstream day has none. The
+rule is the same `published(...)` as for a backtest's results.
 
 ## What It Refuses
 
@@ -168,7 +178,9 @@ so it fetches again after the upstream changed and reuses the file otherwise.
 | Run without an issue time | `UpstreamError`: nothing says when its forecasts were known |
 | Index without a named zone | `UpstreamError`: its periods can't be placed in time |
 | `freq="1D"` without `daily_stamp` in its manifest | `UpstreamError`: run it again into the same `save_dir` (a resume forecasts nothing new and records it) |
-| A record with `issued_at` (live results) | `UpstreamError`: which revision a chained value may use depends on when it was issued |
+| Live results with no committed revision | `UpstreamError`: nothing it holds was ever out |
+| A record with `issued_at` (live results) outside a live directory | `UpstreamError`: only the live directory's `issues.jsonl` says which revision was out when |
+| A live directory whose manifests aren't `mode: live`, or the reverse | `UpstreamError`: live revisions and a backtest's results mixed |
 | No forecast of `horizon` | `UpstreamError` naming the horizons it has |
 | `available` before its issue time | `UpstreamError` |
 | `agg` with `freq="1D"` | `UpstreamError`: read it without `agg` |
