@@ -269,24 +269,39 @@ def test_a_clock_of_ones_own_is_any_class_with_the_three_methods():
 # ---------------------------------------------------------------------------------------------------------------------
 
 
-def host_date(instant: str) -> str:
-    """The host's local date at a UTC instant, as `date.today()` would give it then."""
-    return datetime.datetime.fromtimestamp(pd.Timestamp(instant, tz="UTC").timestamp()).date().isoformat()
+@pytest.fixture
+def host_in_new_york():
+    """The host's own zone is New York (`TZ`, `time.tzset`) for the test, so that its date at the clock's now is known: at
+    23:30 UTC on 10-21 it is 19:30 on 10-21 there, and at 02:00 UTC on 10-22 still 22:00 on 10-21."""
+    if not hasattr(time, "tzset"):
+        pytest.skip("time.tzset is Unix-only")
+    before = os.environ.get("TZ")
+    os.environ["TZ"] = "America/New_York"
+    time.tzset()
+    try:
+        yield
+    finally:
+        if before is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = before
+        time.tzset()
 
 
-def test_today_is_a_date_of_the_zone_asked_on_the_clock():
+def test_today_is_a_date_of_the_zone_asked_on_the_clock(host_in_new_york):
     with use_clock(FakeClock(LATE)):
         assert resolve_date("today", WARSAW) == "2026-10-22"
         assert resolve_date("today", "UTC") == "2026-10-21"
         assert resolve_date("now_d-1", WARSAW) == "2026-10-21"
         assert resolve_date("today_d+7", WARSAW) == "2026-10-29"
-        assert resolve_date("today") == host_date(LATE)  # no zone: the host's date, as date.today() had it
         assert resolve_date("2024-01-01", WARSAW) == "2024-01-01"
         assert today(WARSAW) == datetime.date(2026, 10, 22)
         assert wall_time(WARSAW) == pd.Timestamp("2026-10-22 01:30", tz=WARSAW)
-        naive = wall_time()
-        assert naive.tzinfo is None
-        assert naive == pd.Timestamp(datetime.datetime.fromtimestamp(pd.Timestamp(LATE, tz="UTC").timestamp()))
+    with use_clock(FakeClock("2026-10-22 02:00")):  # 22:00 on 10-21 in New York
+        assert resolve_date("today", "UTC") == "2026-10-22"
+        assert resolve_date("today") == "2026-10-21"  # no zone: the host's date, as date.today() had it
+        assert today() == datetime.date(2026, 10, 21)
+        assert wall_time() == pd.Timestamp("2026-10-21 22:00")  # naive, the host's wall clock
 
 
 def test_the_data_pipeline_keywords_count_days_on_the_clock():
@@ -533,7 +548,7 @@ def test_parquet_parts_are_named_by_the_clock(market, tmp_path, monkeypatch):
     assert parts and all(name.startswith("part-20300101T080000-") for name in parts)
 
 
-# The data's last row is 10-28 in Warsaw; a host in UTC at 23:30 on 10-21 is still on 10-21, Warsaw on 10-22.
+# At 23:30 UTC on 10-21 the host (New York) and UTC are on 10-21, Warsaw on 10-22. The data's last row is 10-28 in Warsaw.
 WARSAW_ISSUE = InformationSet("11:45", WARSAW, use_defaults=False, unknown="ignore")
 
 
@@ -543,10 +558,12 @@ WARSAW_ISSUE = InformationSet("11:45", WARSAW, use_defaults=False, unknown="igno
         (WARSAW_ISSUE, "2026-10-22"),
         (InformationSet("11:45", "data", use_defaults=False, unknown="ignore"), "2026-10-22"),  # the frame's zone
         (InformationSet("11:45", "UTC", use_defaults=False, unknown="ignore"), "2026-10-21"),
-        (None, host_date(LATE)),  # no issue zone: the host's date, as before
+        (None, "2026-10-21"),  # no issue zone: the host's date, as before
     ],
 )
-def test_forecast_only_issues_on_the_issue_zones_today(information_set, expected, market, tmp_path, monkeypatch):
+def test_forecast_only_issues_on_the_issue_zones_today(
+    information_set, expected, market, tmp_path, monkeypatch, host_in_new_york
+):
     monkeypatch.setenv("MAX_PROCESSES", "1")
     monkeypatch.setenv("THREADS_PER_PROCESS", "1")
     with use_clock(FakeClock(LATE)):
@@ -563,17 +580,33 @@ def test_forecast_only_issues_on_the_issue_zones_today(information_set, expected
         assert set(again.predictions()["run_date"].astype(str)) == {expected}
 
 
-def test_forecast_only_over_zones_issues_on_one_day(market, tmp_path, monkeypatch):
-    """issue_timezone="data" over markets in two zones whose dates differ at the clock's now: the host's date for both."""
+@pytest.mark.parametrize("information_set, expected", [(WARSAW_ISSUE, "2026-10-22"), (None, "2026-10-21")])
+def test_a_residual_model_issues_on_the_issue_zones_today(
+    information_set, expected, market, monkeypatch, host_in_new_york
+):
+    from epftoolbox2.models import ResidualModel
+
     monkeypatch.setenv("MAX_PROCESSES", "1")
     monkeypatch.setenv("THREADS_PER_PROCESS", "1")
-    lisbon = make_market_data(start="2026-06-01", days=150, tz="Europe/Lisbon", horizon=1)
+    base, learner = OLSModel(PREDICTORS, training_window=28), OLSModel(["base_fc_d+{horizon}"], training_window=28)
+    model = ResidualModel(base, learner, training_window=28, refit="1D")
+    with use_clock(FakeClock(LATE)):
+        ref = model.run(market, horizon=1, forecast_only=True, information_set=information_set)
+    assert ref.test_start == ref.test_end == expected and ref.produced == 24
+
+
+def test_forecast_only_over_zones_issues_on_one_day(market, tmp_path, monkeypatch, host_in_new_york):
+    """issue_timezone="data" over markets in two zones whose dates differ at the clock's now (Warsaw on 10-22, Reykjavik on
+    10-21): the host's date for both."""
+    monkeypatch.setenv("MAX_PROCESSES", "1")
+    monkeypatch.setenv("THREADS_PER_PROCESS", "1")
+    reykjavik = make_market_data(start="2026-06-01", days=150, tz="Atlantic/Reykjavik", horizon=1)
     info = InformationSet("11:45", "data", use_defaults=False, unknown="ignore")
     mp = ModelPipeline(information_set=info).add_model(OLSModel(PREDICTORS, training_window=28, name="ols"))
     with use_clock(FakeClock(LATE)):
-        report = mp.run({"PL": market, "PT": lisbon}, horizon=1, forecast_only=True)
-    for zone in ("PL", "PT"):
-        assert set(report.zones[zone].predictions()["run_date"].astype(str)) == {host_date(LATE)}
+        report = mp.run({"PL": market, "IS": reykjavik}, horizon=1, forecast_only=True)
+    for zone in ("PL", "IS"):
+        assert set(report.zones[zone].predictions()["run_date"].astype(str)) == {"2026-10-21"}
     with use_clock(FakeClock(LATE)):  # one zone, or zones on one clock: that zone's date
         report = mp.run({"PL": market, "PL2": market}, horizon=1, forecast_only=True)
     assert set(report.zones["PL2"].predictions()["run_date"].astype(str)) == {"2026-10-22"}
