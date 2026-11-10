@@ -766,6 +766,9 @@ class ResidualModel(BaseModel):
         )
         self._residual = self._residual_field(field, start)
         self._residual_base = self._base_provenance(base, base_to, start)
+        # The issue days `_issue_span` read, not "today" read again after the base ran.
+        if forecast_only and windows is None:
+            test_start, test_end = span[0].isoformat(), span[1].isoformat()
         try:
             return super().run(
                 data,

@@ -1121,3 +1121,18 @@ def test_a_report_over_zones_reads_today_once_for_every_zone(tmp_path, monkeypat
         report = mp.report(str(tmp_path), horizon=1, forecast_only=True)
     assert {zone: run_dates(report.zones[zone]) for zone in frames} == {"DE": {"2026-10-21"}, "FR": {"2026-10-21"}}
     assert {zone: len(report.zones[zone].predictions()) for zone in frames} == {"DE": 24, "FR": 24}
+
+
+def test_a_residual_model_reads_today_once(market, monkeypatch):
+    """A residual model's own run reads "today" for its base and gives the learner that day: midnight passing while the base
+    runs (every read moves the clock a second, from 23:59:59.5 in Warsaw) doesn't move the learner to the next day."""
+    from epftoolbox2.models import ResidualModel
+
+    monkeypatch.setenv("MAX_PROCESSES", "1")
+    monkeypatch.setenv("THREADS_PER_PROCESS", "1")
+    base, learner = OLSModel(PREDICTORS, training_window=28), OLSModel(["base_fc_d+{horizon}"], training_window=28)
+    model = ResidualModel(base, learner, training_window=28, refit="1D")
+    clock = FakeClock("2026-10-21 21:59:59.5", tick=1.0)
+    with use_clock(clock):
+        ref = model.run(market, horizon=1, forecast_only=True, information_set=WARSAW_ISSUE)
+    assert ref.test_start == ref.test_end == "2026-10-21" and ref.produced == 24
