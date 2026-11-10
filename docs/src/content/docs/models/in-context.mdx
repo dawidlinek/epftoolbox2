@@ -121,17 +121,25 @@ Both classes take, in this order, `predictors`, `training_window`, `refit`, `n_e
 
 A run starts one fit at a time per process, each on one torch thread with TF32 off, in `MAX_PROCESSES` processes: every usable
 CPU by default, or 6 per GPU (the research ran 4 to 6 per GPU). The run resolves its devices once, in the parent process:
-`device="auto"` is every GPU a matmul runs on (worker k fits on GPU k modulo their number) or else the CPU, `"cuda:N"` that GPU;
-a worker that can't use the device its parent resolved stops the run rather than fit elsewhere. The seed is the same for every
+`device="auto"` is CUDA when a matmul runs on GPU 0, and then every GPU of GPU 0's model (its name and compute capability) whose
+matmul runs (worker k fits on GPU k modulo their number), or else the CPU; `"cuda:N"` is that GPU. GPUs of another model are left
+out with a warning, since under float16 autocast an A100 and an H100 give other forecasts and which unit runs on which depends on
+the scheduling: name the ones to use with `device="cuda:N"` or `CUDA_VISIBLE_DEVICES`. A worker that can't use the device its
+parent resolved stops the run rather than fit elsewhere. The seed is the same for every
 fit, so on a CPU a forecast is the same alone, in a loop, across array shards and after a resume, to the bit.
 
 A CPU and a GPU forecast differ by more than rounding (up to 4.3 EUR/MWh for TabPFN and 0.5 for TabICL on the research's
 rows, below). On a CPU both compute in float32, pinned: left to itself tabpfn autocasts to bfloat16 on CPUs with AVX512-BF16
 or AMX (Sapphire Rapids, Zen 4), whose capability reads "AVX512" as an older one's does. On a GPU both autocast to float16:
-TabPFN always, TabICL for contexts of 1,024 rows or more, or 60 columns or more (the research's). The manifest's `runtime`
-records the device type, its kernels (`cpu_capability`, `cuda_capability`), the precision (`precision`), the versions of the
-package, torch, numpy, scipy and scikit-learn (which preprocess every context), and the GPU's or CPU's name; a resume with
-another of any but the name refuses, and a fit whose package computes in another precision than the one recorded stops the
+TabPFN always, TabICL for contexts of 1,024 rows or more, or 60 columns or more (the research's). What the packages would
+size by a GPU's free memory, which another process on the card changes, is pinned: TabPFN's memory saving off (what its
+"auto" gives contexts of the research's size), TabICL's batches at its cap of 50,000 (one call for 8 views of 735 rows; an
+out-of-memory error stops the run instead of halving the batch) and its outputs kept on the GPU; what a GPU leaves
+unpinned is which float16 kernels CUDA picks on each card, driver and version (reruns, below). The manifest's `runtime`
+records the device type, its kernels (`cpu_capability`, `cuda_capability`), the precision (`precision`), those memory settings
+(`memory_saving`, `min_batch_size`, `offload`), the versions of the package, torch, numpy, scipy and scikit-learn (which
+preprocess every context), and the GPU's or CPU's name with every GPU the run used; a resume with another of any but the name
+refuses, and a fit whose package computes in another precision than the one recorded stops the
 run. A GPU's reruns are not guaranteed to be bitwise (on an H100 TabPFN's were and TabICL's moved by 2e-5): `verify` runs each
 issue day twice and calls a difference `inconclusive`, so verify on the CPU, `verify(..., device="cpu")`. The package's version
 moves forecasts too (tabpfn 9.1.0 against 9.2.0 by up to 0.42 EUR/MWh on the same rows). `[tabpfn]` needs tabpfn 9.1 or later
