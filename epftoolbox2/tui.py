@@ -750,6 +750,57 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
             "choices": ["none", "min", "max", "mean", "peak"],
         },
     ],
+    "ArchiveSource": [
+        {
+            "name": "path",
+            "description": "The SnapshotArchive's directory (filled by scheduled SnapshotArchive.record calls)",
+            "required": True,
+            "default": None,
+            "kind": "text",
+        },
+        {
+            "name": "source",
+            "description": "The archived source's key (SnapshotArchive.keys()), or its class name if the archive has one key of it",
+            "required": True,
+            "default": None,
+            "kind": "text",
+        },
+        {
+            "name": "known_at",
+            "description": "Read each delivery day as fetched by this time (HH:MM, timezone)",
+            "required": False,
+            "default": "11:45",
+            "kind": "text",
+        },
+        {
+            "name": "days_before",
+            "description": "Days from the delivery day back to the day it is read on (1 = the day before, -1 = the day after)",
+            "required": False,
+            "default": 1,
+            "kind": "int",
+        },
+        {
+            "name": "timezone",
+            "description": "Zone of the delivery days and of known_at",
+            "required": False,
+            "default": "Europe/Brussels",
+            "kind": "text",
+        },
+        {
+            "name": "columns",
+            "description": "Archived columns to emit, comma-separated (blank = every column of the source's fetches)",
+            "required": False,
+            "default": None,
+            "kind": "comma_list",
+        },
+        {
+            "name": "prefix",
+            "description": "Prefix of the emitted names, joined with _ (blank keeps the archived names)",
+            "required": False,
+            "default": "archive",
+            "kind": "text",
+        },
+    ],
     "EnergyChartsSource": [
         {
             "name": "country",
@@ -2572,6 +2623,7 @@ _SOURCES = [
     "PseSource",
     "EnergyChartsSource",
     "ForecastSource",
+    "ArchiveSource",
 ]
 _TRANSFORMERS = [
     "TimezoneTransformer",
