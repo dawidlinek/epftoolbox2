@@ -55,6 +55,7 @@ from ..models._cards import preflight, read_provenance
 from ..ensembles._compute import compute
 from ..ensembles.average import AverageEnsemble
 from ..ensembles.base import Ensemble
+from ..ensembles.fallback import FallbackEnsemble
 from ..evaluators.base import Evaluator
 from ..evaluators.dm import DMEvaluator
 from ..evaluators.economic import EconomicEvaluator
@@ -1538,12 +1539,22 @@ class ModelPipeline:
                 )
 
     def _ensembles_with_their_members(self, available: set) -> List[Ensemble]:
-        """The ensembles whose members all have results, in their order; the others are left out with a warning."""
+        """The ensembles whose members all have results, in their order; the others are left out with a warning, but a
+        `FallbackEnsemble` with some of its members, which passes over the others with a warning."""
         reported = []
         known = set(available)
         for ensemble in self._ordered_ensembles():
             lacking = [member for member in ensemble.members if member not in known]
-            if lacking:
+            if lacking and isinstance(ensemble, FallbackEnsemble) and len(lacking) < len(ensemble.members):
+                # A ladder's rung without results serves nothing, and the rungs below it serve its days.
+                warnings.warn(
+                    f"Report: fallback {ensemble.name!r} passes over its member(s) {lacking}, which have no results: they "
+                    "serve nothing, and the rungs below them serve their days. report.rungs() shows them as serving none.",
+                    stacklevel=3,
+                )
+                reported.append(ensemble)
+                known.add(ensemble.name)
+            elif lacking:
                 warnings.warn(
                     f"Report: ensemble {ensemble.name!r} is left out: no results for its member(s) {lacking}. It is never "
                     "averaged over the members that happen to be there.",
@@ -1576,7 +1587,13 @@ class ModelPipeline:
                 test_only_names.add(ensemble.name)
             path = self.results_path(save_dir, ensemble, "jsonl") if save_dir else None
             leaves[ensemble.name] = list(
-                dict.fromkeys(leaf for member in ensemble.members for leaf in leaves.get(member, [member]))
+                dict.fromkeys(
+                    # A fallback's member without results (`allow_missing`) has no leaves to read.
+                    leaf
+                    for member in ensemble.members
+                    if member in held
+                    for leaf in leaves.get(member, [member])
+                )
             )
             result = compute(ensemble, held, stored, like, path, test_only, leaves[ensemble.name], provenance)
             held[ensemble.name] = result.ref

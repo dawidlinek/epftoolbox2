@@ -530,8 +530,39 @@ def test_rungs_refuses_what_is_not_a_fallback(tmp_path):
     with pytest.raises(ValueError, match="not a FallbackEnsemble"):
         daily.rungs("live")
     alone = type(report)({"live": report.refs["live"], "a": report.refs["a"]}, [])
-    with pytest.raises(ValueError, match=r"\['b'\] are not in this report"):
-        alone.rungs("live")
+    with pytest.warns(UserWarning, match=r"\['b'\] are not in this report"):
+        rows = alone.rungs("live")
+    assert (
+        rows.attrs["absent"] == ["b"] and rows.loc[1, "member_forecasts"] == 0 and np.isnan(rows.loc[1, "member_mae"])
+    )
+
+
+def test_allow_missing_passes_over_a_rung_without_results_and_keeps_the_ladder(tmp_path):
+    """Rung 0 has no results file: the fallback serves from b and c with their own rung numbers, says so, and `rungs()` shows
+    a as serving nothing. An average with a missing member is left out, as before, and so is a ladder with no member at all."""
+    hand_members(tmp_path)
+    (tmp_path / "a.jsonl").unlink()
+    with pytest.warns(UserWarning) as caught:
+        report = pipeline(
+            FallbackEnsemble(["a", "b", "c"], name="live"),
+            AverageEnsemble(["a", "b"], name="avg"),
+            FallbackEnsemble(["a"], name="only_a"),
+        ).report(tmp_path, allow_missing=True)
+    messages = [str(w.message) for w in caught]
+    assert any("'live' passes over its member(s) ['a']" in m for m in messages)
+    assert any("ensemble 'avg' is left out" in m for m in messages)
+    assert any("ensemble 'only_a' is left out" in m for m in messages)
+    assert "live" in report.refs and "avg" not in report.refs and "only_a" not in report.refs
+    keys = planned_keys(PLAIN, (1,), "1h")
+    held = {name: {key_of(r): r["prediction"] for r in stored(tmp_path / f"{name}.jsonl")} for name in ("b", "c")}
+    want = oracle({"a": {}, **held}, ["a", "b", "c"], keys, "day")
+    assert served_by(stored(tmp_path / "live.jsonl")) == want
+    assert {rung for _, rung, _ in want.values()} == {1, 2}
+    assert json.loads(manifest_path(tmp_path / "live.jsonl").read_text())["member_results"]["a"]["missing"] is True
+    with pytest.warns(UserWarning, match=r"\['a'\] are not in this report"):
+        rows = report.rungs("live").set_index("member")
+    assert list(rows["forecasts"]) == [0, 3 * 24, 24] and rows.loc["a", "member_forecasts"] == 0
+    assert counts(report, "live") == (5 * 24, 4 * 24, 0, 24)
 
 
 # ---------------------------------------------------------------------------------------------------------------------

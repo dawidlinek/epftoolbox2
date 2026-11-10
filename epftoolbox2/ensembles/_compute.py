@@ -103,6 +103,13 @@ class _Member:
     prediction: np.ndarray
     actual: np.ndarray
     freq: Optional[str]
+    missing: bool = False
+
+    @classmethod
+    def absent(cls) -> "_Member":
+        """A member with no results at all, which a fallback passes over."""
+        empty = np.empty(0, dtype=np.int64)
+        return cls(empty, empty, np.empty(0), np.empty(0), None, missing=True)
 
     def digest(self) -> str:
         data = hashlib.sha256()
@@ -159,9 +166,16 @@ def compute(
     has forecasts in the test window alone. `leaves` are the models under it, however nested. `provenance` gives the package
     version and git SHA its manifest records (a run's `FrameHashes.provenance`, so that a run's manifests agree), read now if
     not given.
+
+    A `FallbackEnsemble`'s member missing from `refs` (`report(allow_missing=True)` passed over it) serves nothing: its rung
+    stays in place, with no forecast.
     """
-    members = {name: _read_member(ensemble, name, refs[name], stored) for name in ensemble.members}
-    manifests = {name: _read_manifest(refs[name]) for name in ensemble.members}
+    absent = [name for name in ensemble.members if name not in refs] if isinstance(ensemble, FallbackEnsemble) else []
+    members = {
+        name: _Member.absent() if name in absent else _read_member(ensemble, name, refs[name], stored)
+        for name in ensemble.members
+    }
+    manifests = {name: None if name in absent else _read_manifest(refs[name]) for name in ensemble.members}
     # Results held in memory have no manifest to read, and they come from one frame.
     leaf_manifests = {leaf: _read_manifest(refs[leaf]) for leaf in leaves if refs[leaf].path is not None}
     _check_members_agree(ensemble, members, leaf_manifests)
@@ -675,6 +689,7 @@ def _write_manifest(
             name: {
                 "manifest": None if manifests[name] is None else manifest_digest(manifests[name]),
                 "results": member.digest(),
+                **({"missing": True} if member.missing else {}),
             }
             for name, member in members.items()
         },

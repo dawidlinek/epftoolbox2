@@ -1329,13 +1329,21 @@ class EvaluationReport:
             raise ValueError(
                 f"{name!r} is not a FallbackEnsemble here, so it has no rungs (a report made by aggregate() has none either)"
             )
-        lacking = [member for member in ref.ladder if member not in self.refs]
-        if lacking:
-            raise ValueError(f"{name}: its members {lacking} are not in this report, so its rungs can't be scored")
+        absent = [member for member in ref.ladder if member not in self.refs]
+        if absent:
+            warnings.warn(
+                f"{name}: its member(s) {absent} are not in this report (passed over for lack of results): they are shown as "
+                "serving nothing, with no forecasts of their own.",
+                stacklevel=2,
+            )
         columns = [*FORECAST_KEYS, "prediction", "actual"]
+
+        def frame_of(member: str) -> pd.DataFrame:
+            records = self._iter_ref(self.refs[member], cols=columns) if member in self.refs else []
+            return _keyed_frame(member, records)
+
         served = _keyed_frame(name, self._iter_ref(ref, cols=[*columns, "rung"]), ("rung",))
-        top = ref.ladder[0]
-        rung_zero = _keyed_frame(top, self._iter_ref(self.refs[top], cols=columns))["prediction"]
+        rung_zero = frame_of(ref.ladder[0])["prediction"]
         served = served.join(rung_zero.rename("rung0_prediction"), how="left")
         rows = []
         for rung, member in enumerate(ref.ladder):
@@ -1345,7 +1353,7 @@ class EvaluationReport:
             )
             scored = np.isfinite(prediction) & np.isfinite(actual)
             common = scored & np.isfinite(rung0)
-            own = _keyed_frame(member, self._iter_ref(self.refs[member], cols=columns))
+            own = frame_of(member)
             own_prediction, own_actual = (own[c].to_numpy(dtype=float) for c in ("prediction", "actual"))
             own_scored = np.isfinite(own_prediction) & np.isfinite(own_actual)
             rows.append(
@@ -1364,6 +1372,7 @@ class EvaluationReport:
             )
         table = pd.DataFrame(rows, columns=RUNG_COLUMNS)
         table.attrs["missing"] = int(ref.skipped.get(_MEMBER_MISSING, 0))
+        table.attrs["absent"] = absent
         return table
 
     def _result_freqs(self) -> Dict[str, str]:
