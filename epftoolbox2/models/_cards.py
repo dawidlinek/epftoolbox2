@@ -549,10 +549,13 @@ def card_problems(model: Any, seen: Optional[Dict] = None) -> List[Problem]:
                 )
             )
     if extra_ok:
-        for pin in runtime_pins(model):
+        pins = runtime_pins(model)
+        # The commits these pins need, which the install line names in place of an extra's own source (runtime_commit=).
+        commits = {name: commit for name, _, commit in map(parse_pin, pins) if commit is not None}
+        for pin in pins:
             name, specifiers, commit = parse_pin(pin)
             found = installed_distribution(name, seen)
-            install = install_line(card.extra) if card.extra else f"pip install '{pin}'"
+            install = install_line(card.extra, commits) if card.extra else f"pip install '{pin}'"
             providers = runtime_providers(name, seen)
             if len(providers) > 1:
                 problems.append(

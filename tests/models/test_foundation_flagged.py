@@ -384,18 +384,23 @@ def test_patchtst_fm_is_fetched_without_an_accept(tmp_path, monkeypatch, no_netw
     assert len(calls) == 1
 
 
-def installed_timestral(monkeypatch, version="1.0.0", commit=TIMESTRAL_COMMIT):
-    """The timestral package installed (`installed_distribution`), from a repository at `commit` (None: not from one), its
-    extra found, and every card's weights resolved: what the pre-flight then says is the runtime's alone."""
+def installed_timestral(monkeypatch, version="1.0.0", commit=TIMESTRAL_COMMIT, present=True):
+    """The timestral package installed (`installed_distribution`), from a repository at `commit` (None: not from one), or not
+    installed at all (`present=False`), its extra found, and every card's weights resolved: what the pre-flight then says is
+    the runtime's alone."""
     real = _cards.installed_distribution
 
     def installed(name, seen=None):
-        return (version, commit) if name == "timestral" else real(name, seen)
+        if name == "timestral":
+            return (version, commit) if present else None
+        return real(name, seen)
 
     providers = _cards.runtime_providers
     monkeypatch.setattr(_cards, "installed_distribution", installed)
     monkeypatch.setattr(
-        _cards, "runtime_providers", lambda n, s=None: ["timestral"] if n == "timestral" else providers(n, s)
+        _cards,
+        "runtime_providers",
+        lambda n, s=None: (["timestral"] if present else []) if n == "timestral" else providers(n, s),
     )
     monkeypatch.setattr(_cards, "has_extra", lambda name: True)
     monkeypatch.setattr(_cards, "resolve_model_weights", lambda model, seen=None: None)
@@ -436,6 +441,21 @@ def test_the_timestral_pre_flight_refuses_another_commit_unless_the_model_says_s
         assert timestral_problems(TimestralModel(weights="/mine")) == []
     if not torch_installed:  # the core job: torch is refused as not installed, by its own pin
         assert any("needs torch" in m for m in runtime_problems(TimestralModel()))
+
+
+def test_with_runtime_commit_a_refusal_names_the_commit_the_run_needs(monkeypatch):
+    """`runtime_commit=` makes another commit the one a run needs: the install line of its refusal names that commit, whether
+    another commit is installed or none, never the pinned one."""
+    wanted, other = "0123abcd", "f" * 40
+    installed_timestral(monkeypatch, commit=other)
+    (refused,) = timestral_problems(TimestralModel(runtime_commit=wanted))
+    assert f"timestral@{wanted}'" in refused and TIMESTRAL_COMMIT not in refused, refused
+    installed_timestral(monkeypatch, present=False)
+    (missing,) = timestral_problems(TimestralModel(runtime_commit=wanted))
+    assert "which is not installed" in missing and f"timestral@{wanted}'" in missing, missing
+    assert TIMESTRAL_COMMIT not in missing
+    (pinned,) = timestral_problems(TimestralModel())
+    assert f"timestral@{TIMESTRAL_COMMIT}'" in pinned, pinned
 
 
 def test_the_manifest_records_the_installed_commit(monkeypatch):

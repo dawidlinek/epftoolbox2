@@ -38,11 +38,17 @@ EXTRA_SOURCES: Dict[str, Tuple[str, ...]] = {
 }
 
 
-def install_line(extra: str) -> str:
+def install_line(extra: str, commits: Optional[Dict[str, str]] = None) -> str:
     """The command that installs `extra` (one name, or several comma-separated): `pip install 'epftoolbox2[extra]'`, followed
-    by the packages `EXTRA_SOURCES` lists for it (the timestral package at its commit)."""
+    by the packages `EXTRA_SOURCES` lists for it (the timestral package at its commit). `commits` ({distribution: commit})
+    puts the commit a run needs in place of a source's own (`TimestralModel(runtime_commit=...)`)."""
     names = [name.strip() for name in extra.split(",") if name.strip()]
     sources = [source for name in names for source in EXTRA_SOURCES.get(name, ())]
+    for distribution, commit in (commits or {}).items():
+        prefix = f"{distribution} @ git+"
+        sources = [
+            source.rsplit("@", 1)[0] + f"@{commit}" if source.startswith(prefix) else source for source in sources
+        ]
     return f"pip install 'epftoolbox2[{','.join(names)}]'" + "".join(f" '{source}'" for source in sources)
 
 
