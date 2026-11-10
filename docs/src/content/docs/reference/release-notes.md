@@ -214,14 +214,18 @@ an issue day it didn't sample.
 - **`FallbackEnsemble`: a ladder of forecasts for the mornings an input is late.** `FallbackEnsemble(members, per="day", name=...)`
   takes each (issue day, horizon, target day) whole from the first member whose forecasts of every planned key of that day exist
   with a finite prediction (the clock's keys: 23 hours on a spring day), so a delivered day is never stitched from two models;
-  `per="key"` takes each key from the first member that has it. A skip record, `check_failed` included, is no forecast, and a day no
-  member serves is `member_missing`. Its records are the member's with `rung` and `member`, `status` `"ok"`, computed from stored
-  results like an average, in backtests and live alike. `report.rungs(name)` gives per rung the days and forecasts it served, its MAE
-  there, its and the rung-0 member's MAE on the keys both hold (identical keys, with the count) and each member's own MAE.
+  `per="key"` takes each key from the first member that has it. A skip record is no forecast (and `check_failed` will be one once
+  step 8f's checks write it), and a day no member serves is `member_missing`; so is the day after a spring switch for every rung
+  reading `price_d-1`, so end a ladder with a rung that doesn't. `report(allow_missing=True)` passes over a member without results,
+  with a warning. Its records are the member's with `rung` and `member`, `status` `"ok"`, computed from stored results like an
+  average, in backtests and live alike. `report.rungs(name)` gives per rung the days and forecasts it served, its MAE there with the
+  count it is over, its and the rung-0 member's MAE on the keys both hold (identical keys, with the count) and each member's own MAE.
   `ModelPipeline.frozen(save_dir)` returns the pipeline with every `top=` ensemble replaced by a plain `AverageEnsemble` of the
-  members chosen for the newest segment, chosen again from the members' results on validation alone, in `frozen_choices`. Nothing
-  else moves: without a fallback every record, manifest and table is bit for bit as before. See
-  [Fallbacks](/epftoolbox2/model-pipeline/fallback/).
+  members chosen for the newest segment, chosen again from the members' results on validation alone, after comparing each member's
+  manifest with the pipeline's model of its name, in `frozen_choices`. The frozen average has the new `chosen_through` (saved to
+  YAML): it makes no forecast issued on or before the last day its choice read, counted as `chosen_in_sample`, so a frozen
+  pipeline run over the study's days is never scored in sample. Nothing else moves: without a fallback or `chosen_through` every
+  record, manifest, YAML file and table is bit for bit as before. See [Fallbacks](/epftoolbox2/model-pipeline/fallback/).
 - **`target_transform="none"`: a pooled tree fits the raw target.** `HistGBModel`, `LightGBMModel`, `XGBoostModel` and
   `CatBoostModel` take a keyword-only `target_transform`: `"per_period"` (each period's own Invariant, the default and the only
   behaviour before), `"pooled"` (one Invariant over every row) or `"none"`, with which the estimator fits the stacked targets as

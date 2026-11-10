@@ -36,6 +36,7 @@ print(report.choices())          # what best_2 chose, on how many forecasts, for
 | `top` | `None` | `None` averages every member. A number k from 1 to `len(members)` keeps the k members with the lowest validation MAE, so `top=1` means "pick the best". `"validation"` chooses k as well |
 | `by` | `"validation"` | Where `top` chooses, and the only value there is: the test period never chooses anything. Anything else raises |
 | `name` | `"avg"` | Names the ensemble in every table and its results file. Names are unique across models and ensembles |
+| `chosen_through` | `None` | Keyword only. For a plain average of members chosen on validation, as [`ModelPipeline.frozen()`](/epftoolbox2/model-pipeline/fallback/#freezing-choices-for-live-use) makes it: the last day whose actual that choice read (an ISO date). It makes no forecast issued on or before it and counts those keys as `chosen_in_sample` in `forecast_counts()`, with a warning, so it is never scored on the days its members were chosen on. Not with `top`; written to YAML only when set |
 
 ## The average
 
@@ -134,7 +135,8 @@ expected and works: see [exact clones](/epftoolbox2/model-pipeline/comparing-mod
 `FallbackEnsemble([...], per="day", name=...)` is an ensemble that takes each target day whole from the first member of a ladder
 that has all of it, for the mornings an input is late. Its records say which `rung` and `member` served, and `report.rungs()` scores
 each rung against rung 0 on identical keys. `ModelPipeline.frozen()` replaces each `top` ensemble by a plain average of what it chose
-for the newest segment, for live use. See [Fallbacks](/epftoolbox2/model-pipeline/fallback/).
+for the newest segment, with `chosen_through` so that it makes no forecast in sample, for live use. See
+[Fallbacks](/epftoolbox2/model-pipeline/fallback/).
 
 ## Ensembles of ensembles
 

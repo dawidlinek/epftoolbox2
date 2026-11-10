@@ -232,7 +232,7 @@ class EvaluationReport:
     def provenance(self) -> pd.DataFrame: ...       # model, family, licence, licence_url, commercial_use, revenue_cap, attribution, weights, sha256, runtime, corpus, corpus_end, released, validation_verdict, test_verdict
     def training_days(self) -> pd.DataFrame: ...    # model, list, predictors, forecasts, periods, horizons, smallest_days, median_days, largest_days, thin_forecasts
     def choices(self) -> pd.DataFrame: ...          # ensemble, kind, segment, chosen, k, validation_mae, validation_forecasts, validation_share, validation_start, validation_end, test_start, test_end, candidates, test_mae, gap; a row per model a search chose; attrs: member_mae, k_mae, limited_by, search
-    def rungs(self, name: str) -> pd.DataFrame: ... # A FallbackEnsemble's rungs: rung, member, days, forecasts, mae, common_forecasts, common_mae, rung0_mae, member_forecasts, member_mae; attrs: missing
+    def rungs(self, name: str) -> pd.DataFrame: ... # A FallbackEnsemble's rungs: rung, member, days, forecasts, mae_forecasts, mae, common_forecasts, common_mae, rung0_mae, member_forecasts, member_mae; attrs: missing, absent
     def by_hour(self) -> pd.DataFrame: ...
     def by_horizon(self) -> pd.DataFrame: ...
     def by_hour_horizon(self) -> pd.DataFrame: ...
@@ -361,6 +361,8 @@ class AverageEnsemble(Ensemble):
         top: Union[int, str, None] = None,  # None: all of them; k: the best k on validation; "validation": chooses k as well
         by: str = "validation",             # Where top chooses, the only value
         name: str = "avg",                  # Unique across models and ensembles
+        *,
+        chosen_through: Optional[str] = None,  # A frozen average: no forecast issued on or before it (chosen_in_sample)
     ): ...
 
 class FallbackEnsemble(Ensemble):
