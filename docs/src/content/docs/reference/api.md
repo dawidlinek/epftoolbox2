@@ -475,6 +475,50 @@ class ForecastSource(DataSource):
     def availability(self, upstream: Optional[Upstream] = None) -> Availability: ...  # the rule with_source_rules gives
     def content_digest(self) -> Optional[str]: ...  # the upstream's manifest digest and results identity
     def fetch(self, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame: ...  # [start, end), UTC, at target instants
+
+class ArchiveSource(DataSource):
+    def __init__(self, path: Any, source: str,  # a SnapshotArchive's directory and one of its source keys (or class name)
+                 known_at: str = "11:45",  # "HH:MM" in timezone: each delivery day as fetched by then...
+                 days_before: int = 1,  # ...on the day this many days before it (0 the day itself, -1 the day after)
+                 timezone: str = "Europe/Brussels",  # the zone of the delivery days and of known_at
+                 columns: Optional[List[str]] = None,  # archived names to emit; None: every column of the fetches
+                 prefix: str = "archive"): ...  # emitted as {prefix}_{column}; "" keeps the archived names
+    def column_names(self) -> List[str]: ...  # prefix included; without columns, read from the archive's catalog
+    def availability(self) -> Availability: ...  # published(known_at, days_before, timezone, vintage="snapshot")
+    def known_instant(self, day: Any) -> pd.Timestamp: ...  # the instant delivery day `day` is read at, UTC
+    def content_digest(self) -> Optional[str]: ...  # the sha256 of the archive's catalog
+    def fetch(self, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame: ...  # [start, end), UTC, each day on its own
+```
+
+### Snapshot archives
+
+What every source of a data pipeline returned, and when, recorded by a job you schedule; see
+[Snapshot Archives](/epftoolbox2/operations/snapshots/).
+
+```python
+from epftoolbox2.data.archive import RecordResult, SnapshotArchive, archive_key, record_snapshot
+
+class SnapshotArchive:
+    def __init__(self, path: Union[str, os.PathLike]): ...
+    def record(self, data_pipeline: DataPipeline, days_back: int = 3, days_ahead: int = 2, *,
+               budget: Any = None, deadline: Any = None,  # step 8b's refresh budget: pending, any set raises
+               timeout: Any = None, retries: Any = None) -> RecordResult: ...
+    def catalog(self, source: Optional[str] = None) -> pd.DataFrame: ...  # one row per fetch, in the order written
+    def keys(self) -> List[str]: ...  # the source keys it holds
+    def resolve(self, source: str) -> str: ...  # a key, or a class name with one key -> the key
+    def fetches(self, source: str) -> List[Fetch]: ...  # the ok fetches, by fetched_at
+    def read(self, fetch: Fetch) -> pd.DataFrame: ...  # the frame as stored, its sha256 checked
+    def observations(self, column: str, source: Optional[str] = None) -> pd.DataFrame: ...  # instant, fetched_at, value
+    def first_seen(self, column: str, source: Optional[str] = None) -> pd.DataFrame: ...  # by instant: fetched_at, value
+    def rewrites(self, column: str, source: Optional[str] = None) -> pd.DataFrame: ...  # before/after, their fetched_at
+    def content_digest(self) -> Optional[str]: ...  # the sha256 of the catalog
+
+class RecordResult:  # lines (one per source), ok, failed, skipped, exit_code (1 when a fetch failed)
+    def summary(self) -> str: ...
+
+def record_snapshot(config: Any, archive: Union[str, os.PathLike], *, days_back: int = 3,
+                    days_ahead: int = 2) -> RecordResult: ...  # a DataPipeline or Workflow YAML, for a scheduled job
+def archive_key(source: DataSource) -> Optional[str]: ...  # "<ClassName>-<hash of class and cache config>"
 ```
 
 ---
