@@ -1304,9 +1304,8 @@ class BaseModel(ABC):
         store = state.store
         windows = state.windows
         plan = state.plan
-        if (
-            state.check_gate is not None
-        ):  # step 8f: a member-day still held (none when every task came back) and its writes
+        # Step 8f: a member-day still held (none when every task came back), checked, and its writes on file.
+        if state.check_gate is not None:
             state.check_gate.finish(self, state, store if store else _MemorySink(state.in_memory))
             if store:
                 store.flush()
