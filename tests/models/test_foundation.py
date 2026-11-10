@@ -92,6 +92,7 @@ class PersistenceBackend(Backend):
         self.model = model
         self.bias = 0.0
         self.fine_tunes = []
+        self.starts = []  # the bias each fine-tune started from: 0.0, the base weights
 
     def point(self, target, known, steps):
         periods = self.model._periods_per_day
@@ -117,8 +118,10 @@ class PersistenceBackend(Backend):
             fitted = self.point(item.target[None], known, item.steps_ahead)[0]
             finite = np.isfinite(y)
             residuals[bool(held)].extend((y[finite] - fitted[finite]).tolist())
-        # The training windows' mean residual, and a little of the holdout's, as early stopping reads it to choose a step.
-        self.bias = float(np.mean(residuals[False])) + 1e-3 * float(np.mean(residuals[True]))
+        # From the state it is in, as a fine-tune of weights starts from them: the training windows' mean residual, and a
+        # little of the holdout's, as early stopping reads it to choose a step.
+        self.starts.append(self.bias)
+        self.bias += float(np.mean(residuals[False])) + 1e-3 * float(np.mean(residuals[True]))
         self.bias += (int(seed) % 101) * 1e-3
         self.fine_tunes.append((data.cut, len(data), int(seed)))
         return FineTuneOutcome(settings["max_steps"], data.dates.max().astype(date), {"windows": len(data)})
@@ -343,6 +346,15 @@ def test_a_zero_shot_call_holds_its_calendar_block_whatever_the_run_has(hourly):
         assert alone and all(long[key] == value for key, value in alone.items())
 
 
+def test_a_call_s_items_are_its_calendar_block_s_whatever_the_run_covers(hourly):
+    """A backend that reads its call's other items (`by_batch`) gives the same forecast alone and in a run of a month: the
+    call holds the same days either way (the block of `batch_size` days that the frame has), not the run's days."""
+    long = by_key(run(make("FakeFM", by_batch=1e-3), hourly, ("2023-06-01", "2023-06-30")))
+    for day in ("2023-06-03", "2023-06-14"):
+        alone = by_key(run(make("FakeFM", by_batch=1e-3), hourly, (day, day)))
+        assert alone and all(long[key] == value for key, value in alone.items())
+
+
 def test_a_backend_that_reads_its_call_is_caught_by_verify(hourly):
     with pytest.raises(AssertionError):
         suite.check_verify(lambda name: make(name, by_batch=1e-3), hourly, INFO, ["2023-06-14"])
@@ -435,6 +447,7 @@ def test_seeds_are_averaged_and_each_seed_is_its_own(hourly):
     three = by_key(run(model, hourly, ("2023-06-12", "2023-06-12")))
     seeds = [seed for _, _, seed in model._fake.fine_tunes]
     assert len(set(seeds)) == 3 and model._fine_tunes == 3
+    assert model._fake.starts == [0.0, 0.0, 0.0]  # each from the base weights, never the previous seed's
     assert one.keys() == three.keys() and one != three
 
 
@@ -516,6 +529,10 @@ def test_a_changed_fine_tune_refuses_the_resume(hourly, tmp_path):
         run(tuned("FakeFM", fine_tune={**QUICK, "lr": 1e-4}), hourly, test, save_dir=tmp_path)
     with pytest.raises(ManifestMismatchError, match="seeds"):
         run(tuned("FakeFM", seeds=2), hourly, test, save_dir=tmp_path)
+    # Let in anyway, another fine-tune's checkpoint is not this one's: it fine-tunes again, into a file of its own.
+    other = tuned("FakeFM", fine_tune={**QUICK, "lr": 1e-4})
+    pipeline(other).run(hourly, *test, horizon=1, save_dir=tmp_path, forecast_only=True, allow_manifest_mismatch=True)
+    assert other._fine_tunes == 1 and len(list((tmp_path / "FakeFM.fits").glob("*.ckpt"))) == 2
 
 
 def test_too_few_windows_skip_the_unit(hourly):

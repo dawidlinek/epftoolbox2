@@ -118,6 +118,8 @@ def test_a_past_series_and_published_cut(hourly, tiny):
     )
     counts = report.forecast_counts().iloc[0]
     assert counts["produced"] == counts["planned"] == 96
+    # The past series is a row of the context the model reads: verify's control of it moves the forecasts.
+    suite.check_verify(lambda name: make(name, tiny, past=["load_actual"]), hourly, INFO, ["2023-06-14"], items=7)
 
 
 def test_the_fine_tune_runs_through_the_trainer_and_is_stored_and_reused(hourly, tiny, tmp_path):
@@ -129,6 +131,7 @@ def test_the_fine_tune_runs_through_the_trainer_and_is_stored_and_reused(hourly,
         return make(name, tiny, fine_tune_every="7D", fine_tune=QUICK, seeds=2, **params)
 
     test = ("2023-06-12", "2023-06-14")
+    before = pipeline(make("t0", tiny)).run(hourly, *test, horizon=1, forecast_only=True)
     fresh = tmp_path / "fresh"
     first = tuned("t0")
     pipeline(first).run(hourly, *test, horizon=1, save_dir=fresh, forecast_only=True)
@@ -145,6 +148,8 @@ def test_the_fine_tune_runs_through_the_trainer_and_is_stored_and_reused(hourly,
     assert again._fine_tunes == 0 and again._checkpoints_loaded == 2 and suite.lines(path) == lines
     zero = pipeline(make("t0", tiny)).run(hourly, *test, horizon=1, forecast_only=True)
     assert {r["prediction"] for r in zero.refs["t0"]._results} != {json.loads(line)["prediction"] for line in lines}
+    # The backend this process loaded once is back on the base weights for a zero-shot model after the fine-tunes.
+    assert suite.forecasts(zero, "t0") == suite.forecasts(before, "t0")
     suite.check_verify(lambda name: tuned(name), hourly, INFO, ["2023-06-12"], items=6)
 
 
