@@ -4,8 +4,8 @@ row, and back, exactly.
 One column per record key a model writes, in the order a forecast's record has them (`COLUMNS`): dates `date32`; `hour`,
 `horizon`, `revision` `int16`; `run_weekday` `int8`; `day_in_test`, `training_days` `int32`; `prediction`, `actual` `float64`;
 `coefficients`, `member_predictions` `list<float64>`; `freq`, `window`, `status`, `mode` dictionary strings; hashes, `detail`,
-`issued_at` and `snapshot` strings. Every column is nullable; a live revision's three keys (step 8c) are null in a backtest's
-rows, and a part written before them reads with them null. A record's keys and their order are one more column, `_keys` (a dictionary string, so a model's few
+`issued_at` and `snapshot` strings. Every column is nullable. A live revision's three keys (step 8c) are columns of a part with a
+live record alone, so a backtest's parts are written as before them; a part without them reads with them null. A record's keys and their order are one more column, `_keys` (a dictionary string, so a model's few
 layouts cost next to nothing), because a JSONL record says two things a column of values can't: which keys it has (a skip record
 has `prediction: null`, a forecast of a model without `refit` has no `newest_target_day`) and in what order (a refit record has
 `refit_anchor` after `freq`, any other after `list_hash`). With it a record converts both ways exactly: its keys in its order, a
@@ -42,12 +42,14 @@ COLUMNS: Tuple[Tuple[str, str], ...] = (
     ("list_hash", "string"),
     ("revision", "int16"),
     ("detail", "string"),
-    # A live revision's record (step 8c, `results.live`): when it was issued (ISO UTC), "live", and its inputs' snapshot hash.
-    # Null in every backtest record; a part written before them reads as if it had them null (`parquet_store._conform`).
-    ("issued_at", "string"),
-    ("mode", "category"),
-    ("snapshot", "string"),
 )
+# A live revision's records (step 8c, `results.live`) add three: when it was issued (ISO UTC), "live", and its inputs' snapshot
+# hash. Only a part with such a record has these columns, so a backtest's parts are what they were before them; a part without
+# them reads as if they were null (`parquet_store._conform`).
+LIVE_COLUMNS: Tuple[Tuple[str, str], ...] = (("issued_at", "string"), ("mode", "category"), ("snapshot", "string"))
+BASE_COLUMNS = COLUMNS
+COLUMNS = (*BASE_COLUMNS, *LIVE_COLUMNS)
+LIVE_NAMES = frozenset(name for name, _ in LIVE_COLUMNS)
 NAMES: Tuple[str, ...] = tuple(name for name, _ in COLUMNS)
 KINDS: Dict[str, str] = dict(COLUMNS)
 KEYS_COLUMN = "_keys"  # each record's keys, in its order, joined by ","
@@ -78,11 +80,12 @@ def arrow_type(kind: str):
     }[kind]
 
 
-def arrow_schema():
-    """The schema every part is written with: `COLUMNS` and `_keys`, all nullable."""
+def arrow_schema(live: bool = True):
+    """The schema of a part: `COLUMNS` and `_keys`, all nullable; without `live`, the columns of a part with no live record
+    (`BASE_COLUMNS`), every part's before step 8c."""
     pa = _pa()
     return pa.schema(
-        [pa.field(name, arrow_type(kind)) for name, kind in COLUMNS]
+        [pa.field(name, arrow_type(kind)) for name, kind in (COLUMNS if live else BASE_COLUMNS)]
         + [pa.field(KEYS_COLUMN, pa.dictionary(pa.int32(), pa.string()))]
     )
 
@@ -143,7 +146,8 @@ def to_table(
     dates: List[
         Tuple[Any, Any]
     ] = []  # a date column equal to one before it (refit_anchor is run_date without refit) reuses it
-    for name, kind in COLUMNS:
+    live = any(name in LIVE_NAMES for keys in layouts for name in keys)
+    for name, kind in COLUMNS if live else BASE_COLUMNS:
         column = values.get(name)
         if column is None:
             arrays.append(pa.nulls(n, arrow_type(kind)))
@@ -163,7 +167,7 @@ def to_table(
         if n
         else pa.array([], pa.dictionary(pa.int32(), pa.string()))
     )
-    return pa.Table.from_arrays(arrays, schema=arrow_schema())
+    return pa.Table.from_arrays(arrays, schema=arrow_schema(live))
 
 
 def _same(a: Any, b: Any) -> bool:

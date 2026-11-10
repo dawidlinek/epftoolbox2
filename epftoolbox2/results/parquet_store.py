@@ -296,7 +296,7 @@ def _write_table(directory: Path, year: str, table, name: str) -> Dict[str, Any]
     }
 
 
-def _read_part(directory: Path, entry: Dict[str, Any], columns: Optional[Sequence[str]]):
+def _read_part(directory: Path, entry: Dict[str, Any], columns: Optional[Sequence[str]], conform: bool = True):
     import pyarrow.parquet as pq
 
     path = Path(directory) / entry["file"]
@@ -318,7 +318,17 @@ def _read_part(directory: Path, entry: Dict[str, Any], columns: Optional[Sequenc
     )
     if table.num_rows != entry["rows"]:
         raise ValueError(f"{path} holds {table.num_rows} rows, its catalog line says {entry['rows']}")
-    return _conform(table, columns)
+    return _conform(table, columns) if conform else table
+
+
+def _concat_parts(tables: List[Any]):
+    """Parts read as they are, as one table: of their own schema where they share one (a backtest's compaction writes what it
+    wrote before the live columns), else each with every column (`_conform`)."""
+    import pyarrow as pa
+
+    if any(not table.schema.equals(tables[0].schema) for table in tables[1:]):
+        tables = [_conform(table, None) for table in tables]
+    return pa.concat_tables(tables) if len(tables) > 1 else tables[0]
 
 
 def _conform(table, columns: Optional[Sequence[str]]):
@@ -825,15 +835,13 @@ class ParquetResultStore(_Store):
                     buffer.converted += table.num_rows
 
     def _write(self, taken: List[Tuple[str, int, Tuple[List[Any], List[Dict], List[Tuple[str, ...]]]]]) -> None:
-        import pyarrow as pa
-
         self.path.mkdir(parents=True, exist_ok=True)
         if not self._tail_checked:  # as a JSONL store does: never append after a line a crash left half-written
             self._repair_tail()
         for year, rows, (tables, records, layouts, keys) in taken:
             if records:
                 tables = [*tables, schema.to_table(records, str(self.path), layouts)]
-            table = pa.concat_tables(tables).unify_dictionaries() if len(tables) > 1 else tables[0]
+            table = _concat_parts(tables).unify_dictionaries() if len(tables) > 1 else tables[0]
             for start in range(0, rows, self._rows_per_part):
                 self._seq += 1
                 part = table.slice(start, self._rows_per_part).combine_chunks()
@@ -1045,8 +1053,6 @@ def compact(save_dir: Any, model: Optional[str] = None) -> Dict[str, Dict[str, i
 
 
 def _compact(save_dir: Path, stems: List[str]) -> Dict[str, Dict[str, int]]:
-    import pyarrow as pa
-
     summary = {}
     for stem in stems:
         directory = save_dir / f"{stem}.parquet"
@@ -1064,8 +1070,8 @@ def _compact(save_dir: Path, stems: List[str]) -> Dict[str, Dict[str, int]]:
             for partition, entries in sorted(by_year.items()):
                 if len(entries) < 2:
                     continue
-                tables = [_read_part(directory, entry, None) for entry in entries]
-                table = pa.concat_tables(tables).unify_dictionaries().combine_chunks()
+                tables = [_read_part(directory, entry, None, conform=False) for entry in entries]
+                table = _concat_parts(tables).unify_dictionaries().combine_chunks()
                 written += 1
                 entry = _write_table(
                     directory, partition.split("=", 1)[1], table, f"part-{run_id}-{written:06d}.parquet"
