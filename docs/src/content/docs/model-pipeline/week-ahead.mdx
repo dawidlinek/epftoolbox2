@@ -37,28 +37,24 @@ The targets are the daily statistics of the row's own date, `actual_daily_min` a
 ## The lists
 
 ```python
-WEEKDAYS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+from epftoolbox2.presets import week_ahead_predictors
 
-calendar_x = (
-    ["is_holiday"] + [f"is_holiday_d-{k}" for k in range(1, 8)] + [f"is_holiday_d+{k}" for k in range(1, 10)]
-    + [f"is_{day}_d+{{horizon}}" for day in WEEKDAYS] + ["daylight_hours_d+{horizon}"]
-)
-regional_nwp = (  # 266 names; their order is the order coordinate descent visits them
-    calendar_x
-    + [f"load_actual_h-{h}" for h in range(1, 169)] + [f"load_forecast_h+{h}" for h in range(1, 36)]
-    + ["load_forecast"]
-    + [f"actual_daily_{stat}_d-{k}" for stat in ("min", "max") for k in range(1, 8)]
-    + [f"load_forecast_daily_{stat}_d+{k}" for stat in ("min", "max") for k in range(3, 10)]
-    + [f"all_avg_{var}_dmean_d+{{horizon}}" for var in ("2t", "wind_speed", "rh", "tcc", "sp", "ssr_inc", "tp")]
-    + ["all_avg_hdd_d+{horizon}", "all_avg_cdd_d+{horizon}"]
-)
+calendar_x = week_ahead_predictors("calendar_x")      # 25 names: holiday flags, weekday dummies, daylight hours
+regional_nwp = week_ahead_predictors("regional_nwp")  # 266 names; their order is the order coordinate descent visits them
 
 
-def expert(stat):
-    return ["is_monday_d+{horizon}", "is_saturday_d+{horizon}", "is_sunday_or_holiday_d+{horizon}",
-            f"load_forecast_daily_{stat}_d+0", f"load_forecast_daily_{stat}_d+{{horizon}}",
-            f"actual_daily_{stat}_d-1", f"actual_daily_{stat}_d-6", "capital_2t_dmean_d+{horizon}"]
+def expert(stat):  # 8 names, stat is "min" or "max"
+    return week_ahead_predictors("expert", stat=stat)
 ```
+
+These are [`epftoolbox2.presets.week_ahead_predictors`](/epftoolbox2/model-pipeline/presets/#week-ahead-daily-minimum-and-maximum-load)
+(plain lists, with the evidence of each in that page). `regional_nwp` is `calendar_x`, then 168 hourly lags of the realised load
+(`load_actual_h-1` … `load_actual_h-168`), the TSO's next 35 hourly forecasts (`load_forecast_h+1` …) and `load_forecast`, the last
+seven daily minima and maxima (`actual_daily_{min,max}_d-1` … `_d-7`), the TSO's A31 forecasts for D+3 … D+9, seven ECMWF variables
+averaged over the market's regions (`all_avg_{2t,wind_speed,rh,tcc,sp,ssr_inc,tp}_dmean_d+{horizon}`) and the heating and cooling
+degree days. `expert(stat)` is Monday, Saturday and Sunday-or-holiday dummies, the TSO's forecast of the issue row's date
+(`_d+0`, which `LagTransformer` doesn't make: it skips lag 0) and of the target day, the actual statistic of D-1 and D-7, and the
+capital's temperature.
 
 `load_forecast_daily_{min,max}_d+k` are the TSO's A31 forecasts, which have a built-in rule: published on Fridays at 10:00 Brussels time
 for the next Monday-to-Sunday week of the market's own local dates, those of the frame's zone. `all_avg_*` and `capital_*` are ECMWF forecasts averaged over a market's regions and read at its
