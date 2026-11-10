@@ -140,12 +140,13 @@ def test_settings_cards_and_what_is_refused(cls):
     card = model.card
     assert card.extra == {TabPFNModel: "tabpfn", TabICLModel: "tabicl"}[cls] and card.commercial_use
     assert card.stated_verdict == "clean (synthetic)" and card.corpus == "synthetic priors" and card.revenue_cap is None
-    assert card.runtime[0].startswith(card.extra) and "torch" in card.runtime
+    assert card.runtime[0].startswith(card.extra) and card.runtime[1:] == ("torch", "scikit-learn", "scipy", "numpy")
+    assert model._PRECISION["cpu"] == "float32" and "float16" in model._PRECISION["cuda"]
     if cls is TabPFNModel:
         assert card.weights.repo == "Prior-Labs/TabPFN-v2-reg" and list(card.weights.files) == [
             "tabpfn-v2-regressor.ckpt"
         ]
-        assert card.runtime[0] == "tabpfn>=6,<10" and "PriorLabs-TabPFN" in card.attribution
+        assert card.runtime[0] == "tabpfn>=9.1,<10" and "PriorLabs-TabPFN" in card.attribution
     else:
         assert card.weights.repo == "jingang/TabICL"
         assert list(card.weights.files) == ["tabicl-regressor-v2-20260212.ckpt"] and card.licence == "BSD-3-Clause"
@@ -180,13 +181,28 @@ def test_every_setting_reaches_the_workers(cls):
     assert (again.n_estimators, again.random_state, again.device, again.weights) == (3, 5, "cpu", "/w/f")
 
 
+def import_stubs(directory: Path, log: Path) -> Path:
+    """A directory of stand-in packages, one per heavy module, each of which writes its name to `log` and raises ImportError
+    when imported: put first on PYTHONPATH, an import of any of them shows in the log whether or not the real package is
+    installed and whether or not the code catches the ImportError (a check of `sys.modules` alone passes vacuously where the
+    package is missing, as in the core job)."""
+    for name in HEAVY:
+        package = directory / name
+        package.mkdir(parents=True)
+        (package / "__init__.py").write_text(
+            f"with open({str(log)!r}, 'a') as handle:\n    handle.write({name!r} + '\\n')\n"
+            f"raise ImportError('{name} imported by a lean path')\n"
+        )
+    return directory
+
+
 def test_importing_building_and_saving_imports_no_model_package(tmp_path):
     """Dawid's lean-package condition: importing the package, building a calendar data pipeline and fetching from it, and
-    building, saving and loading every new model class imports none of torch, the families' packages, autogluon,
-    huggingface_hub, transformers or safetensors, and downloads nothing."""
+    building, saving and loading every new model class import none of torch, the families' packages, autogluon,
+    huggingface_hub, transformers or safetensors, and download nothing. Each is a stub that logs its import and raises."""
+    log = tmp_path / "imported.log"
+    stubs = import_stubs(tmp_path / "stubs", log)
     code = (
-        "import sys\n"
-        "import pandas as pd\n"
         "import epftoolbox2\n"
         "from epftoolbox2.data.sources import CalendarSource\n"
         "from epftoolbox2.pipelines import DataPipeline, ModelPipeline\n"
@@ -200,14 +216,27 @@ def test_importing_building_and_saving_imports_no_model_package(tmp_path):
         f"models.save({str(tmp_path / 'models.yaml')!r})\n"
         f"loaded = ModelPipeline.load({str(tmp_path / 'models.yaml')!r})\n"
         "assert [type(m).__name__ for m in loaded.models] == ['TabPFNModel', 'TabICLModel']\n"
-        f"heavy = {HEAVY!r}\n"
-        "found = sorted(m for m in sys.modules if m.split('.')[0] in heavy)\n"
-        "assert not found, found\n"
+        "assert [m._model_kwargs['device'] for m in loaded.models] == ['auto', 'auto']\n"
     )
-    env = {**os.environ, "EPFTOOLBOX2_WEIGHTS_DIR": str(tmp_path / "no-weights")}
+    path = os.pathsep.join([str(stubs), os.environ.get("PYTHONPATH", "")]).rstrip(os.pathsep)
+    env = {**os.environ, "EPFTOOLBOX2_WEIGHTS_DIR": str(tmp_path / "no-weights"), "PYTHONPATH": path}
     result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, cwd=tmp_path, env=env)
     assert result.returncode == 0, result.stderr
+    assert not log.exists(), f"imported: {log.read_text().split()}"
     assert not (tmp_path / "no-weights").exists(), "something wrote into the weights cache"
+
+
+def test_the_import_stubs_catch_an_import():
+    """The stubs see an import that code catches: the check above can fail."""
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as directory:
+        log = Path(directory) / "imported.log"
+        stubs = import_stubs(Path(directory) / "stubs", log)
+        code = "try:\n    import torch\nexcept ImportError:\n    pass\n"
+        env = {**os.environ, "PYTHONPATH": str(stubs)}
+        subprocess.run([sys.executable, "-c", code], check=True, env=env, cwd=directory)
+        assert log.read_text().split() == ["torch"]
 
 
 @pytest.mark.parametrize("cls", CLASSES)
@@ -400,34 +429,140 @@ def test_the_runtime_fields_and_weights_are_recorded_and_compared_on_resume(fake
     path = manifest_path(tmp_path / f"{make().name}.jsonl")
     manifest = json.loads(path.read_text())
     assert manifest["runtime"]["device"] == "cpu" and manifest["runtime"]["threads_per_fit"] == 1
+    assert manifest["runtime"]["precision"] == "float32"
     assert manifest["model_params"]["block_predict"] is True and manifest["model_params"]["device"] == "cpu"
     assert manifest["card"]["family"] == cls._card.family and manifest["weights"]["reference"] is True
-    manifest["runtime"]["device"] = "cuda"
-    path.write_text(json.dumps(manifest))
-    with pytest.raises(ManifestMismatchError, match="runtime.device"):
-        run(make(), market, save_dir=tmp_path)
+    for field, other in (("device", "cuda"), ("precision", "bfloat16 autocast")):
+        changed = json.loads(json.dumps(manifest))
+        changed["runtime"][field] = other
+        path.write_text(json.dumps(changed))
+        with pytest.raises(ManifestMismatchError, match=f"runtime.{field}"):
+            run(make(), market, save_dir=tmp_path)
 
 
 @pytest.mark.parametrize("cls", CLASSES)
-def test_processes_one_fit_each_and_six_on_a_gpu(cls, monkeypatch):
+def test_processes_one_fit_each_and_six_per_gpu(cls, monkeypatch):
     from epftoolbox2.models.base import _usable_cpu_count
 
-    class Device:
-        def __init__(self, kind):
-            self.type = kind
-            self.index = 0
-
+    cpus = max(1, _usable_cpu_count())
     model = cls(INPUTS)
-    monkeypatch.setattr(cls, "_resolved_device", lambda self: Device("cpu"))
+    monkeypatch.setattr(cls, "_run_devices", lambda self: ("cpu",))
     monkeypatch.setenv(
         "THREADS_PER_PROCESS", "4"
     )  # a fit's torch settings are its process's: one task thread, whatever
     monkeypatch.delenv("MAX_PROCESSES")
-    assert model._executor_config() == (1, max(1, _usable_cpu_count()))
-    monkeypatch.setattr(cls, "_resolved_device", lambda self: Device("cuda"))
-    assert model._executor_config() == (1, min(6, max(1, _usable_cpu_count())))
+    assert model._executor_config() == (1, cpus)
+    monkeypatch.setattr(cls, "_run_devices", lambda self: ("cuda:0",))
+    assert model._executor_config() == (1, min(6, cpus))
+    monkeypatch.setattr(cls, "_run_devices", lambda self: ("cuda:0", "cuda:1", "cuda:2", "cuda:3"))
+    assert model._executor_config() == (1, min(24, cpus))
     monkeypatch.setenv("MAX_PROCESSES", "3")
     assert model._executor_config() == (1, 3)
+
+
+class FakeDevice:
+    """A `torch.device` stand-in: its type and index, printed as torch prints one."""
+
+    def __init__(self, text):
+        self.type, _, index = text.partition(":")
+        self.index = int(index) if index else None
+        self.text = text
+
+    def __str__(self):
+        return self.text
+
+
+@pytest.mark.parametrize("cls", CLASSES)
+def test_auto_is_every_usable_gpu_and_cuda_n_that_one(cls, monkeypatch):
+    """`_run_devices`: "auto" resolving to a GPU is every GPU whose probe passes, in index order; "cuda:N" is that GPU; the
+    CPU and a missing torch are ("cpu",); the answer is kept for the model's `device` and asked again when it changes."""
+    from epftoolbox2.models._torch import runtime
+
+    asked = []
+    monkeypatch.setattr(_in_context, "has_torch", lambda: True)
+    monkeypatch.setattr(_in_context, "cuda_device_count", lambda: 3)
+    monkeypatch.setattr(runtime, "cuda_probe", lambda index: (index != 1, f"GPU {index}", "ok"))
+
+    def resolved(self):
+        asked.append(self.device)
+        return FakeDevice({"auto": "cuda:0", "cuda": "cuda:0", "cpu": "cpu"}.get(self.device, self.device))
+
+    monkeypatch.setattr(cls, "_resolved_device", resolved)
+    model = cls(INPUTS)
+    assert model._run_devices() == ("cuda:0", "cuda:2") and model._run_devices() == ("cuda:0", "cuda:2")
+    model.device = "cuda:1"
+    assert model._run_devices() == ("cuda:1",)
+    model.device = "cpu"
+    assert model._run_devices() == ("cpu",) and asked == ["auto", "cuda:1", "cpu"]
+    monkeypatch.setattr(cls, "_resolved_device", _in_context.InContextModel._resolved_device)
+    monkeypatch.setattr(_in_context, "has_torch", lambda: False)
+    assert cls(INPUTS)._run_devices() == ("cpu",)
+
+
+def test_the_parent_resolves_the_device_once_and_every_worker_fits_on_its_answer(faked, market, monkeypatch):
+    """The parent's answer reaches every fit, whatever a later resolution would say: `_resolved_device` answers CUDA first
+    and the CPU afterwards, and every backend is loaded on the parent's CUDA device; each worker checks the device once."""
+    cls, make, loaded = faked
+    answers = iter([FakeDevice("cuda:0")] + [FakeDevice("cpu")] * 100)
+    devices, checked = [], []
+    monkeypatch.setattr(_in_context, "has_torch", lambda: True)
+    monkeypatch.setattr(_in_context, "cuda_device_count", lambda: 0)
+    monkeypatch.setattr(cls, "_resolved_device", lambda self: next(answers))
+    monkeypatch.setattr(cls, "_runtime_fields", lambda self: {"device": self._run_devices()[0].split(":")[0]})
+    monkeypatch.setattr(cls, "_check_worker_device", lambda self, device: checked.append(device))
+    monkeypatch.setattr(_in_context, "_CHECKED_DEVICES", set())
+    real = cls._load_backend
+
+    def spy(self, resolved, device):
+        devices.append(device)
+        return real(self, resolved, device)
+
+    monkeypatch.setattr(cls, "_load_backend", spy)
+    out = records(make(device="auto"), market, test=("2023-03-13", "2023-03-19"))
+    assert out and devices == ["cuda:0"] and checked == ["cuda:0"]
+    assert [b.device for b in loaded] == ["cuda:0"]
+
+
+def test_worker_k_fits_on_gpu_k_modulo_the_number_of_gpus(monkeypatch):
+    from epftoolbox2.models import _worker
+    from epftoolbox2.models._calendar import FitUnit
+
+    model = TabPFNModel(INPUTS)
+    monkeypatch.setattr(TabPFNModel, "_check_worker_device", lambda self, device: None)
+    monkeypatch.setattr(_worker, "_W_CONFIG", {"in_context_devices": ["cuda:0", "cuda:1", "cuda:2", "cuda:3"]})
+    picked = []
+    for k in range(6):
+        monkeypatch.setattr(_in_context, "worker_index", lambda k=k: k)
+        with _worker.fit_scope(FitUnit(0, 1, 0, None, 0), 28):
+            picked.append(model._device_text())
+    assert picked == ["cuda:0", "cuda:1", "cuda:2", "cuda:3", "cuda:0", "cuda:1"]
+    monkeypatch.setattr(TabPFNModel, "_run_devices", lambda self: ("cpu",))
+    assert model._device_text() == "cpu"  # a fit outside a run's task resolves its own
+
+
+def test_a_worker_that_can_t_use_its_parent_s_gpu_stops_the_run():
+    pytest.importorskip("torch")
+    import torch
+
+    if torch.cuda.is_available() and torch.cuda.device_count() > 7:
+        pytest.skip("this machine has a GPU 7")
+    with pytest.raises(
+        RuntimeError, match="the run resolved cuda:7 in its parent process, and this worker can't use it"
+    ):
+        TabPFNModel(INPUTS, name="icl")._check_worker_device("cuda:7")
+    TabPFNModel(INPUTS)._check_worker_device("cpu")
+
+
+def test_a_backend_that_fails_to_load_stops_the_run(faked, market, monkeypatch):
+    """A load's ValueError (a checkpoint the package can't read) stops the run, never a `fit_error` skip of every unit."""
+    cls, make, _ = faked
+
+    def broken(self, resolved, device):
+        raise ValueError("not a checkpoint")
+
+    monkeypatch.setattr(cls, "_load_backend", broken)
+    with pytest.raises(RuntimeError, match="failed to load: ValueError: not a checkpoint"):
+        records(make(), market, test=("2023-03-13", "2023-03-13"))
 
 
 @pytest.mark.parametrize("torch_found", [True, False])
@@ -502,13 +637,24 @@ def test_the_real_regressor_gets_the_research_s_settings(packaged, market):
     assert out and set(seen["predicts"]) == {"median"}
     made = seen["made"][0]
     (name,) = cls._card.weights.files
-    assert Path(made["model_path"]).name == name and made["device"] == "cpu" and made["random_state"] == 0
+    assert made["device"] == "cpu" and made["random_state"] == 0
+    assert len(seen["loads"]) == 1, "the network is built once per process"
+    load = seen["loads"][0]
+    assert Path(load["path"]).name == name and load["offline"] == "1"
     if cls is TabPFNModel:
+        import torch
+        from tabpfn.base import ModelSpecs
+
         assert made["n_estimators"] == 4 and made["n_preprocessing_jobs"] == 1
+        assert made["inference_precision"] is torch.float32, "float32 pinned on a CPU (auto autocasts to bf16 on some)"
+        assert all(
+            isinstance(m["model_path"], ModelSpecs) and m["model_path"] is made["model_path"] for m in seen["made"]
+        )
+        assert load["download_if_not_exists"] is False and load["force_inference_dtype"] is torch.float32
     else:
         assert (made["n_estimators"], made["batch_size"], made["allow_auto_download"]) == (8, 8, False)
-        assert len(seen["loads"]) == 1, "the checkpoint is read once per process"
-    assert len(seen["fits"]) == 24
+        assert made["use_amp"] is False and Path(made["model_path"]).name == name
+    assert len(seen["fits"]) == 24 and set(seen["fit_offline"]) == {"1"}, "every fit runs offline"
 
 
 def test_the_adapter_suite_with_the_real_package(packaged, market, tmp_path):
@@ -525,10 +671,42 @@ def test_the_runtime_records_the_package_and_torch(packaged, market, tmp_path):
 
     run(make(), market, save_dir=tmp_path, test=("2023-03-13", "2023-03-13"))
     manifest = json.loads(manifest_path(tmp_path / f"{make().name}.jsonl").read_text())
+    import importlib.metadata as metadata
+
     packages = manifest["runtime"]["packages"]
-    assert packages["torch"] == torch.__version__ and packages[cls._card.extra]
+    assert packages["torch"] == torch.__version__ and packages[cls._card.extra] == metadata.version(cls._card.extra)
+    for name in ("scikit-learn", "scipy", "numpy"):  # they preprocess every context
+        assert packages[name] == metadata.version(name)
     assert manifest["runtime"]["cpu_capability"] == torch.backends.cpu.get_cpu_capability()
-    assert manifest["runtime"]["device_name"]
+    assert manifest["runtime"]["precision"] == "float32" and manifest["runtime"]["device_name"]
+    assert not torch.cuda.is_initialized(), "a run started CUDA in the parent before its pool forked"
+
+
+def test_tabpfn_never_reaches_a_download_path(monkeypatch, tmp_path, market, no_network):
+    """With tabpfn's own loader on a weights file that isn't a checkpoint, the run stops loudly at the load, and no download
+    path of tabpfn's (the Hugging Face one, or the direct URL that HF_HUB_OFFLINE doesn't stop) is ever reached."""
+    pytest.importorskip("tabpfn")
+    import urllib.request
+
+    import tabpfn.model_loading as loading
+
+    attempts = []
+
+    def refuse(name):
+        def call(*args, **kwargs):
+            attempts.append(name)
+            raise AssertionError(f"tabpfn tried to download ({name})")
+
+        return call
+
+    for name in ("download_model", "_try_huggingface_downloads", "_try_direct_downloads"):
+        monkeypatch.setattr(loading, name, refuse(name))
+    monkeypatch.setattr(urllib.request, "urlopen", refuse("urlopen"))
+    install_fake_weights(monkeypatch, tmp_path / "weights", TabPFNModel, real_extra=True)
+    monkeypatch.setattr(_in_context, "_BACKENDS", {})
+    with pytest.raises(RuntimeError, match="failed to load"):
+        records(TabPFNModel(INPUTS, training_window=28, device="cpu"), market, test=("2023-03-13", "2023-03-13"))
+    assert attempts == []
 
 
 def test_tabpfn_refuses_weights_its_package_reads_as_another_version(monkeypatch, tmp_path, market):

@@ -89,7 +89,7 @@ tune = [
 # tabpfn needs safetensors, which has no free-threaded (3.14t) wheels, so CI installs only tabicl there. MitraModel is not
 # shipped: its 1,000-bin head needs patches of AutoGluon's internals (docs, models/in-context).
 tabpfn = [
-    "tabpfn>=6,<10",
+    "tabpfn>=9.1,<10",
     "torch>=2.9",
     "huggingface_hub>=0.23",
 ]

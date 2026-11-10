@@ -19,6 +19,7 @@ fake core.
 import contextlib
 import dataclasses
 import hashlib
+import os
 from typing import Any, Dict, List
 
 import numpy as np
@@ -112,20 +113,39 @@ def use_fake_backend(monkeypatch, cls, **settings) -> List[KernelBackend]:
 
 
 def patch_package(monkeypatch, family: str, bandwidth: float = 0.5) -> Dict[str, list]:
-    """The real package's regressor with its model call replaced: `fit` keeps the context (TabICL's `_load_model` sets a
-    stand-in network that only moves), `predict` returns the kernel mean. Records each regressor's settings, each `fit`, each
-    `predict` (its `output_type`) and each checkpoint load."""
-    seen: Dict[str, list] = {"made": [], "fits": [], "predicts": [], "loads": []}
+    """The real package's regressor with its model calls replaced: TabPFN's loader (`load_model_criterion_config`) and
+    TabICL's `_load_model` build stand-ins and record each load (its path, `HF_HUB_OFFLINE` at the time and, for TabPFN, its
+    keyword arguments); `fit` keeps the context and resolves the precision as the package does (TabPFN's
+    `determine_precision`, TabICL's `_resolve_amp_fa3` after its size attributes), `predict` returns the kernel mean.
+    Records each regressor's settings, each `fit`, each `predict` (its `output_type`) and each load."""
+    seen: Dict[str, list] = {"made": [], "fits": [], "predicts": [], "loads": [], "fit_offline": []}
     if family == "tabpfn":
+        import tabpfn.model_loading as loading
         from tabpfn import TabPFNRegressor as regressor
+        from tabpfn.base import determine_precision
+        from tabpfn.utils import infer_devices
+
+        def load(model_path, **kwargs):
+            seen["loads"].append({"path": str(model_path), "offline": os.environ.get("HF_HUB_OFFLINE"), **kwargs})
+            return [object()], object(), [object()], object()
+
+        monkeypatch.setattr(loading, "load_model_criterion_config", load)
     else:
         from tabicl import TabICLRegressor as regressor
 
     def fit(self, X, y):
-        seen["made"].append(self.get_params())
+        seen["made"].append(self.get_params(deep=False))
         seen["fits"].append((np.array(X, dtype=np.float64), np.array(y, dtype=np.float64)))
+        seen["fit_offline"].append(os.environ.get("HF_HUB_OFFLINE"))
         if family == "tabicl":
             self._load_model()
+            self.n_samples_in_, self.n_features_in_ = np.shape(X)
+            self._resolve_device()
+        else:
+            self.devices_ = infer_devices(self.device)
+            self.use_autocast_, self.forced_inference_dtype_, _ = determine_precision(
+                self.inference_precision, self.devices_
+            )
         self._epf_context = (np.array(X, dtype=np.float64), np.array(y, dtype=np.float64))
         return self
 
@@ -143,7 +163,7 @@ def patch_package(monkeypatch, family: str, bandwidth: float = 0.5) -> Dict[str,
                 return self
 
         def load_model(self):
-            seen["loads"].append(str(self.model_path))
+            seen["loads"].append({"path": str(self.model_path), "offline": os.environ.get("HF_HUB_OFFLINE")})
             self.model_, self.model_config_, self.model_path_ = Network(), {}, self.model_path
 
         monkeypatch.setattr(regressor, "_load_model", load_model)

@@ -583,7 +583,7 @@ requires-dist = [
     { name = "scikit-learn", specifier = ">=1.3.0" },
     { name = "scipy", specifier = ">=1.10.0" },
     { name = "tabicl", marker = "extra == 'tabicl'", specifier = ">=2.2,<3" },
-    { name = "tabpfn", marker = "extra == 'tabpfn'", specifier = ">=6,<10" },
+    { name = "tabpfn", marker = "extra == 'tabpfn'", specifier = ">=9.1,<10" },
     { name = "threadpoolctl", specifier = ">=3.1.0" },
     { name = "torch", marker = "extra == 'tabicl'", specifier = ">=2.9", index = "https://download.pytorch.org/whl/cpu" },
     { name = "torch", marker = "extra == 'tabpfn'", specifier = ">=2.9", index = "https://download.pytorch.org/whl/cpu" },

@@ -33,7 +33,8 @@ CARD = ModelCard(
     attribution=None,
     # sha256 recorded by the first `epf weights fetch` (S02, 2026-11-10), the repository's LFS hash of the file too.
     weights=WeightsRef(REPO, REVISION, {CHECKPOINT: SHA256}, bytes=114_324_594),
-    runtime=("tabicl>=2.2,<3", "torch"),
+    # scikit-learn, scipy and numpy preprocess every context (its power transform among them), so their versions are compared.
+    runtime=("tabicl>=2.2,<3", "torch", "scikit-learn", "scipy", "numpy"),
     corpus="synthetic priors",
     corpus_end=None,
     released=date(2026, 2, 12),
@@ -42,12 +43,17 @@ CARD = ModelCard(
 
 
 class _Backend:
-    """TabICLv2 on one device: the checkpoint's model read once (the package's own loader), handed to a regressor per fit."""
+    """TabICLv2 on one device: the checkpoint's model read once (the package's own loader), handed to a regressor per fit. On
+    a CPU half precision is off (`use_amp=False`, as TabICL's "auto" has it there), on a GPU it is TabICL's "auto", float16
+    autocast for contexts of 1,024 rows or 60 columns; a fit whose regressor resolves otherwise stops the run."""
 
     def __init__(self, model: "TabICLModel", path: str, device: str):
         package("tabicl", model)
+        import torch
         from tabicl import TabICLRegressor
 
+        self.on_cpu = torch.device(device).type == "cpu"
+        self.use_amp = False if self.on_cpu else "auto"
         self.regressor = TabICLRegressor
         self.path = path
         self.device = device
@@ -68,6 +74,7 @@ class _Backend:
             allow_auto_download=False,
             device=self.device,
             random_state=self.random_state,
+            use_amp=self.use_amp,
         )
         loaded = self.loaded
 
@@ -75,7 +82,22 @@ class _Backend:
             regressor.model_, regressor.model_config_, regressor.model_path_ = loaded
 
         regressor._load_model = load
-        return regressor.fit(x, y)
+        regressor.fit(x, y)
+        self._check_precision(regressor, x.shape)
+        return regressor
+
+    def _check_precision(self, regressor: Any, shape: tuple) -> None:
+        """The precision the manifest records (`TabICLModel._PRECISION`): no autocast on a CPU; on a GPU autocast exactly for
+        a context of 1,024 rows or more, or 60 columns or more."""
+        resolve = getattr(regressor, "_resolve_amp_fa3", None)
+        if resolve is None:
+            raise RuntimeError("TabICLModel: this tabicl can't say whether it autocasts (no _resolve_amp_fa3)")
+        expected = False if self.on_cpu else not (shape[0] < 1024 and shape[1] < 60)
+        if bool(resolve()[0]) != expected:
+            raise RuntimeError(
+                f"TabICLModel: tabicl autocasts={not expected} on {self.device} for a context of {shape[0]} rows and "
+                f"{shape[1]} columns, not what the manifest records ({TabICLModel._PRECISION['cpu' if self.on_cpu else 'cuda']})"
+            )
 
     def predict(self, regressor: Any, rows: np.ndarray) -> np.ndarray:
         return regressor.predict(rows, output_type="median")
@@ -95,8 +117,10 @@ class TabICLModel(InContextModel):
         n_estimators: Ensemble members of one call (preprocessed, shuffled views of the context), 8 by default, run in one
             batch.
         random_state: The seed of every fit's views.
-        device: "auto" (CUDA if a matmul runs on it, else the CPU), "cpu", "cuda" or "cuda:N". The device type is recorded
-            and compared on resume; on a GPU the package computes in half precision for wide contexts.
+        device: "auto" (every GPU a matmul runs on, worker k on GPU k modulo their number, else the CPU), "cpu", "cuda" or
+            "cuda:N", resolved once for a run. On a CPU the fits compute in float32; on a GPU TabICL autocasts to float16 for
+            contexts of 1,024 rows or 60 columns, and the two differ by up to 0.54 EUR/MWh (mean 0.044) over 1,200 forecasts of
+            the research's rows. The device type and the precision are recorded and compared on resume.
         weights: None (the cache `epf weights fetch` filled), a path to the checkpoint, or `"jingang/TabICL@<rev>"`.
         block_predict: Predict a block's issue days in one call (True), or one row at a time.
         name: Display name.
@@ -105,6 +129,7 @@ class TabICLModel(InContextModel):
     """
 
     _card = CARD
+    _PRECISION = {"cpu": "float32", "cuda": "float16 autocast from 1,024 rows or 60 columns"}
 
     def __init__(
         self,

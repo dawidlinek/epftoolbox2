@@ -36,7 +36,9 @@ CARD = ModelCard(
     ),
     # sha256 recorded by the first `epf weights fetch` (S02, 2026-11-10), the repository's LFS hash of the file too.
     weights=WeightsRef(REPO, REVISION, {CHECKPOINT: SHA256}, bytes=44_390_977),
-    runtime=("tabpfn>=6,<10", "torch"),
+    # tabpfn 9.1 is the first with `ModelSpecs` (the network handed to each fit); scikit-learn, scipy and numpy preprocess
+    # every context (Yeo-Johnson moved by 2.9e-15 between two of their releases), so their versions are compared too.
+    runtime=("tabpfn>=9.1,<10", "torch", "scikit-learn", "scipy", "numpy"),
     corpus="synthetic priors",
     corpus_end=None,
     released=date(2025, 1, 5),
@@ -45,25 +47,44 @@ CARD = ModelCard(
 
 
 class _Backend:
-    """TabPFN v2 on one device: a regressor per fit, built from the resolved checkpoint (the package keeps the loaded
-    checkpoint per process), its context shown by `fit`, the median asked of `predict`."""
+    """TabPFN v2 on one device. The network is built once, here, from the resolved checkpoint (tabpfn's own loader with
+    `download_if_not_exists=False`, inside the caller's `offline()`), and handed to every fit's regressor as `ModelSpecs`, so no
+    fit reaches tabpfn's loader or its download paths. Each fit is a regressor of the research's settings, its context shown by
+    `fit`, the median asked of `predict`. On a CPU the precision is pinned to float32 (tabpfn's "auto" autocasts to bfloat16
+    on CPUs with AVX512-BF16 or AMX); on a GPU it is tabpfn's "auto", float16 autocast. A fit whose regressor computes in
+    another precision stops the run."""
 
     def __init__(self, model: "TabPFNModel", path: str, device: str):
         package("tabpfn", model)
+        import torch
         from tabpfn import TabPFNRegressor
+        from tabpfn.base import ModelSpecs
         from tabpfn.constants import ModelVersion
+        from tabpfn.model_loading import load_model_criterion_config, resolve_model_version
 
-        try:
-            from tabpfn.model_loading import resolve_model_version
-        except ImportError:  # pragma: no cover - older releases name the version by the file the same way
-            resolve_model_version = None
-        if resolve_model_version is not None and resolve_model_version(path) != ModelVersion.V2:
+        if resolve_model_version(path) != ModelVersion.V2:
             raise RuntimeError(
                 f"TabPFNModel: tabpfn reads {path} as {resolve_model_version(path).value} weights, not v2: only the v2 "
                 f"regressor ({REPO}, {CHECKPOINT}) is used, whose licence allows commercial use"
             )
+        self.torch = torch
+        self.on_cpu = torch.device(device).type == "cpu"
+        forced = torch.float32 if self.on_cpu else None
+        models, criterion, configs, inference_config = load_model_criterion_config(
+            model_path=path,
+            check_bar_distribution_criterion=True,
+            estimator_type="regressor",
+            version=ModelVersion.V2.value,
+            download_if_not_exists=False,
+            devices=[torch.device(device)],
+            force_inference_dtype=forced,
+        )
+        self.specs = ModelSpecs(
+            model=models[0], architecture_config=configs[0], inference_config=inference_config, norm_criterion=criterion
+        )
         self.regressor = TabPFNRegressor
         self.version = ModelVersion.V2
+        self.precision = forced if self.on_cpu else "auto"
         self.path = path
         self.device = device
         self.n_estimators = model.n_estimators
@@ -75,13 +96,27 @@ class _Backend:
     def fit(self, x: np.ndarray, y: np.ndarray) -> Any:
         regressor = self.regressor.create_default_for_version(
             self.version,
-            model_path=self.path,
+            model_path=self.specs,
             device=self.device,
             n_estimators=self.n_estimators,
             random_state=self.random_state,
             n_preprocessing_jobs=1,
+            inference_precision=self.precision,
         )
-        return regressor.fit(x, y)
+        regressor.fit(x, y)
+        self._check_precision(regressor)
+        return regressor
+
+    def _check_precision(self, regressor: Any) -> None:
+        """The precision the manifest records (`TabPFNModel._PRECISION`): float32 and no autocast on a CPU, autocast on a GPU."""
+        autocast = getattr(regressor, "use_autocast_", None)
+        forced = getattr(regressor, "forced_inference_dtype_", None)
+        expected = (False, self.torch.float32) if self.on_cpu else (True, None)
+        if (autocast, forced) != expected:
+            raise RuntimeError(
+                f"TabPFNModel: tabpfn computes with autocast={autocast}, dtype={forced} on {self.device}, not the "
+                f"{TabPFNModel._PRECISION['cpu' if self.on_cpu else 'cuda']} the manifest records"
+            )
 
     def predict(self, regressor: Any, rows: np.ndarray) -> np.ndarray:
         return regressor.predict(rows, output_type="median")
@@ -101,8 +136,10 @@ class TabPFNModel(InContextModel):
             block is predicted in one call (`block_predict`).
         n_estimators: Ensemble members of one call (preprocessed views of the context), 4 by default.
         random_state: The seed of every fit's preprocessing.
-        device: "auto" (CUDA if a matmul runs on it, else the CPU), "cpu", "cuda" or "cuda:N". The device type is recorded
-            and compared on resume; CPU and GPU forecasts differ in their last digits.
+        device: "auto" (every GPU a matmul runs on, worker k on GPU k modulo their number, else the CPU), "cpu", "cuda" or
+            "cuda:N", resolved once for a run. On a CPU the fits compute in float32, on a GPU with tabpfn's float16 autocast,
+            and the two differ by more than rounding: up to 4.3 EUR/MWh (mean 0.28) over 1,200 forecasts of the research's
+            rows. The device type and the precision are recorded and compared on resume.
         weights: None (the cache `epf weights fetch` filled), a path to the checkpoint, or `"Prior-Labs/TabPFN-v2-reg@<rev>"`.
         block_predict: Predict a block's issue days in one call (True), or one row at a time.
         name: Display name.
@@ -111,6 +148,7 @@ class TabPFNModel(InContextModel):
     """
 
     _card = CARD
+    _PRECISION = {"cpu": "float32", "cuda": "float16 autocast"}
 
     def __init__(
         self,
