@@ -44,10 +44,9 @@ class T0Backend(Backend):
     levels = LEVELS_19
 
     def __init__(self, resolved: Any, device: Any):
+        # huggingface_hub's mixin reads the config, then the safetensors file (and prints that it loads from a directory).
         with staged(resolved, FILES) as root, contextlib.redirect_stdout(io.StringIO()):
-            model = T0Forecaster.from_pretrained(
-                str(root)
-            )  # huggingface_hub's mixin: config, then the safetensors file
+            model = T0Forecaster.from_pretrained(str(root))
         expected = set(model.state_dict())
         with safetensors.safe_open(str(resolved.path("model.safetensors")), framework="pt") as stored:
             found = set(stored.keys())
