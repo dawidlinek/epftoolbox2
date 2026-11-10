@@ -12,6 +12,7 @@ import warnings
 import pandas as pd
 import yaml
 
+from .._clock import current_clock
 from .._date_utils import resolve_date, resolve_dates
 from ..information_set import DATA_ZONE, InformationSet, InformationSetError, check_level
 from ..models._calendar import (
@@ -787,6 +788,11 @@ class ModelPipeline:
             self._check_benchmarks()
             for zone in zones:
                 self._check_source_columns(frames[zone])
+        if forecast_only and validation is None and test is not None and test_start is None and test_end is None:
+            # Its keywords are each zone's, as test_start's and test_end's are: checked here, resolved per zone below.
+            days = to_period(test, TEST)
+            test_start, test_end = (raw if isinstance(raw, str) else day for raw, day in zip(test, days))
+            test = None
         windows, test_start, test_end = self._resolve_windows(
             validation, test, test_start, test_end, forecast_only, validation_every=validation_every
         )
@@ -817,19 +823,40 @@ class ModelPipeline:
                 )
             for zone in zones:
                 self._check_save_format(dirs[zone], save_format)
+        # Each zone's days to check, and what its runs are given.
         if windows is not None:
-            check_start, check_end = windows.first_day, windows.last_day
+            spans = {zone: (windows.first_day, windows.last_day) for zone in zones}
+            given = {zone: (test_start, test_end) for zone in zones}
         elif forecast_only:
-            # One "today" for every zone, given to each zone's run (a pooled model fits over them all): the zones' issue zone,
-            # or the host's date where their zones differ (issue_timezone="data" over markets in several zones).
-            zone = {today_zone(self.information_set, frames[name].index) for name in zones}
-            zone = zone.pop() if len(zone) == 1 else None
-            check_start, check_end = resolve_date(test_start or "today", zone), resolve_date(test_end or "today", zone)
-            test_start, test_end = check_start, check_end
+            # "Today" is each zone's issue zone's date at one instant, as a run of the zone's frame alone and a report of its
+            # folder read it, and is given to each zone's runs. A pooled model fits over every zone on one issue day.
+            instant = current_clock().now()
+            spans = {
+                zone: tuple(
+                    resolve_dates(
+                        [test_start or "today", test_end or "today"],
+                        today_zone(self.information_set, frames[zone].index),
+                        at=instant,
+                    )
+                )
+                for zone in zones
+            }
+            if pooled and len(set(spans.values())) > 1:
+                raise ValueError(
+                    f"{[model.name for model in pooled]}: a PooledModel issues every zone's forecasts on one day, and these "
+                    f"zones' issue zones are on different days now ({', '.join(f'{z} {s[0]}' for z, s in spans.items())}): "
+                    "pass test_start and test_end."
+                )
+            given = spans
         else:
-            check_start, check_end = test_start, test_end
-        for name, (start, end) in windows.periods if windows is not None else [("test", (check_start, check_end))]:
-            check_issue_days_in(start, end, weekdays, name)
+            spans = given = {zone: (test_start, test_end) for zone in zones}
+        check_start, check_end = spans[zones[0]]  # the pooled models' (every zone's, as checked above)
+        if windows is not None:
+            for name, (start, end) in windows.periods:
+                check_issue_days_in(start, end, weekdays, name)
+        else:
+            for start, end in dict.fromkeys(spans.values()):
+                check_issue_days_in(start, end, weekdays, "test")
         days_argument = {} if weekdays is None else {"issue_days": issue_day_names(weekdays)}
         level = self.availability
         infos = {zone: self._information_set_for(frames[zone]) for zone in zones}
@@ -843,14 +870,15 @@ class ModelPipeline:
             with _zone_errors(zone):
                 # What `_prepare_run` would refuse after an earlier zone's files were written: every day the run names
                 # must be a local date of each zone's frame.
-                _check_days_in_frame(frame, windows, check_start, check_end)
+                first, last = spans[zone]
+                _check_days_in_frame(frame, windows, first, last)
                 shared = _RunChecks(frame)
                 for model in plain:
                     plan = model._plan_predictors(
-                        frame, target, horizon, freq, info, check_start, check_end, shared=shared, **common
+                        frame, target, horizon, freq, info, first, last, shared=shared, **common
                     )
                     checks[(zone, model.name)] = model._checked_inputs(
-                        frame, target, horizon, freq, info, check_start, check_end, plan=plan, shared=shared, **common
+                        frame, target, horizon, freq, info, first, last, plan=plan, shared=shared, **common
                     )
                     if plan is not None:
                         plans[(zone, model.name)] = plan
@@ -923,8 +951,8 @@ class ModelPipeline:
             save_to = str(self.results_path(dirs[zone], model, save_format)) if save_dir else None
             return dict(
                 data=frame,
-                test_start=test_start,
-                test_end=test_end,
+                test_start=given[zone][0],
+                test_end=given[zone][1],
                 target=target,
                 freq=freq,
                 save_to=save_to,
