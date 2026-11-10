@@ -50,7 +50,7 @@ import numpy as np
 import pandas as pd
 import yaml
 
-from .._clock import current_clock
+from .._clock import SYSTEM
 from .._extras import MissingExtraError
 from ..logging import get_logger
 
@@ -933,7 +933,7 @@ class BayesSearch:
     def _wait_for_setup(self, study: Any, name: str) -> None:
         """Wait for the process that created `study` to set it up; a TimeoutError saying how to recover if it stopped."""
         timeout = _seconds(ENV_SETUP_TIMEOUT, 120.0)
-        clock = current_clock()
+        clock = SYSTEM  # the other process runs on real time
         started = clock.monotonic()
         while _READY not in study.user_attrs:
             if clock.monotonic() - started > timeout:
@@ -953,7 +953,7 @@ class BayesSearch:
         during a trial leaves it running, and only `epf tune --requeue` (with no worker running) puts it back."""
         every = _seconds(ENV_WAIT_NOTE, 900.0)
         limit = _seconds(ENV_WAIT_TIMEOUT, 0.0) if os.environ.get(ENV_WAIT_TIMEOUT) else None
-        clock = current_clock()
+        clock = SYSTEM  # the workers run on real time
         noted = started = clock.monotonic()
         while not self._rung_done(storage, r):
             if limit is not None and clock.monotonic() - started > limit:

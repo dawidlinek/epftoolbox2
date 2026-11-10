@@ -13,7 +13,7 @@ import warnings
 from typing import Any, BinaryIO, Callable, Dict, Iterable, Iterator, List, Optional, Sequence, Set, Tuple
 from threading import Lock
 
-from .._clock import SYSTEM, current_clock
+from .._clock import SYSTEM
 
 # What every record written from record schema 2 on ends with (D4 of the forecasting plan), after the keys it had before, whose
 # order and values don't change: `status` ("ok" for a forecast, a skip reason's name for a key with none), `list_hash` (the hash
@@ -1242,7 +1242,7 @@ class _GroupLock:
                 except OSError as exc:
                     if exc.errno not in _HELD_ERRNOS:
                         return
-                    current_clock().sleep(0.01)
+                    SYSTEM.sleep(0.01)  # the other process holds it on real time
             else:
                 return
             try:
