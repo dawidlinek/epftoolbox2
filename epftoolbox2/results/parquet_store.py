@@ -450,12 +450,22 @@ def choose(table, visible: Optional[frozenset] = None) -> Tuple[Any, List[Tuple[
         | (s_horizon[1:] != s_horizon[:-1])
     )
     if start.all():
+        chosen, repeats = idx, []
+    else:
+        chosen = idx[start]
+        group = np.cumsum(start) - 1
+        chosen_of = chosen[group]
+        candidate = ~start & ok[idx] & ok[chosen_of] & (revision[idx] == revision[chosen_of])
+        repeats = list(zip(order[chosen_of[candidate]].tolist(), order[idx[candidate]].tolist()))
+    if visible is not None:  # each issue day from its highest revision alone (`results.store._day_top_revisions`)
+        days, inverse = np.unique(day[chosen], return_inverse=True)
+        top = np.full(len(days), np.iinfo(np.int64).min, dtype=np.int64)
+        np.maximum.at(top, inverse, revision[chosen])
+        dropped = set(order[chosen[revision[chosen] != top[inverse]]].tolist())
+        chosen = chosen[revision[chosen] == top[inverse]]
+        repeats = [pair for pair in repeats if pair[0] not in dropped]
+    if not repeats and len(chosen) == len(order):
         return order, []
-    chosen = idx[start]
-    group = np.cumsum(start) - 1
-    chosen_of = chosen[group]
-    candidate = ~start & ok[idx] & ok[chosen_of] & (revision[idx] == revision[chosen_of])
-    repeats = list(zip(order[chosen_of[candidate]].tolist(), order[idx[candidate]].tolist()))
     return np.sort(order[chosen]), repeats
 
 

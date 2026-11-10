@@ -247,8 +247,10 @@ def read_records(
     Records of a live directory (step 8c, `results.live`) are read with `committed`: issue day (`run_date`) -> its committed
     revisions -> the instant each was committed, and optionally `issued_by`, a cut-off (`visible_revisions`). A line of any other
     revision is not there for the rule below, so an uncommitted revision, or one committed after the cut-off, is never seen and
-    never hides a revision that is; a line without a whole key isn't seen either. Without `committed`, a file in a live directory
-    raises `LiveDirectoryError`, and so does a live record read without it or a record that isn't one read with it.
+    never hides a revision that is; a line without a whole key isn't seen either. Of the revisions seen, each issue day is read
+    from the highest one with a record of that day in this file alone: a key that revision has no record of has none, never
+    one of a lower revision, so a day's curve is one revision's. Without `committed`, a file in a live directory raises
+    `LiveDirectoryError`, and so does a live record read without it or a record that isn't one read with it.
 
     Per key the highest `revision` wins; within it a record with `status` "ok" wins over skip records (a key a later run forecast)
     and is the first ok one in the file. Of skip records alone the last is the key's. `statuses` keeps the keys whose chosen
@@ -279,6 +281,8 @@ def read_records(
         path, "rb"
     ) as f:  # once: a file replaced between the passes (an ensemble's, `os.replace`d) stays this one
         chosen, repeats = _choose(path, f, visible)
+        if visible is not None:
+            chosen, repeats = _day_top_revisions(chosen, repeats)
         if repeats:
             _check_repeats(path, f, chosen, repeats, duplicates)
         # (offset, CRC-32 of the line, key, revision, status) of each line to parse, in file order
@@ -348,6 +352,19 @@ def _choose(
             repeats.pop(key, None)
         chosen[key] = (revision, status, at, zlib.crc32(raw))
     return chosen, repeats
+
+
+def _day_top_revisions(
+    chosen: Dict[Any, Tuple[int, str, int, int]], repeats: Dict[Any, List[int]]
+) -> Tuple[Dict[Any, Tuple[int, str, int, int]], Dict[Any, List[int]]]:
+    """A live reader's keys of each issue day's highest revision alone: a key whose chosen record is of a lower revision than
+    another key's of the same day has none (it isn't in the revision the day is read from)."""
+    top: Dict[str, int] = {}
+    for key, (revision, *_) in chosen.items():
+        if revision > top.get(key[2], revision - 1):
+            top[key[2]] = revision
+    kept = {key: held for key, held in chosen.items() if held[0] == top[key[2]]}
+    return kept, {key: offsets for key, offsets in repeats.items() if key in kept}
 
 
 def _fields_of(record: Dict, number: int) -> Tuple[Any, int, str]:
