@@ -26,16 +26,19 @@ import numpy as np
 import pandas as pd
 
 from ..information_set import parse_predictor
+from ..scalers.target import MultiTargetAsinh, RawTarget
 from . import _contract
 from ._calendar import FREQ_STEPS, periods_per_day
 
 PERIOD, DAY, POOLED = "period", "day", "pooled"
 UNIT_KINDS = (PERIOD, DAY, POOLED)
 
-# How a pooled unit transforms its targets: each period's own Invariant (the research's per-hour one, `ztree.py:104-105`), or
-# one over the rows of every period. A day unit's is always each period's own.
-PER_PERIOD, POOLED_TARGET = "per_period", "pooled"
-TARGET_TRANSFORMS = (PER_PERIOD, POOLED_TARGET)
+# How a unit transforms its targets: each period's own Invariant (the research's per-hour one, `ztree.py:104-105`), one over
+# the rows of every period (a pooled unit's only), or none, the raw target (`scalers.target.RawTarget`, the identity there and
+# back). A day unit takes each period's own or none.
+PER_PERIOD, POOLED_TARGET, NO_TRANSFORM = "per_period", "pooled", "none"
+TARGET_TRANSFORMS = (PER_PERIOD, POOLED_TARGET, NO_TRANSFORM)
+DAY_TARGET_TRANSFORMS = (PER_PERIOD, NO_TRANSFORM)
 
 # The virtual column of a pooled unit: the period of each row, a feature only where a list names it.
 PERIOD_FEATURE = "period"
@@ -61,17 +64,43 @@ def check_target_transform(value: Any) -> str:
     if not isinstance(value, str) or value not in TARGET_TRANSFORMS:
         raise ValueError(
             f"target_transform must be one of {list(TARGET_TRANSFORMS)}, got {value!r}: 'per_period' fits each period's "
-            "targets an Invariant of its own (asinh of median and MAD), 'pooled' one over the rows of every period"
+            "targets an Invariant of its own (asinh of median and MAD), 'pooled' one over the rows of every period, 'none' "
+            "the raw target"
+        )
+    return value
+
+
+def check_periods_target_transform(model: Any, value: Any, periods: str) -> str:
+    """`value` for a tree class of `periods` ("pooled" or "each"; `HistGBModel`, the boosted trees): any of
+    `TARGET_TRANSFORMS` for a pooled fit, the default "per_period" alone for `periods="each"`, whose period units transform
+    their targets with the model's `scaler`; anything else a ValueError, never a setting silently left unread."""
+    check_target_transform(value)
+    if periods == "each" and value != PER_PERIOD:
+        raise ValueError(
+            f"{type(model).__name__}: target_transform={value!r} is how a pooled fit (periods='pooled') transforms its "
+            "targets; with periods='each' each period's target goes through scaler= (the Invariant by default), so "
+            "target_transform takes its default 'per_period' there"
         )
     return value
 
 
 def target_transform_of(model: Any) -> str:
-    """How a day or pooled unit of `model` transforms its targets: a day unit each period's own, a pooled unit its
-    `target_transform` (`"per_period"` if it has none)."""
-    if unit_kind(model) == DAY:
-        return PER_PERIOD
-    return check_target_transform(getattr(model, "target_transform", PER_PERIOD))
+    """How a day or pooled unit of `model` transforms its targets: its `target_transform` (`"per_period"` if it has none),
+    which for a day unit is `"per_period"` or `"none"` (a ValueError for `"pooled"`, a pooled unit's alone)."""
+    value = check_target_transform(getattr(model, "target_transform", PER_PERIOD))
+    if unit_kind(model) == DAY and value not in DAY_TARGET_TRANSFORMS:
+        raise ValueError(
+            f"{type(model).__name__}: a day unit fits each period of the day as an output of its own, so its "
+            f"target_transform is one of {list(DAY_TARGET_TRANSFORMS)}, got {value!r} (one transform over the rows of "
+            "every period is a pooled unit's)"
+        )
+    return value
+
+
+def target_of(transform: str) -> Any:
+    """A fresh target transform of a unit's `transform` (`units_config`'s): `MultiTargetAsinh`, each period's Invariant or one
+    over every row as the unit fits it, or `RawTarget`, the identity, for `"none"`."""
+    return RawTarget() if transform == NO_TRANSFORM else MultiTargetAsinh()
 
 
 def units_config(model: Any, periods: int) -> Optional[Dict[str, Any]]:
@@ -99,12 +128,14 @@ def manifest_fields(model: Any) -> Dict[str, Any]:
 
 
 def check_unit_settings(model: Any, data: pd.DataFrame, lists: Iterable[Sequence[str]] = ()) -> None:
-    """A ValueError for what a day or pooled unit of `model` can't run with in this step: no `refit` (a unit is a fit on the
-    refit calendar; `refit="1D"` fits every issue day), and for a pooled unit a frame column named `period` where a list names
-    the virtual column (which of the two would it be?). Nothing for a period model."""
+    """A ValueError for what a day or pooled unit of `model` can't run with in this step: a target transform its kind doesn't
+    take (`target_transform_of`), no `refit` (a unit is a fit on the refit calendar; `refit="1D"` fits every issue day), and
+    for a pooled unit a frame column named `period` where a list names the virtual column (which of the two would it be?).
+    Nothing for a period model."""
     kind = unit_kind(model)
     if kind == PERIOD:
         return
+    target_transform_of(model)
     if model.refit is None:
         raise ValueError(
             f"{model.name}: a {kind} unit is a fit on the refit calendar, so {type(model).__name__} needs refit= ('7D' fits "

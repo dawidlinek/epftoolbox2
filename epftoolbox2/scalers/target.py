@@ -4,7 +4,8 @@ A day unit (`BaseModel._unit_kind = "day"`, `models/_units.py`) fits the P perio
 with `target_transform="per_period"` the rows of every period together. Each period's targets then get their own
 transformation, fitted on that period's training targets alone, exactly as a period unit's
 `AsinhScaler(apply_to="target", standardise=False)` fits it (epftoolbox's "Invariant"), and a forecast of period p is mapped
-back with p's: a column is that scaler's to the bit.
+back with p's: a column is that scaler's to the bit. With `target_transform="none"` a unit fits the raw targets
+(`RawTarget`, the identity there and back).
 """
 
 from typing import Optional, Tuple
@@ -85,3 +86,23 @@ class MultiTargetAsinh:
         z = np.asarray(z, dtype=np.float64) * 1.0 + 0.0
         center, scale = self._params(z.shape, groups)
         return center + scale * np.sinh(z)
+
+
+class RawTarget:
+    """The raw target in `MultiTargetAsinh`'s interface (`target_transform="none"`): nothing is fitted, `transform` and
+    `inverse` give back their values as float64, unchanged (no centring, no scale, no asinh), so a unit's learner fits and
+    predicts in target units."""
+
+    name = "none"
+
+    def fit(self, y: np.ndarray, mask: Optional[np.ndarray] = None) -> "RawTarget":
+        return self
+
+    def fit_groups(self, y: np.ndarray, groups: Optional[np.ndarray], n_groups: int) -> "RawTarget":
+        return self
+
+    def transform(self, y: np.ndarray, groups: Optional[np.ndarray] = None) -> np.ndarray:
+        return np.asarray(y, dtype=np.float64)
+
+    def inverse(self, z: np.ndarray, groups: Optional[np.ndarray] = None) -> np.ndarray:
+        return np.asarray(z, dtype=np.float64)

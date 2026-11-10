@@ -3256,8 +3256,9 @@ class BaseModel(ABC):
     def _fit_days(self, x: np.ndarray, y: np.ndarray, y_mask: np.ndarray) -> Any:
         """The fit of a day unit (`_unit_kind = "day"`, `models._units`): `x` (dates, inputs) the scaled day-level inputs of its
         training dates, `y` (dates, P) the targets of the P periods of each date's target day through each period's Invariant
-        (`scalers.target.MultiTargetAsinh`), NaN where `y_mask` is False (a slot the clock skips, the repeated autumn hour, a
-        missing value, a target not yet published by the issue time). Returns the fit `_predict_days` reads."""
+        (`scalers.target.MultiTargetAsinh`), or as they are with `target_transform = "none"`, NaN where `y_mask` is False (a
+        slot the clock skips, the repeated autumn hour, a missing value, a target not yet published by the issue time).
+        Returns the fit `_predict_days` reads."""
         raise NotImplementedError(f"{type(self).__name__} has no _fit_days: it fits no day units")
 
     def _predict_days(self, fitted: Any, rows: np.ndarray) -> np.ndarray:
@@ -3265,5 +3266,5 @@ class BaseModel(ABC):
         scaled inputs `rows` (rows, inputs): the issue dates of every day of the unit's block the frame has, padded to the rule's
         nominal length with copies of the first. A row's forecasts must not depend on the call's other rows. A fit of several
         members (seeds) may return (members, rows, P): a forecast is then their mean in target units, each member mapped back
-        with its period's Invariant first (`_worker._fit_day_unit`)."""
+        with its period's Invariant first (`_worker._fit_day_unit`; as it is with `target_transform = "none"`)."""
         raise NotImplementedError(f"{type(self).__name__} has no _predict_days: it fits no day units")

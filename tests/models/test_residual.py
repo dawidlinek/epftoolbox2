@@ -465,6 +465,36 @@ def test_another_learner_window_or_refit_refuses_before_the_base_runs(market, tm
         assert {name: (tmp_path / name).read_bytes() for name in kept} == kept
 
 
+def test_another_learner_target_transform_refuses_before_the_base_runs(market, tmp_path):
+    """A pooled learner's `target_transform` (the manifest's own field, outside `model_params`) is compared before the base
+    runs: a resume with "none" over results of the default refuses, from an earlier start too, with no fit, and the base's
+    results, the base's manifest and the model's results stay as they were."""
+
+    def model(transform):
+        return residual(learner=HistGBModel(LEARNER_INPUTS, target_transform=transform, **HGB))
+
+    run(model("per_period"), market, ("2023-03-20", "2023-03-26"), save_dir=tmp_path)
+    kept = {
+        name: (tmp_path / name).read_bytes()
+        for name in ("residual.base.jsonl", "residual.base.manifest.json", "residual.jsonl", "residual.manifest.json")
+    }
+    fits = []
+    real = HistGBModel._fit_model
+
+    def spy(self, train_x, train_y):
+        fits.append(len(train_y))
+        return real(self, train_x, train_y)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(HistGBModel, "_fit_model", spy)
+        with pytest.raises(
+            ManifestMismatchError, match="target_transform: 'per_period' \\(existing results\\) vs 'none'"
+        ):
+            run(model("none"), market, ("2023-03-13", "2023-03-26"), save_dir=tmp_path)
+    assert fits == [] and {name: (tmp_path / name).read_bytes() for name in kept} == kept
+    run(model("per_period"), market, ("2023-03-13", "2023-03-26"), save_dir=tmp_path)  # the same: resumes
+
+
 def test_a_check_left_by_a_failed_pipeline_isn_t_run_for_a_changed_base(market):
     """A pipeline whose other model fails its check leaves the residual model's check of its base behind; replacing the base
     afterwards runs the new one, as a fresh model with it does."""
@@ -943,6 +973,146 @@ def test_hgb_settings_and_card():
         HistGBModel(HGB_INPUTS, refit=None).run(make_market_data(days=60), "2023-02-20", "2023-02-21", horizon=1)
     model = HistGBModel(HGB_INPUTS)
     assert not model._engine_capable() and model.card.extra is None and model.card.runtime == ("scikit-learn>=1.4",)
+
+
+def test_a_pooled_hgb_fit_with_target_transform_none_is_scikit_learn_s_on_the_raw_stacked_rows_by_hand(market):
+    """`target_transform="none"`: the same stacked rows as the default's, the estimator fitted on their raw targets (no centre,
+    no scale, no asinh), and a forecast its row's prediction as it is. To the bit; every forecast moves against the default's."""
+    from sklearn.ensemble import HistGradientBoostingRegressor
+    from threadpoolctl import threadpool_limits
+
+    seen = []
+    real = HistGBModel._fit_model
+
+    def spy(self, train_x, train_y):
+        seen.append(np.array(train_y, copy=True))
+        return real(self, train_x, train_y)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(HistGBModel, "_fit_model", spy)
+        records = (
+            HistGBModel(HGB_INPUTS, training_window=28, target_transform="none", **HGB)
+            .run(market, "2023-03-14", "2023-03-14", horizon=1)
+            ._results
+        )
+    local = pd.DatetimeIndex(market.index.tz_localize(None))
+    names = [name.replace("{horizon}", "1") for name in HGB_INPUTS]
+    table = market.assign(period=local.hour, date=local.normalize(), target=_calendar_target(market, 1))
+    span = (table["date"] >= pd.Timestamp("2023-02-12")) & (table["date"] <= pd.Timestamp("2023-03-11"))
+    train = table[span].dropna(subset=[*names, "target"]).sort_values(["date", "period"], kind="stable")
+    y = train["target"].to_numpy(dtype=np.float64)
+    (stacked,) = seen
+    assert np.array_equal(stacked, y)  # the learner's targets are the raw stacked targets, bit for bit
+    with threadpool_limits(limits=1, user_api="openmp"):
+        fitted = HistGradientBoostingRegressor(
+            loss="absolute_error",
+            max_iter=15,
+            learning_rate=0.05,
+            max_leaf_nodes=31,
+            min_samples_leaf=5,
+            l2_regularization=1.0,
+            max_features=0.5,
+            early_stopping=False,
+            random_state=0,
+        ).fit(train[names].to_numpy(), y)
+        issue = table[table["date"] == pd.Timestamp("2023-03-14")].groupby("period").tail(1)
+        z = fitted.predict(issue[names].to_numpy())
+    expected = {int(p): float(v) for p, v in zip(issue["period"], z)}
+    made = {r["hour"]: r["prediction"] for r in records}
+    assert made == expected and len(made) == 24
+    default = HistGBModel(HGB_INPUTS, training_window=28, **HGB).run(market, "2023-03-14", "2023-03-14", horizon=1)
+    assert all(r["prediction"] != made[r["hour"]] for r in default._results)
+
+
+def test_hgb_target_transform_what_it_refuses_saves_and_records(market, tmp_path):
+    """A pooled fit takes "per_period", "pooled" and "none"; `periods="each"` the default alone (its period units transform
+    their targets with `scaler`), when built and when set later; another value raises. Saved only when set, so a default
+    model's YAML is as before, and loaded back to its value; the manifest records it (not in `model_params`) and a resume
+    with another refuses before any fit."""
+    for value in ("pooled", "none"):
+        with pytest.raises(ValueError, match="with periods='each' each period's target goes through scaler="):
+            HistGBModel(HGB_INPUTS[:-1], periods="each", target_transform=value)
+        each = HistGBModel(HGB_INPUTS[:-1], periods="each")
+        with pytest.raises(ValueError, match="with periods='each'"):
+            each.target_transform = value
+        assert each.target_transform == "per_period"
+    with pytest.raises(ValueError, match="target_transform must be one of"):
+        HistGBModel(HGB_INPUTS, target_transform="raw")
+    model = HistGBModel(HGB_INPUTS, **HGB)
+    model.target_transform = "pooled"
+    model.target_transform = "none"
+
+    texts = {}
+    for value in ("per_period", "none"):
+        path = tmp_path / f"{value}.yaml"
+        ModelPipeline().add_model(HistGBModel(HGB_INPUTS, target_transform=value, name="hgb")).save(path)
+        texts[value] = path.read_text()
+        (loaded,) = ModelPipeline.load(path).models
+        assert loaded.target_transform == value
+    assert "target_transform" not in texts["per_period"]
+    assert texts["none"] == texts["per_period"].replace(
+        "    periods: pooled\n", "    periods: pooled\n    target_transform: none\n"
+    )
+
+    save = tmp_path / "run"
+    first = run(
+        HistGBModel(HGB_INPUTS, training_window=28, target_transform="none", **HGB),
+        market,
+        ("2023-03-26",) * 2,
+        horizon=1,
+        save_dir=save,
+    )
+    manifest = json.loads(manifest_path(save / "hgb.jsonl").read_text())
+    assert (manifest["unit_kind"], manifest["target_transform"]) == ("pooled", "none")
+    assert "target_transform" not in manifest["model_params"]
+    written = lines(save / "hgb.jsonl")
+    assert len(written) == 23 and first.forecast_counts().iloc[0]["missing"] == 0
+    with pytest.raises(ManifestMismatchError, match="target_transform: 'none' \\(existing results\\) vs 'per_period'"):
+        run(
+            HistGBModel(HGB_INPUTS, training_window=28, **HGB),
+            market,
+            ("2023-03-20", "2023-03-26"),
+            horizon=1,
+            save_dir=save,
+        )
+    assert lines(save / "hgb.jsonl") == written
+
+
+def test_verify_is_ok_with_its_control_for_a_pooled_hgb_of_raw_targets(market):
+    """`target_transform="none"`: no forecast moves under the probe, every one under the control, two runs agree, the co-batch
+    noise moves nothing and the cut frame gives the same bits, on a block's first and spring days."""
+
+    def make(name):
+        return HistGBModel(
+            HGB_INPUTS, training_window=28, target_transform="none", **{**HGB, "max_iter": 60}, name=name
+        )
+
+    suite.check_verify(make, market, INFO, ["2023-03-20", "2023-03-26"], items=6)
+
+
+class RawPooledLS(PooledLS):
+    """`PooledLS` of raw targets (`target_transform = "none"`, a class attribute: no YAML key)."""
+
+    target_transform = "none"
+
+
+def test_a_learner_of_raw_targets_adds_its_prediction_as_it_is(market, tmp_path):
+    """A pooled learner with `target_transform="none"` fits the raw residuals `y - base` and its prediction is added as it is:
+    one that predicts 0 forecasts the base's forecast to the bit (the default's forecasts each period's median residual
+    on top); a `HistGBModel` learner of raw targets is saved nested with its transform and recorded in the manifest."""
+    records = run(residual(learner=RawPooledLS(zero=True)), market).refs["residual"]._results
+    assert len(records) > 600 and all(r["prediction"] == r["base_prediction"] for r in records)
+    learner = HistGBModel(LEARNER_INPUTS, target_transform="none", **HGB)
+    model = residual(learner=learner)
+    assert model.target_transform == "none" and model._unit_kind == "pooled"
+    path = tmp_path / "pipeline.yaml"
+    ModelPipeline().add_model(model).save(path)
+    assert "target_transform: none" in path.read_text()
+    (loaded,) = ModelPipeline.load(path).models
+    assert loaded.learner.target_transform == "none"
+    run(model, market, ("2023-03-26",) * 2, save_dir=tmp_path / "run")
+    manifest = json.loads(manifest_path(tmp_path / "run" / "residual.jsonl").read_text())
+    assert manifest["target_transform"] == "none"
 
 
 @pytest.mark.filterwarnings("ignore:overflow encountered in sinh")

@@ -85,8 +85,8 @@ of any runtime entry or of a weight file's hash refuses a resume (`allow_manifes
 were found doesn't, as that differs between machines that hold the same files. A core model has none of the three keys, so its
 manifests are as before.
 
-A model of day or pooled units (`models._units`) adds `unit_kind` ("day" or "pooled") and `target_transform` ("per_period" or
-"pooled"), both compared: a change of either moves every forecast. A period model, every core model, has neither key.
+A model of day or pooled units (`models._units`) adds `unit_kind` ("day" or "pooled") and `target_transform` ("per_period",
+"pooled" or "none"), both compared: a change of either moves every forecast. A period model, every core model, has neither key.
 
 A model that reads another pipeline's stored forecasts (`ForecastSource`, through `InformationSet.with_source_rules`) adds
 `chained_inputs`: for each such column, its upstream's path, model, horizon, issue time and zone, data zone, `available` and
@@ -209,7 +209,7 @@ _COMPARED_FIELDS += ("pooled",)
 # move every forecast (t0 0.5.0 against its git head moved single hours by up to 161 EUR/MWh). No key for a core model.
 _COMPARED_FIELDS += ("runtime", "weights")
 # What one fit of a model of day or pooled units holds (`models._units`): `unit_kind` "day" or "pooled", and how its targets
-# are transformed, "per_period" or "pooled"; no key for a period model. Either changes every forecast.
+# are transformed, "per_period", "pooled" or "none"; no key for a period model. Either changes every forecast.
 _COMPARED_FIELDS += ("unit_kind", "target_transform")
 # A `ResidualModel` (`models.residual`): the hash of its base's configuration as the base's own manifest records it
 # (`base_manifest`), since the base's forecasts are the learner's inputs and targets; None (and no key) for any other model.
@@ -410,7 +410,8 @@ class Manifest:
     # over other weights, allowed); None (and no key) while there is one. Provenance: never compared, and a resume warns.
     weights_history: Optional[List[Dict[str, str]]] = None
     # A model of day or pooled units (`models._units`): "day" or "pooled", and its targets' transform, "per_period" (each period's
-    # own Invariant) or "pooled"; None (and no key) for a period model. Compared on resume.
+    # own Invariant), "pooled" (one over every row) or "none" (the raw target); None (and no key) for a period model. Compared on
+    # resume.
     unit_kind: Optional[str] = None
     target_transform: Optional[str] = None
     # A `ResidualModel`: {"base_manifest": the hash of its base's configuration (`configuration_digest` of the base's own

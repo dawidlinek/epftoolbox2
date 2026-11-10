@@ -236,19 +236,24 @@ Every model above fits one period of the day at a time: a unit is the rows of on
 - **`_unit_kind = "pooled"`**: the rows are the (date, period) rows of every period, by date then period, with one output: each
   predictor is read on its period's own row (`price_d-1` is that hour's price, `price_h05_d-1` the date's 05:00 price), and the
   name `period` in a list adds the row's period (0 to P-1) as a feature. Define `_fit_model(train_x, train_y)` and
-  `_predict_block(fitted, rows)` as above, and a `target_transform` attribute: `"per_period"` (each period's own Invariant) or
-  `"pooled"` (one over every row). A period with no training row is skipped (`no_finite_training_rows`) with either, so the
-  forecasts a run makes don't depend on the transform.
+  `_predict_block(fitted, rows)` as above, and a `target_transform` attribute: `"per_period"` (each period's own Invariant),
+  `"pooled"` (one over every row) or `"none"` (the raw target). A period with no training row is skipped
+  (`no_finite_training_rows`) with each, so the forecasts a run makes don't depend on the transform.
 
 Both units scale the inputs with the model's `scaler` (its input part; binary 0/1 columns are kept) and transform the targets with
 each period's Invariant, asinh of the median and MAD of its training targets (`epftoolbox2.scalers.target.MultiTargetAsinh`,
-`AsinhScaler(apply_to="target", standardise=False)` per column); a forecast of period p is mapped back with p's. Each unit predicts
+`AsinhScaler(apply_to="target", standardise=False)` per column); a forecast of period p is mapped back with p's. A
+`target_transform = "none"` attribute fits the raw targets instead (`scalers.target.RawTarget`, the identity there and back): the
+fit gets them as they are, masked slots NaN, and its predictions are the forecasts. A day unit takes `"per_period"` (its default)
+or `"none"`; `"pooled"` is refused when its run starts, as is any other value. `TorchModel` and its presets take no other
+transform than each period's Invariant: setting `target_transform` to another value raises. Each unit predicts
 every issue day of its block that the frame has in one call of the block's nominal length (7 days for `"7D"`, times P rows for a
 pooled unit), padded with copies of the first, so a forecast is the same alone, in its block, after a resume and whatever the run's
 `test_start` or the data's end; a row's forecasts must not depend on the call's other rows, which `verify`'s co-batch check runs on
 by default. Records are those of every planned (period, horizon, issue day), keyed as any model's; a day unit's have no
 coefficients. A list may change with the horizon and, for a predictor function of `ctx`, with the issue day, never with the period of
-one issue day. The manifest records `unit_kind` and `target_transform`, and a resume with another refuses. Not in this release: the
+one issue day. The manifest records `unit_kind` and `target_transform` (`"per_period"`, `"pooled"` or `"none"`), and a resume
+with another refuses. Not in this release: the
 engine, `PooledModel`, `train_on="matching"` and `period` in a predictor function's list.
 
 ```python
