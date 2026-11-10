@@ -340,20 +340,26 @@ def model_inputs(hour_arrays: Dict, models: Sequence[tuple]) -> List[ModelInputs
     rebuilds it (`_worker.task_inputs`), all on the chunk's one set of arrays."""
     out = []
     for name, expanded, config, model_cls, model_kwargs in models:
-        inputs = task_inputs(hour_arrays, expanded, config, model_cls, model_kwargs)
-        scale_binary, vst, folds = None, None, None
-        if config.get("fit_path") is not None:
-            spec = config.get("scaler", "standard")
-            scaler = make_scaler(spec)
-            if type(scaler) is StandardScaler:
-                scale_binary = bool(scaler.scale_binary)
-            else:
-                vst = json.dumps(scaler_spec(spec), sort_keys=True)
-            if "blocks" in inputs.model._ENGINE_NEEDS:
-                folds = cv_folds(inputs.model)
-        check = bool(config.get("engine_check")) and (scale_binary is not None or vst is not None)
-        out.append(ModelInputs(name, inputs, scale_binary, vst, folds, check))
+        out.append(inputs_of_model(name, task_inputs(hour_arrays, expanded, config, model_cls, model_kwargs)))
     return out
+
+
+def inputs_of_model(name: str, inputs: TaskInputs) -> ModelInputs:
+    """One model's `ModelInputs` from its `TaskInputs`: with a fit path (`config["fit_path"]`) its `StandardScaler`'s
+    `scale_binary` or its VST's spec, and the CV blocks its fits need; `check` with `config["engine_check"]`."""
+    config = inputs.config
+    scale_binary, vst, folds = None, None, None
+    if config.get("fit_path") is not None:
+        spec = config.get("scaler", "standard")
+        scaler = make_scaler(spec)
+        if type(scaler) is StandardScaler:
+            scale_binary = bool(scaler.scale_binary)
+        else:
+            vst = json.dumps(scaler_spec(spec), sort_keys=True)
+        if "blocks" in inputs.model._ENGINE_NEEDS:
+            folds = cv_folds(inputs.model)
+    check = bool(config.get("engine_check")) and (scale_binary is not None or vst is not None)
+    return ModelInputs(name, inputs, scale_binary, vst, folds, check)
 
 
 def _engine_init(hour_arrays: Dict, models: Sequence[tuple]) -> None:
@@ -611,6 +617,23 @@ class EngineFits:
     def __call__(self, fit: StatsFit) -> Optional[List[Optional[Tuple[float, list]]]]:
         """The fit's forecast of each issue row (prediction in target units, coefficients) or None for a row the model path
         forecasts (`FAR_ISSUE`); None for the whole fit (a hand-back)."""
+        made = self.fit_of(fit)
+        if made is None:
+            return None
+        # One row at a time, as the model path forecasts (decision 16 of the step 3 spec). Whether a row is too far out is
+        # decided from the fit and that row alone, so the same whichever other rows a unit forecasts.
+        out = [made.forecast(self.model, fit.test[row : row + 1], self.counts) for row in range(fit.test.shape[0])]
+        if all(row is None for row in out):
+            return None
+        self.counts.fits += 1
+        if self.inputs.check and self._sampled(fit):
+            self._check(fit, made.fitted, out)
+        return out
+
+    def fit_of(self, fit: StatsFit) -> Optional["EngineUnitFit"]:
+        """The fit from shared statistics of `fit`'s rows, before any issue row (`EngineUnitFit`), or None for a hand-back (see
+        the module): what `__call__` forecasts each issue row from, and what a stored fit keeps (`models._fits`). `fit.test`
+        isn't read."""
         if fit.x.shape[1] == 0:
             return self._back(NO_COLUMNS)  # the model path's own outcome: a fit_error, or LEAR's mean
         r = fit.x.shape[0]
@@ -618,11 +641,12 @@ class EngineFits:
         if r < MIN_ROWS or (folds is not None and r < folds):
             return self._back(FEW_ROWS)  # the model path's descent or KFold refuses fewer rows than folds: a fit_error
         try:
-            stats, transform, inverse, rowset = self._statistics(fit)
+            made = self._statistics(fit)
         except SumsOverflow:
             return self._back(OVERFLOW)
         except StatsFallback as exc:
             return self._back(exc.reason)
+        stats = made.stats
         near = getattr(self.model, "_ENGINE_NEAR_TWIN", None)
         if near is not None and near_twins(stats.G, near):
             return self._back(NEAR_TWIN)
@@ -637,34 +661,15 @@ class EngineFits:
         metric = issue_metric(stats, fitted) if bound < np.inf or condition_max is not None else None
         if condition_max is not None and not metric.condition <= condition_max:
             return self._back(ILL_CONDITIONED)
-        out: List[Optional[Tuple[float, list]]] = []
-        for row in range(fit.test.shape[0]):
-            # One row at a time, as the model path forecasts (decision 16 of the step 3 spec). Whether a row is too far out is
-            # decided from the fit and that row alone, so the same whichever other rows a unit forecasts.
-            z = transform(fit.test[row : row + 1])
-            distance = 0.0 if metric is None else issue_distance(metric, z)
-            if not (distance <= bound and issue_rounding_ok(fitted, stats, z) and solve_error_ok(fitted, stats, z)):
-                self.counts.fallbacks[FAR_ISSUE] += 1
-                out.append(None)
-                continue
-            prediction, coefs = self.model._predict_fitted(fitted, z)
-            if rowset is not None and not _steep_ok(fitted, stats, z, rowset, float(prediction)):
-                self.counts.fallbacks[FAR_ISSUE] += 1
-                out.append(None)
-                continue
-            self.counts.issue(distance)
-            out.append((inverse(float(prediction)), coefs))
-        if all(row is None for row in out):
-            return None
-        self.counts.fits += 1
-        if self.inputs.check and self._sampled(fit):
-            self._check(fit, fitted, out)
-        return out
+        return EngineUnitFit(
+            fitted, stats, metric, float(bound), made.transform, made.inverse, made.rowset, made.params, made.local
+        )
 
-    def _statistics(self, fit: StatsFit):
-        """(`ScaledStats`, the issue rows' transform, the forecast's inverse, the row set or None) of a fit: from its span's
-        sums and `standard_stats`, or from its VST row set and `transformed_stats`; with the CV blocks where the model needs
-        them, from the same sums. Raises `SumsOverflow` or `StatsFallback` for a hand-back."""
+    def _statistics(self, fit: StatsFit) -> "_Statistics":
+        """(`ScaledStats`, the issue rows' transform, the forecast's inverse, the row set or None, the `StandardParams` or None,
+        the fit's places in the row set or None) of a fit: from its span's sums and `standard_stats`, or from its VST row set and
+        `transformed_stats`; with the CV blocks where the model needs them, from the same sums. Raises `SumsOverflow` or
+        `StatsFallback` for a hand-back."""
         folds = self.inputs.folds
         if self.inputs.vst is None:
             span = self.spans.get(fit.period, fit.horizon, fit.rows)
@@ -676,7 +681,7 @@ class EngineFits:
             if folds is not None:
                 blocks = [span.sums.over(rows, columns) for rows in block_rows(np.flatnonzero(fit.finite), folds)]
                 stats = stats._replace(blocks=block_stats(raw, blocks, params, (fit.x, fit.y)))
-            return stats, params.transform, params.inverse, None
+            return _Statistics(stats, params.transform, params.inverse, None, params, None)
         rowset = self.spans.rowset(fit, self.inputs.vst)
         local = rowset.local(fit.columns, fit.mask)
         if isinstance(getattr(rowset.scaler, "apply_to", None), list):
@@ -696,7 +701,7 @@ class EngineFits:
         def transform(x):
             return rowset.transform(local, x)[None, :]
 
-        return stats, transform, rowset.scaler.inverse, rowset
+        return _Statistics(stats, transform, rowset.scaler.inverse, rowset, None, local)
 
     def _sampled(self, fit: StatsFit) -> bool:
         """Whether `engine="check"` runs this fit on the model path too: the hash of its span (period, horizon, its first and
@@ -729,6 +734,57 @@ class EngineFits:
                 prediction, _ = self.model._predict_fitted(own, test[row : row + 1])
                 pairs.append((made[0], scaler.inverse(float(prediction))))
         self.counts.checked(pairs, _other_choice(fitted, own))
+
+
+class _Statistics(NamedTuple):
+    stats: object  # ScaledStats
+    transform: object  # an issue row (1, p) -> its scaled row
+    inverse: object  # a forecast in scaled units -> target units
+    rowset: Optional["_RowSet"]
+    params: object  # StandardParams of a StandardScaler fit, None with a VST
+    local: Optional[np.ndarray]  # a VST fit's places in its row set, None with StandardScaler
+
+
+class EngineUnitFit(NamedTuple):
+    """One fit from shared statistics, made before any issue row (`EngineFits.fit_of`): the model's fit from its `ScaledStats`
+    (`fitted`), what the row checks read of the statistics (`stats`: `zbar` and `yscale`), the fit's `IssueMetric` (None where
+    the model bounds no distance) and its model's bound, the issue rows' `transform` and the forecast's `inverse`, and with a VST
+    the row set (`rowset`: its scaler, `typical` and `yscale`, which `_steep_ok` reads) and the fit's places in it (`local`), with
+    StandardScaler the `StandardParams` (`params`). A stored fit (`models._fits`) keeps these and builds one back."""
+
+    fitted: object
+    stats: object
+    metric: object
+    bound: float
+    transform: object
+    inverse: object
+    rowset: object = None
+    params: object = None
+    local: Optional[np.ndarray] = None
+
+    def forecast(self, model, row: np.ndarray, counts: Optional["EngineCounts"] = None) -> Optional[Tuple[float, list]]:
+        """The forecast of one raw issue row (1, p) (prediction in target units, coefficients), or None where the model path
+        must forecast it (`FAR_ISSUE`, counted in `counts`): beyond the model's bound in the fit's metric, Ridge's rounding or
+        OLS's solve error, or with a VST where its inverse is too steep at the forecast. A function of the fit and the row
+        alone."""
+        z = self.transform(row)
+        distance = 0.0 if self.metric is None else issue_distance(self.metric, z)
+        if not (
+            distance <= self.bound
+            and issue_rounding_ok(self.fitted, self.stats, z)
+            and solve_error_ok(self.fitted, self.stats, z)
+        ):
+            if counts is not None:
+                counts.fallbacks[FAR_ISSUE] += 1
+            return None
+        prediction, coefs = model._predict_fitted(self.fitted, z)
+        if self.rowset is not None and not _steep_ok(self.fitted, self.stats, z, self.rowset, float(prediction)):
+            if counts is not None:
+                counts.fallbacks[FAR_ISSUE] += 1
+            return None
+        if counts is not None:
+            counts.issue(distance)
+        return self.inverse(float(prediction)), coefs
 
 
 def _steep_ok(fitted, stats, z: np.ndarray, rowset: _RowSet, prediction: float) -> bool:
