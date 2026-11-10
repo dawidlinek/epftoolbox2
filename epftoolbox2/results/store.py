@@ -130,10 +130,46 @@ def visible_revisions(committed: Optional[Any], issued_by: Any = None) -> Option
         if limit is NOTHING_VISIBLE:
             continue
         for revision, at in revisions.items():
+            at = getattr(at, "finished", at)  # a `results.live.Commit`, or its instant
             if limit is not None and (at is None or _instant(at) > limit):
                 continue
             pairs.add((day, int(revision)))
     return frozenset(pairs)
+
+
+def commit_marks(committed: Optional[Any], visible: Optional[frozenset]) -> Dict[Tuple[str, int], Tuple[Any, Any]]:
+    """(run_date, revision) -> the (issued_at, snapshot) its commit line says every record of it carries, for the visible
+    revisions whose `committed` value says (a `results.live.Commit` with `marks`); a plain instant says nothing."""
+    out: Dict[Tuple[str, int], Tuple[Any, Any]] = {}
+    if committed is None or not visible:
+        return out
+    for run_date, revisions in committed.items():
+        day = issue_day(run_date)
+        for revision, value in revisions.items():
+            marks = getattr(value, "marks", None)
+            if marks is not None and (day, int(revision)) in visible:
+                out[(day, int(revision))] = marks
+    return out
+
+
+def check_marks(where: Any, record: Dict, marks: Dict[Tuple[str, int], Tuple[Any, Any]]) -> None:
+    """Raise `LiveDirectoryError` for a visible live record whose `issued_at` or `snapshot` isn't its commit line's: a record
+    of another call with that revision's number (a crashed one whose number was taken again after its folder and log lines
+    were removed by hand) or a file edited by hand. Its forecast must never pass for the committed revision's."""
+    expected = marks.get((record.get("run_date"), record.get("revision")))
+    if expected is None:
+        return
+    issued, snapshot = expected
+    held = record.get("issued_at")
+    same_issue = held == issued or (held is not None and issued is not None and _instant(held) == _instant(issued))
+    if not same_issue or record.get("snapshot") != snapshot:
+        raise LiveDirectoryError(
+            f"{where}: a record of revision {record.get('revision')} of {record.get('run_date')} (period {record.get('hour')}, "
+            f"horizon {record.get('horizon')}) was issued at {held!r} with snapshot {record.get('snapshot')!r}, and the line "
+            f"that committed that revision says {issued!r} and {snapshot!r}: the record is another call's (a revision "
+            "number taken again after its folder and issues.jsonl lines were removed by hand) or was edited. No reader may "
+            "take it for the committed revision's."
+        )
 
 
 def check_reading(path: Any, visible: Optional[frozenset]) -> None:
@@ -297,7 +333,9 @@ def read_records(
     Records of a live directory (step 8c, `results.live`) are read with `committed`: issue day (`run_date`) -> its committed
     revisions -> the instant each was committed, and optionally `issued_by`, a cut-off (`visible_revisions`). A line of any other
     revision is not there for the rule below, so an uncommitted revision, or one committed after the cut-off, is never seen and
-    never hides a revision that is; a line without a whole key isn't seen either. Of the revisions seen, each issue day is read
+    never hides a revision that is; a line without a whole key isn't seen either. A `committed` value that is a
+    `results.live.Commit` also says what each record of its revision carries (`issued_at`, `snapshot`): a record read that
+    doesn't raises `LiveDirectoryError` (`check_marks`). Of the revisions seen, each issue day is read
     from the highest one with a record of that day in this file alone: a key that revision has no record of has none, never
     one of a lower revision, so a day's curve is one revision's. Without `committed`, a file in a live directory raises
     `LiveDirectoryError`, and so does a live record read without it or a record that isn't one read with it.
@@ -321,10 +359,11 @@ def read_records(
         raise ValueError(f"duplicates must be 'raise' or 'first', not {duplicates!r}")
     visible = visible_revisions(committed, issued_by)
     check_reading(path, visible)
+    marks = commit_marks(committed, visible)
     if is_parquet_path(path):
         from .parquet_store import read_records as read_parquet
 
-        yield from read_parquet(Path(path), statuses, transform, duplicates, columns, visible=visible)
+        yield from read_parquet(Path(path), statuses, transform, duplicates, columns, visible=visible, marks=marks)
         return
     wanted = None if statuses is None else frozenset(statuses)
     with open(
@@ -362,6 +401,8 @@ def read_records(
                 raise _changed(path, number, f"the line holds {found}, its first pass read {expected[2:]}")
             if (record.get("mode") == MODE_LIVE) != (visible is not None):
                 raise _live_mismatch(path, f"line {number}", visible)
+            if marks:
+                check_marks(f"{path}: line {number}", record, marks)
             out = record if transform is None else transform(record)
             if out is not None:
                 yield out

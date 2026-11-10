@@ -52,6 +52,7 @@ from .store import (
     _LockHeld,
     _preview,
     _Store,
+    check_marks,
     check_reading,
     forecast_text,
     is_live_dir,
@@ -516,6 +517,7 @@ def chosen_rows(
     duplicates: str = "raise",
     stacklevel: int = 5,
     visible: Optional[frozenset] = None,
+    marks: Optional[Dict[Tuple[str, int], Tuple[Any, Any]]] = None,
 ):
     """The rows of `table` (read from `directory`, any columns with the rule's) that the readers' rule gives for `statuses`, in
     table order; with `visible`, of those revisions alone (`choose`). Repeats are compared on every column, read again for them
@@ -536,6 +538,14 @@ def chosen_rows(
         wrong = np.flatnonzero(live != (visible is not None))
         if len(wrong):
             raise _live_mismatch(directory, f"the record of row {int(rows[wrong[0]])}", visible)
+        if marks:  # each visible record carries its commit line's issued_at and snapshot (`results.store.check_marks`)
+            index = pa.array(rows, pa.int64())
+            names = ("run_date", "revision", "hour", "horizon", "issued_at", "snapshot")
+            values = {name: table.column(name).take(index) for name in names}
+            values["run_date"] = values["run_date"].cast(pa.string())
+            values = {name: column.to_pylist() for name, column in values.items()}
+            for i, row in enumerate(rows.tolist()):
+                check_marks(f"{directory}: row {row}", {name: values[name][i] for name in names}, marks)
     return rows
 
 
@@ -546,6 +556,7 @@ def read_records(
     duplicates: str = "raise",
     columns: Optional[Sequence[str]] = None,
     visible: Optional[frozenset] = None,
+    marks: Optional[Dict[Tuple[str, int], Tuple[Any, Any]]] = None,
 ) -> Iterator[Any]:
     """One record per forecast key of a Parquet results directory, by the JSONL reader's rules (`results.store.read_records`),
     in catalog order, `transform(record)` of each if given (None drops it). With `columns`, the records hold those keys (and the
@@ -553,13 +564,20 @@ def read_records(
     if duplicates not in ("raise", "first"):
         raise ValueError(f"duplicates must be 'raise' or 'first', not {duplicates!r}")
     check_reading(directory, visible)
-    table = read_table(directory, columns)
-    rows = chosen_rows(directory, table, statuses, duplicates, stacklevel=6, visible=visible)
+    table = read_table(directory, _with_marks(columns, marks))
+    rows = chosen_rows(directory, table, statuses, duplicates, stacklevel=6, visible=visible, marks=marks)
     for start in range(0, len(rows), 8192):  # dicts a batch at a time
         for record in schema.iter_dicts(table, rows=rows[start : start + 8192].tolist()):
             out = record if transform is None else transform(record)
             if out is not None:
                 yield out
+
+
+def _with_marks(columns: Optional[Sequence[str]], marks: Optional[Dict]) -> Optional[List[str]]:
+    """`columns` and the two a live reader checks each record's commit by (`issued_at`, `snapshot`), when it has marks."""
+    if columns is None or not marks:
+        return None if columns is None else list(columns)
+    return [*columns, *(name for name in ("issued_at", "snapshot") if name not in columns)]
 
 
 def max_revision(directory: Path, run_date: str) -> int:
@@ -635,6 +653,7 @@ def read_frame(
     statuses: Optional[Iterable[str]] = OK_ONLY,
     extra: Sequence[str] = (),
     visible: Optional[frozenset] = None,
+    marks: Optional[Dict[Tuple[str, int], Tuple[Any, Any]]] = None,
 ):
     """The records `read_records` gives, as a DataFrame of `columns` (`_series` per column), without a dict per record: the
     rule's rows, then those `keep(table, rows)` (a boolean array over `rows`) keeps, in catalog order. `extra` are the columns
@@ -643,8 +662,8 @@ def read_frame(
     import pyarrow as pa
 
     check_reading(directory, visible)
-    table = read_table(directory, [*columns, *extra])
-    rows = chosen_rows(directory, table, statuses, stacklevel=7, visible=visible)
+    table = read_table(directory, _with_marks([*columns, *extra], marks))
+    rows = chosen_rows(directory, table, statuses, stacklevel=7, visible=visible, marks=marks)
     rows = rows[keep(table, rows)]
     taken = table.take(pa.array(rows, pa.int64()))
     return pd.DataFrame({name: _series(taken.column(name).combine_chunks(), name) for name in columns})

@@ -10,13 +10,15 @@ A live pipeline writes into a directory of its own, never into a backtest's:
       <model>.jsonl | <model>.parquet    every revision's records, append-only (the 5a and 5b formats)
       <model>.manifest.json              mode "live" (`results.manifest.check_and_write_live`)
       issues.jsonl                       one line per call: issue, call, started, finished, status, exit_code, revision,
-                                         committed, and for a commit issued_at, snapshot and deadline
+                                         committed, and for a commit issued_at, snapshot and deadline; and before it, a
+                                         "begun" line of each revision, which takes its number
       delivered.jsonl                    one line per delivery: issue, revision, delivered_at, receipt_sha256, receipt_path
       issues/<issue>/r<n>/               a revision's own files (snapshots), made before anything else of it
 
 **Revisions.** A call for issue day D writes revision r = 1 + the highest revision any line of D carries, committed or not: a
-call line, a record of `run_date` D in any model's results, or a revision folder `issues/D/r<n>`. The folder is made first
-(`LiveStore.begin`), so a number is taken before any record of it is written and is never taken again, whatever a crash leaves.
+call line, a revision folder `issues/D/r<n>`, or a record of `run_date` D in any model's results. `LiveStore.begin` appends a
+"begun" line, then makes the folder, so a number is taken before any record of it is written and is never taken again, whatever
+a crash leaves; a visible record whose `issued_at` or `snapshot` isn't its commit line's raises.
 Every record of the revision carries `revision` r and, after D4's keys, `issued_at` (UTC), `mode` "live" and `snapshot` (the
 hash of its inputs, `with_live`). Then the snapshot files, then one line in `issues.jsonl` with `committed: true` (appended and
 synced, `LiveRevision.commit`): only that makes the revision visible. A crash before it leaves lines no reader sees.
@@ -88,6 +90,7 @@ DELIVERED = f"{LIVE_LOG_STEMS[1]}.jsonl"
 REVISIONS_DIR = "issues"  # issues/<issue>/r<n>/
 POLICIES = ("latest", "first", "delivered")
 DEADLINE = "deadline"
+BEGUN = "begun"  # the status of the line `begin` writes before any record of a revision: its number is taken
 _TIME = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
 # Backtest files a live directory is never made beside: model results and manifests, and a run over zones' index.
 _ZONE_INDEX = "zone_run.json"
@@ -293,6 +296,14 @@ class Commit:
     issued_at: Optional[pd.Timestamp]
     deadline: Optional[pd.Timestamp]
     line: Dict[str, Any] = field(repr=False, compare=False)
+
+    @property
+    def marks(self) -> Optional[Tuple[Optional[str], Optional[str]]]:
+        """(issued_at, snapshot) as the commit line writes them, which every record of the revision carries; None for a line
+        without `issued_at` (written by hand), whose records aren't checked (`results.store.read_records`)."""
+        if self.line.get("issued_at") is None:
+            return None
+        return self.line["issued_at"], self.line.get("snapshot")
 
 
 # --- the directory ----------------------------------------------------------------------------------------------------------
@@ -530,11 +541,12 @@ class LiveStore:
 
     def next_revision(self, issue: Any) -> int:
         """1 + the highest revision any line of the issue day carries, committed or not, so a crashed revision's number is
-        never used again: a call line, a revision folder, and a record of that `run_date` in any model's results
-        (`results.store.max_revision`). `begin` makes a revision's folder before any of its records, so the records are read
-        only for a day without any folder (records written by hand, or a directory from before the folders): reading every
-        record of every model on each call costs about 0.65 s per model-year of hourly JSONL. A folder removed by hand can let
-        its number be taken again; its old records then repeat their keys at that revision, and reading them raises."""
+        never used again: a call line (`begin` writes one, status "begun", before anything else of a revision), a revision
+        folder (made next), and a record of that `run_date` in any model's results (`results.store.max_revision`). The
+        records are read only for a day without any folder (records written by hand, or a directory from before the
+        folders): reading every record of every model on each call costs about 0.65 s per model-year of hourly JSONL. A number
+        can be taken again only if both its folder and its log lines are removed by hand; a crashed revision's records then
+        carry another `issued_at` than the new commit's line, and reading them raises (`results.store.check_marks`)."""
         day = self.day(issue)
         highest = 0
         for line in self.calls():
@@ -572,11 +584,6 @@ class LiveStore:
         day = self.day(issue)
         issued = _instant(now_utc() if issued_at is None else issued_at, "issued_at")
         revision = self.next_revision(day)
-        folder = self.revision_dir(day, revision)
-        made = [p for p in (folder.parent.parent, folder.parent) if not p.exists()]
-        folder.mkdir(parents=True)  # exists: someone took the number meanwhile, which the lock forbids
-        for directory in (*made, folder):
-            _sync_directory(directory.parent)
         begun = LiveRevision(
             store=self,
             issue=day,
@@ -586,6 +593,24 @@ class LiveStore:
             call=call or uuid.uuid4().hex[:12],
             started=_iso(issued if started is None else _instant(started, "started")),
         )
+        # The number is taken by a line in the log first, then by the folder: either alone keeps it taken, whatever happens
+        # to the other (a failed call's folder removed by hand, say).
+        _append_line(
+            self.issues_path,
+            {
+                "issue": day,
+                "call": begun.call,
+                "started": begun.started,
+                "status": BEGUN,
+                "revision": revision,
+                "committed": False,
+            },
+        )
+        folder = self.revision_dir(day, revision)
+        made = [p for p in (folder.parent.parent, folder.parent) if not p.exists()]
+        folder.mkdir(parents=True)  # exists: someone took the number meanwhile, which the lock forbids
+        for directory in (*made, folder):
+            _sync_directory(directory.parent)
         self._begun.append(begun)
         return begun
 
@@ -686,10 +711,12 @@ class LiveStore:
 
     def visible(
         self, policy: str = "latest", cutoff: Any = DEADLINE, *, pending: Optional["LiveRevision"] = None
-    ) -> Dict[str, Dict[int, pd.Timestamp]]:
-        """What a reader of `policy` and `cutoff` sees (module docstring): issue day -> its visible revisions -> each one's commit
-        instant, for `results.store.read_records(committed=...)`. `pending`, an uncommitted revision of this call, is seen
-        too, by its own writer alone (an ensemble of the revision reads its members' records of it), with `policy="latest"`."""
+    ) -> Dict[str, Dict[int, "Commit"]]:
+        """What a reader of `policy` and `cutoff` sees (module docstring): issue day -> its visible revisions -> each one's
+        `Commit` (`finished`, the commit instant; `marks`, what its records must carry), for
+        `results.store.read_records(committed=...)`. `pending`, an uncommitted revision of this call, is read by its own writer
+        alone, with `policy="latest"`, and alone on its day: a model with no record of it has none that day, so an ensemble of
+        the revision must flush every member's store before it reads them."""
         if policy not in POLICIES:
             raise ValueError(f"policy must be one of {list(POLICIES)}, got {policy!r}")
         limit_of, own_deadline = self._cutoff(cutoff)
@@ -723,11 +750,15 @@ class LiveStore:
                 if head is None:
                     continue
                 seen = {revision: commit for revision, commit in seen.items() if revision <= head}
-            out[day] = {revision: seen[revision].finished for revision in sorted(seen)}
+            out[day] = {revision: seen[revision] for revision in sorted(seen)}
         if pending is not None:
             if policy != "latest":
-                raise ValueError("pending= reads a call's own revision on top of the latest committed: policy='latest'")
-            out.setdefault(pending.issue, {})[pending.revision] = _instant(pending.issued_at)
+                raise ValueError("pending= reads a call's own revision, the latest of its day: policy='latest'")
+            issued = _instant(pending.issued_at)
+            line = {"issued_at": pending.issued_at, "snapshot": pending.snapshot}
+            # The pending revision alone on its day: a member it has no record of yet (not flushed) has none, never an older
+            # revision's. Flush every member before reading them for an ensemble of the revision.
+            out[pending.issue] = {pending.revision: Commit(pending.issue, pending.revision, issued, issued, None, line)}
         return out
 
     def fingerprint(self) -> Tuple[Any, ...]:

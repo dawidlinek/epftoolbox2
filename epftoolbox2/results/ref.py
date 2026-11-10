@@ -8,7 +8,15 @@ from pathlib import Path
 import warnings
 from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Tuple
 
-from .store import OK_ONLY, STATUS_OK, is_parquet_path, iter_file_records, read_records, visible_revisions
+from .store import (
+    OK_ONLY,
+    STATUS_OK,
+    commit_marks,
+    is_parquet_path,
+    iter_file_records,
+    read_records,
+    visible_revisions,
+)
 from .windows import SKIP_TARGET_IN_TEST, TEST, VALIDATION, RunWindows
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -122,6 +130,7 @@ class ModelResultRef:
             self._keep_rows(clock),
             extra=_FILTER_FIELDS,
             visible=visible_revisions(committed),
+            marks=commit_marks(committed, visible_revisions(committed)),
         )
 
     def _committed(self) -> Optional[Dict[str, Dict[int, Any]]]:
@@ -294,7 +303,7 @@ class ModelResultRef:
                     as_read = self._as_read(r, cols, window_start)
                     return as_read, (r if cols is None else as_read)  # a file's whole records aren't held
 
-                if not first:
+                if not first or committed is not None:  # a live directory's first record by the whole rule too
                     yield from read_records(
                         path,
                         statuses,
@@ -304,10 +313,7 @@ class ModelResultRef:
                     )
                     return
                 wanted = None if statuses is None else frozenset(statuses)
-                visible = visible_revisions(committed)
                 for r in iter_file_records(path):
-                    if visible is not None and (r.get("run_date"), r.get("revision")) not in visible:
-                        continue  # a revision this ref doesn't see
                     if wanted is None or r.get("status", STATUS_OK) in wanted:
                         out = read(r)
                         if out is not None:
