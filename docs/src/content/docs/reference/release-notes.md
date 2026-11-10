@@ -12,8 +12,10 @@ Notes for changes that need something from you. The full list of changes of a re
 - **`forecast_only`'s "today" is the issue zone's date.** A `forecast_only=True` run without `test_start`/`test_end` issued on
   the host's date: on a host in UTC, a run at 00:30 Warsaw time (22:30 UTC in summer) forecast from the Warsaw day before. With an
   information set it now issues on today in its `issue_timezone` (with `"data"`, the frame's zone), in `BaseModel.run`,
-  `ModelPipeline.run` and `report()`; without one it is the host's date, as before. A run over zones issues every zone on one day:
-  their issue zone's, or the host's where `"data"` puts the zones' dates apart. Backtests, and runs with explicit dates, don't move.
+  `ModelPipeline.run` and `report()`, also with `test=("today", "today")`; without one it is the host's date, as before. A run
+  reads the day once and issues every model on it. A run over zones issues each zone on its own zone's today, as a run of its frame
+  alone does and its report reads it; a `PooledModel` over zones whose dates differ raises, asking for `test_start` and `test_end`.
+  Backtests, and runs with explicit dates, don't move.
 - **A results file holds skip records, and every record ends with `status`, `list_hash`, `refit_anchor` and `revision`.** A key a
   run can't forecast is now a line too, with its reason as `status` (`"missing_test_predictors"`, `"not_published"`, ...), `prediction`
   null, the `actual` of its issue row and `detail` where the reason has one; a forecast has `status` `"ok"`, the hash of its predictor
@@ -216,13 +218,15 @@ an issue day it didn't sample.
 
 ### New
 
-- **One clock: `epftoolbox2.clock`.** Every time of day the library reads (`"today"` and the other date keywords, the cache's
-  unsettled boundary, a source's Retry-After, Open-Meteo's cut between final and provisional rows, manifest timestamps), every
-  interval it times and every wait it makes go through `current_clock()`: `SYSTEM`, the machine's, unless code runs inside
-  `use_clock(clock)`. `FakeClock(start, *, tick=0.0)` stands still until advanced (`advance(seconds)`); its `sleep` returns at
-  once, advances it and is counted in `sleeps`, so a test of a source's retries takes no time. With `SYSTEM` every number is as
-  before. A test that patched a source module's `time.sleep` must use a `FakeClock` now: the sources no longer import `time`.
-  See [Clock](/epftoolbox2/reference/api/#clock).
+- **One clock: `epftoolbox2.clock`.** Every time of day the library reads (`"today"` and the other date keywords, a source's
+  Retry-After, manifest timestamps), every interval it times and every wait it makes for itself go through `current_clock()`:
+  `SYSTEM`, the machine's, unless code runs inside `use_clock(clock)`. `FakeClock(start, *, tick=0.0)` stands still until
+  advanced (`advance(seconds)`); its `sleep` returns at once, advances it and is counted in `sleeps`, so a test of a source's
+  retries takes no time. What settles data (the cache's unsettled boundary, Energy-Charts' response cache, Open-Meteo's cut
+  between final and provisional rows) reads the earlier of the clock's now and the machine's, so a clock ahead of real time
+  can't leave provisional values in a real cache; waits on other processes (the tuner's for its workers, a results lock's) stay
+  on real time. With `SYSTEM` every number is as before. A test that patched a source module's `time.sleep` must use a
+  `FakeClock` now: the sources no longer import `time`. See [Clock](/epftoolbox2/reference/api/#clock).
 - **`target_transform="none"`: a pooled tree fits the raw target.** `HistGBModel`, `LightGBMModel`, `XGBoostModel` and
   `CatBoostModel` take a keyword-only `target_transform`: `"per_period"` (each period's own Invariant, the default and the only
   behaviour before), `"pooled"` (one Invariant over every row) or `"none"`, with which the estimator fits the stacked targets as

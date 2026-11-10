@@ -960,10 +960,11 @@ class CsvExporter(Exporter):
 
 ## Clock
 
-Every time of day the library reads (`"today"`, `"now_d-7"`, the cache's unsettled boundary, a source's Retry-After,
-Open-Meteo's cut between final and provisional rows, manifest timestamps), every interval it times and every wait it makes go
-through one clock: `SYSTEM`, the machine's, unless code runs inside `use_clock(clock)` (a context variable). Pool workers never
-read it.
+Every time of day the library reads (`"today"`, `"now_d-7"`, a source's Retry-After, manifest timestamps), every interval it
+times and every wait it makes for itself go through one clock: `SYSTEM`, the machine's, unless code runs inside
+`use_clock(clock)` (a context variable, read in the calling thread). What settles data (the cache's unsettled boundary,
+Energy-Charts' response cache, Open-Meteo's cut between final and provisional rows) reads the earlier of the clock's now and the
+machine's, and waits on other processes stay on real time. Pool workers never read the clock.
 
 ```python
 from epftoolbox2.clock import Clock, FakeClock, SYSTEM, current_clock, use_clock

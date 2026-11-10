@@ -71,9 +71,10 @@ Both pipelines accept runtime date keywords so the script runs correctly every d
 The offset `N` in `_d±N` accepts **any integer**, so it can match any model's `training_window`.
 
 Which zone's date: `DataPipeline.run` counts its keywords in the pipeline's `timezone` (the host's without one).
-`forecast_only`'s default `test_start`/`test_end` is today in the information set's issue zone (`issue_timezone`, or the
-frame's zone with `"data"`), so a run at 00:30 Warsaw time on a host in UTC issues for the Warsaw day, not the UTC one; without
-an information set it is the host's date.
+`forecast_only`'s default `test_start`/`test_end`, and `"today"` in them or in `test=("today", "today")`, is today in the
+information set's issue zone (`issue_timezone`, or the frame's zone with `"data"`), so a run at 00:30 Warsaw time on a host in
+UTC issues for the Warsaw day, not the UTC one; without an information set it is the host's date. A run reads the day once and
+issues every model on it. Over zones (`run(data={zone: frame})` with `"data"`) each zone issues on its own zone's today.
 
 <Aside type="tip">
   Set `end="today_d+6"` in `DataPipeline` so that `OpenMeteoSource` and `CalendarSource` fetch forecast data for the full prediction window. ENTSOE columns will be `NaN` beyond today, but lag features (price/load from past days) remain valid and are what models use as predictors.
