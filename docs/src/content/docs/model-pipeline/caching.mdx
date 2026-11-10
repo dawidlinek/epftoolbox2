@@ -319,7 +319,7 @@ revision of every model's forecasts, and a revision becomes visible only once it
 {"run_date": "2026-10-21", "target_date": "2026-10-22", "run_weekday": 2, "hour": 3, "horizon": 1, "day_in_test": 0, "prediction": 72.41, "actual": null, "coefficients": [0.16, -0.75], "freq": "1h", "status": "ok", "list_hash": "6fc96c3892ad", "refit_anchor": "2026-10-19", "revision": 2, "issued_at": "2026-10-21T09:20:00+00:00", "mode": "live", "snapshot": "9b1f..."}
 ```
 
-In Parquet these are three more columns, null in every backtest's record; a part written before them reads with them null.
+In Parquet these are three more columns of a part with live records; a backtest's parts are written as before, without them.
 
 - `issues.jsonl` has one line per call: `issue`, `call`, `started`, `finished`, `status`, `exit_code`, `revision`, `committed`,
   and for a committed revision its `issued_at`, `snapshot` and the call's `deadline`.
@@ -327,16 +327,19 @@ In Parquet these are three more columns, null in every backtest's record; a part
 - `issues/<issue>/r<n>/` holds a revision's own files. It is made before anything else of the revision.
 
 **Revisions and commits.** A call for issue day D takes revision 1 + the highest revision any line of D carries, committed or not
-(a call line, a record of D in any model's results, a revision folder). Its folder is made first, so a number is taken before any
-of its records is written and is never taken again, whatever a crash leaves. The call writes every model's records, then the
-revision's files, and last one line in `issues.jsonl` with `committed: true`, appended and synced: only that line makes the
-revision visible. A crash before it, or a half-written commit line (skipped with a warning, cut off by the next call), leaves
-records no reader sees, so a crash between two models never mixes two revisions into one curve. A commit after the deadline its
-call was given is refused (`LiveLateError`).
+(a call line, a revision folder; the records of D in every model's results only for a day without any folder, such as files
+written by hand). Its folder is made first, so a number is taken before any of its records is written and is never taken again,
+whatever a crash leaves. The call writes every model's records, then the revision's files, and last one line in `issues.jsonl`
+with `committed: true`, appended and synced: only that line makes the revision visible. A crash before it, or a half-written
+commit line (skipped with a warning, cut off by the next call), leaves records no reader sees, so a crash between two models
+never mixes two revisions into one curve. A commit after the deadline its call was given is refused (`LiveLateError`), and a
+commit that raised, for whatever reason, can't be retried: the revision is failed or abandoned, and the next call writes a new one.
+A revision left unfinished when its call ends, by an error or not, is abandoned before `live.lock` is let go.
 
-**Reading.** Per key the highest revision a reader sees counts, under the rules above (a forecast over skip records, so a key a
-revision skipped has no forecast at that revision, even where an earlier one had one). What a reader sees is decided per issue
-day, among the committed revisions committed (the line's `finished`) at or before its **cut-off**:
+**Reading.** Each issue day of a model's results is read from **one revision**: the highest one the reader sees that has a record of
+that day in the model's file. A key that revision has no record of, or only a skip record, has no forecast, even where an earlier
+revision had one, so a day's curve never mixes two revisions. Which revisions a reader sees is decided per issue day, among those
+committed (the line's `finished`) at or before its **cut-off**:
 
 | `policy` | What is read on each issue day |
 |----------|-------------------------------|
@@ -345,10 +348,12 @@ day, among the committed revisions committed (the line's `finished`) at or befor
 | `"delivered"` | the newest delivered revision; nothing on a day without a delivery |
 
 The cut-off is `"deadline"` by default: the deadline `live.json` records (`deadline`, `"HH:MM"` in its `issue_timezone`) on each
-issue day; a revision committed after the deadline its own call recorded is left out too. `None` reads every committed revision;
-an instant, `"HH:MM"`, a mapping of issue day to instant or a function of the issue day give other cut-offs. An uncommitted
-revision, or one committed after the cut-off, is never read: for a [chained](/epftoolbox2/data-sources/forecast/#a-live-upstream)
-model that would be a look-ahead.
+issue day; a revision committed after the deadline its own call recorded is left out too. Where `live.json` records no deadline,
+only revisions whose call recorded a deadline and committed by it are read: the default fails closed, never open. `None` reads
+every committed revision; an instant, `"HH:MM"`, a function of the issue day (its `None`: no cut-off that day) or a mapping give
+other cut-offs. A mapping's keys are issue days however written (`"2026-10-21"`, a `date`, a `Timestamp`), and a day it doesn't
+name sees nothing. An uncommitted revision, or one committed after the cut-off, is never read: for a
+[chained](/epftoolbox2/data-sources/forecast/#a-live-upstream) model that would be a look-ahead.
 
 ```python
 from epftoolbox2.results import ModelResultRef
@@ -371,7 +376,8 @@ pipeline = ModelPipeline(issue_time="11:45", issue_timezone="Europe/Berlin")
 line = pipeline.mark_delivered("live/de_price", issue="2026-10-21", revision=2, receipt="receipts/2026-10-21.json")
 ```
 
-It stores the receipt's sha256 and absolute path under `live.lock`. A revision that isn't committed (its call crashed or failed) or
+It stores the receipt's sha256 and absolute path under `live.lock`. `issue` is a date (or `"2026-10-21"`); an aware instant is
+read as a date of `live.json`'s `issue_timezone` (23:30 UTC on 10-21 is 10-22 in Berlin), and raises without one. A revision that isn't committed (its call crashed or failed) or
 doesn't exist raises `ValueError`, a missing receipt `FileNotFoundError`. `dry_run=True` checks the same and writes nothing, not
 even the lock file.
 

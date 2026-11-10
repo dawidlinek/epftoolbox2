@@ -164,11 +164,15 @@ commit changes what the column holds without changing the results.
 ## A Live Upstream
 
 An upstream in a [live directory](/epftoolbox2/model-pipeline/caching/#live-records) holds revisions of each issue day, visible once
-committed. Each key is read from the **newest revision committed at or before `available` (else the upstream's issue time) on the
-key's issue day**, in the issue zone: a revision committed at 11:50 is not in the column of a downstream that reads the upstream as
+committed. Each issue day is read from the **newest revision committed at or before `available` (else the upstream's issue time)
+on that day**, in the issue zone: a revision committed at 11:50 is not in the column of a downstream that reads the upstream as
 known at 11:45, whether it runs live that morning or as a backtest a year later, so the column never holds a forecast that wasn't
-out when its rule says it is known. A key with no revision committed by then has no value, as a missing upstream day has none. The
+out when its rule says it is known. A day with no revision committed by then has no value, as a missing upstream day has none. The
 rule is the same `published(...)` as for a backtest's results.
+
+A live upstream commits until its deadline, after its issue time, so **give it `available` at or after its deadline**
+(`ForecastSource(path, "lear", "lear_fc", available="11:55")`): without, the revisions it commits on schedule are left out, and
+the source warns with the number of issue days where a newer commit was.
 
 ## What It Refuses
 
