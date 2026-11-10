@@ -112,7 +112,8 @@ cell by cell, both switches included. Its forecast for Helsinki 00:00 of D+1 (Br
 issued at 09:00 on D can't read it, though the hour is still D in Brussels.
 
 `ForecastSource(..., available="10:15")` states a later time than the issue time, for an upstream whose forecasts are revised after
-it; never an earlier one. Results with live revisions (records with `issued_at`) are refused for now.
+it; never an earlier one. A [live upstream](/epftoolbox2/data-sources/forecast/#a-live-upstream) gives each key the newest
+revision committed by that time on its issue day.
 
 ## Coverage of the Training Rows
 

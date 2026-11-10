@@ -74,13 +74,16 @@ from ..results.manifest import (
     read_zone,
     rows_unverified,
 )
+from ..results.live import LiveStore, refuse_live_directory
 from ..results.matching import rows_of_refs, warn_about_thin
 from ..results.panel import PanelReport
 from ..results.report import EvaluationReport
 from ..results.ref import ModelResultRef, issued_mae, split_by_window, warn_off_the_clock
 from ..results.store import (
     DEFAULT_SAVE_FORMAT,
+    LIVE_FILE,
     SAVE_FORMATS,
+    LiveDirectoryError,
     ResultsFormatError,
     check_no_other_format,
     check_save_format,
@@ -517,6 +520,7 @@ class ModelPipeline:
         Several Zones.
         """
         check_stack_settings()  # TORCH_STACKS and TORCH_STACK_MEMBERS, before any model writes
+        refuse_live_directory(save_dir, "run()")  # a live directory's revisions are written by the live calls (step 8)
         if isinstance(data, Mapping):
             return self._run_zones(
                 data,
@@ -1256,7 +1260,11 @@ class ModelPipeline:
         model's manifest names whose folder holds none of the pipeline's results raises `FileNotFoundError` (`allow_missing`
         leaves it out with a warning). Exporters export one report, so they raise there. Any other layout reads as before:
         sub-folders of a `save_dir` are never zones by their names alone.
+
+        A live directory (`live.json`) raises `LiveDirectoryError`: its records are revisions, read by policy
+        (`ModelResultRef(..., policy=...)`).
         """
+        refuse_live_directory(save_dir, "report()")
         if not self.models:
             raise ValueError("At least one model is required")
         zones = read_zone_index(save_dir)
@@ -2003,6 +2011,29 @@ class ModelPipeline:
             print(f"{base.name}: the base's inputs")
             print(out["base_grouped"].to_string(index=False))
         return out
+
+    # --- live directories (step 8c) ------------------------------------------------------------------------------------------
+
+    def mark_delivered(
+        self,
+        save_dir: Union[str, Path],
+        issue: Any,
+        revision: int,
+        receipt: Union[str, Path],
+        dry_run: bool = False,
+    ) -> Dict[str, Any]:
+        """Record that `revision` of issue day `issue` of the live directory `save_dir` was delivered: a line in its
+        `delivered.jsonl` with the sha256 and path of the `receipt` file (what the platform answered, which delivering is the
+        user's own). Readers with `policy="delivered"` read it. An unknown or uncommitted revision raises ValueError, a missing
+        receipt FileNotFoundError, a directory that isn't live `LiveDirectoryError`, and another call holding `live.lock`
+        `LiveBusyError`. `dry_run` checks all of it and writes nothing anywhere. Returns the delivered line."""
+        store = LiveStore(save_dir)
+        if not store.is_live():
+            raise LiveDirectoryError(
+                f"{save_dir} is no live directory (no {LIVE_FILE}): nothing there can be delivered"
+            )
+        with store.hold(create=not dry_run):
+            return store.mark_delivered(issue, revision, receipt, dry_run=dry_run)
 
     def _select_models(self, names: Optional[Sequence[str]]) -> List[BaseModel]:
         if names is None:

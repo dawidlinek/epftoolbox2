@@ -10,7 +10,7 @@ import threading
 import uuid
 import sys
 import warnings
-from typing import Any, BinaryIO, Callable, Dict, Iterable, Iterator, List, Optional, Sequence, Set, Tuple
+from typing import Any, BinaryIO, Callable, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Set, Tuple
 from threading import Lock
 
 from .._clock import SYSTEM
@@ -26,6 +26,175 @@ OK_ONLY = (STATUS_OK,)
 BACKTEST_REVISION = 1
 RECORD_SCHEMA = 2  # recorded in a manifest as provenance (`record_schema`)
 _KEY_FIELDS = ("hour", "horizon", "run_date")
+
+# A live directory (step 8c, `results.live`) is one with `live.json` in it. Its records end with three more keys after D4's,
+# `issued_at`, `mode` ("live") and `snapshot`, and a revision of an issue day is read only once `issues.jsonl` commits it: a
+# reader of its files says which revisions it may see (`read_records(committed=...)`), and a reader that doesn't is refused.
+LIVE_FILE = "live.json"
+MODE_LIVE = "live"
+LIVE_KEYS = ("issued_at", "mode", "snapshot")
+# The stems of a live directory's call and delivery logs (`issues.jsonl`, `delivered.jsonl`), which are no model's results, and
+# of its lock (`live.lock`), which a model named "live" shares (the live call holds it for the model's store too).
+LIVE_LOG_STEMS = ("issues", "delivered")
+LIVE_LOCK_STEM = "live"
+
+
+class LiveDirectoryError(ValueError):
+    """Live records read or written as a backtest's, or the reverse: a backtest run into a live directory, a live writer into
+    a backtest's, a reader of a live directory's records that doesn't say which revisions are committed."""
+
+
+def is_live_dir(directory: Any) -> bool:
+    """Whether `directory` is a live directory: it holds `live.json`."""
+    return (Path(directory) / LIVE_FILE).is_file()
+
+
+def _instant(value: Any, what: str = "an instant") -> Any:
+    """`value` (a Timestamp, a datetime or ISO text with an offset) as a UTC `pandas.Timestamp`; ValueError for a naive one."""
+    import pandas as pd
+
+    stamp = pd.Timestamp(value)
+    if stamp.tzinfo is None:
+        raise ValueError(f"{what} must be an instant with a time zone or offset, got {value!r}")
+    return stamp.tz_convert("UTC")
+
+
+def issue_day(issue: Any, zone: Optional[str] = None) -> str:
+    """An issue day as an ISO date: a `date`, ISO text, or a naive `datetime`/`Timestamp` (its wall date). An aware instant is
+    the date it has in `zone` (a live directory's `issue_timezone`); without a zone it raises ValueError, as 23:30 UTC is
+    already the next day in Berlin."""
+    import pandas as pd
+
+    if isinstance(issue, (datetime.datetime, pd.Timestamp)):
+        stamp = pd.Timestamp(issue)
+        if stamp.tzinfo is not None:
+            if zone is None:
+                raise ValueError(
+                    f"{issue!r} is an instant, which is a different date in different zones, and no issue_timezone says which "
+                    "one: pass the issue day as a date, such as '2026-10-21'"
+                )
+            stamp = stamp.tz_convert(zone)
+        return stamp.date().isoformat()
+    if isinstance(issue, datetime.date):
+        return issue.isoformat()
+    if isinstance(issue, str):
+        try:
+            return datetime.date.fromisoformat(issue.strip()).isoformat()
+        except ValueError:
+            pass
+    raise ValueError(f"an issue day is a date or an ISO date such as '2026-10-21', got {issue!r}")
+
+
+# What a mapping cut-off gives a day it doesn't name: that day sees nothing (a cut-off fails closed).
+NOTHING_VISIBLE = object()
+
+
+def cutoff_of_day(issued_by: Any, zone: Optional[str] = None) -> Callable[[str], Any]:
+    """Each issue day's cut-off (an instant, None for none, or `NOTHING_VISIBLE`) that `issued_by` gives: None (none), one
+    instant for every day, a function of the issue day (its None: none that day), or a mapping of issue day (a date, ISO text, a
+    naive Timestamp, keys normalised by `issue_day`) to instant, where a day the mapping doesn't name sees nothing and a None
+    value is no cut-off that day."""
+    if issued_by is None:
+        return lambda day: None
+    if callable(issued_by):
+        return lambda day: None if (limit := issued_by(day)) is None else _instant(limit, "cutoff")
+    if isinstance(issued_by, Mapping):
+        limits = {issue_day(key, zone): value for key, value in issued_by.items()}
+
+        def of_day(day: str) -> Any:
+            if day not in limits:
+                return NOTHING_VISIBLE
+            return None if limits[day] is None else _instant(limits[day], "cutoff")
+
+        return of_day
+    limit = _instant(issued_by, "cutoff")
+    return lambda day: limit
+
+
+def visible_revisions(committed: Optional[Any], issued_by: Any = None) -> Optional[frozenset]:
+    """The (run_date, revision) pairs a reader of live records may see, or None for a backtest's reader.
+
+    `committed` maps each issue day (a record's `run_date`; keys normalised by `issue_day`) to its committed revisions, each to
+    the instant it was committed (None where that isn't known). `issued_by` is the reader's cut-off (`cutoff_of_day`): a revision
+    committed after its day's cut-off, or of unknown instant under one, isn't seen, and neither is any revision of a day a
+    mapping cut-off doesn't name. Of what is seen, a reader takes per issue day the highest revision that has a record of that
+    day in the file it reads, never a key of a lower one (`read_records`)."""
+    if committed is None:
+        if issued_by is not None:
+            raise ValueError("issued_by is a cut-off of live records: it needs committed=")
+        return None
+    limit_of = cutoff_of_day(issued_by)
+    pairs = set()
+    for run_date, revisions in committed.items():
+        day = issue_day(run_date)
+        limit = limit_of(day)
+        if limit is NOTHING_VISIBLE:
+            continue
+        for revision, at in revisions.items():
+            at = getattr(at, "finished", at)  # a `results.live.Commit`, or its instant
+            if limit is not None and (at is None or _instant(at) > limit):
+                continue
+            pairs.add((day, int(revision)))
+    return frozenset(pairs)
+
+
+def commit_marks(committed: Optional[Any], visible: Optional[frozenset]) -> Dict[Tuple[str, int], Tuple[Any, Any]]:
+    """(run_date, revision) -> the (issued_at, snapshot) its commit line says every record of it carries, for the visible
+    revisions whose `committed` value says (a `results.live.Commit` with `marks`); a plain instant says nothing."""
+    out: Dict[Tuple[str, int], Tuple[Any, Any]] = {}
+    if committed is None or not visible:
+        return out
+    for run_date, revisions in committed.items():
+        day = issue_day(run_date)
+        for revision, value in revisions.items():
+            marks = getattr(value, "marks", None)
+            if marks is not None and (day, int(revision)) in visible:
+                out[(day, int(revision))] = marks
+    return out
+
+
+def check_marks(where: Any, record: Dict, marks: Dict[Tuple[str, int], Tuple[Any, Any]]) -> None:
+    """Raise `LiveDirectoryError` for a visible live record whose `issued_at` or `snapshot` isn't its commit line's: a record
+    of another call with that revision's number (a crashed one whose number was taken again after its folder and log lines
+    were removed by hand) or a file edited by hand. Its forecast must never pass for the committed revision's."""
+    expected = marks.get((record.get("run_date"), record.get("revision")))
+    if expected is None:
+        return
+    issued, snapshot = expected
+    held = record.get("issued_at")
+    same_issue = held == issued or (held is not None and issued is not None and _instant(held) == _instant(issued))
+    if not same_issue or record.get("snapshot") != snapshot:
+        raise LiveDirectoryError(
+            f"{where}: a record of revision {record.get('revision')} of {record.get('run_date')} (period {record.get('hour')}, "
+            f"horizon {record.get('horizon')}) was issued at {held!r} with snapshot {record.get('snapshot')!r}, and the line "
+            f"that committed that revision says {issued!r} and {snapshot!r}: the record is another call's (a revision "
+            "number taken again after its folder and issues.jsonl lines were removed by hand) or was edited. No reader may "
+            "take it for the committed revision's."
+        )
+
+
+def check_reading(path: Any, visible: Optional[frozenset]) -> None:
+    """Refuse a reader of a live directory's records that doesn't say which revisions it may see (`visible`): it would read
+    revisions no `issues.jsonl` line commits, and every revision as a backtest's."""
+    path = Path(path)
+    if visible is None and is_live_dir(path.parent):
+        raise LiveDirectoryError(
+            f"{path} is a live directory's ({path.parent / LIVE_FILE}): its revisions are read once committed, by a reader "
+            "that says which it may see. Read it with ModelResultRef(path, ..., policy='latest' | 'first' | 'delivered'), or "
+            "read_records(path, committed=LiveStore(save_dir).visible(...))."
+        )
+
+
+def _live_mismatch(path: Path, where: str, visible: Optional[frozenset]) -> LiveDirectoryError:
+    if visible is None:
+        return LiveDirectoryError(
+            f"{path}: {where} is a live record (`mode` 'live') outside a live directory: read it as live records, with "
+            "committed= (results.live.LiveStore), from the live directory it was written in."
+        )
+    return LiveDirectoryError(
+        f"{path}: {where} is no live record (no `mode` 'live') in a live directory: a backtest's records were written into "
+        "it. Keep backtests and live forecasts in separate directories."
+    )
 
 
 _PACKAGE_DIR = str(Path(__file__).resolve().parent.parent)
@@ -153,11 +322,24 @@ def read_records(
     transform: Optional[Callable[[Dict], Any]] = None,
     duplicates: str = "raise",
     columns: Optional[Sequence[str]] = None,
+    *,
+    committed: Optional[Any] = None,
+    issued_by: Any = None,
 ) -> Iterator[Any]:
     """One record per forecast key `(hour, horizon, run_date)` of a JSONL results file, in file order, `transform(record)` of
     each if given (None drops it). A Parquet results directory (`<name>.parquet`) is read by the same rules, in the order its
     catalog commits its parts (`results.parquet_store.read_records`); `columns`, if given, are the keys `transform` reads, which
     a Parquet directory reads alone (a JSONL line is parsed whole).
+
+    Records of a live directory (step 8c, `results.live`) are read with `committed`: issue day (`run_date`) -> its committed
+    revisions -> the instant each was committed, and optionally `issued_by`, a cut-off (`visible_revisions`). A line of any other
+    revision is not there for the rule below, so an uncommitted revision, or one committed after the cut-off, is never seen and
+    never hides a revision that is; a line without a whole key isn't seen either. A `committed` value that is a
+    `results.live.Commit` also says what each record of its revision carries (`issued_at`, `snapshot`): a record read that
+    doesn't raises `LiveDirectoryError` (`check_marks`). Of the revisions seen, each issue day is read
+    from the highest one with a record of that day in this file alone: a key that revision has no record of has none, never
+    one of a lower revision, so a day's curve is one revision's. Without `committed`, a file in a live directory raises
+    `LiveDirectoryError`, and so does a live record read without it or a record that isn't one read with it.
 
     Per key the highest `revision` wins; within it a record with `status` "ok" wins over skip records (a key a later run forecast)
     and is the first ok one in the file. Of skip records alone the last is the key's. `statuses` keeps the keys whose chosen
@@ -176,16 +358,21 @@ def read_records(
     forecast) isn't parsed, so a damaged one of those isn't reported; a chosen or repeated one raises with its line number."""
     if duplicates not in ("raise", "first"):
         raise ValueError(f"duplicates must be 'raise' or 'first', not {duplicates!r}")
+    visible = visible_revisions(committed, issued_by)
+    check_reading(path, visible)
+    marks = commit_marks(committed, visible)
     if is_parquet_path(path):
         from .parquet_store import read_records as read_parquet
 
-        yield from read_parquet(Path(path), statuses, transform, duplicates, columns)
+        yield from read_parquet(Path(path), statuses, transform, duplicates, columns, visible=visible, marks=marks)
         return
     wanted = None if statuses is None else frozenset(statuses)
     with open(
         path, "rb"
     ) as f:  # once: a file replaced between the passes (an ensemble's, `os.replace`d) stays this one
-        chosen, repeats = _choose(path, f)
+        chosen, repeats = _choose(path, f, visible)
+        if visible is not None:
+            chosen, repeats = _day_top_revisions(chosen, repeats)
         if repeats:
             _check_repeats(path, f, chosen, repeats, duplicates)
         # (offset, CRC-32 of the line, key, revision, status) of each line to parse, in file order
@@ -213,6 +400,10 @@ def read_records(
             found = None if record is None else _fields_of(record, number)
             if found != expected[2:]:
                 raise _changed(path, number, f"the line holds {found}, its first pass read {expected[2:]}")
+            if (record.get("mode") == MODE_LIVE) != (visible is not None):
+                raise _live_mismatch(path, f"line {number}", visible)
+            if marks:
+                check_marks(f"{path}: line {number}", record, marks)
             out = record if transform is None else transform(record)
             if out is not None:
                 yield out
@@ -222,9 +413,12 @@ def read_records(
     raise _changed(path, number, "it ends before the lines its first pass chose")
 
 
-def _choose(path: Path, f: BinaryIO) -> Tuple[Dict[Any, Tuple[int, str, int, int]], Dict[Any, List[int]]]:
+def _choose(
+    path: Path, f: BinaryIO, visible: Optional[frozenset] = None
+) -> Tuple[Dict[Any, Tuple[int, str, int, int]], Dict[Any, List[int]]]:
     """The first pass of `read_records`: key -> (revision, status, offset of its chosen line, CRC-32 of that line), and key ->
-    offsets of the forecasts repeating its chosen one."""
+    offsets of the forecasts repeating its chosen one. With `visible` ((run_date, revision) pairs), the lines of other
+    revisions, and lines without a whole key, are passed over as if they weren't in the file."""
     chosen: Dict[Any, Tuple[int, str, int, int]] = {}
     repeats: Dict[Any, List[int]] = {}
     offset = 0
@@ -237,6 +431,8 @@ def _choose(path: Path, f: BinaryIO) -> Tuple[Dict[Any, Tuple[int, str, int, int
         if fields is None:
             break  # a half-written last line
         key, revision, status = fields
+        if visible is not None and (not isinstance(key, tuple) or (key[2], revision) not in visible):
+            continue  # an uncommitted revision, or one after the cut-off: not there for this reader
         held = chosen.get(key)
         if held is not None:
             if revision < held[0]:
@@ -248,6 +444,19 @@ def _choose(path: Path, f: BinaryIO) -> Tuple[Dict[Any, Tuple[int, str, int, int
             repeats.pop(key, None)
         chosen[key] = (revision, status, at, zlib.crc32(raw))
     return chosen, repeats
+
+
+def _day_top_revisions(
+    chosen: Dict[Any, Tuple[int, str, int, int]], repeats: Dict[Any, List[int]]
+) -> Tuple[Dict[Any, Tuple[int, str, int, int]], Dict[Any, List[int]]]:
+    """A live reader's keys of each issue day's highest revision alone: a key whose chosen record is of a lower revision than
+    another key's of the same day has none (it isn't in the revision the day is read from)."""
+    top: Dict[str, int] = {}
+    for key, (revision, *_) in chosen.items():
+        if revision > top.get(key[2], revision - 1):
+            top[key[2]] = revision
+    kept = {key: held for key, held in chosen.items() if held[0] == top[key[2]]}
+    return kept, {key: offsets for key, offsets in repeats.items() if key in kept}
 
 
 def _fields_of(record: Dict, number: int) -> Tuple[Any, int, str]:
@@ -323,6 +532,32 @@ def iter_file_records(path: Path) -> Iterator[Dict]:
         return
     for _, _, _, record in _parse_lines(path):
         yield record
+
+
+def max_revision(path: Any, run_date: str) -> int:
+    """The highest `revision` any record of `run_date` in a results file or Parquet directory carries, whatever its status and
+    whether or not it is committed (0 for none): what a live directory's next revision of that day must exceed. A half-written
+    last line isn't read."""
+    path = Path(path)
+    if not path.exists():
+        return 0
+    if is_parquet_path(path):
+        from .parquet_store import max_revision as parquet_max
+
+        return parquet_max(path, run_date)
+    highest = 0
+    with open(path, "rb") as f:
+        for number, raw in enumerate(f, 1):
+            line = raw.strip()
+            if not line:
+                continue
+            fields = _key_fields(path, number, raw, line)
+            if fields is None:
+                break
+            key, revision, _ = fields
+            if isinstance(key, tuple) and key[2] == run_date and revision > highest:
+                highest = revision
+    return highest
 
 
 class ResultsLockedError(RuntimeError):
@@ -419,6 +654,8 @@ class _Store:
     """
 
     save_format = DEFAULT_SAVE_FORMAT
+    _live = False  # a live revision's store (`results.live`), which writes into live directories alone
+    _closed = False  # set by `close()`: a record saved after it would be written by nobody
 
     def __init__(
         self,
@@ -429,6 +666,15 @@ class _Store:
         writer: Optional["StoreWriter"],
     ):
         self.path = Path(path)
+        if self._live != is_live_dir(self.path.parent) and (lock or self._live):
+            raise LiveDirectoryError(
+                f"{self.path}: {self.path.parent} is a live directory ({LIVE_FILE}), which a backtest run doesn't write "
+                "into: its revisions are written and committed by the live calls (step 8). Run the backtest into another "
+                "save_dir."
+                if not self._live
+                else f"{self.path}: {self.path.parent} is no live directory (no {LIVE_FILE}): live revisions are written "
+                "into a directory of their own, never beside a backtest's results."
+            )
         self.test_start = test_start
         self._lock = Lock()
         self._completed: Set[tuple] = set()  # keys whose forecast is on file (read at open, or written by this store)
@@ -457,8 +703,9 @@ class _Store:
 
     def save(self, result: Dict) -> None:
         """Queue a record for writing. A key with a record of a higher revision than 1 on file gets that revision, so that what is
-        written is what a reader takes (`read_records`: the highest revision wins)."""
+        written is what a reader takes (`read_records`: the highest revision wins). A closed store raises."""
         self._raise_error()
+        self._refuse_closed()
         if not self._save_coefficients and result.get("coefficients"):
             result = {**result, "coefficients": []}  # the key keeps its place
         key = (result["hour"], result["horizon"], result["run_date"])
@@ -475,6 +722,7 @@ class _Store:
         """Write a skip record (`with_status` with a skip reason as `status`) unless its key has a forecast or its newest skip
         record has the same status. Returns whether it was written. The key stays pending: the next run retries it."""
         self._raise_error()
+        self._refuse_closed()
         key = (record["hour"], record["horizon"], record["run_date"])
         status = record["status"]
         with self._lock:
@@ -487,6 +735,10 @@ class _Store:
             self._latest[key] = status
         self._enqueue(record, layout)
         return True
+
+    def _refuse_closed(self) -> None:
+        if self._closed:
+            raise ValueError(f"{self.path}: the store is closed, so nothing would write this record")
 
     def _written(self, keys: Iterable[Optional[tuple]]) -> None:
         """The forecasts of these keys (None for a skip record) are on file: they count as done from now on. A record whose
@@ -641,24 +893,32 @@ class ResultStore(_Store):
 
         if writer is None:
             self._write_queue: queue.Queue = queue.Queue()
-            self._writer = threading.Thread(target=self._writer_loop, daemon=True, name="store-writer")
-            self._writer.start()
+            self._start_writer()
         else:
             self._pending: List[Dict] = []
             self._io_lock = Lock()
             writer._register(self)
 
+    def _start_writer(self) -> None:
+        self._writer = threading.Thread(target=self._writer_loop, daemon=True, name="store-writer")
+        self._writer.start()
+
     def flush(self) -> None:
+        """Write everything saved so far, and raise what failed. The store stays open: what is saved after it is written as
+        before (its own thread is started again; it used to stop here, leaving later records queued for nobody)."""
         if self._shared is not None:
             self._shared._write_now(self)
             return
         if self._writer.is_alive():
             self._write_queue.put(self._SENTINEL)
             self._writer.join()
+        if not self._closed:
+            self._start_writer()
         self._raise_error()
 
     def close(self) -> None:
-        """Write what is queued and release the lock."""
+        """Write what is queued and release the lock. Saving into the store afterwards raises."""
+        self._closed = True
         try:
             self.flush()
         finally:

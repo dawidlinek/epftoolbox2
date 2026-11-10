@@ -130,7 +130,7 @@ from ..models._calendar import issue_day_names, mask_members, resolve_issue_days
 from ..models._cards import manifest_fields, window_starts
 from ..logging import get_logger
 from .availability import LISTING_TIMES, merge_listings
-from .store import RECORD_SCHEMA, outside_stacklevel
+from .store import MODE_LIVE, RECORD_SCHEMA, LiveDirectoryError, outside_stacklevel
 from .vintages import merge_vintages
 from .windows import TEST, RunWindows, mask_key
 
@@ -431,6 +431,10 @@ class Manifest:
     daily_stamp: Optional[str] = None
     # A model of `tune.SearchResult.best()`: where it was chosen (`_search`); None (and no key) otherwise. Provenance.
     search: Optional[Dict[str, Any]] = None
+    # "live" for a model of a live directory (`check_and_write_live`, step 8c); None (and no key) for a backtest's. Not one of
+    # the compared fields, so no configuration digest moves: a backtest run refuses a live manifest, and a live call a
+    # backtest's, whatever else they hold.
+    mode: Optional[str] = None
 
     def differences(self, existing: "Manifest", skip: Sequence[str] = ()) -> List[str]:
         """Human-readable list of compared fields that disagree with `existing`; empty if compatible."""
@@ -518,6 +522,8 @@ class Manifest:
             del out["daily_stamp"]
         if out["search"] is None:  # a model no search chose
             del out["search"]
+        if out["mode"] is None:  # a backtest's
+            del out["mode"]
         return out
 
     @classmethod
@@ -1058,8 +1064,17 @@ def check_and_write(
     """
     manifest.save_format = None if save_format == "jsonl" else save_format
     manifest.save_coefficients = None if save_coefficients else False  # compared below, as the configuration is
+    if manifest.mode is not None:
+        raise LiveDirectoryError(
+            f"{model_name}: a live manifest is written by check_and_write_live, not by a backtest's run"
+        )
     if path.exists():
         existing = _read_manifest_of_a_model(path, model_name)
+        if existing.mode is not None:
+            raise LiveDirectoryError(
+                f"{model_name}: {path} is a live directory's manifest (mode {existing.mode!r}): a backtest run doesn't resume "
+                "into live revisions. Run it into another save_dir."
+            )
         run_span = _issue_span(manifest)  # this run's own issue days, before the manifest grows to cover the file
         data_diffs = _compare_data(existing, manifest, frame_hashes)
         skip = () if data_diffs is None else ("data_columns_hash", "history_ahead")
@@ -1128,6 +1143,79 @@ def check_and_write(
         manifest.data_unverified = True
         _mark_rows_unverified(manifest, model_name, path, "they have no manifest")
     manifest.write(path)
+
+
+# What a live manifest doesn't compare of today's compared fields: the data, which grows every day (each revision's inputs are
+# hashed in its snapshot instead).
+LIVE_UNCOMPARED = ("data_columns_hash", "history_ahead")
+
+
+def check_and_write_live(
+    path: Path,
+    manifest: Manifest,
+    *,
+    model_name: str = "Model",
+    allow_mismatch: bool = False,
+    save_format: str = "jsonl",
+    save_coefficients: bool = True,
+) -> None:
+    """Compare a live call's `manifest` with the live directory's manifest at `path` (if any), then write it with `mode` "live",
+    `save_format` (provenance) and `save_coefficients` (compared, as by `check_and_write`: one file never mixes records with
+    and without coefficients).
+
+    A live manifest compares the configuration: today's compared fields but the data (`LIVE_UNCOMPARED`), each chained column's
+    upstream (`chained_differences`), and what decides when an input is known in the information set (the issue time and zone,
+    the rules without their notes, the assumptions in any order, whether the defaults apply), which decides which list a revision
+    uses. A difference raises `ManifestMismatchError` unless `allow_mismatch`. `path` outside a live directory, or a backtest's
+    manifest there, raises `LiveDirectoryError`. The first call's `created_at` is kept."""
+    from ..ensembles._compute import _what_decides_availability  # the ensembles import this module
+    from .store import is_live_dir
+
+    path = Path(path)
+    if not is_live_dir(path.parent):
+        raise LiveDirectoryError(
+            f"{model_name}: {path.parent} is no live directory: a live manifest is written into one"
+        )
+    manifest.mode = MODE_LIVE
+    manifest.save_format = None if save_format == "jsonl" else save_format
+    manifest.save_coefficients = None if save_coefficients else False  # compared below, as the configuration is
+    if path.exists():
+        existing = _read_manifest_of_a_model(path, model_name)
+        if existing.mode != MODE_LIVE:
+            raise LiveDirectoryError(
+                f"{model_name}: {path} is a backtest's manifest in a live directory: a backtest's results were written into "
+                "it. Keep backtests and live forecasts in separate directories."
+            )
+        diffs = [
+            *manifest.differences(existing, skip=LIVE_UNCOMPARED),
+            *chained_differences(existing.chained_inputs, manifest.chained_inputs),
+        ]
+        theirs = _what_decides_availability(existing.information_set)
+        mine = _what_decides_availability(manifest.information_set)
+        if theirs != mine:
+            diffs.append(
+                f"information_set: {json.dumps(theirs, sort_keys=True, default=str)} (live directory) vs "
+                f"{json.dumps(mine, sort_keys=True, default=str)} (this call): when inputs are known decides which list a "
+                "revision uses"
+            )
+        if diffs and not allow_mismatch:
+            raise ManifestMismatchError(
+                f"{model_name}: the live directory {path.parent} was made with another configuration than this call "
+                f"({path.name}):\n"
+                + "\n".join(f"  - {d}" for d in diffs)
+                + "\nIts revisions would mix two configurations. Use another live directory, or pass "
+                "allow_manifest_mismatch=True to overwrite the manifest."
+            )
+        if diffs:
+            logger.warning(f"{model_name}: live manifest mismatch at {path} overridden: {'; '.join(diffs)}")
+        manifest.created_at = existing.created_at
+    manifest.write(path)
+
+
+def is_live_manifest(path: Union[str, Path]) -> bool:
+    """Whether the manifest at `path` exists and is a live directory's (`mode` "live")."""
+    path = Path(path)
+    return path.exists() and json.loads(path.read_text()).get("mode") == MODE_LIVE
 
 
 # What a resume compares of each chained column (`information_set.ChainedInput.IDENTITY`).

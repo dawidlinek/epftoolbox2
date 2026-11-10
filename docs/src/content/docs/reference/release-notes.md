@@ -231,6 +231,24 @@ an issue day it didn't sample.
   can't leave provisional values in a real cache; waits on other processes (the tuner's for its workers, a results lock's) stay
   on real time. With `SYSTEM` every number is as before. A test that patched a source module's `time.sleep` must use a
   `FakeClock` now: the sources no longer import `time`. See [Clock](/epftoolbox2/reference/api/#clock).
+- **Live directories: revisions visible once committed, deliveries, and readers by policy** (step 8c; the live calls that write them
+  come next). A live pipeline writes into a directory of its own (`live.json`), each call for an issue day a new revision of every
+  model's records, numbered 1 + the highest number any line of the day carries and taken before its first record, so a crashed
+  revision's number is never reused. Its records end with `issued_at`, `mode` `"live"` and `snapshot` after `revision` (three more
+  Parquet columns in live parts), and the revision becomes visible only through its `committed` line in
+  `issues.jsonl`, written last. Readers take each issue day from the highest of its committed revisions that their policy and
+  cut-off let through and that has a record of the day: `ModelResultRef(..., policy="latest" | "first" | "delivered", cutoff="deadline")`, and
+  `read_records(..., committed=..., issued_by=...)` underneath. `ModelPipeline.mark_delivered(save_dir, issue, revision, receipt,
+  dry_run=False)` records a delivery (the receipt's sha256 and path) and refuses an uncommitted or unknown revision; a dry run writes
+  nothing. Every write holds `live.lock`, and a call that finds it held raises `LiveBusyError` (exit code 75). `run()` and `report()`
+  into a live directory, a backtest's store there, a live directory beside a backtest's results and a reader of live records that
+  doesn't say what is committed all raise `LiveDirectoryError`. Live manifests (`"mode": "live"`) compare the configuration and the
+  information set, not the data. `ForecastSource` reads a live upstream: each key from the newest revision committed by `available`
+  (else the issue time) on its issue day; give a live upstream `available` at or after its deadline, or it warns. Each issue day
+  of a model's live records is read from one revision, never a key of an older one, and the default cut-off fails closed where no
+  deadline is recorded. Backtest records, readers, manifests and Parquet parts are bit for bit as before (the live columns are in
+  live parts alone). A JSONL store now writes records saved after its `flush()` (they were dropped; no backtest saves any), and
+  saving into a closed store raises. See [Live records](/epftoolbox2/model-pipeline/caching/#live-records).
 - **`target_transform="none"`: a pooled tree fits the raw target.** `HistGBModel`, `LightGBMModel`, `XGBoostModel` and
   `CatBoostModel` take a keyword-only `target_transform`: `"per_period"` (each period's own Invariant, the default and the only
   behaviour before), `"pooled"` (one Invariant over every row) or `"none"`, with which the estimator fits the stacked targets as
