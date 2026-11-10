@@ -1,8 +1,8 @@
 """`T0Model` with the real package (`tfc-t0==0.5.0`, the `[t0]` extra) and tiny random weights made here: the adapter's wiring,
 the adapter suite, `verify`, the fine-tune through the library's trainer and its checkpoints, and the fine-tune loss against
 the research's (`zoo_tsfm/code/t0_ft.py` `forward_q` and `loss_fn`, written out below as the research wrote them). Skipped
-without the extra (the families-extra CI job has it; no job has the real weights, which `-m weights` tests read from
-`EPFTOOLBOX2_WEIGHTS_DIR`)."""
+without the `[t0]` extra, which the `families-extra` CI job installs; no CI job has the real weights, which the `-m weights`
+test reads from `EPFTOOLBOX2_WEIGHTS_DIR`."""
 
 import json
 import os
@@ -138,7 +138,7 @@ def test_the_fine_tune_runs_through_the_trainer_and_is_stored_and_reused(hourly,
     assert first._fine_tunes == 2
     stored = sorted((fresh / "t0.fits").glob("*.ckpt"))
     assert len(stored) == 2
-    sidecar = json.loads(stored[0].with_suffix(".json").read_text())
+    sidecar = json.loads(sorted((fresh / "t0.fits").glob("*.json"))[0].read_text())
     assert sidecar["data_end"] == "2023-06-11" and sidecar["windows"] > 100 and sidecar["best_step"] in (0, 1, 2)
     path = suite.results(fresh, "t0")
     lines = suite.lines(path)

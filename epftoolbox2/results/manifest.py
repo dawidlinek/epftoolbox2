@@ -161,6 +161,10 @@ _PROVENANCE_FIELDS += ("engine_check",)
 # with the same calls trained alone (calls, how many differed, how many raised alone and weren't compared, the largest
 # absolute difference), in the last such run.
 _PROVENANCE_FIELDS += ("stack_check",)
+# `fine_tunes`: a foundation model's fine-tunes (`models.foundation`): the key its checkpoints in `<name>.fits/` are stored
+# under (what `prune_fine_tunes` keeps), how many the last run ran and loaded, and each anchor's windows, kept and dropped by
+# reason, merged over the runs of the results file.
+_PROVENANCE_FIELDS += ("fine_tunes",)
 # `card`: a carded family's licence, corpus, runtime pins and weights reference, with the contamination verdict of each window
 # (`models._cards.manifest_fields`): what the model is under, which a new release may reword without changing a forecast.
 _PROVENANCE_FIELDS += ("card",)
@@ -395,6 +399,9 @@ class Manifest:
     # With `TORCH_STACKS=check`, that run's sample of a torch model's stacked calls also trained alone
     # (`models._torch.groups`): {"calls", "differing", "failed", "max_abs"}; None (and no key) otherwise. Never compared.
     stack_check: Optional[Dict[str, Any]] = None
+    # A foundation model's fine-tunes (`record_fine_tunes`): {"key", "fine_tuned", "loaded", "windows": {"<anchor>_h<h>":
+    # {"candidates", "kept", "with_gaps", "dropped": {reason: n}}}}; None (and no key) otherwise. Never compared.
+    fine_tunes: Optional[Dict[str, Any]] = None
     # A `PooledModel`'s zone: {"zones", "over", "zone_feature", "missing", "data": {other zone: its data_columns_hash}}; None (and
     # no key) otherwise. Compared on resume.
     pooled: Optional[Dict[str, Any]] = None
@@ -498,6 +505,8 @@ class Manifest:
             del out["engine_check"]
         if out["stack_check"] is None:  # no TORCH_STACKS=check
             del out["stack_check"]
+        if out["fine_tunes"] is None:  # no fine-tune stored
+            del out["fine_tunes"]
         if out["pooled"] is None:  # fitted on one zone's rows
             del out["pooled"]
         for name in ("card", "runtime", "weights", "weights_history"):  # a core model, or one set of weights
@@ -963,6 +972,16 @@ def record_stack_check(path: Path, manifest: Manifest, check: Dict[str, Any]) ->
         manifest.write(path)
 
 
+def record_fine_tunes(path: Path, manifest: Manifest, entry: Dict[str, Any]) -> None:
+    """Write a foundation model's fine-tunes of a run into its manifest's provenance (`fine_tunes`): this run's key and
+    counts, each anchor's windows merged over what earlier runs of the file recorded (this run's where both have one)."""
+    windows = {**dict((manifest.fine_tunes or {}).get("windows") or {}), **dict(entry.get("windows") or {})}
+    merged = {**dict(entry), "windows": dict(sorted(windows.items()))}
+    if merged != manifest.fine_tunes:
+        manifest.fine_tunes = json.loads(json.dumps(merged, default=str))
+        manifest.write(path)
+
+
 def read_skipped(
     path: Union[str, Path],
     window: str = TEST,
@@ -1091,6 +1110,7 @@ def check_and_write(
         manifest.engine = existing.engine  # the same: until this run's fits from shared statistics are counted
         manifest.engine_check = existing.engine_check
         manifest.stack_check = existing.stack_check
+        manifest.fine_tunes = existing.fine_tunes  # until this run's fine-tunes are recorded (`record_fine_tunes`)
         if existing.data_unverified or (
             has_existing_results and _accepted_other_data(existing, manifest, data_diffs, frame_hashes)
         ):

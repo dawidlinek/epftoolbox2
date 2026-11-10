@@ -5,15 +5,14 @@ Each item is a dict: `target` (T,), with covariates `past_covariates` (each know
 series) and `future_covariates` (each known-ahead series over the steps ahead), float32, no cross-learning (each item its own
 group, so no item attends to another of its call). `predict_quantiles` at the research's 19 levels, all native levels of
 Chronos-2's 21, so the median is its own 0.5 level. Chronos-2 reads at most `context_length` (8,192) steps: a longer context is
-cut to its newest steps by the package, which warns here once per backend.
+cut to its newest steps by the package, which each model's run warns about (`ChronosModel._max_context_steps`).
 
 Needs the `[chronos]` extra; importing this module imports torch and chronos.
 """
 
 from __future__ import annotations
 
-import warnings
-from typing import Any
+from typing import Any, Mapping
 
 import numpy as np
 
@@ -38,23 +37,14 @@ class ChronosBackend(Backend):
         with staged(resolved, FILES) as root:
             self.pipeline = BaseChronosPipeline.from_pretrained(str(root), device_map=str(device))
         self.pipeline.model.eval()
-        self._warned = False
 
     @property
     def max_context(self) -> int:
         return int(self.pipeline.model_context_length)
 
-    def predict(self, call: Any) -> np.ndarray:
+    def predict(self, call: Any, options: Mapping[str, Any]) -> np.ndarray:
         steps = int(call.steps_ahead)
         width = call.target.shape[1]
-        if width > self.max_context and not self._warned:
-            self._warned = True
-            warnings.warn(
-                f"ChronosModel: a context of {width} steps is longer than Chronos-2's {self.max_context}; the package reads "
-                f"its newest {self.max_context} steps",
-                UserWarning,
-                stacklevel=2,
-            )
         inputs = []
         for b in range(call.target.shape[0]):
             item = {"target": call.target[b].astype(np.float32)}

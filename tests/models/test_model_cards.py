@@ -12,7 +12,6 @@ import hashlib
 import json
 import os
 import pickle
-import subprocess
 import sys
 import types
 from datetime import date
@@ -963,18 +962,17 @@ def test_engine_ok_false_keeps_a_class_out_of_the_engine_whatever_it_defines(dat
     assert forecasts(on, "carded") == forecasts(off, "carded")
 
 
-def test_importing_the_package_imports_no_extra():
-    code = (
-        "import sys\n"
-        "import epftoolbox2, epftoolbox2.models, epftoolbox2.cli\n"
-        "from epftoolbox2.models import _cards, _weights\n"
-        "epftoolbox2.verify()\n"
-        "heavy = ('numba', 'torch', 'huggingface_hub', 'transformers', 'safetensors', 'tabpfn', 'tabicl', 'autogluon')\n"
-        "found = sorted(m for m in sys.modules if m.split('.')[0] in heavy)\n"
-        "assert not found, found\n"
-    )
-    result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+def test_importing_the_package_imports_no_extra(tmp_path):
+    """No extra is even tried: each is a stub that logs an import attempt and raises (`tests.import_stubs`), so a guarded
+    `try: import numba` counts too, which a look at `sys.modules` afterwards wouldn't see."""
+    from tests.import_stubs import run_without
+
+    code = "import epftoolbox2, epftoolbox2.models, epftoolbox2.cli\nfrom epftoolbox2.models import _cards, _weights\n"
+    code += "epftoolbox2.verify()\n"
+    heavy = ("numba", "torch", "huggingface_hub", "transformers", "safetensors", "tabpfn", "tabicl", "autogluon", "t0")
+    result, attempted = run_without(code, (*heavy, "chronos"), tmp_path)
     assert result.returncode == 0, result.stderr
+    assert attempted == [], f"tried to import {attempted}"
     assert "Extras" in result.stdout and "fast" in result.stdout
 
 

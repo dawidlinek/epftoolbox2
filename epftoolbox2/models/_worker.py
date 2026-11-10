@@ -5,6 +5,7 @@ import contextvars
 import datetime
 import hashlib
 import math
+import multiprocessing
 import os
 import sys
 import threading
@@ -62,6 +63,30 @@ _HELD_COUNTS: List[Tuple[Any, int]] = []  # (threadpoolctl library controller, t
 _HELD_ENV: Dict[str, Optional[str]] = {}  # the thread variables as they were, under spawn
 # Whether the pools spawn their workers rather than fork them (`BaseModel._run_tasks`, `_engine._run_chunk`).
 _POOLS_SPAWN = sys.platform == "win32"
+
+
+def cuda_initialised() -> bool:
+    """Whether this process has initialised CUDA (a foundation model, or any GPU work, run in it): torch imported and
+    `torch.cuda.is_initialized()`. Asking imports nothing."""
+    torch = sys.modules.get("torch")
+    try:
+        return bool(torch.cuda.is_initialized()) if torch is not None else False
+    except Exception:
+        return False
+
+
+def pools_spawn() -> bool:
+    """Whether a worker pool started now spawns its workers rather than forking them: on Windows (`_POOLS_SPAWN`), and wherever
+    this process has initialised CUDA (`cuda_initialised`), since a forked child of such a process can't use CUDA ("Cannot
+    re-initialize CUDA in forked subprocess") and forking it is unsafe anyway. So after a foundation model ran on a GPU in this
+    process, every later pool of the run spawns."""
+    return _POOLS_SPAWN or cuda_initialised()
+
+
+def pool_context() -> Any:
+    """The multiprocessing context of a worker pool started now (`pools_spawn`): every pool of the library starts from it."""
+    return multiprocessing.get_context("spawn" if pools_spawn() else "fork")
+
 
 # Reasons a task produces no forecast without being an error. They are counted per model and reported.
 SKIP_TOO_FEW_ROWS = "too_few_rows"
@@ -192,7 +217,7 @@ def _hold_native_threads() -> None:
             if count != NATIVE_THREADS_PER_TASK:
                 lib.set_num_threads(NATIVE_THREADS_PER_TASK)
                 _HELD_COUNTS.append((lib, count))
-    if _POOLS_SPAWN:
+    if pools_spawn():
         for name in NATIVE_THREAD_ENV_VARS:
             _HELD_ENV[name] = os.environ.get(name)
             os.environ[name] = str(NATIVE_THREADS_PER_TASK)

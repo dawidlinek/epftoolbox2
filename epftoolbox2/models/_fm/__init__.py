@@ -5,10 +5,13 @@ numpy fake, and with the real package in the extras jobs. A backend is built by 
 once per process, from the weights the pre-flight resolved (`ResolvedWeights`: each file opened by name, never a directory as a
 whole) inside `_weights.offline()`, and is called with history batches (`models._history.Batch`):
 
-- `predict(call) -> (batch_size, S, len(levels))`: the quantiles of each step ahead of each item of a call (target `(B, T)`,
-  past `{name: (B, T)}`, known-ahead `{name: (B, T + S)}`, S = `call.steps_ahead`), float, at `levels`. The model's forecast is
-  the 0.5 level of them (decision 24); a family without one names its point level in `point_level`. Each item's output must not
-  depend on the other items of its call (verify's co-batch check).
+- `predict(call, options) -> (batch_size, S, len(levels))`: the quantiles of each step ahead of each item of a call (target
+  `(B, T)`, past `{name: (B, T)}`, known-ahead `{name: (B, T + S)}`, S = `call.steps_ahead`), float, at `levels`, with the
+  model's per-call settings `options` (`FoundationModel._predict_options`). The model's forecast is the 0.5 level of them
+  (decision 24); a family without one names its point level in `point_level`. Each item's output must not depend on the other
+  items of its call (verify's co-batch check).
+- A backend is loaded by `FoundationModel._load_backend(resolved, device, options)` with the model's load settings
+  (`_backend_options`) and shared by the models of a process whose class, weight hashes, device and those settings are equal.
 - `fine_tune(data, settings, seed) -> FineTuneOutcome` (families with `FoundationModel._can_fine_tune`): fine-tune from the base
   weights on `data` (`FineTuneData`, whose newest target is at or before its cut, asserted by the model before the call and by
   the trainer), leaving the backend on the best state; `save_state(path)` writes that state, `load_state(path)` puts a stored one
@@ -79,7 +82,9 @@ class Backend:
     levels: Tuple[float, ...] = (0.5,)
     point_level: float = 0.5
 
-    def predict(self, call: Any) -> np.ndarray:  # pragma: no cover - every family defines it
+    def predict(
+        self, call: Any, options: Mapping[str, Any]
+    ) -> np.ndarray:  # pragma: no cover - every family defines it
         raise NotImplementedError
 
     def fine_tune(self, data: FineTuneData, settings: Mapping[str, Any], seed: int) -> FineTuneOutcome:

@@ -58,7 +58,7 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 import numpy as np
 import pandas as pd
 
-from ._calendar import EXPANDING, FREQ_STEPS, block_days, check_refit, refit_anchor, unit_seed
+from ._calendar import EXPANDING, FREQ_STEPS, block_days, check_refit, periods_per_day, refit_anchor, unit_seed
 from ._cards import ModelCard, WeightsRef, resolve_model_weights, runtime_versions
 from ._history import HistorySpec, history_batch, history_batches
 from ._units import DAY, NO_TRANSFORM
@@ -77,6 +77,7 @@ from ._worker import (
 from .base import BaseModel, _usable_cpu_count
 
 __all__ = [
+    "prune_fine_tunes",
     "FoundationModel",
     "T0Model",
     "ChronosModel",
@@ -229,6 +230,9 @@ class FoundationModel(BaseModel):
     _can_fine_tune = False
     # Whether the family runs on torch (its device, TF32 and threads scoped and recorded); a test's numpy fake doesn't.
     _uses_torch = True
+    # The most context steps the family's backend reads (None: any): a longer context is cut to its newest steps by the
+    # package, which a run warns about and the manifest's runtime records (`context_steps`).
+    _max_context_steps: Optional[int] = None
     _default_name = "foundation"
 
     # BaseModel's attributes that a foundation model sets itself, kept out of its saved parameters (`_Internal`).
@@ -278,6 +282,10 @@ class FoundationModel(BaseModel):
         # Fine-tunes this model ran (a resume that loads its stored ones runs none) and checkpoints it loaded.
         self._fine_tunes = 0
         self._checkpoints_loaded = 0
+        # Each fine-tune's windows by "<anchor>_h<horizon>" (kept, dropped and why) and the key its checkpoints went under.
+        self._window_counts: Dict[str, Any] = {}
+        self._fit_key_used: Optional[str] = None
+        self._run_counts = (0, 0)
 
     # --- parameters --------------------------------------------------------------------------------------------------
 
@@ -386,20 +394,34 @@ class FoundationModel(BaseModel):
         """torch's version, the device type, dtype, TF32 (off), the thread count and the device's kernels
         (`_torch.runtime.runtime_fields`, without the trainer's stack), all compared on resume but the device's name."""
         if not self._uses_torch:
-            return {"device": "cpu", "dtype": DTYPE, "threads_per_fit": self._threads()}
-        from ._torch.runtime import runtime_fields
+            fields = {"device": "cpu", "dtype": DTYPE, "threads_per_fit": self._threads()}
+        else:
+            from ._torch.runtime import runtime_fields
 
-        fields = runtime_fields(
-            device=self.device, dtype=DTYPE, tf32=False, threads_per_fit=self._threads(), stack="loop"
-        )
-        fields.pop("stack", None)
-        fields.pop("pad_to", None)
+            fields = runtime_fields(
+                device=self.device, dtype=DTYPE, tf32=False, threads_per_fit=self._threads(), stack="loop"
+            )
+            fields.pop("stack", None)
+            fields.pop("pad_to", None)
+        if self._max_context_steps is not None:
+            # The context steps the backend reads, which a context beyond its limit doesn't change.
+            fields["context_steps"] = min(self.context * self._periods_per_day, self._max_context_steps)
         return fields
 
     @abstractmethod
-    def _load_backend(self, resolved: Any, device: Any) -> Any:
-        """The family's `_fm.Backend` on `device`, from `resolved` (the card's files, or None for a card without weights),
-        importing the family's package here and nowhere else."""
+    def _load_backend(self, resolved: Any, device: Any, options: Mapping[str, Any]) -> Any:
+        """The family's `_fm.Backend` on `device`, from `resolved` (the card's files, or None for a card without weights) with
+        the load options `options` (`_backend_options`), importing the family's package here and nowhere else."""
+
+    def _backend_options(self) -> Dict[str, Any]:
+        """The model's settings a backend is built with (plain values): part of the key a loaded backend is shared under, so
+        two models of a family share one only when these are equal. Empty here."""
+        return {}
+
+    def _predict_options(self) -> Dict[str, Any]:
+        """The model's settings every backend call takes (`Backend.predict(call, options)`), such as a family's averaging or
+        clipping switches. Empty here."""
+        return {}
 
     @contextlib.contextmanager
     def _scope(self) -> Any:
@@ -416,11 +438,12 @@ class FoundationModel(BaseModel):
         """This family's backend on `device`, loaded once per process from the weights the pre-flight resolved, offline."""
         resolved = resolve_model_weights(self)
         files = None if resolved is None else tuple(sorted(resolved.files.items()))
-        key = (type(self).__module__, type(self).__qualname__, files, str(device))
+        options = self._backend_options()
+        key = (type(self).__module__, type(self).__qualname__, files, str(device), json.dumps(options, sort_keys=True))
         backend = _LOADED.get(key)
         if backend is None:
             with offline():
-                backend = self._load_backend(resolved, device)
+                backend = self._load_backend(resolved, device, options)
             _LOADED[key] = backend
             while len(_LOADED) > _MAX_LOADED:
                 _LOADED.popitem(last=False)
@@ -467,6 +490,16 @@ class FoundationModel(BaseModel):
             shared=shared,
         )
         self._history_rules = self._cut_rules(information_set, cut_rules)
+        steps = self.context * periods_per_day(freq)
+        if self._max_context_steps is not None and steps > self._max_context_steps:
+            read = self._max_context_steps / periods_per_day(freq)
+            warnings.warn(
+                f"{self.name}: context={self.context} days of {freq} periods is {steps} steps, and {type(self).__name__} reads "
+                f"at most {self._max_context_steps}: the package reads the newest {self._max_context_steps} steps ({read:.1f} "
+                "days), which the manifest records as context_steps",
+                UserWarning,
+                stacklevel=stacklevel,
+            )
         return expanded
 
     def _call_jobs(self, tasks: Iterable[tuple], first_day: datetime.date) -> Dict[datetime.date, List[tuple]]:
@@ -489,6 +522,8 @@ class FoundationModel(BaseModel):
         rows = set(np.concatenate([arrays["days"] for arrays in hour_arrays.values()]).tolist())
         first_ordinal = config["refit"]["first_ordinal"]
         store = self._store(state)
+        self._window_counts = {}
+        self._run_counts = (self._fine_tunes, self._checkpoints_loaded)
         jobs = self._call_jobs(tasks, state.first_day)
         done = state.n_days - len({task[2] for task in tasks})
         with self._scope() as device, Progress() as progress:
@@ -499,6 +534,7 @@ class FoundationModel(BaseModel):
                 results, skipped = block_records(config, ran)
                 self._collect(state, results, skipped, sink)
                 progress.advance(bar, len({task[2] for task in job}))
+        self._record_fine_tunes(state, store)
 
     def _run_block_calls(
         self,
@@ -548,9 +584,10 @@ class FoundationModel(BaseModel):
         """{(issue day, period): the point forecast} of every item of `batch` the backend can take, in calls of `batch_size`."""
         complete = [i for i, item in enumerate(batch.items) if not item.missing]
         point = backend.point_index
+        options = self._predict_options()
         out: Dict[Tuple[datetime.date, int], float] = {}
         for call in batch.batches(self.batch_size, complete):
-            quantiles = np.asarray(backend.predict(call), dtype=np.float64)
+            quantiles = np.asarray(backend.predict(call, options), dtype=np.float64)
             expected = (self.batch_size, call.steps_ahead, len(backend.levels))
             if quantiles.shape != expected:
                 raise RuntimeError(
@@ -584,11 +621,30 @@ class FoundationModel(BaseModel):
     # --- fine-tunes --------------------------------------------------------------------------------------------------
 
     def _store(self, state: Any) -> Optional["_Checkpoints"]:
-        """Where this run's fine-tunes are stored: `<save_dir>/<name>.fits/`, next to the results; None without a store or a
-        fine-tune."""
+        """Where this run's fine-tunes are stored: `<save_dir>/<stem>.fits/` next to the results `<stem>.jsonl` (the model's name
+        in lower case, spaces as underscores) and their manifest; None without a store or a fine-tune."""
         if self.fine_tune_every is None or not state.store:
             return None
-        return _Checkpoints(Path(state.store.path).parent / f"{self.name}.fits")
+        results = Path(state.store.path)
+        return _Checkpoints(results.with_name(results.stem + ".fits"))
+
+    def _record_fine_tunes(self, state: Any, store: Optional["_Checkpoints"]) -> None:
+        """This run's fine-tunes into the manifest's provenance (`fine_tunes`): the key its checkpoints are stored under (what
+        `prune_fine_tunes` keeps), how many it ran and loaded, and each anchor's windows (kept, dropped and why)."""
+        if store is None or state.manifest is None or not self._window_counts:
+            return
+        from ..results.manifest import manifest_path, record_fine_tunes
+
+        record_fine_tunes(
+            manifest_path(state.store.path),
+            state.manifest,
+            {
+                "key": self._fit_key_used,
+                "fine_tuned": self._fine_tunes - self._run_counts[0],
+                "loaded": self._checkpoints_loaded - self._run_counts[1],
+                "windows": dict(sorted(self._window_counts.items())),
+            },
+        )
 
     def _anchor_cut(
         self, anchor: datetime.date, frame: pd.DataFrame, spec: HistorySpec
@@ -601,11 +657,16 @@ class FoundationModel(BaseModel):
         after = cut + FREQ_STEPS[self._freq]
         return cut, _local_date(after, frame.index.tz) - datetime.timedelta(days=1)
 
-    def _fine_tune_data(self, unit: Any, frame: pd.DataFrame, spec: HistorySpec) -> Tuple[Any, str, pd.Timestamp]:
-        """(the windows of the unit's fine-tune, their digest, the cut instant): each target day up to the anchor's cut (every
-        one from the frame's first with a whole context, or the newest `window` days), read as the forecast issued `horizon`
-        days before it, with no missing value in any series and a finite target on its target day. Asserted: no window's
-        target is after the cut."""
+    def _fine_tune_data(
+        self, unit: Any, frame: pd.DataFrame, spec: HistorySpec
+    ) -> Tuple[Any, str, pd.Timestamp, Dict[str, Any]]:
+        """(the windows of the unit's fine-tune, their digest, the cut instant, their counts): each target day up to the
+        anchor's cut (every one from the frame's first, or the newest `window` days), read as the forecast issued `horizon`
+        days before it. A window is dropped where its context starts before the frame's first row, where the backend couldn't
+        forecast from it (`HistoryItem.missing`: a series with no value in the context, a known-ahead value missing ahead, any
+        gap for a backend that takes none) and where its target day has no target; a missing value the backend takes (a gap
+        in a context, masked) keeps it. The counts (`candidates`, `kept`, `with_gaps`, `dropped` by reason) warn where data
+        dropped any. Asserted: no window's target is after the cut."""
         from ._fm import FineTuneData
 
         horizon, anchor = unit.horizon, unit.anchor
@@ -620,14 +681,22 @@ class FoundationModel(BaseModel):
         issue_days = [day - datetime.timedelta(days=horizon) for day in targets]
         items: List[Any] = []
         ys: List[np.ndarray] = []
+        dropped: collections.Counter = collections.Counter()
+        with_gaps = 0
+        candidates = 0
         if issue_days:
             batch = history_batch(spec, frame, issue_days, self._history_rules, self._freq, horizon)
+            candidates = len(batch.items)
             step = FREQ_STEPS[self._freq]
             series = frame[spec.target]
             utc = series.index.tz_convert("UTC") if tz is not None else series.index
             values = pd.Series(series.to_numpy(dtype=np.float64, na_value=np.nan), index=utc)
             for item in batch.items:
-                if item.missing or any(gap != (0, 0) for gap in item.gaps.values()):
+                if item.first_step < frame.index[0]:
+                    dropped[DROPPED_BEFORE_FRAME] += 1
+                    continue
+                if item.missing:
+                    dropped[f"missing values of {', '.join(item.missing)}"] += 1
                     continue
                 first_ahead = item.first_step + len(item.target) * step
                 instants = pd.date_range(first_ahead, periods=item.steps_ahead, freq=step)
@@ -636,6 +705,7 @@ class FoundationModel(BaseModel):
                 y = values.reindex(instants).to_numpy(dtype=np.float64).copy()
                 y[np.asarray(item.slot_periods) < 0] = np.nan
                 if not np.isfinite(y).any():
+                    dropped[DROPPED_NO_TARGET] += 1
                     continue
                 last = instants[np.flatnonzero(np.isfinite(y))[-1]]
                 if (last.tz_convert(cut.tz) if tz is not None else last) > cut:
@@ -644,12 +714,30 @@ class FoundationModel(BaseModel):
                         f"cut {cut}: a fine-tune may only read targets known at the anchor's issue time"
                     )
                 y.setflags(write=False)
+                with_gaps += any(gap[0] for gap in item.gaps.values())
                 items.append(item)
                 ys.append(y)
         dates = np.array([item.target_day for item in items], dtype="datetime64[D]")
         if len(dates) and dates.max() > np.datetime64(cut_date, "D"):
             raise AssertionError(
                 f"{self.name}: a window of the fine-tune at {anchor} has its target on {dates.max()}, after its cut {cut_date}"
+            )
+        counts = {
+            "candidates": candidates,
+            "kept": len(items),
+            "with_gaps": with_gaps,
+            "dropped": dict(sorted(dropped.items())),
+        }
+        by_data = {reason: n for reason, n in dropped.items() if reason != DROPPED_BEFORE_FRAME}
+        if by_data:
+            shown = "; ".join(f"{n} for {reason}" for reason, n in sorted(by_data.items()))
+            warnings.warn(
+                f"{self.name}: the fine-tune at {anchor} (horizon {horizon}) keeps {len(items)} of {candidates} windows: "
+                f"dropped {shown}"
+                + (f"; {dropped[DROPPED_BEFORE_FRAME]} start before the frame" if dropped[DROPPED_BEFORE_FRAME] else "")
+                + (f"; {with_gaps} kept hold gaps the backend masks" if with_gaps else ""),
+                UserWarning,
+                stacklevel=2,
             )
         data = FineTuneData(tuple(items), tuple(ys), dates, cut_date, tuple(spec.past), tuple(spec.known_ahead))
         digest = hashlib.sha256()
@@ -662,12 +750,12 @@ class FoundationModel(BaseModel):
                 y,
             ):
                 digest.update(np.ascontiguousarray(array, dtype=np.float64).tobytes())
-        return data, digest.hexdigest(), cut
+        return data, digest.hexdigest(), cut, counts
 
     def _fit_key(self, spec: HistorySpec) -> str:
         """The digest of everything that decides a fine-tune but its windows: the family, its series and context, the
-        fine-tune's settings, the base weights' hashes, the runtime (packages, device type, dtype, TF32, threads) and the
-        rules the series are cut by."""
+        fine-tune's settings and base seed, the base weights' hashes, the runtime (packages, device type, dtype, TF32, threads)
+        and the rules the series are cut by."""
         resolved = resolve_model_weights(self)
         runtime = {key: value for key, value in self._runtime_fields().items() if key != "device_name"}
         rules = None if self._history_rules is None else self._history_rules_of(spec, self._history_rules, self._freq)
@@ -677,6 +765,7 @@ class FoundationModel(BaseModel):
                 "spec": [spec.context, list(spec.known_ahead), list(spec.past), spec.target, spec.newest_target],
                 "freq": self._freq,
                 "fine_tune": self._settings(),
+                "random_state": self.random_state,
                 "weights": None if resolved is None else dict(sorted(resolved.files.items())),
                 "packages": runtime_versions(self._card) if self._card is not None else {},
                 "runtime": runtime,
@@ -695,7 +784,8 @@ class FoundationModel(BaseModel):
     ) -> Tuple[List[Dict], Optional[str]]:
         """Each seed's forecasts of the block from its fine-tune at the unit's anchor (stored, or run and stored), or the skip
         reason of every task of the unit when there are too few windows."""
-        data, data_digest, cut = self._fine_tune_data(unit, frame, spec)
+        data, data_digest, cut, counts = self._fine_tune_data(unit, frame, spec)
+        self._window_counts[f"{unit.anchor.isoformat()}_h{unit.horizon}"] = counts
         settings = self._settings()
         dates = data.dates
         if len(dates) == 0 or (dates <= dates.max() - np.timedelta64(settings["holdout_days"], "D")).sum() == 0:
@@ -703,11 +793,14 @@ class FoundationModel(BaseModel):
                 f"{SKIP_TOO_FEW_ROWS}: the fine-tune at {unit.anchor} has {len(dates)} window(s), none before its "
                 f"{settings['holdout_days']}-day holdout"
             )
-        key = self._fit_key(spec) if store is not None else None
+        key = None
+        if store is not None:
+            key = self._fit_key(spec)
+            self._fit_key_used = key
         per_seed = []
         for index in range(self.seeds):
             seed = unit_seed(self.random_state, unit, index)
-            path = None if store is None else store.find(unit, index, key, data_digest)
+            path = None if store is None else store.find(unit, index, key, data_digest, seed)
             if path is not None:
                 backend.load_state(path)
                 self._checkpoints_loaded += 1
@@ -716,51 +809,68 @@ class FoundationModel(BaseModel):
                 outcome = backend.fine_tune(data, settings, seed)
                 self._fine_tunes += 1
                 if store is not None:
-                    store.save(backend, unit, index, seed, key, data_digest, data, cut, outcome)
+                    store.save(backend, unit, index, seed, key, data_digest, data, cut, outcome, counts)
             per_seed.append(self._forecast(batch, backend))
         backend.reset()
         return per_seed, None
 
 
+# Why a window of a fine-tune is dropped where no data is to blame: its context starts before the frame's first row.
+DROPPED_BEFORE_FRAME = "a context starting before the frame"
+DROPPED_NO_TARGET = "no target on the target day"
+
+
 class _Checkpoints:
-    """A run's stored fine-tunes (decision 13): `<anchor>_h<horizon>_s<seed index>_<key>.ckpt` and its sidecar `.json`
-    (anchor, horizon, seed, the key of what decides it, the sha256 and size of the file, the data end, the cut, the best step,
-    the windows and their digest, the trainer's statistics). Written atomically, the file before its sidecar."""
+    """A run's stored fine-tunes (decision 13). Per (anchor, horizon, seed index, key) a sidecar `<stem>.json` (anchor, horizon,
+    seed, the key of what decides it, the file it names with its sha256 and size, the data end, the cut, the best step, the
+    windows and their digest and counts, the trainer's statistics) and the checkpoint it names, `<stem>.<sha256 prefix>.ckpt`,
+    a name of its content's. A save writes the checkpoint under a new name, then replaces the sidecar, then removes the stem's
+    other checkpoints (the refit's predecessor, or a crash's leftover), so a crash anywhere leaves the old pair or the new one
+    whole. A pair that doesn't match (no file, another sha256, key, seed or windows) is fine-tuned again, with a warning.
+    Leftovers of an interrupted write (`*.partial`) are removed when the store opens: the results store's lock keeps two runs
+    of one model from writing here at once."""
 
     def __init__(self, directory: Path):
         self.directory = directory
+        if directory.is_dir():
+            for leftover in directory.glob("*.partial"):
+                leftover.unlink(missing_ok=True)
 
-    def _paths(self, unit: Any, index: int, key: str) -> Tuple[Path, Path]:
-        stem = f"{unit.anchor.isoformat()}_h{unit.horizon}_s{index}_{key[:16]}"
-        return self.directory / f"{stem}.ckpt", self.directory / f"{stem}.json"
+    @staticmethod
+    def stem(unit: Any, index: int, key: str) -> str:
+        return f"{unit.anchor.isoformat()}_h{unit.horizon}_s{index}_{key[:16]}"
 
-    def find(self, unit: Any, index: int, key: str, data_digest: str) -> Optional[Path]:
-        """The stored fine-tune of this unit and seed, None when there is none (or it was fine-tuned on other windows, which
-        warns). A file whose sha256 isn't its sidecar's raises: it changed after it was stored."""
-        path, sidecar = self._paths(unit, index, key)
+    def _refit(self, sidecar: Path, why: str) -> None:
+        warnings.warn(
+            f"the stored fine-tune {sidecar.stem} {why}: fine-tuning again, which on a GPU gives other numbers than any "
+            "forecast already stored from it",
+            UserWarning,
+            stacklevel=3,
+        )
+
+    def find(self, unit: Any, index: int, key: str, data_digest: str, seed: int) -> Optional[Path]:
+        """The checkpoint of this unit, seed index, key and seed fine-tuned on these windows, None (fine-tune again) when there
+        is none, or when what is stored doesn't match, which warns."""
+        sidecar = self.directory / f"{self.stem(unit, index, key)}.json"
         if not sidecar.is_file():
             return None
-        record = json.loads(sidecar.read_text())
-        if not path.is_file():
-            warnings.warn(
-                f"the stored fine-tune {path.name} is gone (its sidecar is there): fine-tuning again, which on a GPU gives "
-                "other numbers than the forecasts already stored from it",
-                UserWarning,
-                stacklevel=2,
-            )
+        try:
+            record = json.loads(sidecar.read_text())
+            path = self.directory / record["file"]
+        except (ValueError, KeyError, TypeError):
+            self._refit(sidecar, "has a sidecar that can't be read")
             return None
-        digest = sha256_of(path)
-        if digest != record.get("sha256"):
-            raise ValueError(
-                f"the stored fine-tune {path} has sha256 {digest}, its sidecar says {record.get('sha256')}: it changed after "
-                "it was stored. Delete both files to fine-tune again."
-            )
-        if record.get("key") != key or record.get("data_digest") != data_digest:
-            warnings.warn(
-                f"the stored fine-tune {path.name} was made on other windows (the data changed since): fine-tuning again",
-                UserWarning,
-                stacklevel=2,
-            )
+        if not path.is_file():
+            self._refit(sidecar, f"is gone ({path.name}, which its sidecar names)")
+            return None
+        if sha256_of(path) != record.get("sha256"):
+            self._refit(sidecar, f"changed after it was stored ({path.name} has another sha256 than its sidecar's)")
+            return None
+        if record.get("key") != key or record.get("seed") != int(seed):
+            self._refit(sidecar, "was made with another key or seed")
+            return None
+        if record.get("data_digest") != data_digest:
+            self._refit(sidecar, "was made on other windows (the data changed since)")
             return None
         return path
 
@@ -775,34 +885,85 @@ class _Checkpoints:
         data: Any,
         cut: pd.Timestamp,
         outcome: Any,
+        counts: Optional[Dict[str, Any]] = None,
     ) -> Path:
         self.directory.mkdir(parents=True, exist_ok=True)
-        path, sidecar = self._paths(unit, index, key)
-        partial = path.with_name(path.name + ".partial")
+        stem = self.stem(unit, index, key)
+        partial = self.directory / f"{stem}.ckpt.partial"
         backend.save_state(partial)
-        os.replace(partial, path)
-        stats = dict(outcome.stats)
+        digest = sha256_of(partial, cached=False)
+        path = self.directory / f"{stem}.{digest[:16]}.ckpt"
+        os.replace(partial, path)  # a name of its own: the pair on file stays whole until the sidecar names this file
         record = {
             "anchor": unit.anchor.isoformat(),
             "horizon": int(unit.horizon),
             "seed_index": int(index),
             "seed": int(seed),
             "key": key,
-            "sha256": sha256_of(path, cached=False),
+            "file": path.name,
+            "sha256": digest,
             "bytes": path.stat().st_size,
             "data_end": str(outcome.data_end),
             "cut": str(data.cut),
             "cut_step": str(cut),
             "best_step": int(outcome.best_step),
             "windows": len(data),
+            "window_counts": counts,
             "data_digest": data_digest,
-            "stats": json.loads(json.dumps(stats, default=str)),
+            "stats": json.loads(json.dumps(dict(outcome.stats), default=str)),
             "created_at": _created_at(),
         }
-        written = sidecar.with_name(sidecar.name + ".partial")
+        written = self.directory / f"{stem}.json.partial"
         written.write_text(json.dumps(record, indent=2) + "\n")
-        os.replace(written, sidecar)
+        os.replace(written, self.directory / f"{stem}.json")
+        for other in self.directory.glob(f"{stem}.*.ckpt"):  # superseded by this refit, or left by a crash
+            if other.name != path.name:
+                other.unlink(missing_ok=True)
         return path
+
+
+def prune_fine_tunes(save_dir: Any, name: str, keep_keys: Optional[Sequence[str]] = None) -> List[Path]:
+    """Remove from the model `name`'s `<save_dir>/<stem>.fits/` what no current run reads: the stored fine-tunes (sidecar and checkpoint) whose
+    key isn't in `keep_keys`, by default the key the model's last run stored under (its manifest's `fine_tunes`), checkpoint
+    files no sidecar names, and leftovers of an interrupted write. Returns the paths removed. A t0 checkpoint is about 407 MB.
+
+    Without `keep_keys` and with no key in the manifest (no run with a store fine-tuned there yet) it raises rather than
+    remove everything."""
+    from types import SimpleNamespace
+
+    from ..pipelines.model_pipeline import ModelPipeline
+
+    save_dir = Path(save_dir)
+    stem = ModelPipeline.results_path(save_dir, SimpleNamespace(name=name), "jsonl").stem
+    directory = save_dir / f"{stem}.fits"
+    if keep_keys is None:
+        manifest = save_dir / f"{stem}.manifest.json"
+        entry = json.loads(manifest.read_text()).get("fine_tunes") if manifest.is_file() else None
+        if not entry or not entry.get("key"):
+            raise ValueError(
+                f"{manifest} records no key of a run's fine-tunes, so nothing says which to keep: pass keep_keys"
+            )
+        keep_keys = [entry["key"]]
+    keep = set(keep_keys)
+    removed: List[Path] = []
+    if not directory.is_dir():
+        return removed
+    named = set()
+    for sidecar in sorted(directory.glob("*.json")):
+        try:
+            record = json.loads(sidecar.read_text())
+        except ValueError:
+            record = {}
+        if record.get("key") in keep:
+            named.add(record.get("file"))
+            continue
+        sidecar.unlink()
+        removed.append(sidecar)
+    for path in sorted([*directory.glob("*.ckpt"), *directory.glob("*.partial")]):
+        if path.name not in named:
+            path.unlink()
+            removed.append(path)
+    return removed
 
 
 # --- the families ---------------------------------------------------------------------------------------------------------
@@ -898,7 +1059,7 @@ class T0Model(FoundationModel):
             name=name,
         )
 
-    def _load_backend(self, resolved: Any, device: Any) -> Any:
+    def _load_backend(self, resolved: Any, device: Any, options: Mapping[str, Any]) -> Any:
         from ._fm.t0 import T0Backend
 
         return T0Backend(resolved, device)
@@ -912,6 +1073,8 @@ class ChronosModel(FoundationModel):
 
     _card = CHRONOS_CARD
     _default_name = "chronos2"
+    # Chronos-2's `context_length` (its config.json): 341 days of hours, 85 of quarter-hours.
+    _max_context_steps = 8192
     # Chronos-2 doesn't fine-tune here (its fine-tuning is out of this step): the base's fine-tune settings are no parameters
     # of this class, so a pipeline doesn't save them.
     fine_tune_every = _Internal()
@@ -950,7 +1113,7 @@ class ChronosModel(FoundationModel):
             "batch_size": self.batch_size,
         }
 
-    def _load_backend(self, resolved: Any, device: Any) -> Any:
+    def _load_backend(self, resolved: Any, device: Any, options: Mapping[str, Any]) -> Any:
         from ._fm.chronos import ChronosBackend
 
         return ChronosBackend(resolved, device)

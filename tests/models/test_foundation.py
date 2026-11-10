@@ -11,8 +11,8 @@ torch, in the core CI job. The real packages' adapters with tiny random weights 
 import dataclasses
 import datetime
 import json
-import subprocess
 import sys
+import warnings
 from datetime import date
 from pathlib import Path
 
@@ -28,6 +28,7 @@ from epftoolbox2.models._history import HistorySpec, history_batch
 from epftoolbox2.models.foundation import FINE_TUNE_DEFAULTS, check_fine_tune
 from epftoolbox2.pipelines import ModelPipeline
 from epftoolbox2.results.manifest import ManifestMismatchError
+from tests.import_stubs import run_without
 from tests.models import adapter_suite as suite
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -102,7 +103,7 @@ class PersistenceBackend(Backend):
             out = out + 0.1 * values[:, width:]
         return out
 
-    def predict(self, call):
+    def predict(self, call, options):
         out = self.point(call.target, call.known, call.steps_ahead) + self.bias + self.model.offset
         if self.model.by_batch:
             out = out + self.model.by_batch * float(call.target[:, -1].mean())
@@ -121,7 +122,7 @@ class PersistenceBackend(Backend):
         # From the state it is in, as a fine-tune of weights starts from them: the training windows' mean residual, and a
         # little of the holdout's, as early stopping reads it to choose a step.
         self.starts.append(self.bias)
-        self.bias += float(np.mean(residuals[False])) + 1e-3 * float(np.mean(residuals[True]))
+        self.bias += float(np.nanmean(residuals[False])) + 1e-3 * float(np.nanmean(residuals[True]))
         self.bias += (int(seed) % 101) * 1e-3
         self.fine_tunes.append((data.cut, len(data), int(seed)))
         return FineTuneOutcome(settings["max_steps"], data.dates.max().astype(date), {"windows": len(data)})
@@ -183,12 +184,12 @@ class FakeFM(FoundationModel):
     def _model_kwargs(self):
         return {**super()._model_kwargs, "by_batch": self.by_batch, "offset": self.offset}
 
-    def _load_backend(self, resolved, device):
+    def _load_backend(self, resolved, device, options):
         return PersistenceBackend(self)
 
     def _backend(self, device):  # one backend per model (the fake reads the model's own settings), not one per process
         if self._fake is None:
-            self._fake = self._load_backend(None, device)
+            self._fake = self._load_backend(None, device, self._backend_options())
         return self._fake
 
 
@@ -288,9 +289,9 @@ def test_t0_and_chronos_build_with_the_spec_s_defaults_and_save_only_their_param
 
 def test_importing_the_package_or_building_these_models_imports_no_model_package(tmp_path):
     """Dawid's lean condition: `import epftoolbox2`, a data pipeline of calendar data (fetched) and building T0Model and
-    ChronosModel import none of torch, t0, chronos, huggingface_hub, transformers or safetensors."""
+    ChronosModel try to import none of torch, t0, chronos, huggingface_hub, transformers or safetensors: each is a stub on the
+    path that logs an attempt and raises, so a guarded `try: import t0` counts too (`tests.import_stubs`)."""
     code = (
-        "import sys\n"
         "import epftoolbox2\n"
         "from epftoolbox2.data.sources import CalendarSource\n"
         "from epftoolbox2.pipelines import DataPipeline, ModelPipeline\n"
@@ -300,12 +301,14 @@ def test_importing_the_package_or_building_these_models_imports_no_model_package
         "models = [T0Model(known_ahead=['load_forecast']), ChronosModel(context=182)]\n"
         "ModelPipeline().add_model(models[0]).add_model(models[1]).to_dict()\n"
         "[model.card for model in models]\n"
-        "heavy = ('torch', 't0', 'chronos', 'huggingface_hub', 'transformers', 'safetensors')\n"
-        "found = sorted(m for m in sys.modules if m.split('.')[0] in heavy)\n"
-        "assert not found, found\n"
     )
-    result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, cwd=tmp_path)
+    heavy = ("torch", "t0", "chronos", "huggingface_hub", "transformers", "safetensors")
+    result, attempted = run_without(code, heavy, tmp_path)
     assert result.returncode == 0, result.stderr
+    assert attempted == [], f"tried to import {attempted}"
+    # The guard sees what it guards: the same code with an import of t0 caught by an except is logged.
+    result, attempted = run_without("try:\n    import t0\nexcept ImportError:\n    pass\n", heavy, tmp_path / "probe")
+    assert result.returncode == 0 and attempted == ["t0"], (result.stderr, attempted)
 
 
 # ---------------------------------------------------------------------------------------------------------------------------
@@ -493,12 +496,22 @@ def test_stored_fine_tunes_are_reused_and_a_deleted_one_refits(hourly, tmp_path)
     run(tuned("FakeFM", seeds=2), hourly, test, save_dir=fresh)
     first = tuned("FakeFM", seeds=2)
     run(first, hourly, test, save_dir=resumed)
-    fits = sorted((resumed / "FakeFM.fits").glob("*.ckpt"))
+    fits = sorted((resumed / "fakefm.fits").glob("*.ckpt"))
     assert first._fine_tunes == 6 and len(fits) == 6  # three Mondays, two seeds
-    sidecar = json.loads(fits[0].with_suffix(".json").read_text())
-    assert {"anchor", "horizon", "seed", "sha256", "data_end", "best_step", "windows", "data_digest", "key"} <= set(
-        sidecar
-    )
+    sidecar = json.loads(sorted((resumed / "fakefm.fits").glob("*.json"))[0].read_text())
+    assert {
+        "anchor",
+        "horizon",
+        "seed",
+        "file",
+        "sha256",
+        "data_end",
+        "best_step",
+        "windows",
+        "data_digest",
+        "key",
+    } <= set(sidecar)
+    assert sidecar["file"] == fits[0].name and fits[0].name.endswith(f".{sidecar['sha256'][:16]}.ckpt")
     path = suite.results(resumed, "FakeFM")
     kept = [line for i, line in enumerate(suite.lines(path)) if i % 5 not in (1, 3)]
     path.write_text("".join(f"{line}\n" for line in kept))
@@ -515,8 +528,11 @@ def test_stored_fine_tunes_are_reused_and_a_deleted_one_refits(hourly, tmp_path)
     assert suite.lines(path) == suite.lines(suite.results(fresh, "FakeFM"))  # on the CPU the refit is the same bits
     fits[1].write_text(json.dumps({"bias": 99.0}))
     path.write_text("".join(f"{line}\n" for line in kept))
-    with pytest.raises(ValueError, match="changed after it was stored"):
-        run(tuned("FakeFM", seeds=2), hourly, test, save_dir=resumed)
+    other = tuned("FakeFM", seeds=2)
+    with pytest.warns(UserWarning, match="changed after it was stored"):
+        run(other, hourly, test, save_dir=resumed)
+    assert other._fine_tunes == 1 and json.loads(fits[1].read_text())["bias"] != 99.0  # fine-tuned again, not raised
+    assert suite.lines(path) == suite.lines(suite.results(fresh, "FakeFM"))
 
 
 def test_a_changed_fine_tune_refuses_the_resume(hourly, tmp_path):
@@ -532,7 +548,7 @@ def test_a_changed_fine_tune_refuses_the_resume(hourly, tmp_path):
     # Let in anyway, another fine-tune's checkpoint is not this one's: it fine-tunes again, into a file of its own.
     other = tuned("FakeFM", fine_tune={**QUICK, "lr": 1e-4})
     pipeline(other).run(hourly, *test, horizon=1, save_dir=tmp_path, forecast_only=True, allow_manifest_mismatch=True)
-    assert other._fine_tunes == 1 and len(list((tmp_path / "FakeFM.fits").glob("*.ckpt"))) == 2
+    assert other._fine_tunes == 1 and len(list((tmp_path / "fakefm.fits").glob("*.ckpt"))) == 2
 
 
 def test_too_few_windows_skip_the_unit(hourly):
@@ -566,7 +582,8 @@ def test_the_fine_tune_windows_are_read_as_forecasts_issued_a_horizon_before(hou
     pipeline(model, information_set=INFO_AHEAD).run(hourly, "2023-06-12", "2023-06-12", horizon=2, forecast_only=True)
     spec = model._history_spec("price")
     unit = dataclasses.make_dataclass("Unit", ["horizon", "anchor"])(2, date(2023, 6, 12))
-    data, digest, cut = model._fine_tune_data(unit, hourly, spec)
+    data, digest, cut, counts = model._fine_tune_data(unit, hourly, spec)
+    assert counts["kept"] == len(data) and set(counts["dropped"]) == {"a context starting before the frame"}
     assert data.cut == date(2023, 6, 11) and len(data) > 100 and len(digest) == 64
     # Every window's series are whole: the first is the first target day whose context lies in the frame.
     assert all(np.isfinite(i.target).all() and np.isfinite(i.known["load_forecast"]).all() for i in data.items)
@@ -581,3 +598,242 @@ def test_the_fine_tune_windows_are_read_as_forecasts_issued_a_horizon_before(hou
     assert np.isnan(y[~on_target]).all()
     actual = hourly.loc["2023-06-11", "price"].to_numpy()
     assert np.array_equal(y[on_target], actual)
+
+
+# ---------------------------------------------------------------------------------------------------------------------------
+# The review: seeds and keys, missing values, CUDA and pools, the store, options, the context a family reads, the TUI
+# ---------------------------------------------------------------------------------------------------------------------------
+
+
+def test_another_random_state_fine_tunes_again_into_a_file_of_its_own(hourly, tmp_path):
+    """`random_state` decides every seed, so it is in the key: a run with another one into the same save_dir (results and
+    manifest deleted) fine-tunes again and keeps the other's checkpoint; `find` also compares the seed a sidecar records."""
+    test = ("2023-06-05", "2023-06-11")
+    run(tuned("FakeFM", random_state=0), hourly, test, save_dir=tmp_path)
+    for name in ("fakefm.jsonl", "fakefm.manifest.json"):
+        (tmp_path / name).unlink()
+    other = tuned("FakeFM", random_state=1)
+    run(other, hourly, test, save_dir=tmp_path)
+    assert other._fine_tunes == 1 and other._checkpoints_loaded == 0
+    assert len(list((tmp_path / "fakefm.fits").glob("*.ckpt"))) == 2
+    from epftoolbox2.models.foundation import _Checkpoints
+
+    store = _Checkpoints(tmp_path / "fakefm.fits")
+    record = json.loads(next((tmp_path / "fakefm.fits").glob("*.json")).read_text())
+    unit = dataclasses.make_dataclass("Unit", ["horizon", "anchor"])(1, date.fromisoformat(record["anchor"]))
+    with pytest.warns(UserWarning, match="another key or seed"):
+        assert store.find(unit, 0, record["key"], record["data_digest"], record["seed"] + 1) is None
+    assert store.find(unit, 0, record["key"], record["data_digest"], record["seed"]) is not None
+
+
+def test_a_missing_value_drops_only_the_windows_the_backend_cant_take_and_says_so(hourly, tmp_path):
+    """One missing hour of the load forecast: a window whose steps ahead need it is dropped (2 of them, the item a forecast
+    couldn't be made from), one whose context holds it is kept (the backend masks it); the run warns with the counts, and the
+    manifest's `fine_tunes` records them per anchor, with the key its checkpoints are stored under."""
+    holed = hourly.copy()
+    holed.loc[holed.index[holed.index == pd.Timestamp("2023-05-20 03:00", tz=ZONE)], "load_forecast"] = np.nan
+    whole_model, holed_model = tuned("FakeFM"), tuned("FakeFM")
+    run(whole_model, hourly, ("2023-06-12", "2023-06-12"))
+    with pytest.warns(
+        UserWarning, match=r"keeps (\d+) of (\d+) windows: dropped 2 for missing values of load_forecast"
+    ):
+        run(holed_model, holed, ("2023-06-12", "2023-06-12"), save_dir=tmp_path)
+    (_, whole, _), (_, kept, _) = whole_model._fake.fine_tunes[0], holed_model._fake.fine_tunes[0]
+    assert kept == whole - 2
+    entry = json.loads((tmp_path / "fakefm.manifest.json").read_text())["fine_tunes"]
+    counts = entry["windows"]["2023-06-12_h1"]
+    assert counts["kept"] == kept and counts["dropped"]["missing values of load_forecast"] == 2
+    assert counts["with_gaps"] >= CONTEXT and entry["fine_tuned"] == 1 and entry["loaded"] == 0
+    assert entry["key"] == json.loads(next((tmp_path / "fakefm.fits").glob("*.json")).read_text())["key"]
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # a whole frame drops only windows that start before it: no warning
+        run(tuned("FakeFM"), hourly, ("2023-06-12", "2023-06-12"))
+
+
+def test_after_cuda_starts_in_this_process_every_pool_spawns(hourly, monkeypatch):
+    """A foundation model on a GPU initialises CUDA in this process, and a forked child of it can't use CUDA: once
+    `torch.cuda.is_initialized()` (a stand-in here) every pool of the library spawns its workers, as on Windows; before, on
+    Linux, they fork."""
+    import types
+    from concurrent.futures import Future
+    from pathlib import Path as _Path
+
+    from epftoolbox2.models import OLSModel, _worker
+
+    contexts = []
+
+    class Capture:
+        def __init__(self, max_workers=None, mp_context=None, initializer=None, initargs=()):
+            contexts.append(mp_context.get_start_method())
+            _worker._worker_init(*initargs)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc_info):
+            return False
+
+        def submit(self, task, *args):
+            future = Future()
+            future.set_result(task(*args))
+            return future
+
+        def shutdown(self, wait=True, cancel_futures=False):
+            pass
+
+    monkeypatch.setattr("epftoolbox2.models.base.ProcessPoolExecutor", Capture)
+    data = hourly
+    ModelPipeline().add_model(OLSModel(["load_forecast"], 28)).run(
+        data, "2023-06-12", "2023-06-12", horizon=1, forecast_only=True
+    )
+    initialised = types.SimpleNamespace(cuda=types.SimpleNamespace(is_initialized=lambda: True))
+    monkeypatch.setitem(sys.modules, "torch", initialised)
+    ModelPipeline().add_model(OLSModel(["load_forecast"], 28)).run(
+        data, "2023-06-12", "2023-06-12", horizon=1, forecast_only=True
+    )
+    assert contexts == (["spawn", "spawn"] if _worker._POOLS_SPAWN else ["fork", "spawn"])
+    package = _Path(_worker.__file__).parents[1]
+    forked = [p for p in package.rglob("*.py") if 'get_context("fork"' in p.read_text()]
+    assert forked == [], f"a pool that forks whatever CUDA did: {forked}"
+
+
+def test_a_crash_between_a_checkpoint_and_its_sidecar_leaves_a_whole_pair(hourly, tmp_path, monkeypatch):
+    """A rerun on changed data stopped after its new checkpoint is written and before its sidecar: the old pair is whole, a
+    rerun fine-tunes once more (the old windows aren't these) with a warning, keeps one checkpoint per stem and no leftover,
+    and its records are a fresh run's on that data."""
+    from epftoolbox2.models import foundation
+
+    test = ("2023-06-12", "2023-06-12")
+    run(tuned("FakeFM"), hourly, test, save_dir=tmp_path)
+    changed = hourly.copy()
+    changed.loc[changed.index[(changed.index >= "2023-05-10") & (changed.index < "2023-05-11")], "load_forecast"] += (
+        100.0
+    )
+
+    def clear():
+        for path in tmp_path.iterdir():
+            if path.is_file():
+                path.unlink()
+
+    clear()
+
+    def killed():
+        raise KeyboardInterrupt("the time limit")
+
+    created_at = foundation._created_at
+    monkeypatch.setattr(foundation, "_created_at", killed)
+    with pytest.raises(KeyboardInterrupt), pytest.warns(UserWarning, match="other windows"):
+        run(tuned("FakeFM"), changed, test, save_dir=tmp_path)
+    monkeypatch.setattr(foundation, "_created_at", created_at)
+    fits = tmp_path / "fakefm.fits"
+    (sidecar,) = fits.glob("*.json")
+    record = json.loads(sidecar.read_text())
+    assert (fits / record["file"]).is_file() and len(list(fits.glob("*.ckpt"))) == 2  # the old pair, the new file
+    clear()
+    again = tuned("FakeFM")
+    with pytest.warns(UserWarning, match="other windows"):
+        run(again, changed, test, save_dir=tmp_path)
+    assert again._fine_tunes == 1 and len(list(fits.glob("*.ckpt"))) == 1 and not list(fits.glob("*.partial"))
+    fresh = tmp_path / "fresh"
+    run(tuned("FakeFM"), changed, test, save_dir=fresh)
+    assert suite.lines(suite.results(tmp_path, "FakeFM")) == suite.lines(suite.results(fresh, "FakeFM"))
+    (fits / "leftover.ckpt.partial").write_text("half")  # a crash's leftover: gone when a run next opens the store
+    clear()
+    run(tuned("FakeFM"), changed, test, save_dir=tmp_path)
+    assert not list(fits.glob("*.partial"))
+
+
+def test_prune_keeps_the_last_run_s_checkpoints_and_removes_the_rest(hourly, tmp_path):
+    """Two runs of other fine-tune settings into one save_dir (the second let in by `allow_manifest_mismatch`): `prune_fine_tunes`
+    keeps the pairs of the key the manifest records (the last run's) and removes the other key's, orphans and leftovers;
+    without a recorded key it refuses."""
+    from epftoolbox2.models.foundation import prune_fine_tunes
+
+    test = ("2023-06-05", "2023-06-11")
+    with pytest.raises(ValueError, match="records no key"):
+        prune_fine_tunes(tmp_path, "FakeFM")
+    run(tuned("FakeFM"), hourly, test, save_dir=tmp_path)
+    path = suite.results(tmp_path, "FakeFM")
+    path.write_text("".join(f"{line}\n" for line in suite.lines(path)[::2]))  # half gone: the second run has work
+    second = tuned("FakeFM", fine_tune={**QUICK, "lr": 1e-4})
+    pipeline(second).run(hourly, *test, horizon=1, save_dir=tmp_path, forecast_only=True, allow_manifest_mismatch=True)
+    fits = tmp_path / "fakefm.fits"
+    assert len(list(fits.glob("*.ckpt"))) == 2
+    (fits / "orphan.0123456789abcdef.ckpt").write_text("{}")
+    removed = prune_fine_tunes(tmp_path, "FakeFM")
+    assert len(removed) == 3 and len(list(fits.glob("*.ckpt"))) == 1 == len(list(fits.glob("*.json")))
+    key = json.loads((tmp_path / "fakefm.manifest.json").read_text())["fine_tunes"]["key"]
+    assert json.loads(next(fits.glob("*.json")).read_text())["key"] == key
+    assert prune_fine_tunes(tmp_path, "FakeFM") == []
+
+
+class WithOptions(FakeFM):
+    """A family whose backend is built with a setting (`scale`, a load option) and called with another (`shift`): two models
+    share a loaded backend only when their load options are equal, and each call gets the model's own call options."""
+
+    def __init__(self, scale=1.0, shift=0.0, **kwargs):
+        self.scale, self.shift = scale, shift
+        super().__init__(**kwargs)
+
+    def _backend(self, device):  # the base's process-wide cache, unlike the fake's one per model
+        return FoundationModel._backend(self, device)
+
+    def _load_backend(self, resolved, device, options):
+        backend = Scaled(self)
+        backend.scale = options["scale"]
+        return backend
+
+    def _backend_options(self):
+        return {"scale": self.scale}
+
+    def _predict_options(self):
+        return {"shift": self.shift}
+
+
+class Scaled(PersistenceBackend):
+    def predict(self, call, options):
+        return super().predict(call, options) * self.scale + options["shift"]
+
+
+def test_backend_options_are_part_of_the_key_and_calls_get_the_model_s_options(hourly):
+    from epftoolbox2.models import foundation
+
+    test = ("2023-06-12", "2023-06-12")
+    one, two, shifted = WithOptions(scale=1.0), WithOptions(scale=2.0), WithOptions(scale=1.0, shift=5.0)
+    base = by_key(run(one, hourly, test))
+    double = by_key(run(two, hourly, test))
+    moved = by_key(run(shifted, hourly, test))
+    assert one._backend("cpu") is shifted._backend("cpu") is not two._backend("cpu")
+    assert all(double[k] == pytest.approx(2 * v) for k, v in base.items())
+    assert all(moved[k] == pytest.approx(v + 5.0) for k, v in base.items())
+    assert len({key for key in foundation._LOADED if key[1] == "WithOptions"}) == 2
+
+
+class Capped(FakeFM):
+    _max_context_steps = 5 * 24
+
+
+def test_a_context_beyond_what_a_family_reads_warns_for_each_model_and_is_recorded(hourly, tmp_path):
+    """A family that reads at most 120 steps: models of 7 and 6 days of hours each warn in their own run, and the manifest's
+    runtime records the steps read (120 both); 5 days doesn't warn."""
+    for context in (7, 6):
+        with pytest.warns(UserWarning, match=f"context={context} days of 1h periods is {context * 24} steps"):
+            run(Capped(context=context, name=f"C{context}"), hourly, ("2023-06-12", "2023-06-12"), save_dir=tmp_path)
+        runtime = json.loads((tmp_path / f"c{context}.manifest.json").read_text())["runtime"]
+        assert runtime["context_steps"] == 120
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        run(Capped(context=5, name="C5"), hourly, ("2023-06-12", "2023-06-12"))
+
+
+def test_the_tui_builds_a_zero_shot_t0(monkeypatch):
+    from epftoolbox2 import tui
+
+    field = next(f for f in tui.PARAM_SCHEMAS["T0Model"] if f["name"] == "fine_tune_every")
+    for answer, expected in (("", None), ("none", None), ("None", None), ("1MS", "1MS"), ("12MS", "12MS")):
+        monkeypatch.setattr(
+            tui.questionary,
+            "text",
+            lambda label, default="", value=answer: type("A", (), {"ask": lambda self: value})(),
+        )
+        assert tui._ask_field(field) == expected, answer

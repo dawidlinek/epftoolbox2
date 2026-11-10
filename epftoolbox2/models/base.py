@@ -23,7 +23,6 @@ import datetime
 import gc
 import inspect
 import math
-import multiprocessing
 import os
 import sys
 import warnings
@@ -94,6 +93,7 @@ from .context import (
     warn_never_published_in,
 )
 from ._worker import (
+    pool_context,
     NOT_PLANNED,
     SKIP_MISSING_TEST_ROW,
     SKIP_NOT_PUBLISHED,
@@ -1615,7 +1615,7 @@ class BaseModel(ABC):
             n_processes = min(n_processes, _WINDOWS_MAX_WORKERS)
         model_cls, model_kwargs = self._worker_model()
 
-        mp_context = multiprocessing.get_context("fork" if sys.platform != "win32" else "spawn")
+        mp_context = pool_context()
         with (
             pool_native_threads(),  # the workers inherit one OpenBLAS thread, so they start none
             ProcessPoolExecutor(

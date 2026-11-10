@@ -1,8 +1,11 @@
 """`ChronosModel` with the real package (`chronos-forecasting`, the `[chronos]` extra) and a tiny random Chronos-2 made here: the
 adapter's wiring against the research's call (`zoo_tsfm/code/zoo.py` `Chronos`), the adapter suite and `verify`. Skipped without
-the extra; the real weights are for `-m weights` tests and the B1 checks outside CI."""
+the `[chronos]` extra, which the `families-extra` CI job installs; no CI job has the real weights, which the `-m weights` test
+reads from `EPFTOOLBOX2_WEIGHTS_DIR`."""
 
+import json
 import os
+import warnings
 
 import numpy as np
 import pytest
@@ -131,10 +134,21 @@ def test_a_past_series_at_horizon_two(hourly, tiny):
     assert counts["produced"] == counts["planned"] == 96
 
 
-def test_a_context_longer_than_the_model_reads_warns(hourly, tmp_path):
-    short = tiny_chronos(tmp_path / "short", context_length=96)
-    with pytest.warns(UserWarning, match="longer than Chronos-2's 96"):
-        pipeline(make("c2", short)).run(hourly, "2023-06-14", "2023-06-14", horizon=1, forecast_only=True)
+def test_a_context_longer_than_chronos_reads_warns_for_each_model(hourly, tiny, tmp_path):
+    """Chronos-2 reads 8,192 steps: 364 and 350 days of hours each warn in their own run (the backend they share warns
+    nothing), and both manifests record the 8,192 steps read; 341 days (8,184 steps) doesn't warn."""
+    frame = market("1h", start="2022-01-01", end="2023-07-01")
+    for context in (364, 350):
+        with pytest.warns(UserWarning, match=f"context={context} days of 1h periods is {context * 24} steps"):
+            pipeline(make(f"c{context}", tiny, context=context)).run(
+                frame, "2023-06-14", "2023-06-14", horizon=1, forecast_only=True, save_dir=tmp_path
+            )
+        manifest = json.loads((tmp_path / f"c{context}.manifest.json").read_text())
+        assert manifest["runtime"]["context_steps"] == 8192
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UserWarning)
+        warnings.filterwarnings("ignore", message=".*not the reference weights")
+        pipeline(make("c341", tiny, context=341)).run(frame, "2023-06-14", "2023-06-14", horizon=1, forecast_only=True)
 
 
 @pytest.mark.weights

@@ -36,6 +36,7 @@ console = Console()
 #   "window"       – a training window: days, "expanding", or a comma-separated list of them (e.g. "56,84,728,expanding")
 #   "json"         – free text parsed as JSON → dict/list (e.g. {"price": [-500, 4000]})
 #   "bounds"       – "low,high", either side empty for none (e.g. "0,1.05" or ",100") → (low, high), empty for None
+# An optional flag "empty_is_none": True on a text field reads a cleared answer or "none" as None (not the default).
 
 
 # The training settings every network shares (TorchModel and its presets), after each class's own fields.
@@ -1945,10 +1946,11 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
         },
         {
             "name": "fine_tune_every",
-            "description": "Fine-tune from the base weights on a calendar (12MS yearly, 1MS monthly), or empty for zero-shot",
+            "description": "Fine-tune calendar: 12MS yearly, 1MS monthly; clear it or type none for zero-shot",
             "required": False,
             "default": "12MS",
             "kind": "text",
+            "empty_is_none": True,
         },
         {
             "name": "seeds",
@@ -2361,6 +2363,9 @@ def _ask_field(field: dict, available_columns: Optional[list[str]] = None) -> An
     if raw is None:
         _abort()
     raw = raw.strip()
+
+    if field.get("empty_is_none") and raw.lower() in ("", "none", "null"):
+        return None  # a cleared answer, or "none": the parameter's None (T0Model's fine_tune_every: zero-shot)
 
     if not raw:
         if required:

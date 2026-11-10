@@ -20,7 +20,6 @@ stack is that zone's rows and nothing is added, so a record is the model's own t
 
 import copy
 import datetime
-import multiprocessing
 from pathlib import Path
 import sys
 import traceback
@@ -41,6 +40,7 @@ from ..scalers.standard import StandardScaler
 from ._calendar import FitUnit, listed_days, refit_anchor
 from ._engine import run_arguments
 from ._worker import (
+    pool_context,
     SKIP_FIT_ERROR,
     SKIP_MISSING_TEST_PREDICTORS,
     SKIP_MISSING_TEST_ROW,
@@ -653,7 +653,7 @@ def _execute(pooled: PooledModel, states: List[Tuple[str, BaseModel, _RunState]]
         n_processes = max(1, min(n_processes, len(jobs)))
         if sys.platform == "win32":
             n_processes = min(n_processes, _WINDOWS_MAX_WORKERS)
-        mp_context = multiprocessing.get_context("fork" if sys.platform != "win32" else "spawn")
+        mp_context = pool_context()
         with ProcessPoolExecutor(
             max_workers=n_processes,
             mp_context=mp_context,

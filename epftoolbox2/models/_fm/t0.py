@@ -7,7 +7,8 @@ fine-tune (`zoo_tsfm/code/t0_ft.py`, `zoo_followup/code/t0_roll.py`) through the
 - **The fine-tune loss** of a window is t0's native pinball loss over its target day's steps and its five native levels, from
   one differentiable forward pass over the rollout buffer (as `forward_q` there), divided by the mean absolute step-to-step
   change of its context plus 1e-3, so markets and regimes weigh alike. Windows of one S share a forward pass; a step that
-  forecasts no period of the target day (or has no actual) is masked.
+  forecasts no period of the target day (or has no actual) is masked, and a missing value in a context is masked by t0 as in
+  `predict` (the scale is then the mean of the changes it has).
 - **State**: the base weights are kept on the CPU at the first fine-tune; `reset()` loads them back, `save_state` writes the
   fine-tuned state as safetensors and `load_state` reads one back.
 
@@ -68,7 +69,7 @@ class T0Backend(Backend):
         future = np.stack(list(known.values()), axis=1).astype(np.float32) if known else None
         return context, future
 
-    def predict(self, call: Any) -> np.ndarray:
+    def predict(self, call: Any, options: Mapping[str, Any]) -> np.ndarray:
         context, future = self._arrays(call.target, call.past, call.known)
         with torch.no_grad():
             out = self.model.predict(
@@ -115,7 +116,11 @@ class T0Backend(Backend):
         else:
             mask = torch.as_tensor(finite, dtype=torch.float32, device=device)[..., None]
             per_window = (pinball * mask).sum(dim=(1, 2)) / (mask.sum(dim=(1, 2)) * len(native))
-        scale = np.array([np.mean(np.abs(np.diff(row))) + 1e-3 for row in context[:, 0]], dtype=np.float32)
+        # A context with a gap (masked by t0) scales by the changes it has; a whole one by t0_ft.py's np.mean, to the bit.
+        scale = np.array(
+            [(np.nanmean if np.isnan(row).any() else np.mean)(np.abs(np.diff(row))) + 1e-3 for row in context[:, 0]],
+            dtype=np.float32,
+        )
         return per_window / torch.as_tensor(scale, dtype=torch.float32, device=device)
 
     def _losses(self, data: FineTuneData, indices: np.ndarray) -> "torch.Tensor":
