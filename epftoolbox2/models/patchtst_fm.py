@@ -45,15 +45,15 @@ PATCHTST_FM_CARD = ModelCard(
         bytes=1_538_472_531,
     ),
     runtime=("granite-tsfm>=0.3.10,<0.4", "torch", "transformers"),
-    # The model card lists the corpus (no dates): a subset of the GIFT-Eval pretraining split, a TSMixup of public datasets
-    # outside GIFT-Eval's test set, and synthetic KernelSynth and CauKer series; the research judged it clean.
+    # The model card lists the corpus but no dates: a subset of the GIFT-Eval pretraining split (which t0-alpha's card dates to
+    # 2021), a TSMixup of public datasets outside GIFT-Eval's test set, and synthetic KernelSynth and CauKer series. With no end
+    # date the verdict goes by the release (decision 10), as Chronos-2's: a window from 2026-08-08 is clean (released before).
     corpus=(
         "a subset of the GIFT-Eval pretraining split, TSMixup of public datasets outside GIFT-Eval's test set, and synthetic "
         "KernelSynth and CauKer series (documented; no end date given)"
     ),
     corpus_end=None,
     released=date(2026, 8, 7),
-    stated_verdict="clean (documented corpus of public benchmark and synthetic series)",
 )
 
 

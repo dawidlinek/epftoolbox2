@@ -72,7 +72,7 @@ epf weights fetch TimestralModel --size 209m --accept Mistral-Modified-MIT      
 |---|---|---|---|---|---|
 | t0-alpha | `theforecastingcompany/t0-alpha` @ `741927847fe0` | `config.json`, `model.safetensors` (406,601,742 B) | Apache-2.0, commercial use allowed | GIFT-Eval pretraining split (real series, each ending before 2022) and synthetic corpora; 2021-12-31; 2026-06-09 | `clean` for any window from 2022 |
 | Chronos-2 | `amazon/chronos-2` @ `29ec3766d36d` | `config.json`, `model.safetensors` (477,931,539 B) | Apache-2.0, commercial use allowed | real univariate series of the Chronos and GIFT-Eval pretraining corpora (no electricity prices) and synthetic data; no end date given; 2025-10-30 | `possibly contaminated` for a window starting before 2025-10-30, `clean (released before)` after |
-| PatchTST-FM-r2 | `ibm-granite/granite-timeseries-patchtst-fm-r2` @ `b125275f9204` | `config.json`, `model.safetensors` (1,538,472,531 B) | `Apache-2.0 OR OpenMDW-1.0`, commercial use allowed | a subset of the GIFT-Eval pretraining split, TSMixup of public datasets outside GIFT-Eval's test set, synthetic KernelSynth and CauKer series; documented, no end date; 2026-08-07 | stated `clean` (a documented corpus of public benchmark and synthetic series), as the research judged it |
+| PatchTST-FM-r2 | `ibm-granite/granite-timeseries-patchtst-fm-r2` @ `b125275f9204` | `config.json`, `model.safetensors` (1,538,472,531 B) | `Apache-2.0 OR OpenMDW-1.0`, commercial use allowed | a subset of the GIFT-Eval pretraining split, TSMixup of public datasets outside GIFT-Eval's test set, synthetic KernelSynth and CauKer series; documented, no end date; 2026-08-07 | `possibly contaminated` for a window starting on or before 2026-08-07, `clean (released before)` after: the card dates nothing (its GIFT-Eval split is the one t0-alpha's card dates to 2021) |
 | TimesFM-3.0 | `google/timesfm-3.0-pytorch` @ `43046b85ec22` | `config.json`, `model.safetensors` (1,322,900,097 B) | **`TimesFM-Non-Commercial-1.0`**: research, testing and evaluation only, no commercial or production use | GIFT-Eval pretraining (less fev-bench's datasets), Wikipedia pageviews to 2023-11, Google Trends to 2022, synthetic series; 2023-11-30; 2026-08-24 | `clean` for a window from December 2023 |
 | Timestral 209M / 123M / 28M | `mistralai/Timestral-209M` @ `9874d252ab0a` (123M `5a147287addd`, 28M `49b26409ac87`) | `config.json`, `model.safetensors` (837,272,778 / 490,446,978 / 111,297,425 B) | **`Mistral-Modified-MIT`**: MIT with no rights at all above USD 20 M global consolidated monthly revenue of your company or employer; attribution "2026 - Mistral AI" | synthetic pretraining, then real and synthetic post-training, the real datasets undocumented; no end date; 2026-10-15 | `possibly contaminated` for any window starting on or before 2026-10-15 |
 
@@ -247,8 +247,9 @@ Covariates go to each package in the order you list them.
   "Provenance" sheet), and the manifest records the card.
 - **Contamination.** Timestral's post-training corpus is undocumented and it was released on 2026-10-15, after the research's
   test year: every window starting on or before that day is `possibly contaminated`, so don't present it as a clean benchmark
-  result. TimesFM-3's corpus ends in November 2023 (`clean` from December 2023); PatchTST-FM-r2's is documented and stated
-  `clean`.
+  result. TimesFM-3's corpus ends in November 2023 (`clean` from December 2023). PatchTST-FM-r2's card lists its corpus but
+  dates none of it (its GIFT-Eval split is the one t0-alpha's card dates to 2021), so its verdict goes by its release, as
+  Chronos-2's: `possibly contaminated` for a window starting on or before 2026-08-07, both of the research's years included.
 - Neither flagged extra is part of an extra that installs several families.
 
 ### Timestral's runtime

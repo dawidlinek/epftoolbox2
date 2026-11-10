@@ -307,7 +307,11 @@ def test_the_cards_say_what_the_spec_says():
         None,
     )
     assert "granite-tsfm>=0.3.10,<0.4" in patchtst.runtime and patchtst.weights.repo.startswith("ibm-granite/")
-    assert contamination_verdict(patchtst, "2024-10-01").startswith(CLEAN)
+    # No corpus end date (the GIFT-Eval split and TSMixup carry none on its card): the verdict goes by the release, 2026-08-07.
+    assert patchtst.stated_verdict is None and patchtst.corpus_end is None
+    for day in ("2017-01-02", "2021-06-01", "2024-10-01", "2025-10-01", "2026-08-07"):
+        assert contamination_verdict(patchtst, day) == POSSIBLY_CONTAMINATED, day
+    assert contamination_verdict(patchtst, "2026-08-08") == CLEAN_RELEASED_BEFORE
     assert (timesfm.family, timesfm.extra, timesfm.licence, timesfm.commercial_use) == (
         "timesfm-3.0",
         "timesfm",
@@ -336,6 +340,16 @@ def test_the_cards_say_what_the_spec_says():
     assert TIMESTRAL_CARDS["209m"].weights.files["model.safetensors"] == (
         "1456effb9927e3daa8c7234f10497e3424233869245a9c72b8ecebaf7ad2b7fa"
     )
+
+
+def test_patchtst_fm_is_judged_no_cleaner_than_t0_on_the_corpus_they_share():
+    """PatchTST-FM-r2 trains on (a subset of) the GIFT-Eval pretraining split, which t0-alpha's card dates to 2021: a window
+    t0 is possibly contaminated for can't read clean for PatchTST-FM, whose card gives no end date at all."""
+    from epftoolbox2.models import T0Model
+
+    for day in ("2017-01-02", "2021-06-01"):
+        assert contamination_verdict(PatchTSTFMModel._card, day) == contamination_verdict(T0Model._card, day), day
+        assert contamination_verdict(PatchTSTFMModel._card, day) == POSSIBLY_CONTAMINATED
 
 
 @pytest.mark.parametrize(
@@ -570,8 +584,8 @@ def test_clip_nonnegative_clamps_only_where_asked(hourly):
 
 
 def test_the_attribution_and_the_verdicts_show_in_every_report(hourly, tmp_path, capsys, monkeypatch):
-    """Timestral's attribution "2026 - Mistral AI" and its verdict, TimesFM-3's non-commercial licence, PatchTST-FM's stated
-    verdict: in `report.provenance()`, the terminal exporter and the CSV exporter's provenance file."""
+    """Timestral's attribution "2026 - Mistral AI" and its verdict, TimesFM-3's non-commercial licence, PatchTST-FM's verdict by
+    its release: in `report.provenance()`, the terminal exporter and the CSV exporter's provenance file."""
     test = ("2023-06-12", "2023-06-13")
     models = [MAKERS["patchtst"]("P"), MAKERS["timestral"]("T"), MAKERS["timesfm"]("F")]
     monkeypatch.setenv("COLUMNS", "400")  # the terminal exporter's table unwrapped
@@ -584,7 +598,7 @@ def test_the_attribution_and_the_verdicts_show_in_every_report(hourly, tmp_path,
     assert "USD 20 million" in table.loc["T", "revenue_cap"]
     assert table.loc["F", "licence"] == TIMESFM_LICENCE and not table.loc["F", "commercial_use"]
     assert table.loc["F", "test_verdict"] == POSSIBLY_CONTAMINATED  # 2023-06: before its corpus end, 2023-11-30
-    assert table.loc["P", "test_verdict"].startswith(CLEAN)
+    assert table.loc["P", "test_verdict"] == POSSIBLY_CONTAMINATED  # released 2026-08-07, no corpus end
     shown = " ".join(capsys.readouterr().out.split())
     assert "2026 - Mistral AI" in shown and TIMESFM_LICENCE in shown
     written = (tmp_path / "forecasts.provenance.csv").read_text()
