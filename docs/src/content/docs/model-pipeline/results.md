@@ -266,8 +266,8 @@ print(report.error_split())  # two models of the resolution study, DE_LU, April 
   hour's mean error minus the day's; `quarter`, each quarter-hour's error minus its hour's. `days` and `forecasts` say what each row
   is on; models with different numbers of whole days warn (`df.attrs["unequal_days"]`).
 
-These are the resolution study's MAEh, shape MAE and squared-error split; `tests/reproductions/test_resolution_scoring.py` recomputes
-its R1 table with them.
+These are the resolution study's MAEh, shape MAE and squared-error split; its R1 table is recomputed with them from the stored
+forecasts on the [Resolution Study](/epftoolbox2/reproductions/resolution/#tier-s-the-published-tables-from-the-stored-forecasts) page.
 
 ## Joining reports
 

@@ -1,0 +1,770 @@
+---
+title: Resolution Study
+description: The 15-minute, hourly and daily price and load study (DE-LU, AT) and quality Q2's daily aggregates reproduced — every published cell scored exactly from the stored forecasts, and the study rebuilt from library models, cell by cell and verdict by verdict on identical keys
+---
+
+The research behind the library's 15-minute support asked how to forecast day-ahead prices once the auction moved to 15-minute
+products (delivery day 1 October 2025 in DE-LU and AT):
+
+- **R1**: are 96 models, one per quarter-hour, needed, or do 24 hourly models plus a within-hour shape do as well?
+- **R2**: how much history from before the switch, when prices were hourly, should a model train on?
+- **R3**: are a day's base, peak, minimum and maximum better forecast directly or derived from the intraday forecasts?
+- **R4**: the same structures for the day-ahead load, against the TSO's own forecast.
+
+Quality Q2 asked R3's question on the five markets of Lago et al. (2021). The studies ran their own code. This page reproduces
+their tables in two tiers.
+
+- **Tier S, scoring.** The studies' stored forecasts, turned into library records and scored by `EvaluationReport`. Every published
+  cell equals the study's own formula, run on the same arrays, within 1e-12, and its CSV to the four decimals the CSV stores; every
+  DM verdict is the study's.
+- **Tier R, re-estimation.** The studies rebuilt from library components (per-quarter-hour `LEARModel`, `RidgeModel`, `ShapeModel`
+  on a chained hourly forecast, `NaiveModel`, `freq="1D"` models, `AverageEnsemble`) and run again. The estimators differ from the
+  studies' (see [What differs](#what-differs-from-the-study)), so tier R can't be exact. It passes where each MAE cell is within 5 %
+  of the study's and each DM verdict (A better, B better, no significant difference at 5 %) is the same, on identical forecast keys
+  with the counts in every table. A cell outside the band or a verdict that flips is reported and explained here, never tuned away.
+
+## Setup
+
+- **Data.** The study's ENTSO-E files for DE-LU and AT up to delivery day 11 October 2026: day-ahead prices (A44; hourly to
+  30 September 2025, 15-minute from 1 October 2025), actual load and the TSO's day-ahead load forecast (A65, 15-minute), and the
+  TSO's day-ahead wind and solar forecasts (A69, 15-minute). An hourly price fills its four quarter-hours; gaps of up to three
+  hours in the load and A69 inputs are filled linearly, as the study did; the price and every target are never filled.
+- **Forecasts.** For target day T, issued at 11:45 local time on D = T − 1, one day ahead (`horizon=1`), refitted every day.
+- **Information set.** The price of D published at 13:00 on D − 1, the TSO's load forecast of D at 10:00 on D − 1, realised load
+  an hour after real time, the calendar static: honest runs pass at `availability="raise"`. The A69 forecast of T is due only at
+  18:00 on D, after the issue. The study's **REN+** runs use it anyway, so they are post-gate: their library runs use
+  `availability="warn"`, which lists every such input (and a chained forecast that read one as a late upstream), and their tables
+  stand apart from the honest ones below.
+- **Training.** The newest training target is D − 1 (`newest_target="d-1"`), the window W target days: R1 182 days of the
+  15-minute era, R2 91, 182, 364 and 728, R4 364; the shape models 91.
+- **Binary columns.** Every fitted model has `binary_mask="fit"`: the columns left unscaled as 0/1 are read from each fit's own
+  rows, as the study scaled each fit. With the default (`None`) they are read once, from the first test day's window, and kept
+  through the test period, so the A69 solar forecast of the early and late hours, all 0 in a winter window, stays unscaled when spring
+  makes it positive: the post-gate runs then lose up to 16 % MAE15 against the study (AT A96_FULL; AT A96_QLOC +7.6 %), the
+  honest ones nothing (see [What differs](#what-differs-from-the-study)).
+- **Keys.** Every table is on identical keys: the target days whose every quarter-hour is natively 15-minute and on which every
+  model of the table has every forecast. Each table gives its days, and the study's.
+- **DM tests.** On the daily mean absolute errors, Newey–West lag 6, two-sided, the study's sign (negative: A better),
+  significant at p < 0.05 (`report.tests(lag=6)`). The study's variance divides each autocovariance by its n − k products, the
+  library's by n; tier S checks the library against the usual estimator (within 1e-10) and its verdicts against the study's.
+  Q2's tests are quality's: one-sided, no lag.
+- **Machines.** Tier S on a workstation. Tier R on WCSS Bem2 (R1, R2 and R4 with 24 worker processes per run, 3 to 10 minutes
+  each; R3 with 8) and S02 (Q2), the numba kernels.
+
+## The Variants as Library Components
+
+| Study | Library |
+|---|---|
+| A96_QLOC | `LEARModel(qloc, training_window=W, criterion="bic")` per quarter-hour (`freq="15min"`), `qloc` a `(horizon, period)` function: the 24 hourly means of the price on T−1, T−2, T−3, T−7 and of the TSO forecast on T, T−1, T−7, the 4 quarter-hours of the target's hour on T−1, T−2, T−7 and of the TSO forecast on T, the weekday of T (191 inputs) |
+| A96_FULL | the same with all 96 quarter-hours of the price on T−1, T−2, T−3, T−7 and of the TSO forecast on T, its hourly means on T−1 and T−7 (535 inputs) |
+| C96_HAGG | the hourly means and the weekday only, one list for every quarter-hour |
+| A96_QLOC_ridge | `RidgeModel(qloc, W, alphas=..., scaler="asinh")` on the study's 25 penalties (10⁻³ to 10³ times the window) |
+| B24_flat | `NaiveModel` of a chained hourly forecast: 24 hourly `LEARModel`s on the hourly means (`LEAR_1h`), stored, read back by `ForecastSource` and stepped over the quarter-hours by `ResampleTransformer` |
+| B24_static | `ShapeModel(base, LEARModel([], 91, scaler="standard"))`: each quarter-hour's mean deviation from its hour over 91 days |
+| B24_dyn | `ShapeModel(base, OLSModel([ramp, TSO within-hour deviation], 91, fit_intercept=True))`; REN+ adds the A69 forecasts' within-hour deviations |
+| D24x4 | a multi-task lasso: no library equivalent, tier S only |
+| naive | `NaiveModel(naive)`, `naive` a function of `ctx`: T−7 on Mondays, Saturdays and Sundays, T−1 otherwise |
+| R2 history q / all / era | q: the target NaN on every date that isn't a 15-minute day, after the features are built; all: the whole window, hourly days stepped over their quarter-hours; era: QLOC plus `era_d+1`, a static 0/1 column for T in the 15-minute era |
+| R3 direct | `LEARModel` (direct LASSO) and `RidgeModel` with `freq="1D"` on the `_day_mean`, `_day_peak`, `_day_min`, `_day_max` targets of `DailyStatsTransformer(freq="15min")`, one row per date stamped at 11:45, the study's daily inputs |
+| R3 derived | `report.aggregate("1D", agg=...)` of the intraday run; the same values through `ForecastSource(agg=...)` and `NaiveModel`, within 1e-12 |
+| avg | `AverageEnsemble` of a derived and a direct model |
+| R4 TSO | `NaiveModel` of the TSO's forecast of T |
+| Q2 direct | `LEARModel.lago()`'s settings with `newest_target="d-1"`, `freq="1D"`, on the daily targets, the 247 LEAR inputs or 42 daily statistics of the same information |
+
+The B24 variants and the naive, as the runs build them. The ramp is the hourly forecast of hour h + 1 of T less that of h − 1,
+over their distance, built in the frame from the chained column and given its rule
+(`information_set.rules["price_1h_fc_ramp"] = information_set.resolve("price_1h_fc").rule`):
+
+```python
+from epftoolbox2.data.sources import ForecastSource
+from epftoolbox2.models import LEARModel, NaiveModel, OLSModel, ShapeModel
+
+source = ForecastSource("runs/de_lu_1h", model="LEAR_1h", column="price_1h_fc")  # the hourly upstream, stored
+base = "price_1h_fc_d+{horizon}"
+b24_flat = NaiveModel([base], name="B24_flat")
+b24_static = ShapeModel(base, LEARModel([], 91, scaler="standard", binary_mask="fit"), name="B24_static")
+shape_x = ["price_1h_fc_ramp_d+{horizon}", "load_forecast_hour_dev_d+{horizon}"]
+b24_dyn = ShapeModel(base, OLSModel(shape_x, 91, fit_intercept=True, binary_mask="fit"), name="B24_dyn")
+
+
+def naive(ctx):
+    """The same quarter-hour on T-7 for a Monday, Saturday or Sunday, on T-1 otherwise."""
+    lag = "_d-6" if ctx.target_weekday in (0, 5, 6) else ""
+    return [f"price_s{ctx.period:02d}{lag}"]
+
+
+naive_model = NaiveModel(naive, name="naive")
+```
+
+
+## Tier S: The Published Tables From the Stored Forecasts
+
+The study's stored forecast arrays (R1 in four settings and nine variants, the 16 R2 runs, R4, the R3 rows derived from them) and
+step 4's stored `"d-1"` LEAR path (quality Q2's derived rows) become library records on the study's own scored days: a slot the
+clock skips is left out, the repeated autumn hour has no actual. The library's report scores them: `summary()` for MAE15,
+`aggregate("1h", agg="mean")` for MAEh, `ShapeMAEEvaluator` for the shape MAE (each quarter-hour's deviation from its hour's
+mean, forecast against actual), `error_split()` for the shares of the squared error in the day's level, the hour profile and the
+quarter-hours, `tests(lag=6)`, and `aggregate("1D", agg=...)` for R3 and Q2.
+
+- **R1, R2, R4.** Every cell (R1: 4 settings × 9 variants × 8 cells; R2: 288 rows of MAE15, RMSE15, MAEh, shape MAE; R4: 36 rows
+  × 8) is within 1e-12 of the study's formula and within 5e-5 of its CSVs, which round to four decimals.
+- **DM.** All 50 published tests (R1 28, R2 14, R4 8) give the study's verdict; the library's statistic is the usual Newey–West
+  estimator's within 1e-10.
+- **R3 derived.** Every day's error is within 6e-14 of `run_daily.py`'s (2e-12 MW for load), and the CSVs' MAE, bias, median
+  error and RMSE equal the library's (relative 1.4e-14) on R1's days. A daily aggregate counts whole days only, so the library
+  leaves out the autumn switch day (its repeated hour has no actual) and the day after the spring switch (no forecast was issued
+  from 02:00 on the switch day): the load and R2-period rows are on 1 to 4 fewer days than the study's CSVs.
+- **Q2 derived.** All 20 MAE cells and the 9 biases the report prints, to their rounding.
+
+### R1: MAE15 / MAEh / shape MAE (EUR/MWh)
+
+| Variant | DE-LU honest (191 d) | DE-LU REN+ (191 d) | AT honest (192 d) | AT REN+ (192 d) |
+|---|---|---|---|---|
+| A96_QLOC | 27.43 / 26.71 / 6.43 | 21.58 / 20.67 / 6.25 | 24.11 / 22.86 / 7.49 | 23.25 / 21.79 / 7.70 |
+| A96_QLOC_ridge | 26.81 / 26.08 / 6.25 | 22.16 / 21.16 / 6.54 | 23.74 / 22.30 / 7.79 | 23.51 / 21.85 / 8.16 |
+| A96_FULL | 27.33 / 26.60 / 6.47 | 21.67 / 20.76 / 6.31 | 23.97 / 22.68 / 7.58 | 23.48 / 22.03 / 7.90 |
+| C96_HAGG | 27.45 / 26.72 / 6.47 | 21.60 / 20.68 / 6.23 | 24.16 / 22.91 / 7.54 | 23.30 / 21.83 / 7.79 |
+| B24_dyn | 27.41 / 26.80 / 5.93 | 21.55 / 20.75 / 5.68 | 24.02 / 22.79 / 7.06 | 23.14 / 21.76 / 7.16 |
+| B24_static | 27.61 / 26.79 / 6.35 | 21.78 / 20.74 / 6.35 | 24.25 / 22.79 / 7.45 | 23.34 / 21.75 / 7.45 |
+| B24_flat | 28.65 / 26.79 / 9.06 | 23.10 / 20.74 / 9.06 | 26.00 / 22.79 / 10.60 | 25.16 / 21.75 / 10.60 |
+| D24x4 | 28.02 / 27.40 / 6.04 | 22.28 / 21.58 / 5.63 | 24.71 / 23.51 / 7.21 | 23.86 / 22.64 / 7.15 |
+| naive | 36.28 / 35.90 / 7.02 | 36.28 / 35.90 / 7.02 | 28.98 / 27.62 / 8.78 | 28.98 / 27.62 / 8.78 |
+
+Largest |library − `table_r1.csv`| over the 8 cells of a row:
+DE-LU honest 5.0e-05, DE-LU REN+ 5.0e-05, AT honest 4.9e-05, AT REN+ 4.8e-05.
+
+The published DM list (the daily mean |e| of A less B, negative when A is better; p in brackets):
+
+| A vs B | DE-LU honest | DE-LU REN+ | AT honest | AT REN+ |
+|---|---|---|---|---|
+| A96_QLOC vs C96_HAGG | -0.69 (0.493) | -0.72 (0.469) | -1.76 (0.078) | -1.13 (0.257) |
+| A96_QLOC vs B24_dyn | +0.32 (0.748) | +0.36 (0.718) | +1.08 (0.282) | +1.40 (0.163) |
+| B24_dyn vs B24_flat | -12.05 (0.000) | -12.72 (0.000) | -16.41 (0.000) | -16.19 (0.000) |
+| B24_dyn vs B24_static | -7.34 (0.000) | -5.60 (0.000) | -7.36 (0.000) | -4.89 (0.000) |
+| A96_QLOC_ridge vs A96_QLOC | -1.54 (0.123) | +1.11 (0.265) | -0.85 (0.393) | +0.58 (0.563) |
+| A96_FULL vs A96_QLOC | -0.82 (0.412) | +1.02 (0.309) | -0.96 (0.338) | +1.05 (0.294) |
+| D24x4 vs A96_QLOC | +5.12 (0.000) | +5.10 (0.000) | +6.44 (0.000) | +4.56 (0.000) |
+
+### R2: MAE15 by Training Window (91 / 182 / 364 / 728 days)
+
+History: **q**, 15-minute days only; **all**, the whole window with hourly days stepped over their quarter-hours; **era**, all
+plus a 15-minute-era dummy (A96_QLOC only).
+
+**DE-LU** (281 days)
+
+| Variant | history | 91 | 182 | 364 | 728 |
+|---|---|---|---|---|---|
+| A96_QLOC | q | 24.99 | 24.77 | 24.91 | 24.91 |
+| A96_QLOC | all | 24.92 | 24.63 | 23.91 | 23.72 |
+| A96_QLOC | era | 24.92 | 24.62 | 23.95 | 23.70 |
+| C96_HAGG | q | 25.02 | 24.77 | 24.88 | 24.89 |
+| C96_HAGG | all | 24.98 | 24.68 | 24.09 | 24.02 |
+| B24_dyn | q | 24.99 | 24.77 | 24.95 | 24.97 |
+| B24_dyn | all | 24.94 | 24.62 | 23.83 | 23.56 |
+| B24_static | all | 25.11 | 24.83 | 24.09 | 23.82 |
+| B24_flat | all | 25.97 | 25.70 | 24.99 | 24.77 |
+
+**AT** (282 days)
+
+| Variant | history | 91 | 182 | 364 | 728 |
+|---|---|---|---|---|---|
+| A96_QLOC | q | 22.74 | 22.64 | 22.76 | 22.76 |
+| A96_QLOC | all | 22.77 | 22.43 | 22.27 | 22.02 |
+| A96_QLOC | era | 22.77 | 22.44 | 22.24 | 21.88 |
+| C96_HAGG | q | 22.76 | 22.68 | 22.79 | 22.79 |
+| C96_HAGG | all | 22.78 | 22.51 | 22.52 | 22.59 |
+| B24_dyn | q | 22.70 | 22.50 | 22.68 | 22.68 |
+| B24_dyn | all | 22.73 | 22.35 | 22.17 | 21.98 |
+| B24_static | all | 23.00 | 22.62 | 22.51 | 22.31 |
+| B24_flat | all | 24.48 | 24.14 | 23.97 | 23.80 |
+
+| A vs B | DE-LU | AT |
+|---|---|---|
+| B24_dyn all 728 vs B24_dyn q 182 | -3.21 (0.001) | -1.76 (0.078) |
+| A96_QLOC all 728 vs A96_QLOC q 182 | -3.05 (0.002) | -2.19 (0.028) |
+| A96_QLOC era 728 vs A96_QLOC all 728 | -0.47 (0.639) | -3.48 (0.001) |
+| B24_dyn all 728 vs A96_QLOC era 728 | -1.98 (0.047) | +1.65 (0.099) |
+| C96_HAGG all 728 vs C96_HAGG all 182 | -2.21 (0.027) | +0.29 (0.770) |
+| A96_QLOC q 728 vs A96_QLOC q 182 | +1.13 (0.259) | +1.01 (0.314) |
+| B24_dyn all 728 vs B24_flat all 728 | -10.77 (0.000) | -15.54 (0.000) |
+
+### R4: Load (MW), MAE15 / MAEh / Shape MAE
+
+| Model | DE-LU (334 d) | AT (279 d) |
+|---|---|---|
+| B24_dyn | 1765.3 / 1752.4 / 199.9 | 304.0 / 302.4 / 26.7 |
+| C96_HAGG | 1765.8 / 1749.4 / 225.8 | 303.4 / 301.1 / 31.6 |
+| A96_QLOC | 1766.1 / 1750.3 / 225.1 | 303.6 / 301.3 / 31.7 |
+| D24x4 | 1781.9 / 1768.3 / 207.4 | 306.6 / 304.9 / 27.5 |
+| B24_static | 1775.7 / 1752.5 / 253.8 | 306.1 / 302.4 / 35.4 |
+| B24_flat | 1833.0 / 1752.5 / 466.4 | 319.1 / 302.4 / 72.5 |
+| A96_noLF | 2239.1 / 2224.6 / 234.6 | 335.7 / 333.5 / 31.8 |
+| TSO | 2130.1 / 2113.2 / 244.0 | 363.3 / 361.6 / 29.8 |
+| naive | 3046.7 / 3032.9 / 258.7 | 430.2 / 428.5 / 32.7 |
+
+| A vs B | DE-LU | AT |
+|---|---|---|
+| A96_QLOC vs TSO | -5.17 (0.000) | -5.10 (0.000) |
+| A96_QLOC vs B24_dyn | +0.39 (0.697) | -0.76 (0.447) |
+| B24_dyn vs B24_flat | -17.94 (0.000) | -15.94 (0.000) |
+| A96_QLOC vs C96_HAGG | +0.15 (0.878) | +0.58 (0.559) |
+
+### R3: Daily Statistics Derived From the Intraday Forecasts, MAE (Bias), Honest Price
+
+**DE-LU** (191 days)
+
+| Derived from | base | peak | min | max |
+|---|---|---|---|---|
+| A96_QLOC | 21.0 (-3.7) | 29.9 (-0.8) | 37.1 (+0.2) | 56.1 (-40.4) |
+| A96_QLOC_ridge | 19.7 (-1.5) | 28.4 (+0.9) | 37.8 (+3.4) | 53.3 (-32.8) |
+| B24_dyn | 21.0 (-3.8) | 29.9 (-0.9) | 36.8 (+1.0) | 56.6 (-42.9) |
+| B24_static | 20.9 (-3.8) | 29.9 (-0.9) | 36.2 (+0.4) | 55.5 (-37.8) |
+| B24_flat | 20.9 (-3.8) | 29.9 (-0.9) | 36.3 (+6.0) | 61.0 (-53.3) |
+| naive | 31.8 (+0.8) | 38.4 (+1.5) | 46.1 (+3.2) | 76.5 (+3.9) |
+
+**AT** (192 days)
+
+| Derived from | base | peak | min | max |
+|---|---|---|---|---|
+| A96_QLOC | 17.2 (-4.4) | 25.6 (-1.8) | 37.6 (+3.9) | 41.1 (-31.7) |
+| A96_QLOC_ridge | 15.5 (-1.2) | 24.0 (+0.8) | 39.9 (+5.9) | 40.5 (-22.9) |
+| B24_dyn | 16.8 (-4.1) | 25.0 (-1.5) | 37.7 (+5.4) | 42.0 (-31.2) |
+| B24_static | 16.8 (-4.1) | 25.0 (-1.5) | 37.4 (+4.7) | 39.9 (-28.0) |
+| B24_flat | 16.8 (-4.1) | 25.0 (-1.5) | 37.9 (+11.1) | 48.4 (-45.6) |
+| naive | 21.2 (-0.7) | 29.0 (+0.2) | 42.6 (+1.8) | 55.6 (+2.3) |
+
+### Quality Q2: Derived Daily Statistics on the Lago Benchmark, MAE (Bias)
+
+The five markets of Lago et al. (2021) over their 728 test days, from the hourly LEAR path averaged over four windows, issued
+with `newest_target="d-1"` (see [Benchmark Reproduction](/epftoolbox2/models/lear-benchmark/)).
+
+| Target | NP | PJM | FR | BE | DE |
+|---|---|---|---|---|---|
+| mean | 1.392 (-0.31) | 2.420 (-0.24) | 3.008 (-0.31) | 4.663 (-0.77) | 2.629 (-0.11) |
+| peak | 1.854 (-0.51) | 3.065 (-0.50) | 4.043 (-0.54) | 6.421 (-1.23) | 3.471 (-0.36) |
+| min | 1.719 (+0.21) | 2.827 (+0.29) | 3.186 (+0.02) | 3.747 (+0.21) | 4.148 (+1.29) |
+| max | 2.946 (-1.15) | 5.173 (-1.91) | 9.213 (-4.46) | 13.173 (-6.50) | 4.417 (-1.37) |
+
+## Tier R: Honest Runs
+
+The library's models on the study's data, scored as above, next to the study's published cell; deviation in brackets.
+
+### R1: Structures for 15-Minute Prices
+
+The study's test, 2 April to 11 October 2026, a 182-day window of 15-minute days, refitted daily.
+
+**DE-LU**
+
+191 identical days, the study's 191; library / study (deviation).
+
+| Variant | MAE15 library / study | MAEh | shape MAE |
+|---|---|---|---|
+| A96_QLOC_ridge | 26.97 / 26.81 (+0.6 %) | 26.25 / 26.08 (+0.7 %) | 6.27 / 6.25 (+0.3 %) |
+| A96_FULL | 27.01 / 27.33 (-1.2 %) | 26.18 / 26.60 (-1.6 %) | 6.93 / 6.47 (+7.1 %) |
+| B24_dyn | 26.71 / 27.41 (-2.6 %) | 25.94 / 26.80 (-3.2 %) | 6.10 / 5.93 (+2.9 %) |
+| A96_QLOC | 26.64 / 27.43 (-2.9 %) | 25.84 / 26.71 (-3.2 %) | 6.57 / 6.43 (+2.3 %) |
+| C96_HAGG | 26.65 / 27.45 (-2.9 %) | 25.83 / 26.72 (-3.3 %) | 6.57 / 6.47 (+1.5 %) |
+| B24_static | 26.75 / 27.61 (-3.1 %) | 25.93 / 26.79 (-3.2 %) | 6.35 / 6.35 (+0.0 %) |
+| B24_flat | 27.91 / 28.65 (-2.6 %) | 25.93 / 26.79 (-3.2 %) | 9.06 / 9.06 (+0.0 %) |
+| naive | 36.28 / 36.28 (-0.0 %) | 35.90 / 35.90 (-0.0 %) | 7.02 / 7.02 (-0.0 %) |
+
+| A vs B | library | study | verdict |
+|---|---|---|---|
+| A96_QLOC vs C96_HAGG | -0.45 (0.654) | -0.69 (0.493) | agree |
+| A96_QLOC vs B24_dyn | -0.97 (0.332) | +0.32 (0.748) | agree |
+| B24_dyn vs B24_flat | -10.61 (0.000) | -12.02 (0.000) | agree |
+| B24_dyn vs B24_static | -1.03 (0.302) | -7.34 (0.000) | **flip** |
+| A96_QLOC_ridge vs A96_QLOC | +1.39 (0.164) | -1.54 (0.123) | agree |
+| A96_FULL vs A96_QLOC | +1.77 (0.077) | -0.82 (0.413) | agree |
+
+**AT**
+
+192 identical days, the study's 192; library / study (deviation).
+
+| Variant | MAE15 library / study | MAEh | shape MAE |
+|---|---|---|---|
+| A96_QLOC_ridge | 23.52 / 23.74 (-1.0 %) | 22.12 / 22.30 (-0.8 %) | 7.51 / 7.79 (-3.6 %) |
+| A96_FULL | 23.76 / 23.97 (-0.9 %) | 22.07 / 22.68 (-2.7 %) | 8.49 / 7.58 (+12.0 %) |
+| B24_dyn | 23.19 / 24.02 (-3.4 %) | 21.74 / 22.79 (-4.6 %) | 7.27 / 7.06 (+3.0 %) |
+| A96_QLOC | 23.16 / 24.11 (-3.9 %) | 21.58 / 22.86 (-5.6 %) | 7.92 / 7.49 (+5.7 %) |
+| C96_HAGG | 23.22 / 24.16 (-3.9 %) | 21.65 / 22.91 (-5.5 %) | 7.96 / 7.54 (+5.7 %) |
+| B24_static | 23.33 / 24.25 (-3.8 %) | 21.74 / 22.79 (-4.6 %) | 7.45 / 7.45 (-0.0 %) |
+| B24_flat | 25.17 / 26.00 (-3.2 %) | 21.74 / 22.79 (-4.6 %) | 10.60 / 10.60 (-0.0 %) |
+| naive | 28.98 / 28.98 (-0.0 %) | 27.62 / 27.62 (-0.0 %) | 8.78 / 8.78 (-0.0 %) |
+
+| A vs B | library | study | verdict |
+|---|---|---|---|
+| A96_QLOC vs C96_HAGG | -1.62 (0.105) | -1.76 (0.078) | agree |
+| A96_QLOC vs B24_dyn | -0.58 (0.560) | +1.07 (0.282) | agree |
+| B24_dyn vs B24_flat | -15.34 (0.000) | -16.37 (0.000) | agree |
+| B24_dyn vs B24_static | -2.70 (0.007) | -7.35 (0.000) | agree |
+| A96_QLOC_ridge vs A96_QLOC | +1.51 (0.132) | -0.85 (0.394) | agree |
+| A96_FULL vs A96_QLOC | +2.76 (0.006) | -0.96 (0.339) | **flip** |
+
+### R2: History Across the Switch
+
+The study's test, 2 January to 11 October 2026; every run of a zone on the same keys.
+
+**DE-LU** (281 days)
+
+| Variant | history | 91 | 182 | 364 | 728 |
+|---|---|---|---|---|---|
+| A96_QLOC | q | 24.89 (24.99) | 24.39 (24.77) | 24.45 (24.91) | 24.46 (24.91) |
+| A96_QLOC | all | 24.92 (24.92) | 24.23 (24.63) | 22.96 (23.91) | 22.96 (23.72) |
+| A96_QLOC | era | 24.92 (24.92) | 24.22 (24.62) | 22.97 (23.95) | 22.99 (23.70) |
+| C96_HAGG | q | 24.92 (25.02) | 24.43 (24.77) | 24.53 (24.88) | 24.54 (24.89) |
+| C96_HAGG | all | 24.98 (24.98) | 24.25 (24.68) | 23.14 (24.09) | 23.21 (24.02) |
+| B24_dyn | q | 24.96 (24.99) | 24.54 (24.77) | 24.67 (24.95) | 24.67 (24.97) |
+| B24_dyn | all | 24.99 (24.94) | 24.31 (24.62) | 23.00 (23.83) | 22.88 (23.56) |
+| B24_static | all | 25.09 (25.11) | 24.41 (24.83) | 23.18 (24.09) | 23.08 (23.82) |
+| B24_flat | all | 25.98 (25.97) | 25.39 (25.70) | 24.15 (24.99) | 24.07 (24.77) |
+
+**AT** (282 days)
+
+| Variant | history | 91 | 182 | 364 | 728 |
+|---|---|---|---|---|---|
+| A96_QLOC | q | 22.06 (22.74) | 21.65 (22.64) | 22.07 (22.76) | 22.07 (22.76) |
+| A96_QLOC | all | 22.10 (22.77) | 21.52 (22.43) | 21.42 (22.27) | 21.03 (22.02) |
+| A96_QLOC | era | 22.10 (22.77) | 21.51 (22.44) | 21.38 (22.24) | 20.97 (21.88) |
+| C96_HAGG | q | 22.10 (22.76) | 21.70 (22.68) | 22.14 (22.79) | 22.14 (22.79) |
+| C96_HAGG | all | 22.14 (22.78) | 21.55 (22.51) | 21.68 (22.52) | 21.49 (22.59) |
+| B24_dyn | q | 22.05 (22.70) | 21.62 (22.50) | 22.10 (22.68) | 22.09 (22.68) |
+| B24_dyn | all | 22.08 (22.73) | 21.54 (22.35) | 21.41 (22.17) | 21.05 (21.98) |
+| B24_static | all | 22.29 (23.00) | 21.74 (22.62) | 21.71 (22.51) | 21.34 (22.31) |
+| B24_flat | all | 23.85 (24.48) | 23.32 (24.14) | 23.28 (23.97) | 22.91 (23.80) |
+
+| A vs B | DE-LU library / study | AT library / study |
+|---|---|---|
+| B24_dyn all 728 vs B24_dyn q 182 | -3.25 (0.001) / -3.20 (0.001) | -1.51 (0.132) / -1.76 (0.079) |
+| A96_QLOC all 728 vs A96_QLOC q 182 | -2.88 (0.004) / -3.05 (0.002) | -1.65 (0.100) / -2.19 (0.029) **flip** |
+| A96_QLOC era 728 vs A96_QLOC all 728 | +0.66 (0.510) / -0.47 (0.640) | -1.97 (0.049) / -3.47 (0.001) |
+| B24_dyn all 728 vs A96_QLOC era 728 | -1.31 (0.189) / -1.98 (0.048) **flip** | +1.46 (0.144) / +1.65 (0.099) |
+| C96_HAGG all 728 vs C96_HAGG all 182 | -2.24 (0.025) / -2.20 (0.028) | -0.18 (0.858) / +0.29 (0.771) |
+| A96_QLOC q 728 vs A96_QLOC q 182 | +0.31 (0.759) / +1.13 (0.259) | +2.54 (0.011) / +1.01 (0.314) **flip** |
+| B24_dyn all 728 vs B24_flat all 728 | -10.21 (0.000) / -10.74 (0.000) | -14.91 (0.000) / -15.50 (0.000) |
+
+The sub-periods and the shape dilution the study reports (MAE15, EUR/MWh; "best q" the window with the lowest MAE15 among the four
+15-minute-only runs):
+
+| Cell | DE-LU library (study) | AT library (study) |
+|---|---|---|
+| Jan–Mar, A96_QLOC all 728 | 17.33 (17.79) | 17.11 (17.77) |
+| Jan–Mar, A96_QLOC best q | 19.59 (19.05) | 18.33 (19.25) |
+| Apr–Oct, B24_dyn all 728 | 25.52 (26.29) | 22.86 (23.95) |
+| Apr–Oct, B24_dyn best q | 26.67 (27.41) | 23.20 (24.03) |
+| shape MAE, C96_HAGG all 182 | 6.07 (5.99) | 7.44 (7.13) |
+| shape MAE, C96_HAGG all 728 | 6.24 (6.39) | 7.60 (7.59) |
+| shape MAE, A96_QLOC era 728 | 5.46 (5.62) | 6.78 (6.66) |
+| shape MAE, B24_dyn all 728 | 5.46 (5.27) | 6.72 (6.56) |
+
+### R3: Daily Statistics, Honest Price
+
+`direct_lasso` and `direct_ridge` are the `freq="1D"` models; `derived_*` the intraday forecasts' day statistics
+(`aggregate("1D")`); `avg_A96_QLOC_lasso` the `AverageEnsemble` of derived A96_QLOC and direct_lasso, a row the study doesn't
+have.
+
+**DE-LU**
+
+MAE, library (study); the study's days: 191.
+
+| Method | days | base | peak | min | max |
+|---|---|---|---|---|---|
+| direct_lasso | 191 | 22.8 (23.9) | 30.0 (31.7) | 38.0 (38.6) | 54.6 (53.8) |
+| direct_ridge | 191 | 23.5 (23.3) | 30.9 (30.9) | 38.0 (37.7) | 54.2 (54.0) |
+| avg_A96_QLOC_lasso | 191 | 20.1 | 28.4 | 36.7 | 54.2 |
+| derived_A96_QLOC | 191 | 19.5 (21.0) | 28.4 (29.9) | 39.5 (37.1) | 56.3 (56.1) |
+| derived_A96_QLOC_ridge | 191 | 20.0 (19.7) | 28.8 (28.4) | 37.3 (37.8) | 53.2 (53.3) |
+| derived_A96_FULL | 191 | 19.6 (21.0) | 29.0 (30.5) | 40.2 (36.7) | 57.2 (55.5) |
+| derived_C96_HAGG | 191 | 19.5 (21.0) | 28.5 (30.0) | 39.0 (36.3) | 55.5 (55.6) |
+| derived_B24_dyn | 191 | 19.5 (21.0) | 28.5 (29.9) | 37.9 (36.8) | 55.7 (56.6) |
+| derived_B24_static | 191 | 19.5 (20.9) | 28.5 (29.9) | 37.5 (36.2) | 55.4 (55.5) |
+| derived_B24_flat | 191 | 19.5 (20.9) | 28.5 (29.9) | 37.5 (36.3) | 57.8 (61.0) |
+| derived_naive | 191 | 31.8 (31.8) | 38.4 (38.4) | 46.1 (46.1) | 76.5 (76.5) |
+
+**AT**
+
+MAE, library (study); the study's days: 192.
+
+| Method | days | base | peak | min | max |
+|---|---|---|---|---|---|
+| direct_lasso | 192 | 16.9 (18.0) | 24.2 (26.3) | 39.3 (38.3) | 41.4 (41.7) |
+| direct_ridge | 192 | 16.7 (16.6) | 24.6 (24.9) | 38.8 (39.6) | 40.8 (40.7) |
+| avg_A96_QLOC_lasso | 192 | 15.5 | 23.3 | 38.4 | 39.7 |
+| derived_A96_QLOC | 192 | 15.1 (17.2) | 23.3 (25.6) | 39.4 (37.6) | 39.7 (41.1) |
+| derived_A96_QLOC_ridge | 192 | 15.7 (15.5) | 24.1 (24.0) | 38.0 (39.9) | 41.0 (40.5) |
+| derived_A96_FULL | 192 | 15.5 (17.1) | 23.8 (25.5) | 40.6 (38.1) | 40.0 (41.3) |
+| derived_C96_HAGG | 192 | 15.1 (17.1) | 23.4 (25.6) | 38.8 (37.3) | 39.9 (41.9) |
+| derived_B24_dyn | 192 | 15.0 (16.8) | 23.1 (25.0) | 38.4 (37.7) | 38.7 (42.0) |
+| derived_B24_static | 192 | 15.0 (16.8) | 23.1 (25.0) | 38.0 (37.4) | 38.5 (39.9) |
+| derived_B24_flat | 192 | 15.0 (16.8) | 23.1 (25.0) | 39.9 (37.9) | 43.9 (48.4) |
+| derived_naive | 192 | 21.2 (21.2) | 29.0 (29.0) | 42.6 (42.6) | 55.6 (55.6) |
+
+Direct models on R2's test period (the study's indicative comparison of a 15-minute-only 182-day window with a 728-day one whose
+older daily extremes are hourly):
+
+**DE-LU, 182 days, q**
+
+MAE, library (study); the study's days: 281.
+
+| Method | days | base | peak | min | max |
+|---|---|---|---|---|---|
+| direct_lasso | 281 | 21.6 (22.2) | 27.8 (28.9) | 32.7 (34.2) | 48.9 (49.1) |
+| direct_ridge | 281 | 22.0 (21.9) | 28.4 (28.2) | 33.2 (33.0) | 48.7 (48.6) |
+
+**DE-LU, 728 days, all**
+
+MAE, library (study); the study's days: 281.
+
+| Method | days | base | peak | min | max |
+|---|---|---|---|---|---|
+| direct_lasso | 281 | 21.8 (23.3) | 26.9 (27.2) | 31.5 (31.5) | 47.1 (49.9) |
+| direct_ridge | 281 | 22.0 (21.8) | 27.0 (26.9) | 31.2 (31.4) | 47.4 (47.2) |
+
+**AT, 182 days, q**
+
+MAE, library (study); the study's days: 282.
+
+| Method | days | base | peak | min | max |
+|---|---|---|---|---|---|
+| direct_lasso | 282 | 15.8 (16.8) | 22.6 (24.2) | 32.9 (33.0) | 39.3 (39.9) |
+| direct_ridge | 282 | 15.8 (15.7) | 23.1 (23.4) | 32.9 (33.6) | 38.7 (38.6) |
+
+**AT, 728 days, all**
+
+MAE, library (study); the study's days: 282.
+
+| Method | days | base | peak | min | max |
+|---|---|---|---|---|---|
+| direct_lasso | 282 | 15.9 (16.7) | 22.5 (23.1) | 31.2 (31.5) | 39.0 (40.5) |
+| direct_ridge | 282 | 15.9 (15.8) | 22.6 (22.6) | 31.4 (31.5) | 38.9 (38.8) |
+
+### R4: Load Against the TSO
+
+The study's test, 2 October 2025 to 11 October 2026, a 364-day window.
+
+**DE-LU** (334 days)
+
+| Model | MAE15 | MAEh | shape MAE |
+|---|---|---|---|
+| B24_dyn | 1755.5 / 1765.3 (-0.6 %) | 1742.1 / 1752.4 (-0.6 %) | 199.7 / 199.9 (-0.1 %) |
+| C96_HAGG | 1752.8 / 1765.8 (-0.7 %) | 1736.6 / 1749.4 (-0.7 %) | 225.6 / 225.8 (-0.1 %) |
+| A96_QLOC | 1752.7 / 1766.1 (-0.8 %) | 1735.9 / 1750.3 (-0.8 %) | 226.3 / 225.1 (+0.5 %) |
+| B24_static | 1765.8 / 1775.7 (-0.6 %) | 1742.2 / 1752.5 (-0.6 %) | 254.1 / 253.8 (+0.1 %) |
+| B24_flat | 1821.6 / 1833.0 (-0.6 %) | 1742.2 / 1752.5 (-0.6 %) | 466.4 / 466.4 (+0.0 %) |
+| TSO | 2130.0 / 2130.1 (-0.0 %) | 2113.1 / 2113.2 (-0.0 %) | 244.0 / 244.0 (+0.0 %) |
+| A96_noLF | 2217.1 / 2239.1 (-1.0 %) | 2201.4 / 2224.6 (-1.0 %) | 240.5 / 234.6 (+2.5 %) |
+| naive | 3046.5 / 3046.7 (-0.0 %) | 3032.8 / 3032.9 (-0.0 %) | 258.7 / 258.7 (+0.0 %) |
+
+| A vs B | library | study | verdict |
+|---|---|---|---|
+| A96_QLOC vs TSO | -5.01 (0.000) | -5.16 (0.000) | agree |
+| A96_QLOC vs B24_dyn | -1.22 (0.221) | +0.39 (0.697) | agree |
+| B24_dyn vs B24_flat | -16.78 (0.000) | -17.93 (0.000) | agree |
+| A96_QLOC vs C96_HAGG | -0.01 (0.988) | +0.15 (0.878) | agree |
+
+**AT** (279 days)
+
+| Model | MAE15 | MAEh | shape MAE |
+|---|---|---|---|
+| C96_HAGG | 304.0 / 303.4 (+0.2 %) | 301.7 / 301.1 (+0.2 %) | 31.6 / 31.6 (+0.0 %) |
+| A96_QLOC | 303.7 / 303.6 (+0.0 %) | 301.6 / 301.3 (+0.1 %) | 31.6 / 31.7 (-0.3 %) |
+| B24_dyn | 304.1 / 304.0 (+0.0 %) | 302.6 / 302.4 (+0.1 %) | 26.1 / 26.7 (-2.2 %) |
+| B24_static | 306.3 / 306.1 (+0.1 %) | 302.6 / 302.4 (+0.1 %) | 35.5 / 35.4 (+0.2 %) |
+| B24_flat | 319.2 / 319.1 (+0.0 %) | 302.6 / 302.4 (+0.1 %) | 72.5 / 72.5 (+0.0 %) |
+| A96_noLF | 333.6 / 335.7 (-0.6 %) | 331.2 / 333.5 (-0.7 %) | 34.2 / 31.8 (+7.7 %) |
+| TSO | 363.3 / 363.3 (+0.0 %) | 361.7 / 361.6 (+0.0 %) | 29.8 / 29.8 (+0.0 %) |
+| naive | 430.2 / 430.2 (+0.0 %) | 428.5 / 428.5 (+0.0 %) | 32.7 / 32.7 (+0.0 %) |
+
+| A vs B | library | study | verdict |
+|---|---|---|---|
+| A96_QLOC vs TSO | -4.86 (0.000) | -5.09 (0.000) | agree |
+| A96_QLOC vs B24_dyn | -1.37 (0.171) | -0.76 (0.447) | agree |
+| B24_dyn vs B24_flat | -16.24 (0.000) | -15.91 (0.000) | agree |
+| A96_QLOC vs C96_HAGG | -1.06 (0.290) | +0.58 (0.559) | agree |
+
+R3's load rows (MW):
+
+**DE-LU**
+
+MAE, library (study); the study's days: 334.
+
+| Method | days | base | peak | min | max |
+|---|---|---|---|---|---|
+| direct_lasso | 332 | 1503.5 (1501.9) | 1861.8 (1866.6) | 1420.8 (1454.9) | 1863.8 (1900.3) |
+| direct_ridge | 332 | 1500.2 (1483.8) | 1867.6 (1834.8) | 1395.6 (1383.8) | 1830.0 (1821.2) |
+| avg_A96_QLOC_lasso | 332 | 1454.4 | 1816.8 | 1337.8 | 1801.8 |
+| derived_A96_QLOC | 332 | 1437.9 (1455.7) | 1798.7 (1853.2) | 1323.7 (1322.8) | 1861.2 (1854.9) |
+| derived_A96_noLF | 332 | 1933.1 (1939.8) | 2442.7 (2467.2) | 1483.9 (1490.2) | 2504.4 (2488.6) |
+| derived_C96_HAGG | 332 | 1437.6 (1454.2) | 1799.5 (1850.2) | 1320.2 (1323.0) | 1863.1 (1876.9) |
+| derived_B24_dyn | 332 | 1440.6 (1454.1) | 1805.8 (1849.9) | 1324.6 (1324.6) | 1875.2 (1876.6) |
+| derived_B24_static | 332 | 1440.5 (1453.9) | 1806.1 (1849.9) | 1346.7 (1344.7) | 1860.5 (1841.6) |
+| derived_B24_flat | 332 | 1440.5 (1453.9) | 1806.1 (1849.9) | 1335.0 (1329.9) | 1962.0 (1945.2) |
+| derived_TSO | 332 | 1758.3 (1752.9) | 2270.2 (2265.5) | 1519.6 (1521.9) | 2047.5 (2047.0) |
+| derived_naive | 332 | 2744.4 (2749.7) | 3289.1 (3292.5) | 2382.6 (2389.0) | 3105.7 (3107.0) |
+
+**AT**
+
+MAE, library (study); the study's days: 242.
+
+| Method | days | base | peak | min | max |
+|---|---|---|---|---|---|
+| direct_lasso | 238 | 293.7 (274.7) | 399.9 (385.5) | 208.9 (208.5) | 356.4 (333.6) |
+| direct_ridge | 238 | 289.5 (286.0) | 394.1 (385.6) | 212.8 (210.6) | 350.8 (346.6) |
+| avg_A96_QLOC_lasso | 238 | 271.7 | 382.7 | 184.5 | 326.1 |
+| derived_A96_QLOC | 238 | 262.8 (255.4) | 374.9 (365.7) | 177.5 (179.6) | 325.5 (313.1) |
+| derived_A96_noLF | 238 | 293.0 (292.1) | 409.2 (411.2) | 191.3 (195.7) | 360.3 (367.7) |
+| derived_C96_HAGG | 238 | 263.0 (255.3) | 375.4 (365.5) | 177.8 (178.9) | 326.5 (311.8) |
+| derived_B24_dyn | 238 | 263.2 (255.0) | 376.5 (366.1) | 179.6 (180.1) | 327.6 (313.6) |
+| derived_B24_static | 238 | 263.2 (255.0) | 376.6 (366.1) | 179.4 (177.9) | 328.1 (314.0) |
+| derived_B24_flat | 238 | 263.2 (255.0) | 376.6 (366.1) | 184.8 (183.6) | 331.7 (320.4) |
+| derived_TSO | 238 | 306.5 (304.9) | 416.4 (415.2) | 261.9 (259.6) | 377.7 (374.8) |
+| derived_naive | 238 | 386.6 (385.1) | 521.8 (521.0) | 291.7 (289.1) | 459.9 (455.3) |
+
+### Quality Q2: Direct Daily Models
+
+`LEARModel.lago()`'s estimator is the original epftoolbox's within 1e-9, so this tier R is exact in all but name.
+
+MAE of the library's runs, 728 days each; every cell within 0.0005 of the published one (printed to 3 decimals).
+
+| Target | Model | NP | PJM | FR | BE | DE |
+|---|---|---|---|---|---|---|
+| mean | derived | 1.392 | 2.420 | 3.008 | 4.663 | 2.629 |
+| mean | direct_lear | 1.415 | 2.432 | 3.045 | 4.720 | 2.650 |
+| mean | direct_compact | 1.476 | 2.395 | 3.121 | 4.695 | 2.855 |
+| mean | avg_compact | 1.405 | 2.373 | 3.012 | 4.604 | 2.695 |
+| mean | avg_lear | 1.399 | 2.421 | 3.012 | 4.674 | 2.624 |
+| peak | derived | 1.854 | 3.065 | 4.043 | 6.421 | 3.471 |
+| peak | direct_lear | 1.872 | 3.098 | 4.106 | 6.564 | 3.444 |
+| peak | direct_compact | 1.998 | 3.118 | 4.228 | 6.477 | 3.812 |
+| peak | avg_compact | 1.888 | 3.052 | 4.087 | 6.338 | 3.561 |
+| peak | avg_lear | 1.860 | 3.077 | 4.065 | 6.476 | 3.453 |
+| min | derived | 1.719 | 2.827 | 3.186 | 3.747 | 4.148 |
+| min | direct_lear | 1.819 | 2.755 | 3.315 | 3.627 | 4.504 |
+| min | direct_compact | 1.782 | 2.708 | 3.266 | 3.315 | 4.502 |
+| min | avg_compact | 1.724 | 2.720 | 3.137 | 3.393 | 4.174 |
+| min | avg_lear | 1.746 | 2.772 | 3.173 | 3.568 | 4.166 |
+| max | derived | 2.946 | 5.173 | 9.213 | 13.173 | 4.417 |
+| max | direct_lear | 3.084 | 5.196 | 9.460 | 13.206 | 4.626 |
+| max | direct_compact | 3.273 | 5.106 | 9.410 | 12.600 | 5.067 |
+| max | avg_compact | 3.039 | 4.996 | 9.113 | 12.537 | 4.487 |
+| max | avg_lear | 2.961 | 5.017 | 9.226 | 12.908 | 4.381 |
+
+One-sided DM tests against derived (quality's), library / study:
+
+| Target | Alternative | NP | PJM | FR | BE | DE |
+|---|---|---|---|---|---|---|
+| mean | direct_lear | derived better / derived better | n.s. / n.s. | n.s. / n.s. | n.s. / n.s. | n.s. / n.s. |
+| mean | direct_compact | derived better / derived better | n.s. / n.s. | derived better / derived better | n.s. / n.s. | derived better / derived better |
+| mean | avg_compact | n.s. / n.s. | alt better / alt better | n.s. / n.s. | n.s. / n.s. | derived better / derived better |
+| peak | direct_lear | derived better / derived better | n.s. / n.s. | derived better / derived better | derived better / derived better | n.s. / n.s. |
+| peak | direct_compact | derived better / derived better | n.s. / n.s. | derived better / derived better | n.s. / n.s. | derived better / derived better |
+| peak | avg_compact | derived better / derived better | n.s. / n.s. | n.s. / n.s. | n.s. / n.s. | derived better / derived better |
+| min | direct_lear | derived better / derived better | alt better / alt better | derived better / derived better | n.s. / n.s. | derived better / derived better |
+| min | direct_compact | derived better / derived better | alt better / alt better | n.s. / n.s. | alt better / alt better | derived better / derived better |
+| min | avg_compact | n.s. / n.s. | alt better / alt better | n.s. / n.s. | alt better / alt better | n.s. / n.s. |
+| max | direct_lear | derived better / derived better | n.s. / n.s. | derived better / derived better | n.s. / n.s. | derived better / derived better |
+| max | direct_compact | derived better / derived better | n.s. / n.s. | n.s. / n.s. | alt better / alt better | derived better / derived better |
+| max | avg_compact | derived better / derived better | alt better / alt better | n.s. / n.s. | alt better / alt better | n.s. / n.s. |
+
+## Tier R: Post-Gate Runs (REN+)
+
+These runs use the A69 wind and solar forecast of T, which is published after the 11:45 issue: they measure what the forecast is
+worth, not what an issuer has. Run at `availability="warn"`, they list every such input, and a chained hourly forecast that read
+one is a late upstream.
+
+### R1
+
+**DE-LU**
+
+191 identical days, the study's 191; library / study (deviation).
+
+| Variant | MAE15 library / study | MAEh | shape MAE |
+|---|---|---|---|
+| B24_dyn | 21.58 / 21.55 (+0.1 %) | 20.69 / 20.75 (-0.3 %) | 5.71 / 5.68 (+0.6 %) |
+| A96_QLOC | 21.60 / 21.58 (+0.1 %) | 20.61 / 20.67 (-0.3 %) | 6.50 / 6.25 (+4.1 %) |
+| C96_HAGG | 21.61 / 21.60 (+0.0 %) | 20.63 / 20.68 (-0.3 %) | 6.54 / 6.23 (+4.9 %) |
+| A96_FULL | 22.56 / 21.67 (+4.1 %) | 21.45 / 20.76 (+3.3 %) | 7.14 / 6.31 (+13.1 %) |
+| B24_static | 21.80 / 21.78 (+0.1 %) | 20.69 / 20.74 (-0.2 %) | 6.35 / 6.35 (+0.0 %) |
+| A96_QLOC_ridge | 22.21 / 22.16 (+0.3 %) | 21.26 / 21.16 (+0.5 %) | 6.41 / 6.54 (-1.9 %) |
+| B24_flat | 23.14 / 23.10 (+0.2 %) | 20.69 / 20.74 (-0.2 %) | 9.06 / 9.06 (+0.0 %) |
+| naive | 36.28 / 36.28 (-0.0 %) | 35.90 / 35.90 (-0.0 %) | 7.02 / 7.02 (-0.0 %) |
+
+| A vs B | library | study | verdict |
+|---|---|---|---|
+| A96_QLOC vs C96_HAGG | -0.36 (0.717) | -0.72 (0.469) | agree |
+| A96_QLOC vs B24_dyn | +0.16 (0.870) | +0.36 (0.719) | agree |
+| B24_dyn vs B24_flat | -10.75 (0.000) | -12.70 (0.000) | agree |
+| B24_dyn vs B24_static | -3.05 (0.002) | -5.60 (0.000) | agree |
+| A96_QLOC_ridge vs A96_QLOC | +3.02 (0.003) | +1.11 (0.266) | **flip** |
+| A96_FULL vs A96_QLOC | +2.10 (0.036) | +1.02 (0.307) | **flip** |
+
+**AT**
+
+192 identical days, the study's 192; library / study (deviation).
+
+| Variant | MAE15 library / study | MAEh | shape MAE |
+|---|---|---|---|
+| B24_dyn | 23.09 / 23.14 (-0.2 %) | 21.50 / 21.76 (-1.2 %) | 7.46 / 7.16 (+4.1 %) |
+| A96_QLOC | 23.06 / 23.25 (-0.9 %) | 21.34 / 21.79 (-2.1 %) | 8.31 / 7.70 (+8.0 %) |
+| C96_HAGG | 23.15 / 23.30 (-0.7 %) | 21.34 / 21.83 (-2.2 %) | 8.39 / 7.79 (+7.8 %) |
+| B24_static | 23.12 / 23.34 (-0.9 %) | 21.49 / 21.75 (-1.2 %) | 7.45 / 7.45 (-0.0 %) |
+| A96_FULL | 24.41 / 23.48 (+3.9 %) | 22.49 / 22.03 (+2.1 %) | 9.24 / 7.90 (+16.9 %) |
+| A96_QLOC_ridge | 23.00 / 23.51 (-2.2 %) | 21.43 / 21.85 (-1.9 %) | 7.83 / 8.16 (-4.0 %) |
+| B24_flat | 24.98 / 25.16 (-0.7 %) | 21.49 / 21.75 (-1.2 %) | 10.60 / 10.60 (-0.0 %) |
+| naive | 28.98 / 28.98 (-0.0 %) | 27.62 / 27.62 (-0.0 %) | 8.78 / 8.78 (-0.0 %) |
+
+| A vs B | library | study | verdict |
+|---|---|---|---|
+| A96_QLOC vs C96_HAGG | -1.77 (0.076) | -1.13 (0.257) | agree |
+| A96_QLOC vs B24_dyn | -0.29 (0.771) | +1.40 (0.162) | agree |
+| B24_dyn vs B24_flat | -14.33 (0.000) | -16.18 (0.000) | agree |
+| B24_dyn vs B24_static | -0.60 (0.550) | -4.90 (0.000) | **flip** |
+| A96_QLOC_ridge vs A96_QLOC | -0.20 (0.845) | +0.58 (0.564) | agree |
+| A96_FULL vs A96_QLOC | +3.50 (0.000) | +1.05 (0.295) | **flip** |
+
+### R3: Daily Statistics, Price
+
+**DE-LU**
+
+MAE, library (study); the study's days: 191.
+
+| Method | days | base | peak | min | max |
+|---|---|---|---|---|---|
+| direct_lasso | 191 | 17.7 (18.7) | 20.8 (22.3) | 29.1 (28.9) | 44.9 (45.8) |
+| direct_ridge | 191 | 17.5 (17.3) | 20.6 (20.7) | 28.5 (28.6) | 46.5 (46.2) |
+| avg_A96_QLOC_lasso | 191 | 14.4 | 18.8 | 29.2 | 42.5 |
+| derived_A96_QLOC | 191 | 13.9 (14.9) | 20.6 (20.6) | 33.6 (28.6) | 44.0 (47.1) |
+| derived_A96_QLOC_ridge | 191 | 14.2 (13.8) | 20.6 (20.1) | 33.0 (34.1) | 44.6 (44.7) |
+| derived_A96_FULL | 191 | 14.7 (15.0) | 21.9 (20.9) | 39.6 (30.4) | 45.0 (48.4) |
+| derived_C96_HAGG | 191 | 13.9 (14.9) | 20.7 (20.7) | 34.0 (29.2) | 44.0 (47.1) |
+| derived_B24_dyn | 191 | 13.8 (14.9) | 20.5 (20.4) | 30.9 (29.2) | 44.2 (48.0) |
+| derived_B24_static | 191 | 13.8 (14.8) | 20.5 (20.4) | 31.2 (29.8) | 43.8 (45.6) |
+| derived_B24_flat | 191 | 13.8 (14.8) | 20.5 (20.4) | 29.3 (28.4) | 49.4 (52.7) |
+| derived_naive | 191 | 31.8 (31.8) | 38.4 (38.4) | 46.1 (46.1) | 76.5 (76.5) |
+
+**AT**
+
+MAE, library (study); the study's days: 192.
+
+| Method | days | base | peak | min | max |
+|---|---|---|---|---|---|
+| direct_lasso | 192 | 16.0 (17.2) | 21.8 (23.7) | 36.4 (35.3) | 40.7 (42.1) |
+| direct_ridge | 192 | 16.1 (16.0) | 22.3 (22.5) | 35.7 (36.1) | 40.3 (40.3) |
+| avg_A96_QLOC_lasso | 192 | 14.6 | 21.1 | 36.2 | 38.0 |
+| derived_A96_QLOC | 192 | 15.2 (16.0) | 22.8 (23.2) | 39.7 (35.0) | 39.3 (39.7) |
+| derived_A96_QLOC_ridge | 192 | 15.2 (15.4) | 22.4 (23.4) | 36.7 (39.9) | 38.9 (39.1) |
+| derived_A96_FULL | 192 | 16.2 (16.3) | 24.4 (23.9) | 45.5 (38.7) | 41.1 (40.1) |
+| derived_C96_HAGG | 192 | 15.3 (16.0) | 22.9 (23.2) | 38.8 (35.7) | 39.2 (39.3) |
+| derived_B24_dyn | 192 | 15.3 (15.7) | 23.0 (22.7) | 35.3 (33.9) | 40.7 (40.8) |
+| derived_B24_static | 192 | 15.3 (15.7) | 23.0 (22.7) | 34.8 (33.8) | 37.6 (39.0) |
+| derived_B24_flat | 192 | 15.3 (15.7) | 23.0 (22.7) | 35.8 (34.9) | 42.8 (47.1) |
+| derived_naive | 192 | 21.2 (21.2) | 29.0 (29.0) | 42.6 (42.6) | 55.6 (55.6) |
+
+## Cells and Verdicts
+
+| Table | MAE cells within 5 % | DM verdicts the same |
+|---|---|---|
+| R1 honest | 42 of 48 | 10 of 12 |
+| R1 REN+ (post-gate) | 44 of 48 | 8 of 12 |
+| R2 | 678 of 810 | 11 of 14 |
+| R3 honest | 154 of 192 | none published |
+| R3 REN+ (post-gate) | 57 of 80 | none published |
+| R4 | 94 of 96 | 8 of 8 |
+| Q2 | 100 of 100 | 60 of 60 |
+
+Every MAE15 cell over a whole test period is within the band: R1 from −3.9 % to +4.1 %, R2 from −4.8 % to +0.2 %, R4 from −1.0 %
+to +0.2 %. The cells outside it are MAEh (the library's lower, by up to 7 %), shape MAE (the library's higher, up to 17 % for
+A96_FULL), R2's January-to-March and April-to-October parts (89 and 193 days), and R3's daily statistics, most of all the minimum
+of the post-gate runs; [What differs](#what-differs-from-the-study) measures why. The naive and the TSO's forecast, which no
+estimator touches, reproduce the study's intraday cells within 0.1 % and their daily statistics within 1 % (on R3's days), so the
+data, the days and the scoring are the study's.
+
+Verdicts that flip:
+
+- **B24_dyn against B24_static** (R1 DE-LU honest, AT REN+): a lead the study found in all four settings holds in two. Its cause
+  is the next section.
+- **A96_FULL against A96_QLOC** (R1 AT honest, DE-LU and AT REN+): the library's A96_FULL is significantly worse than A96_QLOC
+  where the study saw no difference. Its 535 inputs (823 in REN+) on 182 rows are where the library's lasso, which keeps about
+  four times as many inputs, costs most: A96_FULL's shape MAE is 7 to 17 % above the study's.
+- **A96_QLOC_ridge against A96_QLOC** (R1 DE-LU REN+): the same 2.8 % gap as the study's (2.7 %), significant here (p .003, the
+  study's .27).
+- **R2**: B24_dyn on all history against A96_QLOC with the era dummy, 728 days (DE-LU: the study's −1.98, p .048; the library's
+  −1.31, p .19); A96_QLOC on all history at 728 days against 15-minute days at 182 (AT: the study's p .029, the library's .098);
+  A96_QLOC on 15-minute days, 728 against 182 days (AT: no difference in the study, p .31; the 182 days better in the library, p
+  .010). The first two were within 0.03 of the 5 % line in the study.
+
+What holds: B24_dyn ties A96_QLOC (all four R1 settings and both R4 zones), quarter-hour lags add nothing significant over
+hourly means (A96_QLOC against C96_HAGG, all four), flat spreading is clearly worse (B24_dyn against B24_flat, every setting,
+R1, R2 and R4), all history beats 15-minute days only in DE-LU (B24_dyn and A96_QLOC, 728 against 182 days), the model with the
+TSO's forecast as input beats the TSO's forecast by 18 % in DE-LU and 16 % in AT (the study's 17 and 16.5 %), and derived base
+and peak beat the direct daily models (R3: DE-LU base 19.5 to 20.0 against 22.8 to 23.5, load 1438 to 1441 MW against 1500 to
+1504) while the extremes are about even. Every one of quality Q2's 100 cells and 60 verdicts is the study's.
+
+## B24_dyn Against B24_static
+
+The study found B24_dyn, the hourly forecast plus a regression of each quarter-hour's deviation on the forecast hourly ramp and
+the TSO forecast's within-hour shape, significantly better than B24_static, a fixed mean shape, in all four R1 settings (DM −7.3,
+−5.6, −7.4, −4.9). At tier R its lead holds in AT honest (−2.70, p .007) and DE-LU REN+ (−3.05, p .002) and is gone in DE-LU
+honest (−1.03, p .30) and AT REN+ (−0.60, p .55).
+
+The cause, suspected on DE-LU honest when `ShapeModel` was built, is measured here inside the study's own code. `run_price.py`
+fits B24_dyn's regression on the **actual** hourly ramps of its training days and serves it the **forecast** ramp of T. A
+`ShapeModel` reads one column for its training rows and its issue row, so it trains on the chained forecasts' ramps, out of
+sample, as the study's audit recommended. The study's B24_dyn, refitted with that one change, on its own out-of-sample hourly
+forecasts (its R2 run of the same hourly model, which holds them from 2 January 2026), honest R1:
+
+| | DE-LU | AT |
+|---|---|---|
+| B24_dyn as published, actual ramps: MAE15 / shape MAE | 27.41 / 5.93 | 24.02 / 7.06 |
+| B24_dyn on forecast ramps | 27.57 / 6.17 | 24.16 / 7.30 |
+| B24_static | 27.61 / 6.35 | 24.26 / 7.45 |
+| DM B24_dyn vs B24_static, published | −7.34 (0.000) | −7.35 (0.000) |
+| DM B24_dyn vs B24_static, forecast ramps | −0.71 (.48) | −2.03 (.04) |
+
+Refitted on the actual ramps, the same code gives the stored forecasts to the bit, so nothing else moved. The library's verdicts
+are the forecast-ramp row's: no lead in DE-LU, a smaller one in AT. Training on actual ramps is no look-ahead (the training days'
+prices are known at the issue), and here it is the better of the two; a `ShapeModel` can't express it, because a training row and
+the issue row read the same column. Most of B24_dyn's published lead over B24_static is that choice: cite it with this in mind.
+
+## What Differs From the Study
+
+- **The lasso.** The study's is the LARS path's own coefficients at the BIC kink, with no refit. `LEARModel(criterion="bic")`
+  finds the kink on the normalised path, then fits the Lasso at that penalty on the standardised columns exactly (Lago et al.'s
+  refit, about √n times less penalised), and keeps about four times as many inputs. The library's estimator on the study's own
+  design matrix and scaling gives what tier R gives (A96_QLOC, R1, EUR/MWh):
+
+  | | MAE15 | MAEh | shape MAE | inputs per fit |
+  |---|---|---|---|---|
+  | AT honest: the study | 24.11 | 22.86 | 7.49 | 9.2 |
+  | the library's estimator on the study's design | 23.21 | 21.62 | 7.95 | 36.2 |
+  | tier R | 23.16 | 21.58 | 7.92 | |
+  | AT REN+: the study | 23.25 | 21.79 | 7.70 | 11.3 |
+  | the library's estimator on the study's design | 23.23 | 21.44 | 8.55 | 39.0 |
+  | tier R | 23.06 | 21.34 | 8.31 | |
+
+  The day's level and hour profile come out better (lower MAEh), the quarter-hour detail noisier (higher shape MAE), most of all
+  with A96_FULL's many inputs. A noisier quarter-hour forecast also has a lower minimum and a higher maximum: R3's derived
+  minimum is worse (DE-LU REN+ A96_QLOC 33.6 against 28.6) and its maximum, under-forecast in every price row, better.
+- **The ridge.** The study's chooses the penalty by generalised cross-validation, `RidgeModel` by leave-one-out, on the same 25
+  penalties: R1 MAE15 within 2.2 %.
+- **The shape regression.** Actual against forecast ramps (above), and a tiny ridge (10⁻³ · n on standardised regressors)
+  against OLS.
+- **Binary columns.** `binary_mask="fit"` (see Setup). With the default, R1 MAE15 (EUR/MWh):
+
+  | | DE-LU REN+ A96_QLOC | A96_FULL | B24_dyn | AT REN+ A96_QLOC | A96_FULL | B24_dyn |
+  |---|---|---|---|---|---|---|
+  | the study | 21.58 | 21.67 | 21.55 | 23.25 | 23.48 | 23.14 |
+  | `binary_mask=None` (default) | 21.66 | 24.22 | 23.24 | 25.03 | 27.28 | 25.68 |
+  | `binary_mask="fit"` | 21.60 | 22.56 | 21.58 | 23.06 | 24.41 | 23.09 |
+
+  The honest runs are the same either way. The default's dependence on the first test day is a known issue, pinned as a strict
+  xfail in `tests/test_known_issues.py` (`test_a_forecast_is_the_same_whatever_day_the_test_starts_on`).
+- **Days and keys.** The library's identical days are the study's in R1 (191 and 192), R2 (281 and 282) and R4 (334 and 279); R3's
+  load rows have 332 and 238 against 334 and 242 (a daily aggregate drops the switch days, see tier S). The day after the spring
+  switch has 92 forecasts in every library model, since there is no 02:00 row on the switch day to issue from; the study had 96.
+  In the q history (R1, R2's q runs, R3) the target is NaN on the hourly era and on the 15-minute era's two days stored hourly or
+  incomplete (2026-09-13, DE-LU 2026-07-24), which the study's q rows leave out, after the features are built (an edit of the frame, no
+  `history=` parameter). The data sit on the UTC grid, so the repeated autumn hour trains on both of its rows (the study averaged
+  them), and the spring day's skipped hour has the mean of the hours around it.
+- **The B24 upstream.** The hourly model is issued from 92 days before the test, so that the shape model's training rows hold its
+  out-of-sample forecasts. The study needed none.
