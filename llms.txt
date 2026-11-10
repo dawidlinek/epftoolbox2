@@ -140,7 +140,7 @@ Rules to know before using the library:
 
 ## Reproductions
 
-- [Renewables Study](docs/src/content/docs/reproductions/renewables.mdx): the renewables study (DE-LU and AT solar and wind generation from issue-time weather, chained into hourly price models) scored exactly from its stored forecasts and rebuilt from library components (`RidgeModel` and pooled `HistGBModel` with `normalise_by`, `bounds`, `zero_when`; `ForecastSource`), each cell next to the published one on identical keys with counts, every DM verdict compared, honest and post-gate apart
+- [Renewables Study](docs/src/content/docs/reproductions/renewables.mdx): the renewables study (DE-LU and AT solar and wind generation from issue-time weather, chained into hourly price models) scored exactly from its stored forecasts and rebuilt from library components (`RidgeModel` and pooled `HistGBModel` with `target_transform="none"`, `normalise_by`, `bounds`, `zero_when`; `ForecastSource`), each cell next to the published one on identical keys with counts, every DM verdict compared, honest and post-gate apart
 
 ## Reference
 
