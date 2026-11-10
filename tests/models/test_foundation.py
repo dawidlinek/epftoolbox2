@@ -568,6 +568,9 @@ def test_the_fine_tune_windows_are_read_as_forecasts_issued_a_horizon_before(hou
     unit = dataclasses.make_dataclass("Unit", ["horizon", "anchor"])(2, date(2023, 6, 12))
     data, digest, cut = model._fine_tune_data(unit, hourly, spec)
     assert data.cut == date(2023, 6, 11) and len(data) > 100 and len(digest) == 64
+    # Every window's series are whole: the first is the first target day whose context lies in the frame.
+    assert all(np.isfinite(i.target).all() and np.isfinite(i.known["load_forecast"]).all() for i in data.items)
+    assert hourly.index[0] <= data.items[0].first_step < hourly.index[0] + pd.Timedelta(days=1)
     item, y = data.items[-1], data.targets[-1]
     assert item.issue_day == date(2023, 6, 9) and item.target_day == date(2023, 6, 11)
     (again,) = history_batch(spec, hourly, [item.issue_day], INFO_AHEAD, "1h", 2).items
