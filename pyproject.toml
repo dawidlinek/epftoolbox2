@@ -86,7 +86,7 @@ tune = [
 # The in-context tabular families (epftoolbox2/models/tabpfn.py, tabicl.py), one extra each, so each class's pre-flight asks
 # for its own: TabPFNModel's `tabpfn` (only the v2 weights are used, through ModelVersion.V2) and TabICLModel's `tabicl`, each
 # with torch (from PyTorch's CPU index, below) and huggingface_hub, through which `epf weights fetch` downloads the weights.
-# tabpfn needs safetensors, which has no free-threaded (3.14t) wheels, so CI installs neither there. MitraModel is not
+# tabpfn needs safetensors, which has no free-threaded (3.14t) wheels, so CI installs only tabicl there. MitraModel is not
 # shipped: its 1,000-bin head needs patches of AutoGluon's internals (docs, models/in-context).
 tabpfn = [
     "tabpfn>=6,<10",

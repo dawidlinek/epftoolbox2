@@ -23,6 +23,8 @@ from epftoolbox2.models import (
     ResidualModel,
     RidgeModel,
     ShapeModel,
+    TabICLModel,
+    TabPFNModel,
     TorchModel,
     XGBoostModel,
 )
@@ -893,6 +895,21 @@ class TestModelPipelineParameterFidelity:
                     native="2025-10-01",
                     name="Shape2",
                 ),
+                # The in-context families build, save and load without their packages or weights (step 6e).
+                TabPFNModel(
+                    ["price_h05_d-1", "load_d+{horizon}"],
+                    training_window=364,
+                    refit="1MS",
+                    n_estimators=8,
+                    random_state=4,
+                    device="cuda:1",
+                    weights="/weights/tabpfn-v2-regressor.ckpt",
+                    block_predict=False,
+                    name="PFN",
+                    newest_target="published",
+                    binary_mask="fit",
+                ),
+                TabICLModel(["price_d-1"], training_window=56, refit="1D", n_estimators=2, device="cpu", name="ICL"),
             ],
             "ensembles": [AverageEnsemble(["O", "L"], top=1, by="validation", name="best")],
             "evaluators": [

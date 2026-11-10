@@ -177,8 +177,9 @@ jobs:
     # The pretrained families' extras, packages installed and no weights: the in-context models [tabpfn] and [tabicl]
     # (tests/models/test_in_context.py: the real regressors around a fake fit/predict, their settings, the TabPFN version guard,
     # one checkpoint read per process; the adapter suite), and the rest of the suite with the packages installed. The test job
-    # above installs no extra, so there these tests skip. No free-threaded cell: tabpfn needs safetensors, which has no
-    # free-threaded wheels. No job has weights or a GPU (`-m weights` runs where EPFTOOLBOX2_WEIGHTS_DIR holds them).
+    # above installs no extra, so there these tests skip. The free-threaded cell installs [tabicl] alone: tabpfn needs
+    # safetensors, which has no free-threaded wheels. No job has weights or a GPU (`-m weights` runs where
+    # EPFTOOLBOX2_WEIGHTS_DIR holds them).
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -190,6 +191,9 @@ jobs:
           - python-version: '3.13'
             extras: '--extra tabpfn --extra tabicl'
             modules: "'tabpfn', 'tabicl', 'torch'"
+          - python-version: '3.14t'
+            extras: '--extra tabicl'
+            modules: "'tabicl', 'torch'"
 
     steps:
     - name: Checkout code
