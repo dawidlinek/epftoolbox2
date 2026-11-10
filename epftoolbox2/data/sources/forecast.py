@@ -336,9 +336,10 @@ class ForecastSource(DataSource):
         time = self.available or upstream.issue_time
         return lambda day: local_instant(day, time, upstream.issue_timezone)
 
-    def _committed(self, upstream: Upstream):
+    def _committed(self, upstream: Upstream, start: Any = None, end: Any = None):
         """What `read_records(committed=...)` reads of a live upstream (`results.live.LiveStore.visible`, policy "latest" by
-        each issue day's cut-off), None for a backtest's; `UpstreamError` for a live one that committed nothing."""
+        each issue day's cut-off), None for a backtest's; `UpstreamError` for a live one that committed nothing. Warns when
+        the cut-off leaves out a newer commit on an issue day whose targets fall in `[start, end)` (every day without them)."""
         if not upstream.live:
             return None
         from ...results.live import LiveStore
@@ -351,8 +352,11 @@ class ForecastSource(DataSource):
             )
         visible = store.visible("latest", cutoff=self._cutoff(upstream))
         everything = store.visible("latest", cutoff=None)
+        days = self._issue_days(upstream, start, end)
         later = sorted(
-            day for day, revisions in everything.items() if max(revisions) > max(visible.get(day, {0: None}))
+            day
+            for day, revisions in everything.items()
+            if max(revisions) > max(visible.get(day, {0: None})) and (days is None or day in days)
         )
         if later:
             time = self.available or upstream.issue_time
@@ -367,6 +371,16 @@ class ForecastSource(DataSource):
                 stacklevel=4,
             )
         return visible
+
+    def _issue_days(self, upstream: Upstream, start: Any, end: Any) -> Optional[set]:
+        """The issue days whose forecasts at this horizon are for a target date (of the upstream's data zone) with an instant in
+        `[start, end)`; None without a range."""
+        if start is None or end is None:
+            return None
+        first = _utc(start).tz_convert(upstream.data_timezone).date()
+        last = (_utc(end) - pd.Timedelta(1, "ns")).tz_convert(upstream.data_timezone).date()
+        targets = pd.date_range(first, last, freq="D")
+        return {(day - pd.Timedelta(days=self.horizon)).date().isoformat() for day in targets}
 
     def availability(self, upstream: Optional[Upstream] = None):
         """The column's rule: published at the upstream's issue time (or `available`) in its issue zone, `horizon` days before
@@ -450,7 +464,7 @@ class ForecastSource(DataSource):
         horizon = self.horizon
         found: Dict[str, set] = {"freq": set()}
 
-        committed = self._committed(upstream)
+        committed = self._committed(upstream, start, end)
 
         def pick(record: Dict[str, Any]) -> Optional[Tuple[str, int, float]]:
             if record.get("issued_at") is not None and not upstream.live:
