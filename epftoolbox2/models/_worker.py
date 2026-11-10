@@ -10,6 +10,7 @@ import os
 import sys
 import threading
 import traceback
+import warnings
 
 import numpy as np
 from threadpoolctl import ThreadpoolController
@@ -78,14 +79,38 @@ def cuda_initialised() -> bool:
 def pools_spawn() -> bool:
     """Whether a worker pool started now spawns its workers rather than forking them: on Windows (`_POOLS_SPAWN`), and wherever
     this process has initialised CUDA (`cuda_initialised`), since a forked child of such a process can't use CUDA ("Cannot
-    re-initialize CUDA in forked subprocess") and forking it is unsafe anyway. So after a foundation model ran on a GPU in this
-    process, every later pool of the run spawns."""
+    re-initialize CUDA in forked subprocess") and forking it is unsafe anyway. The library's own GPU work runs in a spawned
+    child (`_device_worker`) and never makes it so: this is the safety net for CUDA initialised here by anything else."""
     return _POOLS_SPAWN or cuda_initialised()
 
 
+# What a manifest's provenance records (`pool_start`) of a run whose pool spawned because CUDA was initialised in this process.
+POOL_SPAWN_FOR_CUDA = "spawn: CUDA was initialised in the process that ran the pipeline"
+_CUDA_WARNED = False
+
+
 def pool_context() -> Any:
-    """The multiprocessing context of a worker pool started now (`pools_spawn`): every pool of the library starts from it."""
-    return multiprocessing.get_context("spawn" if pools_spawn() else "fork")
+    """The multiprocessing context of a worker pool started now (`pools_spawn`): every pool of the library starts from it. The
+    first pool that spawns because of CUDA warns, once per process."""
+    global _CUDA_WARNED
+    if not _POOLS_SPAWN and cuda_initialised():
+        if not _CUDA_WARNED:
+            _CUDA_WARNED = True
+            warnings.warn(
+                "CUDA is initialised in this process (GPU work ran in it, outside the library's GPU host process), so its "
+                "worker pools now spawn their workers instead of forking them: a class or setting changed in this session after "
+                "import doesn't reach them, a class defined in __main__ or a notebook cell can't be found (BrokenProcessPool), "
+                "and each such run's manifest records pool_start",
+                UserWarning,
+                stacklevel=3,
+            )
+        return multiprocessing.get_context("spawn")
+    return multiprocessing.get_context("spawn" if _POOLS_SPAWN else "fork")
+
+
+def pool_start_note(context: Any) -> Optional[str]:
+    """`POOL_SPAWN_FOR_CUDA` for a pool context that spawns where pools fork (CUDA in this process), else None."""
+    return POOL_SPAWN_FOR_CUDA if context.get_start_method() == "spawn" and not _POOLS_SPAWN else None
 
 
 # Reasons a task produces no forecast without being an error. They are counted per model and reported.

@@ -165,6 +165,9 @@ _PROVENANCE_FIELDS += ("stack_check",)
 # under (what `prune_fine_tunes` keeps), how many the last run ran and loaded, and each anchor's windows, kept and dropped by
 # reason, merged over the runs of the results file.
 _PROVENANCE_FIELDS += ("fine_tunes",)
+# `pool_start`: how the last run's worker pool started where that wasn't the platform's way: "spawn: CUDA was initialised ..."
+# where pools fork (`models._worker.pool_context`'s safety net).
+_PROVENANCE_FIELDS += ("pool_start",)
 # `card`: a carded family's licence, corpus, runtime pins and weights reference, with the contamination verdict of each window
 # (`models._cards.manifest_fields`): what the model is under, which a new release may reword without changing a forecast.
 _PROVENANCE_FIELDS += ("card",)
@@ -402,6 +405,8 @@ class Manifest:
     # A foundation model's fine-tunes (`record_fine_tunes`): {"key", "fine_tuned", "loaded", "windows": {"<anchor>_h<h>":
     # {"candidates", "kept", "with_gaps", "dropped": {reason: n}}}}; None (and no key) otherwise. Never compared.
     fine_tunes: Optional[Dict[str, Any]] = None
+    # The start method of the last run's pool where it wasn't the platform's (`record_pool_start`); None (and no key) otherwise.
+    pool_start: Optional[str] = None
     # A `PooledModel`'s zone: {"zones", "over", "zone_feature", "missing", "data": {other zone: its data_columns_hash}}; None (and
     # no key) otherwise. Compared on resume.
     pooled: Optional[Dict[str, Any]] = None
@@ -507,6 +512,8 @@ class Manifest:
             del out["stack_check"]
         if out["fine_tunes"] is None:  # no fine-tune stored
             del out["fine_tunes"]
+        if out["pool_start"] is None:  # the platform's start method
+            del out["pool_start"]
         if out["pooled"] is None:  # fitted on one zone's rows
             del out["pooled"]
         for name in ("card", "runtime", "weights", "weights_history"):  # a core model, or one set of weights
@@ -969,6 +976,13 @@ def record_stack_check(path: Path, manifest: Manifest, check: Dict[str, Any]) ->
     check = dict(check)
     if check != manifest.stack_check:
         manifest.stack_check = check
+        manifest.write(path)
+
+
+def record_pool_start(path: Path, manifest: Manifest, note: str) -> None:
+    """Write how a run's pool started (`models._worker.POOL_SPAWN_FOR_CUDA`) into its manifest's provenance."""
+    if note != manifest.pool_start:
+        manifest.pool_start = note
         manifest.write(path)
 
 

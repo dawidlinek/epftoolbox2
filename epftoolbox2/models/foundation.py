@@ -43,7 +43,9 @@ from __future__ import annotations
 
 import collections
 import contextlib
+import dataclasses
 import datetime
+import functools
 import hashlib
 import json
 import math
@@ -182,6 +184,103 @@ class _Internal:
 
 def _local_date(stamp: pd.Timestamp, tz: Any) -> datetime.date:
     return (stamp if tz is None else stamp.tz_convert(tz)).date()
+
+
+def _on_gpu(device: Any) -> bool:
+    """Whether a backend on `device` runs on a GPU (a CUDA device)."""
+    return str(device).startswith("cuda")
+
+
+def _public_params(model: Any) -> Dict[str, Any]:
+    """The model's parameters as a pipeline saves them (its public attributes): what rebuilds it in another process."""
+    return {key: value for key, value in vars(model).items() if not key.startswith("_")}
+
+
+def _hosted_backend(
+    cls: type, params: Dict[str, Any], resolved: Any, device: str, options: Dict[str, Any], threads: int
+):
+    """In the child that hosts GPU work (`_device_worker`): the model rebuilt from its parameters, its backend loaded
+    offline from `resolved`, and every call of it run inside torch's scope on `device` (TF32 off, `threads`)."""
+    model = cls(**params)
+    scoped = _ScopedBackend(None, device, threads, model._uses_torch)
+    with scoped.scope(), offline():
+        scoped.backend = model._load_backend(resolved, device, options)
+    return scoped
+
+
+class _ScopedBackend:
+    """A backend whose calls run inside `torch_scope(device, tf32=False, threads)` (a torch family), in the hosting child."""
+
+    def __init__(self, backend: Any, device: str, threads: int, uses_torch: bool):
+        self.backend, self.device, self.threads, self.uses_torch = backend, device, threads, uses_torch
+
+    def scope(self) -> Any:
+        if not self.uses_torch:
+            return contextlib.nullcontext()
+        from ._torch.runtime import torch_scope
+
+        return torch_scope(self.device, tf32=False, threads=self.threads)
+
+    def describe(self) -> Dict[str, Any]:
+        return {"levels": tuple(self.backend.levels), "point_level": self.backend.point_level, "pid": os.getpid()}
+
+    def predict(self, call: Any, options: Mapping[str, Any]) -> np.ndarray:
+        with self.scope():
+            return np.asarray(self.backend.predict(call, options))
+
+    def fine_tune(self, data: Any, settings: Mapping[str, Any], seed: int) -> Any:
+        with self.scope():
+            return self.backend.fine_tune(data, settings, seed)
+
+    def save_state(self, path: str) -> None:
+        with self.scope():
+            self.backend.save_state(Path(path))
+
+    def load_state(self, path: str) -> None:
+        with self.scope():
+            self.backend.load_state(Path(path))
+
+    def reset(self) -> None:
+        with self.scope():
+            self.backend.reset()
+
+
+class _RemoteBackend:
+    """This process's handle of a backend hosted on a GPU in the spawned child (`_device_worker.shared()`): each method runs
+    there, with the call, the windows and the paths of checkpoint files pickled to it."""
+
+    def __init__(self, model: Any, resolved: Any, device: Any, options: Dict[str, Any]):
+        from ._device_worker import shared
+
+        self._process = shared()
+        factory = functools.partial(
+            _hosted_backend, type(model), _public_params(model), resolved, str(device), dict(options), model._threads()
+        )
+        self._key = self._process.host(factory)
+        described = self._process.call(self._key, "describe")
+        self.levels, self.point_level, self.pid = described["levels"], described["point_level"], described["pid"]
+
+    @property
+    def point_index(self) -> int:
+        return [float(level) for level in self.levels].index(float(self.point_level))
+
+    def predict(self, call: Any, options: Mapping[str, Any]) -> np.ndarray:
+        return self._process.call(self._key, "predict", call, dict(options))
+
+    def fine_tune(self, data: Any, settings: Mapping[str, Any], seed: int) -> Any:
+        return self._process.call(self._key, "fine_tune", data, dict(settings), int(seed))
+
+    def save_state(self, path: Path) -> None:
+        self._process.call(self._key, "save_state", str(path))
+
+    def load_state(self, path: Path) -> None:
+        self._process.call(self._key, "load_state", str(path))
+
+    def reset(self) -> None:
+        self._process.call(self._key, "reset")
+
+    def release(self) -> None:
+        self._process.drop(self._key)
 
 
 def _created_at() -> str:
@@ -442,11 +541,18 @@ class FoundationModel(BaseModel):
         key = (type(self).__module__, type(self).__qualname__, files, str(device), json.dumps(options, sort_keys=True))
         backend = _LOADED.get(key)
         if backend is None:
-            with offline():
-                backend = self._load_backend(resolved, device, options)
+            if _on_gpu(device):
+                # On a GPU the backend lives in a spawned child (`_device_worker`): this process never initialises CUDA, so
+                # the pools of the models after it still fork.
+                backend = _RemoteBackend(self, resolved, device, options)
+            else:
+                with offline():
+                    backend = self._load_backend(resolved, device, options)
             _LOADED[key] = backend
             while len(_LOADED) > _MAX_LOADED:
-                _LOADED.popitem(last=False)
+                _, gone = _LOADED.popitem(last=False)
+                if isinstance(gone, _RemoteBackend):
+                    gone.release()
         _LOADED.move_to_end(key)
         return backend
 
@@ -626,7 +732,16 @@ class FoundationModel(BaseModel):
         if self.fine_tune_every is None or not state.store:
             return None
         results = Path(state.store.path)
-        return _Checkpoints(results.with_name(results.stem + ".fits"))
+        directory = results.with_name(results.stem + ".fits")
+        earlier = results.with_name(f"{self.name}.fits")  # where versions before b46e87e stored them
+        if earlier != directory and earlier.is_dir():
+            warnings.warn(
+                f"{self.name}: {earlier} holds fine-tunes of an earlier version of the library, which this one doesn't read "
+                f"(it stores them in {directory}, under other keys): they are fine-tuned again; remove {earlier} when done",
+                UserWarning,
+                stacklevel=2,
+            )
+        return _Checkpoints(directory)
 
     def _record_fine_tunes(self, state: Any, store: Optional["_Checkpoints"]) -> None:
         """This run's fine-tunes into the manifest's provenance (`fine_tunes`): the key its checkpoints are stored under (what
@@ -698,6 +813,10 @@ class FoundationModel(BaseModel):
                 if item.missing:
                     dropped[f"missing values of {', '.join(item.missing)}"] += 1
                     continue
+                if not np.isfinite(np.diff(item.target)).any():
+                    # Not two neighbouring values: no change to scale a loss by (t0's is the mean absolute change).
+                    dropped[DROPPED_NO_CHANGE] += 1
+                    continue
                 first_ahead = item.first_step + len(item.target) * step
                 instants = pd.date_range(first_ahead, periods=item.steps_ahead, freq=step)
                 if tz is not None:
@@ -715,7 +834,8 @@ class FoundationModel(BaseModel):
                     )
                 y.setflags(write=False)
                 with_gaps += any(gap[0] for gap in item.gaps.values())
-                items.append(item)
+                # Without what only a listing reads (`late`, which holds the reader): the windows go to a hosting child.
+                items.append(dataclasses.replace(item, late={}))
                 ys.append(y)
         dates = np.array([item.target_day for item in items], dtype="datetime64[D]")
         if len(dates) and dates.max() > np.datetime64(cut_date, "D"):
@@ -729,13 +849,14 @@ class FoundationModel(BaseModel):
             "dropped": dict(sorted(dropped.items())),
         }
         by_data = {reason: n for reason, n in dropped.items() if reason != DROPPED_BEFORE_FRAME}
-        if by_data:
-            shown = "; ".join(f"{n} for {reason}" for reason, n in sorted(by_data.items()))
+        if by_data or with_gaps:
+            shown = "; ".join(f"{n} for {reason}" for reason, n in sorted(by_data.items())) or "none for missing data"
             warnings.warn(
-                f"{self.name}: the fine-tune at {anchor} (horizon {horizon}) keeps {len(items)} of {candidates} windows: "
-                f"dropped {shown}"
-                + (f"; {dropped[DROPPED_BEFORE_FRAME]} start before the frame" if dropped[DROPPED_BEFORE_FRAME] else "")
-                + (f"; {with_gaps} kept hold gaps the backend masks" if with_gaps else ""),
+                f"{self.name}: the fine-tune at {anchor} (horizon {horizon}) keeps {len(items)} of {candidates} windows, "
+                f"{with_gaps} of them with gaps the backend masks: dropped {shown}"
+                + (
+                    f"; {dropped[DROPPED_BEFORE_FRAME]} start before the frame" if dropped[DROPPED_BEFORE_FRAME] else ""
+                ),
                 UserWarning,
                 stacklevel=2,
             )
@@ -818,6 +939,7 @@ class FoundationModel(BaseModel):
 # Why a window of a fine-tune is dropped where no data is to blame: its context starts before the frame's first row.
 DROPPED_BEFORE_FRAME = "a context starting before the frame"
 DROPPED_NO_TARGET = "no target on the target day"
+DROPPED_NO_CHANGE = "a target context without two neighbouring values"
 
 
 class _Checkpoints:
@@ -853,6 +975,11 @@ class _Checkpoints:
         is none, or when what is stored doesn't match, which warns."""
         sidecar = self.directory / f"{self.stem(unit, index, key)}.json"
         if not sidecar.is_file():
+            prefix = f"{unit.anchor.isoformat()}_h{unit.horizon}_s{index}_"
+            others = sorted(self.directory.glob(f"{prefix}*.json")) if self.directory.is_dir() else []
+            if others:
+                keys = ", ".join(other.stem[len(prefix) :] for other in others)
+                self._refit(sidecar, f"is stored under another key ({keys}: other settings, seed, weights or runtime)")
             return None
         try:
             record = json.loads(sidecar.read_text())
@@ -926,6 +1053,8 @@ def prune_fine_tunes(save_dir: Any, name: str, keep_keys: Optional[Sequence[str]
     """Remove from the model `name`'s `<save_dir>/<stem>.fits/` what no current run reads: the stored fine-tunes (sidecar and checkpoint) whose
     key isn't in `keep_keys`, by default the key the model's last run stored under (its manifest's `fine_tunes`), checkpoint
     files no sidecar names, and leftovers of an interrupted write. Returns the paths removed. A t0 checkpoint is about 407 MB.
+    It takes the results' lock (`<stem>.lock`) for as long as it prunes, and refuses (`ResultsLockedError`) while a run of the
+    model holds it.
 
     Without `keep_keys` and with no key in the manifest (no run with a store fine-tuned there yet) it raises rather than
     remove everything."""
@@ -948,6 +1077,21 @@ def prune_fine_tunes(save_dir: Any, name: str, keep_keys: Optional[Sequence[str]
     removed: List[Path] = []
     if not directory.is_dir():
         return removed
+    from ..results.store import ResultsLockedError, _hold_lock, _LockHeld
+
+    try:  # the results store's lock: a run of the model holds it while it writes
+        release = _hold_lock(save_dir / f"{stem}.lock")
+    except _LockHeld:
+        raise ResultsLockedError(
+            f"a run of {name!r} is writing {save_dir} (it holds {stem}.lock): prune its fine-tunes when it is done"
+        ) from None
+    try:
+        return _prune(directory, keep, removed)
+    finally:
+        release()
+
+
+def _prune(directory: Path, keep: set, removed: List[Path]) -> List[Path]:
     named = set()
     for sidecar in sorted(directory.glob("*.json")):
         try:

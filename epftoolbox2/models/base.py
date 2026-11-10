@@ -48,6 +48,7 @@ from ..results.manifest import (
     check_stored_lists,
     manifest_path,
     read_windows,
+    record_pool_start,
     record_skips,
 )
 from ..results.windows import TEST, RunWindows, mask_key
@@ -94,6 +95,7 @@ from .context import (
 )
 from ._worker import (
     pool_context,
+    pool_start_note,
     NOT_PLANNED,
     SKIP_MISSING_TEST_ROW,
     SKIP_NOT_PUBLISHED,
@@ -428,6 +430,8 @@ class _RunState:
     skip_examples: Dict[str, str]
     skip_record: Optional[Callable[[tuple, str], Dict]]
     tasks: List[tuple] = field(default_factory=list)
+    # `_worker.POOL_SPAWN_FOR_CUDA` when the run's pool spawned because CUDA was initialised in this process (`pool_start`).
+    pool_note: Optional[str] = None
 
     def skip(self, task: tuple, outcome: str, example: str, sink: Optional[_Sink]) -> None:
         """Count a task with no forecast under its reason (`outcome` before any ": detail"), in its window too, keep `example` if
@@ -1264,6 +1268,8 @@ class BaseModel(ABC):
         store = state.store
         windows = state.windows
         plan = state.plan
+        if store and state.pool_note:
+            record_pool_start(manifest_path(store.path), state.manifest, state.pool_note)
         if store:
             record_skips(
                 manifest_path(store.path),
@@ -1616,6 +1622,7 @@ class BaseModel(ABC):
         model_cls, model_kwargs = self._worker_model()
 
         mp_context = pool_context()
+        state.pool_note = pool_start_note(mp_context)
         with (
             pool_native_threads(),  # the workers inherit one OpenBLAS thread, so they start none
             ProcessPoolExecutor(

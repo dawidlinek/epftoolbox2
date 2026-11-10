@@ -135,12 +135,14 @@ horizon and each of `seeds` seeds (3), a copy of the **base** weights, never the
   `"d-1"`, the anchor itself under `"published"` with a 13:00 price rule), each read as the forecast issued `horizon` days
   before it; `fine_tune={"window": 365}` keeps the newest 365 days instead of every one from the frame's start (`"expanding"`).
   A window is dropped where its context starts before the frame, where a forecast couldn't be made from it (a known-ahead value
-  missing over its steps ahead, a series with no value in its context) and where its target day has no target; a missing value
-  inside a context is kept, masked by t0 as in a forecast, so one missing hour of the load forecast costs the two windows whose
-  steps ahead need it, not every window whose year-long context holds it. A run warns with each anchor's counts (kept, dropped
-  and why) where data dropped any, and the manifest records them (`fine_tunes`). The research's `t0_ft.py` dropped no window:
-  its DST-resolved data had no missing value. The model raises if a window's target is after the cut, before the trainer runs,
-  and the trainer checks it again.
+  missing over its steps ahead, a series with no value in its context), where its target context has no two neighbouring
+  values (no step-to-step change to scale its loss by) and where its target day has no target; a missing value inside a context
+  is kept, masked by t0 as in a forecast, so one missing hour of the load forecast costs the two windows whose steps ahead need
+  it, not every window whose year-long context holds it. A run warns with each anchor's counts (kept, kept with gaps, dropped
+  and why) where data dropped any or a kept window has a gap, and the manifest records them (`fine_tunes`). The research's
+  `t0_ft.py` dropped no window: its DST-resolved data had no missing value. The model raises if a window's target is after the
+  cut, before the trainer runs, and the trainer checks it again; a training or holdout loss that isn't finite stops the
+  fine-tune with `FloatingPointError` instead of keeping the base weights as its best state.
 - **The recipe** is the research's (`fine_tune`, a dict, merged over these defaults): AdamW at `lr` 1e-5, batches of 16
   windows, at most 400 steps, the last 61 days of windows held out and evaluated every 25 steps, a stop after 4 evaluations
   without a gain and the best state restored, gradients clipped at norm 1. The loss is t0's pinball loss over its five native
@@ -150,8 +152,9 @@ horizon and each of `seeds` seeds (3), a copy of the **base** weights, never the
   the results file) with a sidecar: its sha256, the data end, the best step, the holdout losses, the windows' counts and digests
   of its windows and of everything that decides it, `random_state` and the seed included. A resume or a re-forecast loads it
   instead of fine-tuning again, since GPU fine-tunes are not repeatable (the research's repeats differed by up to 0.16 EUR/MWh).
-  A stored fine-tune that doesn't match (its file gone or changed, another seed, other windows) is fine-tuned again with a
-  warning; a checkpoint is written under a name of its own content before its sidecar names it, so a run stopped anywhere leaves
+  A stored fine-tune that doesn't match (its file gone or changed, another seed, other windows, or one stored under another key,
+  which the warning names) is fine-tuned again with a warning, as is the folder `<name>.fits/` of a version that kept the
+  name's capitals (it is named, not read); a checkpoint is written under a name of its own content before its sidecar names it, so a run stopped anywhere leaves
   the old pair or the new one whole, and a refit removes the checkpoint it replaces. A changed `fine_tune`, `seeds`,
   `fine_tune_every` or `random_state` refuses the resume.
 - **Disk.** A t0-alpha checkpoint is about 407 MB, one per anchor, horizon and seed: yearly fine-tunes with 3 seeds take about
@@ -165,6 +168,8 @@ horizon and each of `seeds` seeds (3), a copy of the **base** weights, never the
   removed = prune_fine_tunes("runs/foundation", "t0_yearly")  # keeps the last run's key, as its manifest records it
   ```
 
+  It takes the results file's lock, so it raises `ResultsLockedError` while a run of the model is writing there.
+
 <Aside type="caution">
 Yearly fine-tunes are the default but untested: the research measured a monthly re-fine-tune against none (1.55 % better on
 DE_LU, 1.7 % on AT, pooled over both markets), not a yearly one. `fine_tune_every="1MS"` is the monthly recipe on one market.
@@ -172,8 +177,8 @@ DE_LU, 1.7 % on AT, pooled over both markets), not a yearly one. `fine_tune_ever
 
 ## CPU and GPU
 
-A foundation model runs in the process that runs the pipeline, one model at a time: on `device="auto"` (CUDA when a matmul runs
-on it, else the CPU), `"cpu"`, `"cuda"` or `"cuda:N"`, with `THREADS_PER_PROCESS` torch threads (default the smaller of 8 and
+A foundation model runs one model at a time, not in a worker pool: on `device="auto"` (CUDA when a matmul runs on it, else the
+CPU), `"cpu"`, `"cuda"` or `"cuda:N"`, with `THREADS_PER_PROCESS` torch threads (default the smaller of 8 and
 the usable CPUs), TF32 off, inside a scope that puts the process's torch settings back afterwards. The backend loads once per
 process from the cached weights. The manifest records and compares the runtime packages, the weights' hashes, the device type,
 dtype, TF32 and the thread count; the GPU's name is recorded and a change only warns.
@@ -182,10 +187,17 @@ Chronos-2 reads at most 8,192 steps: 341 days of hours, 85 days of quarter-hours
 steps by the package; each model's run warns about it, and its manifest records the steps read (`runtime.context_steps`), so
 `context=350` and `context=364` on hours are the same model, and `context=364` on a 15-minute frame reads about 85 days.
 
-A foundation model on a GPU initialises CUDA in the process that runs the pipeline. A process forked from it can't use CUDA, so
-from then on every worker pool of the run (the models after it, an engine group, a torch stack) spawns its workers instead of
-forking them, as on Windows: their start costs a few seconds more, and the classes they run must be importable (defined in a
-module, not in `__main__` or a notebook cell).
+On the CPU the backend runs in the process that runs the pipeline. On a GPU it runs in one spawned process that hosts the GPU
+work, started by the first such model and shared by the ones after it, so the pipeline's process never initialises CUDA and
+the worker pools of the models after it still fork (a process forked from one that has initialised CUDA can't use CUDA). Each
+batch of contexts, each fine-tune's windows and each checkpoint's path pass to it and its forecasts come back, so the numbers
+are the in-process ones; a subclass of a foundation model run on a GPU must be importable there (defined in a module, not in a
+notebook cell). If that host process dies (out of memory on the device), the run raises and the next model starts a new one.
+
+If CUDA is initialised in the pipeline's process anyway (GPU work of your own, or another library's, before the run), every
+worker pool spawns its workers from then on, as on Windows: their start costs a few seconds more, a class or setting changed in
+the session after import doesn't reach them, and a class defined in `__main__` or a notebook cell can't be found. The first such
+pool warns, once per process, and each such run's manifest records it (`pool_start`).
 
 ## Reproducing the research
 

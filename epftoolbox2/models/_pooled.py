@@ -41,6 +41,7 @@ from ._calendar import FitUnit, listed_days, refit_anchor
 from ._engine import run_arguments
 from ._worker import (
     pool_context,
+    pool_start_note,
     SKIP_FIT_ERROR,
     SKIP_MISSING_TEST_PREDICTORS,
     SKIP_MISSING_TEST_ROW,
@@ -654,6 +655,8 @@ def _execute(pooled: PooledModel, states: List[Tuple[str, BaseModel, _RunState]]
         if sys.platform == "win32":
             n_processes = min(n_processes, _WINDOWS_MAX_WORKERS)
         mp_context = pool_context()
+        for _, _, state in states:
+            state.pool_note = pool_start_note(mp_context)
         with ProcessPoolExecutor(
             max_workers=n_processes,
             mp_context=mp_context,

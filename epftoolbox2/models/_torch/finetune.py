@@ -8,7 +8,9 @@ the first step and every `eval_every` steps, a step kept as best when it beats t
 indices)` returns one loss per window, whatever the model (quantile loss divided by the context's scale for t0).
 
 The library asserts the cut: a window whose target date is after `windows.cut` (the newest target the anchor's information
-allows) raises `AssertionError` before any step, so a fine-tune can never train on a target it couldn't know.
+allows) raises `AssertionError` before any step, so a fine-tune can never train on a target it couldn't know. A loss that isn't
+finite, on a training batch or the holdout, raises `FloatingPointError`: a NaN holdout loss would otherwise never beat the
+first one, and the base weights would come back as the "best" state with no word.
 """
 
 import datetime as dt
@@ -138,7 +140,13 @@ def fine_tune(
         with torch.no_grad():
             for start in range(0, len(hold), int(eval_batch_size)):
                 total += float(windows.loss(model, hold[start : start + int(eval_batch_size)]).sum())
-        return total / len(hold)
+        value = total / len(hold)
+        if not math.isfinite(value):
+            raise FloatingPointError(
+                f"fine_tune: the holdout loss is {value}: a window's loss isn't finite (a NaN in its targets or its scale?); "
+                "no state is kept from a step whose loss can't be compared"
+            )
+        return value
 
     history: List[Tuple[int, float]] = []
     with torch.random.fork_rng(devices=devices), torch.enable_grad():
@@ -152,6 +160,11 @@ def fine_tune(
             model.train()
             chosen = train[rng.choice(len(train), batch, replace=False)]
             loss = windows.loss(model, chosen).mean()
+            if not bool(torch.isfinite(loss)):
+                raise FloatingPointError(
+                    f"fine_tune: the training loss of step {step} is {float(loss.detach())} (windows {sorted(chosen.tolist())[:8]}...): "
+                    "a window's loss isn't finite; nothing is trained on it"
+                )
             opt.zero_grad()
             loss.backward()
             if grad_clip is not None:

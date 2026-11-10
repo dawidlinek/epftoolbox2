@@ -1960,6 +1960,13 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
             "kind": "int",
         },
         {
+            "name": "random_state",
+            "description": "Base seed of every fine-tune's seeds",
+            "required": False,
+            "default": 0,
+            "kind": "int",
+        },
+        {
             "name": "fine_tune",
             "description": "Fine-tune settings (lr, max_steps, batch_size, holdout_days, eval_every, patience, grad_clip, window)",
             "required": False,

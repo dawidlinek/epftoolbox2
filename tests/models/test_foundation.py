@@ -8,6 +8,7 @@ and a thousandth of the holdout's (which early stopping reads), plus a small amo
 torch, in the core CI job. The real packages' adapters with tiny random weights are in `test_t0.py` and `test_chronos.py`.
 """
 
+import contextlib
 import dataclasses
 import datetime
 import json
@@ -227,7 +228,7 @@ def run(model, frame, test, horizon=1, information_set=INFO, **kwargs):
 
 
 def by_key(report, name="FakeFM"):
-    return {(r["run_date"], r["hour"], r["horizon"]): r["prediction"] for r in report.refs[name]._results}
+    return {(r["run_date"], r["hour"], r["horizon"]): r["prediction"] for r in report.refs[name].iter_records()}
 
 
 # ---------------------------------------------------------------------------------------------------------------------------
@@ -547,7 +548,10 @@ def test_a_changed_fine_tune_refuses_the_resume(hourly, tmp_path):
         run(tuned("FakeFM", seeds=2), hourly, test, save_dir=tmp_path)
     # Let in anyway, another fine-tune's checkpoint is not this one's: it fine-tunes again, into a file of its own.
     other = tuned("FakeFM", fine_tune={**QUICK, "lr": 1e-4})
-    pipeline(other).run(hourly, *test, horizon=1, save_dir=tmp_path, forecast_only=True, allow_manifest_mismatch=True)
+    with pytest.warns(UserWarning, match="is stored under another key"):
+        pipeline(other).run(
+            hourly, *test, horizon=1, save_dir=tmp_path, forecast_only=True, allow_manifest_mismatch=True
+        )
     assert other._fine_tunes == 1 and len(list((tmp_path / "fakefm.fits").glob("*.ckpt"))) == 2
 
 
@@ -613,7 +617,8 @@ def test_another_random_state_fine_tunes_again_into_a_file_of_its_own(hourly, tm
     for name in ("fakefm.jsonl", "fakefm.manifest.json"):
         (tmp_path / name).unlink()
     other = tuned("FakeFM", random_state=1)
-    run(other, hourly, test, save_dir=tmp_path)
+    with pytest.warns(UserWarning, match=r"is stored under another key \([0-9a-f]{16}"):
+        run(other, hourly, test, save_dir=tmp_path)
     assert other._fine_tunes == 1 and other._checkpoints_loaded == 0
     assert len(list((tmp_path / "fakefm.fits").glob("*.ckpt"))) == 2
     from epftoolbox2.models.foundation import _Checkpoints
@@ -635,7 +640,8 @@ def test_a_missing_value_drops_only_the_windows_the_backend_cant_take_and_says_s
     whole_model, holed_model = tuned("FakeFM"), tuned("FakeFM")
     run(whole_model, hourly, ("2023-06-12", "2023-06-12"))
     with pytest.warns(
-        UserWarning, match=r"keeps (\d+) of (\d+) windows: dropped 2 for missing values of load_forecast"
+        UserWarning,
+        match=r"keeps (\d+) of (\d+) windows, (\d+) of them with gaps the backend masks: dropped 2 for missing",
     ):
         run(holed_model, holed, ("2023-06-12", "2023-06-12"), save_dir=tmp_path)
     (_, whole, _), (_, kept, _) = whole_model._fake.fine_tunes[0], holed_model._fake.fine_tunes[0]
@@ -650,48 +656,68 @@ def test_a_missing_value_drops_only_the_windows_the_backend_cant_take_and_says_s
         run(tuned("FakeFM"), hourly, ("2023-06-12", "2023-06-12"))
 
 
-def test_after_cuda_starts_in_this_process_every_pool_spawns(hourly, monkeypatch):
-    """A foundation model on a GPU initialises CUDA in this process, and a forked child of it can't use CUDA: once
-    `torch.cuda.is_initialized()` (a stand-in here) every pool of the library spawns its workers, as on Windows; before, on
-    Linux, they fork."""
+class CapturePool:
+    """A stand-in for the worker pool that runs its jobs here and records the start method it was given (`contexts`)."""
+
+    contexts: list = []
+
+    def __init__(self, max_workers=None, mp_context=None, initializer=None, initargs=()):
+        from epftoolbox2.models import _worker
+
+        CapturePool.contexts.append(mp_context.get_start_method())
+        _worker._worker_init(*initargs)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        return False
+
+    def submit(self, task, *args):
+        from concurrent.futures import Future
+
+        future = Future()
+        future.set_result(task(*args))
+        return future
+
+    def shutdown(self, wait=True, cancel_futures=False):
+        pass
+
+
+def an_ols_run(frame, save_dir=None):
+    from epftoolbox2.models import OLSModel
+
+    return (
+        ModelPipeline()
+        .add_model(OLSModel(["load_forecast"], 28, name="OLS"))
+        .run(frame, "2023-06-12", "2023-06-12", horizon=1, forecast_only=True, save_dir=save_dir)
+    )
+
+
+def test_after_cuda_starts_in_this_process_every_pool_spawns(hourly, monkeypatch, tmp_path):
+    """The safety net: once `torch.cuda.is_initialized()` in this process (a stand-in here: GPU work that ran outside the
+    library's host process) every pool of the library spawns its workers, as on Windows, warns once per process naming CUDA,
+    and the run's manifest records `pool_start`; before, on Linux, they fork and the manifest says nothing."""
     import types
-    from concurrent.futures import Future
     from pathlib import Path as _Path
 
-    from epftoolbox2.models import OLSModel, _worker
+    from epftoolbox2.models import _worker
 
-    contexts = []
-
-    class Capture:
-        def __init__(self, max_workers=None, mp_context=None, initializer=None, initargs=()):
-            contexts.append(mp_context.get_start_method())
-            _worker._worker_init(*initargs)
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *exc_info):
-            return False
-
-        def submit(self, task, *args):
-            future = Future()
-            future.set_result(task(*args))
-            return future
-
-        def shutdown(self, wait=True, cancel_futures=False):
-            pass
-
-    monkeypatch.setattr("epftoolbox2.models.base.ProcessPoolExecutor", Capture)
-    data = hourly
-    ModelPipeline().add_model(OLSModel(["load_forecast"], 28)).run(
-        data, "2023-06-12", "2023-06-12", horizon=1, forecast_only=True
-    )
+    monkeypatch.setattr("epftoolbox2.models.base.ProcessPoolExecutor", CapturePool)
+    monkeypatch.setattr(CapturePool, "contexts", [])
+    monkeypatch.setattr(_worker, "_CUDA_WARNED", False)
+    an_ols_run(hourly, tmp_path / "before")
+    assert "pool_start" not in json.loads((tmp_path / "before" / "ols.manifest.json").read_text())
     initialised = types.SimpleNamespace(cuda=types.SimpleNamespace(is_initialized=lambda: True))
     monkeypatch.setitem(sys.modules, "torch", initialised)
-    ModelPipeline().add_model(OLSModel(["load_forecast"], 28)).run(
-        data, "2023-06-12", "2023-06-12", horizon=1, forecast_only=True
-    )
-    assert contexts == (["spawn", "spawn"] if _worker._POOLS_SPAWN else ["fork", "spawn"])
+    with pytest.warns(UserWarning, match="CUDA is initialised in this process"):
+        an_ols_run(hourly, tmp_path / "after")
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UserWarning)  # once per process
+        an_ols_run(hourly)
+    assert CapturePool.contexts == (["spawn"] * 3 if _worker._POOLS_SPAWN else ["fork", "spawn", "spawn"])
+    manifest = json.loads((tmp_path / "after" / "ols.manifest.json").read_text())
+    assert manifest["pool_start"] == _worker.POOL_SPAWN_FOR_CUDA
     package = _Path(_worker.__file__).parents[1]
     forked = [p for p in package.rglob("*.py") if 'get_context("fork"' in p.read_text()]
     assert forked == [], f"a pool that forks whatever CUDA did: {forked}"
@@ -756,7 +782,10 @@ def test_prune_keeps_the_last_run_s_checkpoints_and_removes_the_rest(hourly, tmp
     path = suite.results(tmp_path, "FakeFM")
     path.write_text("".join(f"{line}\n" for line in suite.lines(path)[::2]))  # half gone: the second run has work
     second = tuned("FakeFM", fine_tune={**QUICK, "lr": 1e-4})
-    pipeline(second).run(hourly, *test, horizon=1, save_dir=tmp_path, forecast_only=True, allow_manifest_mismatch=True)
+    with pytest.warns(UserWarning, match="is stored under another key"):
+        pipeline(second).run(
+            hourly, *test, horizon=1, save_dir=tmp_path, forecast_only=True, allow_manifest_mismatch=True
+        )
     fits = tmp_path / "fakefm.fits"
     assert len(list(fits.glob("*.ckpt"))) == 2
     (fits / "orphan.0123456789abcdef.ckpt").write_text("{}")
@@ -837,3 +866,116 @@ def test_the_tui_builds_a_zero_shot_t0(monkeypatch):
             lambda label, default="", value=answer: type("A", (), {"ask": lambda self: value})(),
         )
         assert tui._ask_field(field) == expected, answer
+
+
+# ---------------------------------------------------------------------------------------------------------------------------
+# The second review: a context without a change, GPU work in a child, another key, prune under the lock, windows with gaps
+# ---------------------------------------------------------------------------------------------------------------------------
+
+
+def test_a_window_whose_target_context_has_no_change_is_dropped_and_counted(hourly, tmp_path):
+    """The price starts at the last hour of a day (the load forecast earlier): the window whose context holds that one value
+    has no step-to-step change to scale t0's loss by, so it is dropped, counted and warned about, not given a NaN scale."""
+    late = hourly.copy()
+    late.loc[late.index < pd.Timestamp("2023-03-01 23:00", tz=ZONE), "price"] = np.nan
+    model = FakeFM(context=CONTEXT, fine_tune_every="7D", fine_tune=QUICK)
+    with pytest.warns(UserWarning, match="1 for a target context without two neighbouring values"):
+        run(model, late, ("2023-06-12", "2023-06-12"), save_dir=tmp_path)
+    counts = json.loads((tmp_path / "fakefm.manifest.json").read_text())["fine_tunes"]["windows"]["2023-06-12_h1"]
+    assert counts["dropped"]["a target context without two neighbouring values"] == 1
+
+
+def test_fine_tune_raises_on_a_loss_that_isnt_finite():
+    """A window whose loss is NaN, in a training batch or in the holdout: the trainer raises instead of keeping the base weights
+    as its best state with no word."""
+    torch = pytest.importorskip("torch")
+    from epftoolbox2.models._torch.finetune import FineTuneWindows, fine_tune
+
+    dates = np.array([np.datetime64("2023-01-01") + np.timedelta64(i, "D") for i in range(40)])
+    for bad in ("training", "holdout"):
+        model = torch.nn.Linear(1, 1)
+        bad_rows = set(range(0, 10)) if bad == "training" else set(range(35, 40))
+
+        def loss(module, indices, bad_rows=bad_rows):
+            out = module(torch.ones(len(indices), 1)).sum(dim=1) ** 2
+            mask = torch.tensor([float("nan") if int(i) in bad_rows else 0.0 for i in indices])
+            return out + mask
+
+        windows = FineTuneWindows(dates=dates, cut=dates.max(), loss=loss)
+        with pytest.raises(FloatingPointError, match=f"the {bad} loss"):
+            fine_tune(model, windows, max_steps=5, batch_size=30, holdout_days=5, eval_every=1, seed=0)
+
+
+class OnGpu(FakeFM):
+    """The fake on a "GPU": its backend is hosted in the spawned child (`_device_worker`), where building it stands in for
+    initialising CUDA (a torch whose `cuda.is_initialized()` is True there)."""
+
+    def _backend(self, device):  # the base's process-wide cache and hosting, unlike the fake's one per model
+        return FoundationModel._backend(self, device)
+
+    @contextlib.contextmanager
+    def _scope(self):
+        yield "cuda:0"
+
+    def _load_backend(self, resolved, device, options):
+        import types
+
+        sys.modules["torch"] = types.SimpleNamespace(cuda=types.SimpleNamespace(is_initialized=lambda: True))
+        return PersistenceBackend(self)
+
+
+def test_gpu_work_runs_in_a_spawned_child_and_this_process_keeps_forking(hourly, monkeypatch, tmp_path):
+    """A model on a GPU hosts its backend in a spawned child: zero-shot forecasts and a stored fine-tune are the in-process
+    fake's, the backend's process is another, this process never initialises CUDA (the stand-in is the child's), and the pool of
+    a model after it still forks, with nothing in its manifest."""
+    import os
+
+    from epftoolbox2.models import _worker, foundation
+
+    test = ("2023-06-12", "2023-06-13")
+    here = by_key(run(make("FakeFM"), hourly, test))
+    there = OnGpu(name="FakeFM")
+    assert by_key(run(there, hourly, test)) == here
+    remote = there._backend("cuda:0")
+    assert isinstance(remote, foundation._RemoteBackend) and remote.pid != os.getpid()
+    tuned_here = by_key(run(tuned("FakeFM"), hourly, test))
+    tuned_there = OnGpu(name="FakeFM", fine_tune_every="7D", fine_tune=QUICK)
+    assert by_key(run(tuned_there, hourly, test, save_dir=tmp_path)) == tuned_here
+    assert tuned_there._fine_tunes == 1 and len(list((tmp_path / "fakefm.fits").glob("*.ckpt"))) == 1
+    assert not _worker.cuda_initialised()
+    monkeypatch.setattr("epftoolbox2.models.base.ProcessPoolExecutor", CapturePool)
+    monkeypatch.setattr(CapturePool, "contexts", [])
+    an_ols_run(hourly, tmp_path / "after")
+    assert CapturePool.contexts == (["spawn"] if _worker._POOLS_SPAWN else ["fork"])
+    assert "pool_start" not in json.loads((tmp_path / "after" / "ols.manifest.json").read_text())
+
+
+def test_the_fine_tunes_of_an_earlier_version_s_folder_are_named(hourly, tmp_path):
+    """A model named with capitals stored its fine-tunes in `<name>.fits/` before this version (`<stem>.fits/` now): the run
+    warns, naming both folders."""
+    (tmp_path / "FakeFM.fits").mkdir()
+    with pytest.warns(UserWarning, match="holds fine-tunes of an earlier version"):
+        run(tuned("FakeFM"), hourly, ("2023-06-12", "2023-06-12"), save_dir=tmp_path)
+
+
+def test_prune_refuses_while_a_run_holds_the_results_lock(hourly, tmp_path):
+    from epftoolbox2.models.foundation import prune_fine_tunes
+    from epftoolbox2.results.store import ResultsLockedError, _hold_lock
+
+    run(tuned("FakeFM"), hourly, ("2023-06-12", "2023-06-12"), save_dir=tmp_path)
+    release = _hold_lock(tmp_path / "fakefm.lock")
+    try:
+        with pytest.raises(ResultsLockedError, match="is writing"):
+            prune_fine_tunes(tmp_path, "FakeFM")
+    finally:
+        release()
+    assert prune_fine_tunes(tmp_path, "FakeFM") == []
+
+
+def test_windows_kept_with_gaps_warn_though_none_is_dropped(hourly):
+    """One missing price hour: the windows whose contexts hold it are kept with the gap masked and none is dropped for data;
+    the run says how many."""
+    holed = hourly.copy()
+    holed.loc[holed.index == pd.Timestamp("2023-05-20 03:00", tz=ZONE), "price"] = np.nan
+    with pytest.warns(UserWarning, match=r"(\d+) of them with gaps the backend masks: dropped none for missing data"):
+        run(tuned("FakeFM"), holed, ("2023-06-12", "2023-06-12"))
