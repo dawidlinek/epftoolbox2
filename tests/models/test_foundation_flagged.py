@@ -574,6 +574,24 @@ def test_importing_or_building_the_families_imports_no_model_package(tmp_path):
         assert result.returncode == 0 and attempted == [package], (result.stderr, attempted)
 
 
+@pytest.mark.parametrize("version", [(3, 14), (3, 15), (3, 13), (3, 11)])
+def test_patchtst_fm_s_pre_flight_says_it_needs_python_below_3_14(version, monkeypatch):
+    """granite-tsfm installs on Python < 3.14 only, so on 3.14 and later `[patchtst-fm]` installs nothing: the pre-flight says
+    which Python it needs instead of naming the extra; below 3.14 it names the extra."""
+    import epftoolbox2.models.patchtst_fm as module
+
+    monkeypatch.setattr(module.sys, "version_info", version)
+    monkeypatch.setattr(_cards, "has_extra", lambda name: name != "patchtst-fm")
+    (problem,) = [p for p in PatchTSTFMModel()._preflight({}) if p.kind == "extra"]
+    if version >= (3, 14):
+        assert "needs Python 3.13 or older" in problem.message and "granite-tsfm" in problem.message, problem.message
+        assert "pip install 'epftoolbox2[patchtst-fm]'" in problem.message  # in a Python 3.11-3.13 environment
+        assert "3.11-3.13" in problem.message
+    else:
+        assert problem.message.endswith("pip install 'epftoolbox2[patchtst-fm]'"), problem.message
+    assert problem.extra == "patchtst-fm"
+
+
 @pytest.mark.filterwarnings("ignore:.*not the reference weights")
 @pytest.mark.parametrize("family", [PatchTSTFMModel, TimestralModel, TimesFMModel], ids=lambda cls: cls.__name__)
 def test_the_pre_flight_names_the_family_s_extra(hourly, monkeypatch, tmp_path, family):

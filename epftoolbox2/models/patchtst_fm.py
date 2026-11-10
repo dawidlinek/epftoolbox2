@@ -10,9 +10,10 @@ PatchTSTFMModel`.
 
 from __future__ import annotations
 
+import sys
 import warnings
 from datetime import date
-from typing import Any, Dict, Mapping, Optional
+from typing import Any, Dict, List, Mapping, Optional
 
 from ._calendar import periods_per_day
 from ._cards import ModelCard, WeightsRef
@@ -123,6 +124,26 @@ class PatchTSTFMModel(FoundationModel):
                 stacklevel=stacklevel,
             )
         return expanded
+
+    def _preflight(self, seen: Optional[Dict] = None) -> List[Any]:
+        """The card's checks; where the extra is missing on Python 3.14 or later, the problem says that granite-tsfm needs 3.13
+        or older (the extra installs nothing there) instead of naming the extra alone."""
+        problems = super()._preflight(seen)
+        if sys.version_info >= (3, 14):
+            here = f"{sys.version_info[0]}.{sys.version_info[1]}"
+            problems = [
+                problem._replace(
+                    message=(
+                        f"needs Python 3.13 or older: granite-tsfm, which PatchTST-FM runs on, installs only there, so "
+                        f"[patchtst-fm] installs nothing on Python {here}: use a Python 3.11-3.13 environment and pip install "
+                        "'epftoolbox2[patchtst-fm]' there"
+                    )
+                )
+                if problem.kind == "extra"
+                else problem
+                for problem in problems
+            ]
+        return problems
 
     def _runtime_fields(self) -> Dict[str, Any]:
         """FoundationModel's, and on a CUDA device the package's bfloat16 autocast (compared on resume)."""
