@@ -104,6 +104,7 @@ A task (period × horizon × run day) that cannot give a forecast is skipped and
 | `no_matching_days` | A [`train_on="matching"` list](/epftoolbox2/model-pipeline/predictor-functions/#training-only-on-the-days-with-the-same-list): no past day in the window got this list |
 | `no_finite_training_rows` | Every training row has a NaN predictor or target |
 | `fit_error` | The model raised `ValueError` (scikit-learn does this on degenerate input) |
+| `check_failed` | With [checks before export](/epftoolbox2/model-pipeline/checks/): a forecast of a target day that failed one; `detail` says which |
 
 A shortfall is logged as a warning when the model runs, and a model that produces nothing raises. Any other exception inside a task stops the run (results already written to `save_dir` are kept, so a rerun resumes).
 

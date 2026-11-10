@@ -67,11 +67,13 @@ Every record ends with four keys, after the ones before them, which keep their o
 
 - `status`: `"ok"` for a forecast, the [skip reason](/epftoolbox2/model-pipeline/results/#forecast-counts) for a key without one
   (`missing_test_predictors`, `missing_test_row`, `not_published`, `too_few_rows`, `no_finite_training_rows`, `no_matching_days`,
-  `fit_error`).
+  `fit_error`, and with [checks before export](/epftoolbox2/model-pipeline/checks/) `check_failed`).
 - `list_hash`: a hash of the forecast's predictor list and its training rule, for a fixed list the one a
   [predictor function](/epftoolbox2/model-pipeline/predictor-functions/#results) returning that list gets.
 - `refit_anchor`: the date of the fit the forecast came from, its own `run_date` without `refit`.
-- `revision`: 1 for every record a backtest writes.
+- `revision`: 1 for every record a backtest writes, but for a key a [check](/epftoolbox2/model-pipeline/checks/#in-backtests)
+  overruled on file: its `check_failed` record is one revision above the forecast, and what is written for the key later has its
+  revision.
 
 A skip record has the key fields, `prediction` null, `actual` the target of the row the forecast would have been issued from (null
 when there is no such row), `coefficients` empty, the four keys, and `detail` where the reason has one (`"window 56"`: the member of a
