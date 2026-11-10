@@ -13,10 +13,12 @@ such as the TSO load forecast) and `past` (known up to now, read over the contex
 model's quantiles. `T0Model` is zero-shot or fine-tuned from the base weights on a calendar (`fine_tune_every`, yearly by
 default); `ChronosModel` is zero-shot. Both share the base class `FoundationModel`, which more families build on.
 
-In the research behind this library (`recent` DE_LU and AT, test year 2025-10 to 2026-09, issued at 11:45 on the day before),
+In the research behind this library (`recent` DE_LU and AT, test year 2025-10 to 2026-09, issued at 11:45 the day before the
+target day),
 zero-shot t0-alpha with the load forecast and a 364-day context had a test MAE of 20.15 EUR/MWh on DE_LU (LEAR's window average
 20.89), a monthly re-fine-tune of it over three seeds 18.96 and 16.33 on DE_LU and AT, and Chronos-2 with a 182-day context 20.56
-and 17.33. These models are as good as a well-tuned LEAR alone and add the most inside an ensemble.
+and 17.33. Alone they are about as good as LEAR's window average (17.78 on AT); the fine-tuned t0 is a member of the research's
+best clean ensembles.
 
 ## Installing
 
