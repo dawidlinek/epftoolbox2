@@ -46,7 +46,6 @@ import hashlib
 import inspect
 import json
 import math
-import multiprocessing
 import os
 import sys
 import threading
@@ -66,6 +65,8 @@ from ...results.store import StoreWriter
 from .._calendar import resolve_horizons
 from .._engine import _BASE_READERS, _Bar, _close, _close_writer, _release, engine_chunks, engine_limits, mask_readers
 from .._worker import (
+    pool_context,
+    pool_start_note,
     _POOLS_SPAWN,
     TaskFailed,
     TaskInputs,
@@ -452,7 +453,9 @@ def _run_chunk(
         n_processes = min(n_processes, _WINDOWS_MAX_WORKERS)
     refit = first._refit_block is not None
 
-    mp_context = multiprocessing.get_context("fork" if sys.platform != "win32" else "spawn")
+    mp_context = pool_context()
+    for _, state in pending:
+        state.pool_note = pool_start_note(mp_context)
     with (
         pool_native_threads(),  # the workers inherit one OpenBLAS thread, so they start none
         ProcessPoolExecutor(

@@ -5,10 +5,12 @@ import contextvars
 import datetime
 import hashlib
 import math
+import multiprocessing
 import os
 import sys
 import threading
 import traceback
+import warnings
 
 import numpy as np
 from threadpoolctl import ThreadpoolController
@@ -62,6 +64,61 @@ _HELD_COUNTS: List[Tuple[Any, int]] = []  # (threadpoolctl library controller, t
 _HELD_ENV: Dict[str, Optional[str]] = {}  # the thread variables as they were, under spawn
 # Whether the pools spawn their workers rather than fork them (`BaseModel._run_tasks`, `_engine._run_chunk`).
 _POOLS_SPAWN = sys.platform == "win32"
+
+
+def cuda_initialised() -> bool:
+    """Whether this process has initialised CUDA (a foundation model, or any GPU work, run in it): torch imported and
+    `torch.cuda.is_initialized()`. Asking imports nothing."""
+    torch = sys.modules.get("torch")
+    try:
+        return bool(torch.cuda.is_initialized()) if torch is not None else False
+    except Exception:
+        return False
+
+
+def pools_spawn() -> bool:
+    """Whether a worker pool started now spawns its workers rather than forking them: on Windows (`_POOLS_SPAWN`), and wherever
+    this process has initialised CUDA (`cuda_initialised`), since a forked child of such a process can't use CUDA ("Cannot
+    re-initialize CUDA in forked subprocess") and forking it is unsafe anyway. The library's own GPU work runs in a spawned
+    child (`_device_worker`) and never makes it so: this is the safety net for CUDA initialised here by anything else."""
+    return _POOLS_SPAWN or cuda_initialised()
+
+
+# What a manifest's provenance records (`pool_start`) of a run whose pool spawned because CUDA was initialised in this process.
+POOL_SPAWN_FOR_CUDA = "spawn: CUDA was initialised in the process that ran the pipeline"
+_CUDA_WARNED = False
+
+
+def pool_context() -> Any:
+    """The multiprocessing context of a worker pool started now (`pools_spawn`): every pool of the library starts from it. The
+    first pool that spawns because of CUDA warns, once per process."""
+    global _CUDA_WARNED
+    if not _POOLS_SPAWN and cuda_initialised():
+        if not _CUDA_WARNED:
+            _CUDA_WARNED = True
+            warnings.warn(
+                "CUDA is initialised in this process (GPU work ran in it, outside the library's GPU host process), so its "
+                "worker pools now spawn their workers instead of forking them: a class or setting changed in this session after "
+                "import doesn't reach them, a class defined in __main__ or a notebook cell can't be found (BrokenProcessPool), "
+                "and each such run's manifest records pool_start",
+                UserWarning,
+                stacklevel=3,
+            )
+        return multiprocessing.get_context("spawn")
+    return multiprocessing.get_context("spawn" if _POOLS_SPAWN else "fork")
+
+
+def platform_start_method() -> str:
+    """How this platform's pools start their workers: "spawn" on Windows, else "fork"."""
+    return "spawn" if _POOLS_SPAWN else "fork"
+
+
+def pool_start_note(context: Any) -> str:
+    """How a pool of this context starts, as a manifest lists it (`pool_start`): `POOL_SPAWN_FOR_CUDA` for one that spawns
+    where pools fork (CUDA in this process), else its start method."""
+    method = context.get_start_method()
+    return POOL_SPAWN_FOR_CUDA if method == "spawn" and not _POOLS_SPAWN else method
+
 
 # Reasons a task produces no forecast without being an error. They are counted per model and reported.
 SKIP_TOO_FEW_ROWS = "too_few_rows"
@@ -192,7 +249,7 @@ def _hold_native_threads() -> None:
             if count != NATIVE_THREADS_PER_TASK:
                 lib.set_num_threads(NATIVE_THREADS_PER_TASK)
                 _HELD_COUNTS.append((lib, count))
-    if _POOLS_SPAWN:
+    if pools_spawn():
         for name in NATIVE_THREAD_ENV_VARS:
             _HELD_ENV[name] = os.environ.get(name)
             os.environ[name] = str(NATIVE_THREADS_PER_TASK)

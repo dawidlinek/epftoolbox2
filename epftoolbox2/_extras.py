@@ -16,6 +16,8 @@ EXTRAS: Dict[str, Tuple[str, ...]] = {
     "xgboost": ("xgboost",),
     "catboost": ("catboost",),
     "tune": ("optuna",),
+    "t0": ("t0", "torch", "safetensors"),
+    "chronos": ("chronos", "torch", "transformers"),
 }
 
 

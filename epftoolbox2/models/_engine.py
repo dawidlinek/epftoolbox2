@@ -26,7 +26,6 @@ other model can move by a bit; its manifest records `fit_path` (compared on resu
 import datetime
 import gc
 import inspect
-import multiprocessing
 import os
 import sys
 import warnings
@@ -42,7 +41,7 @@ from ..results.ref import ModelResultRef
 from ..results.store import StoreWriter
 from ._calendar import resolve_horizons
 from ._engine_worker import EngineCounts, EngineTaskFailed, _engine_init, fit_path_of, run_job, tolerance_of
-from ._worker import pool_native_threads
+from ._worker import pool_context, pool_native_threads, pool_start_note
 from .base import (
     _FRAME_READERS,
     _MASK_READERS,
@@ -343,7 +342,9 @@ def _run_chunk(prepared: List[Tuple[BaseModel, _RunState]], bar: _Bar, check: bo
         n_processes = min(n_processes, _WINDOWS_MAX_WORKERS)
     refit = first._refit_block is not None
 
-    mp_context = multiprocessing.get_context("fork" if sys.platform != "win32" else "spawn")
+    mp_context = pool_context()
+    for _, state in pending:
+        state.pool_note = pool_start_note(mp_context)
     with (
         pool_native_threads(),  # the workers inherit one OpenBLAS thread, so they start none
         ProcessPoolExecutor(

@@ -36,6 +36,7 @@ console = Console()
 #   "window"       – a training window: days, "expanding", or a comma-separated list of them (e.g. "56,84,728,expanding")
 #   "json"         – free text parsed as JSON → dict/list (e.g. {"price": [-500, 4000]})
 #   "bounds"       – "low,high", either side empty for none (e.g. "0,1.05" or ",100") → (low, high), empty for None
+# An optional flag "empty_is_none": True on a text field reads a cleared answer or "none" as None (not the default).
 
 
 # The training settings every network shares (TorchModel and its presets), after each class's own fields.
@@ -1919,6 +1920,142 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
         },
         *_row_target_fields(),
     ],
+    # Foundation models (step 6i): pretrained sequence models of the target's history; weights from `epf weights fetch`.
+    "T0Model": [
+        {"name": "name", "description": "Model display name", "required": False, "default": "t0", "kind": "text"},
+        {
+            "name": "context",
+            "description": "Local days of the target's history each forecast reads (T = days x periods per day steps)",
+            "required": False,
+            "default": 364,
+            "kind": "int",
+        },
+        {
+            "name": "known_ahead",
+            "description": "Base columns known through the target day (e.g. load_forecast), read over context and steps ahead",
+            "required": False,
+            "default": None,
+            "kind": "column_select",
+        },
+        {
+            "name": "past",
+            "description": "Base columns read over the context only, NaN after their newest known step",
+            "required": False,
+            "default": None,
+            "kind": "column_select",
+        },
+        {
+            "name": "fine_tune_every",
+            "description": "Fine-tune calendar: 12MS yearly, 1MS monthly; clear it or type none for zero-shot",
+            "required": False,
+            "default": "12MS",
+            "kind": "text",
+            "empty_is_none": True,
+        },
+        {
+            "name": "seeds",
+            "description": "Fine-tunes per anchor, their medians averaged",
+            "required": False,
+            "default": 3,
+            "kind": "int",
+        },
+        {
+            "name": "random_state",
+            "description": "Base seed of every fine-tune's seeds",
+            "required": False,
+            "default": 0,
+            "kind": "int",
+        },
+        {
+            "name": "fine_tune",
+            "description": "Fine-tune settings (lr, max_steps, batch_size, holdout_days, eval_every, patience, grad_clip, window)",
+            "required": False,
+            "default": None,
+            "kind": "json",
+        },
+        {
+            "name": "batch_size",
+            "description": "Items per backend call (padded)",
+            "required": False,
+            "default": 64,
+            "kind": "int",
+        },
+        {
+            "name": "device",
+            "description": "auto (CUDA if a matmul runs on it, else the CPU), cpu, cuda or cuda:N",
+            "required": False,
+            "default": "auto",
+            "kind": "text",
+        },
+        {
+            "name": "weights",
+            "description": "Weights file or directory used as given; empty for the card's (epf weights fetch)",
+            "required": False,
+            "default": None,
+            "kind": "text",
+        },
+        {
+            "name": "newest_target",
+            "description": "Where the target's context ends: d-1, or the newest step published by the issue time",
+            "required": False,
+            "default": "d-1",
+            "kind": "select",
+            "choices": ["d-1", "published"],
+        },
+    ],
+    "ChronosModel": [
+        {"name": "name", "description": "Model display name", "required": False, "default": "chronos2", "kind": "text"},
+        {
+            "name": "context",
+            "description": "Local days of the target's history each forecast reads (T = days x periods per day steps)",
+            "required": False,
+            "default": 364,
+            "kind": "int",
+        },
+        {
+            "name": "known_ahead",
+            "description": "Base columns known through the target day (e.g. load_forecast), read over context and steps ahead",
+            "required": False,
+            "default": None,
+            "kind": "column_select",
+        },
+        {
+            "name": "past",
+            "description": "Base columns read over the context only, NaN after their newest known step",
+            "required": False,
+            "default": None,
+            "kind": "column_select",
+        },
+        {
+            "name": "batch_size",
+            "description": "Items per backend call (padded)",
+            "required": False,
+            "default": 64,
+            "kind": "int",
+        },
+        {
+            "name": "device",
+            "description": "auto (CUDA if a matmul runs on it, else the CPU), cpu, cuda or cuda:N",
+            "required": False,
+            "default": "auto",
+            "kind": "text",
+        },
+        {
+            "name": "weights",
+            "description": "Weights file or directory used as given; empty for the card's (epf weights fetch)",
+            "required": False,
+            "default": None,
+            "kind": "text",
+        },
+        {
+            "name": "newest_target",
+            "description": "Where the target's context ends: d-1, or the newest step published by the issue time",
+            "required": False,
+            "default": "d-1",
+            "kind": "select",
+            "choices": ["d-1", "published"],
+        },
+    ],
     "MAEEvaluator": [],
     "RMSEEvaluator": [],
     "rMAEEvaluator": [
@@ -2234,6 +2371,9 @@ def _ask_field(field: dict, available_columns: Optional[list[str]] = None) -> An
         _abort()
     raw = raw.strip()
 
+    if field.get("empty_is_none") and raw.lower() in ("", "none", "null"):
+        return None  # a cleared answer, or "none": the parameter's None (T0Model's fine_tune_every: zero-shot)
+
     if not raw:
         if required:
             console.print("[red]This field is required.[/red]")
@@ -2383,6 +2523,8 @@ _MODELS = [
     "MLPDailyModel",
     "MLPHourlyModel",
     "TorchModel",
+    "T0Model",
+    "ChronosModel",
 ]
 # Not offered: `PooledModel` (registered in `COMPONENT_REGISTRY`, saved and loaded from YAML) fits over the frames of
 # `ModelPipeline.run(data={zone: frame})`, and the wizard builds and runs a pipeline on one CSV. `ResidualModel` holds two

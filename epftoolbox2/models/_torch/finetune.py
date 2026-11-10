@@ -8,7 +8,10 @@ the first step and every `eval_every` steps, a step kept as best when it beats t
 indices)` returns one loss per window, whatever the model (quantile loss divided by the context's scale for t0).
 
 The library asserts the cut: a window whose target date is after `windows.cut` (the newest target the anchor's information
-allows) raises `AssertionError` before any step, so a fine-tune can never train on a target it couldn't know.
+allows) raises `AssertionError` before any step, so a fine-tune can never train on a target it couldn't know. A loss that isn't
+finite, on a training batch or the holdout, raises `_fm.NonFiniteLoss` (a `FloatingPointError`): a NaN holdout loss would
+otherwise never beat the first one, and the base weights would come back as the "best" state with no word. It says "training
+diverged" where the weights are no longer finite after a step, else names the windows whose own loss isn't finite.
 """
 
 import datetime as dt
@@ -19,6 +22,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 
 from ..._extras import MissingExtraError
+from .._fm import NonFiniteLoss
 
 try:
     import torch
@@ -87,6 +91,24 @@ def split_holdout(dates: Sequence[Any], holdout_days: int) -> Tuple[np.ndarray, 
     return np.flatnonzero(~hold), np.flatnonzero(hold), end
 
 
+def _non_finite(model: Any, where: str, step: int, value: float, culprits: Sequence[int]) -> NonFiniteLoss:
+    """The error of a loss that isn't finite: the training diverged where the weights no longer are (after a step), else the
+    windows whose own loss isn't (positions in `windows`) are to blame, their targets or their context's scale."""
+    diverged = step > 0 and any(not bool(torch.isfinite(p).all()) for p in model.parameters())
+    named = sorted(int(i) for i in culprits)
+    if diverged:
+        message = (
+            f"fine_tune: training diverged: the weights are no longer finite after step {step - 1 if where == 'training' else step} "
+            f"(the {where} loss of step {step} is {value}); lower lr or clip the gradients (grad_clip)"
+        )
+    else:
+        message = (
+            f"fine_tune: the {where} loss of step {step} is {value} with finite weights: the loss of the windows at "
+            f"{named[:8]}{' and more' if len(named) > 8 else ''} isn't finite (a NaN in their targets or their context's scale)"
+        )
+    return NonFiniteLoss(message, where=where, step=step, windows=named, diverged=diverged)
+
+
 def fine_tune(
     model: "torch.nn.Module",
     windows: FineTuneWindows,
@@ -132,26 +154,39 @@ def fine_tune(
     rng = np.random.default_rng(int(seed))
     batch = min(int(batch_size), len(train))
 
-    def holdout_loss() -> float:
+    def holdout_loss(step: int) -> float:
         model.eval()
         total = 0.0
+        culprits: List[int] = []
         with torch.no_grad():
             for start in range(0, len(hold), int(eval_batch_size)):
-                total += float(windows.loss(model, hold[start : start + int(eval_batch_size)]).sum())
-        return total / len(hold)
+                chunk = hold[start : start + int(eval_batch_size)]
+                values = windows.loss(model, chunk)
+                part = float(values.sum())
+                total += part
+                if not math.isfinite(part):
+                    culprits.extend(chunk[~torch.isfinite(values).cpu().numpy()].tolist())
+        value = total / len(hold)
+        if not math.isfinite(value):
+            raise _non_finite(model, "holdout", step, value, culprits)
+        return value
 
     history: List[Tuple[int, float]] = []
     with torch.random.fork_rng(devices=devices), torch.enable_grad():
         torch.manual_seed(int(seed))
         opt = torch.optim.AdamW(params, lr=float(lr), weight_decay=float(weight_decay))
-        base = holdout_loss()
+        base = holdout_loss(0)
         history.append((0, base))
         best, best_step, bad, step = base, 0, 0, 0
         best_state = {k: v.detach().clone() for k, v in model.state_dict().items()}
         for step in range(1, int(max_steps) + 1):
             model.train()
             chosen = train[rng.choice(len(train), batch, replace=False)]
-            loss = windows.loss(model, chosen).mean()
+            per_window = windows.loss(model, chosen)
+            loss = per_window.mean()
+            if not bool(torch.isfinite(loss)):
+                culprits = chosen[~torch.isfinite(per_window.detach()).cpu().numpy()].tolist()
+                raise _non_finite(model, "training", step, float(loss.detach()), culprits)
             opt.zero_grad()
             loss.backward()
             if grad_clip is not None:
@@ -159,7 +194,7 @@ def fine_tune(
             opt.step()
             if step % int(eval_every):
                 continue
-            h = holdout_loss()
+            h = holdout_loss(step)
             history.append((step, h))
             if h < best - float(min_delta):
                 best, best_step, bad = h, step, 0

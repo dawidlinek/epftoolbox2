@@ -162,6 +162,18 @@ _PROVENANCE_FIELDS += ("engine_check",)
 # with the same calls trained alone (calls, how many differed, how many raised alone and weren't compared, the largest
 # absolute difference), in the last such run.
 _PROVENANCE_FIELDS += ("stack_check",)
+# `fine_tunes`: a foundation model's fine-tunes (`models.foundation`): the key its checkpoints in `<name>.fits/` are stored
+# under (what `prune_fine_tunes` keeps), how many the last run ran and loaded, and each anchor's windows, kept and dropped by
+# reason, merged over the runs of the results file.
+_PROVENANCE_FIELDS += ("fine_tunes",)
+# `pool_start`: the start methods of the worker pools the file's records were made under, in the order the runs first used
+# them, where any wasn't the platform's way: "spawn: CUDA was initialised ..." where pools fork (`models._worker.pool_context`'s
+# safety net), and "fork" for the runs before or after it that forked. Carried over on resume.
+_PROVENANCE_FIELDS += ("pool_start",)
+# `gpu_host`: where a foundation model's backend ran in the spawned GPU host process (`models._device_worker`), what the last
+# such run ran with there: {"start": "spawn", "threads": the torch threads it really used, "torch_flags": this process's
+# process-wide torch flags it was given}.
+_PROVENANCE_FIELDS += ("gpu_host",)
 # `card`: a carded family's licence, corpus, runtime pins and weights reference, with the contamination verdict of each window
 # (`models._cards.manifest_fields`): what the model is under, which a new release may reword without changing a forecast.
 _PROVENANCE_FIELDS += ("card",)
@@ -396,6 +408,15 @@ class Manifest:
     # With `TORCH_STACKS=check`, that run's sample of a torch model's stacked calls also trained alone
     # (`models._torch.groups`): {"calls", "differing", "failed", "max_abs"}; None (and no key) otherwise. Never compared.
     stack_check: Optional[Dict[str, Any]] = None
+    # A foundation model's fine-tunes (`record_fine_tunes`): {"key", "fine_tuned", "loaded", "windows": {"<anchor>_h<h>":
+    # {"candidates", "kept", "with_gaps", "dropped": {reason: n}}}}; None (and no key) otherwise. Never compared.
+    fine_tunes: Optional[Dict[str, Any]] = None
+    # The start methods of the pools the file's records were made under, where any wasn't the platform's
+    # (`record_pool_start`); None (and no key) where every run's was. Never compared.
+    pool_start: Optional[List[str]] = None
+    # What a foundation model's last run in the GPU host process ran with there (`record_gpu_host`); None (and no key)
+    # otherwise. Never compared.
+    gpu_host: Optional[Dict[str, Any]] = None
     # A `PooledModel`'s zone: {"zones", "over", "zone_feature", "missing", "data": {other zone: its data_columns_hash}}; None (and
     # no key) otherwise. Compared on resume.
     pooled: Optional[Dict[str, Any]] = None
@@ -503,6 +524,12 @@ class Manifest:
             del out["engine_check"]
         if out["stack_check"] is None:  # no TORCH_STACKS=check
             del out["stack_check"]
+        if out["fine_tunes"] is None:  # no fine-tune stored
+            del out["fine_tunes"]
+        if not out["pool_start"] or out["pool_start"] == [_platform_start()]:  # the platform's start method alone
+            del out["pool_start"]
+        if out["gpu_host"] is None:  # no GPU host process
+            del out["gpu_host"]
         if out["pooled"] is None:  # fitted on one zone's rows
             del out["pooled"]
         for name in ("card", "runtime", "weights", "weights_history"):  # a core model, or one set of weights
@@ -528,6 +555,8 @@ class Manifest:
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "Manifest":
+        if isinstance(data.get("pool_start"), str):  # one run's note (28bee7e)
+            data = {**data, "pool_start": [data["pool_start"]]}
         return cls(**data)
 
     def write(self, path: Path) -> None:
@@ -970,6 +999,40 @@ def record_stack_check(path: Path, manifest: Manifest, check: Dict[str, Any]) ->
         manifest.write(path)
 
 
+def _platform_start() -> str:
+    from ..models._worker import platform_start_method  # the models import this module
+
+    return platform_start_method()
+
+
+def record_pool_start(path: Path, manifest: Manifest, note: str) -> None:
+    """Add how a run's pool started (`models._worker.pool_start_note`: "fork", "spawn", or `POOL_SPAWN_FOR_CUDA`) to the start
+    methods its manifest's provenance lists (`pool_start`), which the file's earlier runs' carried over (`check_manifest`)."""
+    methods = list(manifest.pool_start or [])
+    if note not in methods:
+        manifest.pool_start = methods + [note]
+        if methods or note != _platform_start():  # a list of the platform's way alone isn't written (`to_dict`)
+            manifest.write(path)
+
+
+def record_gpu_host(path: Path, manifest: Manifest, entry: Dict[str, Any]) -> None:
+    """Write what a foundation model's run ran with in the GPU host process into its manifest's provenance (`gpu_host`)."""
+    entry = json.loads(json.dumps(entry, default=str))
+    if entry != manifest.gpu_host:
+        manifest.gpu_host = entry
+        manifest.write(path)
+
+
+def record_fine_tunes(path: Path, manifest: Manifest, entry: Dict[str, Any]) -> None:
+    """Write a foundation model's fine-tunes of a run into its manifest's provenance (`fine_tunes`): this run's key and
+    counts, each anchor's windows merged over what earlier runs of the file recorded (this run's where both have one)."""
+    windows = {**dict((manifest.fine_tunes or {}).get("windows") or {}), **dict(entry.get("windows") or {})}
+    merged = {**dict(entry), "windows": dict(sorted(windows.items()))}
+    if merged != manifest.fine_tunes:
+        manifest.fine_tunes = json.loads(json.dumps(merged, default=str))
+        manifest.write(path)
+
+
 def read_skipped(
     path: Union[str, Path],
     window: str = TEST,
@@ -1107,6 +1170,11 @@ def check_and_write(
         manifest.engine = existing.engine  # the same: until this run's fits from shared statistics are counted
         manifest.engine_check = existing.engine_check
         manifest.stack_check = existing.stack_check
+        manifest.fine_tunes = existing.fine_tunes  # until this run's fine-tunes are recorded (`record_fine_tunes`)
+        manifest.gpu_host = existing.gpu_host
+        # The start methods of the file's records: none recorded is the platform's alone, if it has records.
+        earlier = existing.pool_start or ([_platform_start()] if has_existing_results else [])
+        manifest.pool_start = list(earlier) or None
         if existing.data_unverified or (
             has_existing_results and _accepted_other_data(existing, manifest, data_diffs, frame_hashes)
         ):
@@ -1773,5 +1841,6 @@ __all__ = [
     "read_windows",
     "read_zone",
     "record_engine",
+    "record_gpu_host",
     "record_skips",
 ]

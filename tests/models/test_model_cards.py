@@ -12,7 +12,6 @@ import hashlib
 import json
 import os
 import pickle
-import subprocess
 import sys
 import types
 from datetime import date
@@ -648,11 +647,23 @@ def epf(monkeypatch, *argv):
     return 0
 
 
+def without_shipped_weights(monkeypatch) -> None:
+    """Take the registered families that ship with weights (`T0Model`, `ChronosModel`, ...) out of the registry for one test,
+    so `epf weights fetch all` sees this module's fake families alone."""
+    import importlib
+
+    for name, module in list(COMPONENT_REGISTRY["models"].items()):
+        card = getattr(getattr(importlib.import_module(module), name), "_card", None)
+        if isinstance(card, ModelCard) and card.weights is not None:
+            monkeypatch.delitem(COMPONENT_REGISTRY["models"], name)
+
+
 def said(capsys) -> str:
     return " ".join(capsys.readouterr().out.split())
 
 
 def test_epf_weights_fetch_list_and_verify(weights_root, monkeypatch, capsys, no_network):
+    without_shipped_weights(monkeypatch)
     calls = []
     monkeypatch.setattr(_weights, "snapshot_download", fake_download({WEIGHTS_FILE: REFERENCE}, calls))
     assert epf(monkeypatch, "weights", "list") == 0
@@ -951,18 +962,17 @@ def test_engine_ok_false_keeps_a_class_out_of_the_engine_whatever_it_defines(dat
     assert forecasts(on, "carded") == forecasts(off, "carded")
 
 
-def test_importing_the_package_imports_no_extra():
-    code = (
-        "import sys\n"
-        "import epftoolbox2, epftoolbox2.models, epftoolbox2.cli\n"
-        "from epftoolbox2.models import _cards, _weights\n"
-        "epftoolbox2.verify()\n"
-        "heavy = ('numba', 'torch', 'huggingface_hub', 'transformers', 'safetensors', 'tabpfn', 'tabicl', 'autogluon')\n"
-        "found = sorted(m for m in sys.modules if m.split('.')[0] in heavy)\n"
-        "assert not found, found\n"
-    )
-    result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+def test_importing_the_package_imports_no_extra(tmp_path):
+    """No extra is even tried: each is a stub that logs an import attempt and raises (`tests.import_stubs`), so a guarded
+    `try: import numba` counts too, which a look at `sys.modules` afterwards wouldn't see."""
+    from tests.import_stubs import run_without
+
+    code = "import epftoolbox2, epftoolbox2.models, epftoolbox2.cli\nfrom epftoolbox2.models import _cards, _weights\n"
+    code += "epftoolbox2.verify()\n"
+    heavy = ("numba", "torch", "huggingface_hub", "transformers", "safetensors", "tabpfn", "tabicl", "autogluon", "t0")
+    result, attempted = run_without(code, (*heavy, "chronos"), tmp_path)
     assert result.returncode == 0, result.stderr
+    assert attempted == [], f"tried to import {attempted}"
     assert "Extras" in result.stdout and "fast" in result.stdout
 
 
@@ -1186,6 +1196,8 @@ class GatedRepoError(OSError):
 
 
 def test_epf_weights_fetch_reports_a_failed_download_and_goes_on(weights_root, monkeypatch, capsys, no_network):
+    without_shipped_weights(monkeypatch)
+
     def download(repo_id, revision, allow_patterns=None, local_dir=None, **kwargs):
         if repo_id == REPO:
             raise GatedRepoError(f"401 Client Error: access to model {repo_id} is restricted")

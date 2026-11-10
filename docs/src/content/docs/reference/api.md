@@ -719,7 +719,31 @@ class MLPDailyModel(TorchModel):            # nets.MLP, output="day": one networ
                  pad_to: Optional[int] = None, device: str = "auto", tf32: bool = False, random_state: int = 0,
                  newest_target: str = "d-1", binary_mask: Optional[str] = None, scaler="standard",
                  name: str = "mlp_daily", module_hash: Optional[str] = None): ...
+
+class FoundationModel(BaseModel):           # the base of the pretrained sequence models (a family defines its backend)
+    def __init__(self, context: int = 364, known_ahead: Sequence[str] = (), past: Sequence[str] = (),
+                 batch_size: int = 64, device: str = "auto", weights: Optional[str] = None,
+                 fine_tune_every: Optional[str] = None, fine_tune: Optional[Dict[str, Any]] = None, seeds: int = 1,
+                 random_state: int = 0, newest_target: str = "d-1", name: Optional[str] = None): ...
+
+class T0Model(FoundationModel):             # t0-alpha, zero-shot or fine-tuned yearly from the base weights ([t0])
+    def __init__(self, context: int = 364, known_ahead: Sequence[str] = (), past: Sequence[str] = (),
+                 fine_tune_every: Optional[str] = "12MS", seeds: int = 3, fine_tune: Optional[Dict[str, Any]] = None,
+                 batch_size: int = 64, device: str = "auto", weights: Optional[str] = None, random_state: int = 0,
+                 newest_target: str = "d-1", name: str = "t0"): ...
+
+class ChronosModel(FoundationModel):        # Chronos-2, zero-shot ([chronos])
+    def __init__(self, context: int = 364, known_ahead: Sequence[str] = (), past: Sequence[str] = (),
+                 batch_size: int = 64, device: str = "auto", weights: Optional[str] = None,
+                 newest_target: str = "d-1", name: str = "chronos2"): ...
 ```
+
+`FoundationModel`, `T0Model` and `ChronosModel` are in [Foundation Models](/epftoolbox2/models/foundation-models/): a forecast
+reads `context` local days of the target and its `known_ahead` and `past` base columns through the information set, `weights`
+come from `epf weights fetch`, and a fine-tune (`fine_tune_every`) is stored in `<save_dir>/<name>.fits/` and reused on resume
+(`epftoolbox2.models.foundation.prune_fine_tunes` removes the ones no current run uses, and raises `ResultsLockedError` while
+a run of the model writes there). On a GPU the backend runs in a spawned process of its own, so later worker pools still fork; a script that runs one
+needs an `if __name__ == "__main__":` block.
 
 `LightGBMModel`, `XGBoostModel` and `CatBoostModel` are in [Gradient-Boosted Trees](/epftoolbox2/models/trees/): they build, save and load without their package (one extra each), a fit's `threads`, the package's version and XGBoost's `device` are compared on resume, and `threads > 1` is refused where workers fork (Linux, macOS). `HistGBModel` and `ResidualModel` are in [Residual Model](/epftoolbox2/models/residual/): `INVARIANT_TARGET` is
 `{"name": "asinh", "params": {"apply_to": "target", "standardise": False}}` (`epftoolbox2.models.hgb`), the predictors as they are
