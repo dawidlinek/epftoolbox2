@@ -51,6 +51,10 @@ cell of the report is the library's value rounded. The daylight flag is `SolarGe
 study's formula and site (`algorithm="spencer"`, `night_below=0.0`), equal to the study's on every one of the 15,550 DE solar
 keys.
 
+In CI, `tests/reproductions/test_renewables_scoring.py` repeats experiment 2's ridge price table (both zones, with its
+recovered shares, DM table and sub-periods) and experiment 1's DE solar and wind table and DM list on every run, from a
+2.3 MB fixture in `tests/fixtures/renewables/`.
+
 The headline cells (MAE, test period; generation in MW, price in EUR/MWh):
 
 | Table | Cell | Keys | Report | Library (= study's CSV) |

@@ -116,6 +116,10 @@ quarter-hours, `tests(lag=6)`, and `aggregate("1D", agg=...)` for R3 and Q2.
   from 02:00 on the switch day): the load and R2-period rows are on 1 to 4 fewer days than the study's CSVs.
 - **Q2 derived.** All 20 MAE cells and the 9 biases the report prints, to their rounding.
 
+In CI, `tests/reproductions/test_resolution_scoring.py` repeats R1 (honest DE_LU and AT), its DM tests and R3's derived
+rows on every run, from a 2 MB fixture of the stored forecasts in `tests/fixtures/resolution/`; the other tables were
+checked outside CI.
+
 ### R1: MAE15 / MAEh / shape MAE (EUR/MWh)
 
 | Variant | DE-LU honest (191 d) | DE-LU REN+ (191 d) | AT honest (192 d) | AT REN+ (192 d) |
