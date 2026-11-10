@@ -1,0 +1,175 @@
+---
+title: Foundation Models
+description: T0Model (t0-alpha, zero-shot or fine-tuned from the base weights) and ChronosModel (Chronos-2), pretrained sequence models of the target's history read through the information set; their extras, licences and contamination verdicts, epf weights fetch, CPU and GPU, stored fine-tunes
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+`T0Model` and `ChronosModel` forecast the target from its own history and its covariates' with pretrained weights:
+[t0-alpha](https://huggingface.co/theforecastingcompany/t0-alpha) (The Forecasting Company, 102 M parameters) and
+[Chronos-2](https://huggingface.co/amazon/chronos-2) (Amazon, 120 M). They read series, not predictor columns: `context` local
+days of the target and the base columns you name as `known_ahead` (known through the end of the target day at the issue time,
+such as the TSO load forecast) and `past` (known up to now, read over the context only). Each forecast is the median of the
+model's quantiles. `T0Model` is zero-shot or fine-tuned from the base weights on a calendar (`fine_tune_every`, yearly by
+default); `ChronosModel` is zero-shot. Both share the base class `FoundationModel`, which more families build on.
+
+In the research behind this library (`recent` DE_LU and AT, test year 2025-10 to 2026-09, issued at 11:45 on the day before),
+zero-shot t0-alpha with the load forecast and a 364-day context had a test MAE of 20.15 EUR/MWh on DE_LU (LEAR's window average
+20.89), a monthly re-fine-tune of it over three seeds 18.96 and 16.33 on DE_LU and AT, and Chronos-2 with a 182-day context 20.56
+and 17.33. These models are as good as a well-tuned LEAR alone and add the most inside an ensemble.
+
+## Installing
+
+Each family is an extra of its own, imported when a model first forecasts: the classes import, save to YAML and load without it,
+and a run's pre-flight names a missing extra (or missing weights) before any model fits.
+
+```bash
+pip install 'epftoolbox2[t0]'        # T0Model: tfc-t0 0.5.0, torch, huggingface_hub
+pip install 'epftoolbox2[chronos]'   # ChronosModel: chronos-forecasting 2.x, torch
+```
+
+- **`tfc-t0` is pinned to 0.5.0.** Its git head moved single hours of the research's forecasts by up to 161 EUR/MWh, so the
+  version (and a VCS commit, if any) is in the manifest and a resume with another one is refused.
+- **Python 3.11 to 3.15 with the GIL.** Both load safetensors, which has no free-threaded wheel: on 3.14t the extras don't
+  install.
+- **torch.** The lock and `uv sync` take the CPU build. For a GPU, install a CUDA build first (for example
+  `pip install torch --index-url https://download.pytorch.org/whl/cu126`), then the extra.
+
+## Weights
+
+A run never downloads. Fetch each family's weights once, on a machine with network, into the cache every run reads offline
+([Licences and Weights](/epftoolbox2/models/licences-and-weights/)):
+
+```bash
+epf weights fetch T0Model        # theforecastingcompany/t0-alpha, 406.6 MB
+epf weights fetch ChronosModel   # amazon/chronos-2, 477.9 MB
+```
+
+| Family | Repository and revision | Files (sha256 pinned) | Licence | Corpus, its end; released | Verdict |
+|---|---|---|---|---|---|
+| t0-alpha | `theforecastingcompany/t0-alpha` @ `741927847fe0` | `config.json`, `model.safetensors` (406,601,742 B) | Apache-2.0, commercial use allowed | GIFT-Eval pretraining split (real series, each ending before 2022) and synthetic corpora; 2021-12-31; 2026-06-09 | `clean` for any window from 2022 |
+| Chronos-2 | `amazon/chronos-2` @ `29ec3766d36d` | `config.json`, `model.safetensors` (477,931,539 B) | Apache-2.0, commercial use allowed | real univariate series of the Chronos and GIFT-Eval pretraining corpora (no electricity prices) and synthetic data; no end date given; 2025-10-30 | `possibly contaminated` for a window starting before 2025-10-30, `clean (released before)` after |
+
+t0-alpha's repository history was squashed on 2026-10-15, so its files are pinned by their sha256 as well as the commit: a fetch
+of files with other hashes is refused. The Chronos-2 paper (arXiv 2510.15821) names its training corpora but no end date, so its
+verdict goes by the release date, window by window: a test year from 2025-10-01 shows `possibly contaminated`, though no
+electricity-price series is among the corpora. Every report prints the licence and the verdict of each window
+(`report.provenance()`, the exporters). A `weights="/path"` directory or file is used as given, hashed and recorded.
+
+## Basic usage
+
+```python
+from epftoolbox2.information_set import InformationSet
+from epftoolbox2.models import ChronosModel, T0Model
+from epftoolbox2.pipelines import ModelPipeline
+
+pipeline = (
+    ModelPipeline(information_set=InformationSet("11:45"))
+    .add_model(T0Model(known_ahead=["load_forecast"], fine_tune_every=None, name="t0_zero_shot"))
+    .add_model(T0Model(known_ahead=["load_forecast"], name="t0_yearly"))  # fine-tuned every 1 January, 3 seeds
+    .add_model(ChronosModel(context=182, known_ahead=["load_forecast"], name="chronos2"))
+)
+report = pipeline.run(df, "2025-10-01", "2026-09-30", horizon=1, save_dir="runs/foundation")
+```
+
+## Parameters
+
+| Parameter | Default | What it is |
+|---|---|---|
+| `context` | `364` | Local days of the target's history a forecast reads (T = days x periods per day steps) |
+| `known_ahead` | `()` | Base columns read over the context and the steps ahead, known through the end of the target day |
+| `past` | `()` | Base columns read over the context only, NaN after their own newest known step |
+| `fine_tune_every` | `"12MS"` (`T0Model`) | A refit rule whose anchors fine-tune (`"12MS"` every 1 January, `"1MS"` monthly), or `None` for zero-shot |
+| `seeds` | `3` (`T0Model`) | Fine-tunes per anchor and horizon, their medians averaged |
+| `fine_tune` | the research's recipe | The fine-tune's settings, merged over the defaults (below) |
+| `random_state` | `0` | The base seed of every fine-tune (each seed's from a hash of it, the anchor, the horizon and the seed's number) |
+| `batch_size` | `64` | Items per backend call, every call padded to it; compared on resume |
+| `device` | `"auto"` | `"auto"`, `"cpu"`, `"cuda"` or `"cuda:N"` |
+| `weights` | `None` | The card's weights from the cache, or a file or directory used as given |
+| `newest_target` | `"d-1"` | Where the target's context (and a fine-tune's targets) end: D-1, or `"published"` where the rule says |
+| `name` | `"t0"`, `"chronos2"` | The model's name |
+
+`ChronosModel` takes the same but `fine_tune_every`, `seeds`, `fine_tune` and `random_state` (it is zero-shot).
+`FoundationModel` is the base of both, for a family of your own: it defines `_card`, `_load_backend(resolved, device)` returning
+a backend (`epftoolbox2.models._fm.Backend`: `predict(call)` with the quantiles of each step ahead of each item, and for a
+fine-tune `fine_tune`, `save_state`, `load_state`, `reset`) and which covariates it takes.
+
+A foundation model needs an information set: its series are cut where the rules say they are known at the issue time, so each
+series needs a rule (the built-in ones cover the shipped sources' columns; declare your own with
+`InformationSet(rules={...})`). `report.availability()` lists one row per series, with the newest step it reads; at
+`availability="raise"` a run refuses a `known_ahead` series not known through the target day.
+
+## What a forecast reads
+
+For the forecast issued on D at horizon h:
+
+- **The target's context** is its last `context x periods per day` steps in physical time, ending at D-1's last step with
+  `newest_target="d-1"` (the default of every model) or at the newest step its rule calls known at the issue time with
+  `"published"` (with prices published at 13:00 on D-1, D's prices at 11:45). The research's forecasts were made with D's prices
+  in the context: pass `newest_target="published"` to reproduce them.
+- **Known-ahead series** cover the same steps and the steps ahead, to the end of the target day; **past series** the context,
+  NaN after their own newest known step.
+- **The steps ahead** run from the context's end to the end of the target day: 24 for an hourly price under `"published"` at
+  h = 1, 48 under `"d-1"` (D and D+1), 23 or 25 on a DST target day. The context has the same length on every day; no day is
+  resampled.
+
+Calendar covariates are not offered: in the research they hurt every family. Outputs are point forecasts (the 0.5 level);
+quantiles are not stored.
+
+## Zero-shot calls
+
+A zero-shot forecast is its own: no fit, and its record's `refit_anchor` is its run date. The calls hold the issue days of a
+fixed calendar of `batch_size` days (64 by default, counted from Monday 1970-01-05), every day of it the frame has, the run's or
+not, grouped by the number of steps ahead and padded to `batch_size` items with copies of the first. A call has one shape
+whatever the run covers, so on a CPU a forecast is the same bits alone, in a full year, after a resume and whatever the test's
+first day; `verify`'s co-batch check replaces the other items of a call by noise and requires no forecast to move.
+
+## Fine-tuning t0
+
+`T0Model(fine_tune_every="12MS")` (the default) fine-tunes at each anchor of the refit calendar (here every 1 January), for each
+horizon and each of `seeds` seeds (3), a copy of the **base** weights, never the previous anchor's:
+
+- **The windows** are the target days up to the anchor's cut, the newest whole day of targets known at its issue time (D-1 under
+  `"d-1"`, the anchor itself under `"published"` with a 13:00 price rule), each read as the forecast issued `horizon` days
+  before it, with no missing value; `fine_tune={"window": 365}` keeps the newest 365 days instead of every one from the frame's
+  start (`"expanding"`). The model raises if a window's target is after the cut, before the trainer runs, and the trainer checks
+  it again.
+- **The recipe** is the research's (`fine_tune`, a dict, merged over these defaults): AdamW at `lr` 1e-5, batches of 16
+  windows, at most 400 steps, the last 61 days of windows held out and evaluated every 25 steps, a stop after 4 evaluations
+  without a gain and the best state restored, gradients clipped at norm 1. The loss is t0's pinball loss over its five native
+  quantiles on the target day's steps, divided by the mean absolute step-to-step change of the window's context.
+- **A forecast** is the mean over the seeds of each seed's median.
+- **Stored fine-tunes.** With a `save_dir` each fine-tune is written to `<save_dir>/<name>.fits/` (about 400 MB each) with a
+  sidecar: its sha256, the data end, the best step, the holdout losses and digests of its windows and of everything that decides
+  it. A resume or a re-forecast loads it instead of fine-tuning again, since GPU fine-tunes are not repeatable (the research's
+  repeats differed by up to 0.16 EUR/MWh); a missing file is fine-tuned again (with a warning), and a file whose sha256 changed is
+  refused. A changed `fine_tune`, `seeds` or `fine_tune_every` refuses the resume.
+
+<Aside type="caution">
+Yearly fine-tunes are the default but untested: the research measured a monthly re-fine-tune against none (1.55 % better on
+DE_LU, 1.7 % on AT, pooled over both markets), not a yearly one. `fine_tune_every="1MS"` is the monthly recipe on one market.
+</Aside>
+
+## CPU and GPU
+
+A foundation model runs in the process that runs the pipeline, one model at a time: on `device="auto"` (CUDA when a matmul runs
+on it, else the CPU), `"cpu"`, `"cuda"` or `"cuda:N"`, with `THREADS_PER_PROCESS` torch threads (default the smaller of 8 and
+the usable CPUs), TF32 off, inside a scope that puts the process's torch settings back afterwards. The backend loads once per
+process from the cached weights. The manifest records and compares the runtime packages, the weights' hashes, the device type,
+dtype, TF32 and the thread count; the GPU's name is recorded and a change only warns.
+
+Chronos-2 reads at most 8,192 steps (341 days of hours): a longer context is cut to its newest 8,192 steps by the package, which
+a run warns about.
+
+## Reproducing the research
+
+On the research's own rows (frames built from `recent/data/{DE_LU,AT}.npz` on a fixed-offset `Etc/GMT-1` clock, every day 24
+hours, rules given on that clock, `newest_target="published"`, nothing late in `report.availability()`), the library's forecasts
+against the stored ones, validation and test years:
+
+| Run | Forecasts compared | Max \|library - stored\| (EUR/MWh) | Gate |
+|---|---|---|---|
+| t0-alpha zero-shot, ctx 364, with and without the load forecast, DE_LU and AT | see the reproduction page of the release | | 1e-3 |
+| Chronos-2 zero-shot, ctx 182, load forecast, DE_LU and AT | | | 0.1 |
+
+The checks and their scripts are in the project's research folder (`library_check_step6/foundation/`).

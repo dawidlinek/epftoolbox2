@@ -180,9 +180,12 @@ class FakeFM(FoundationModel):
     def _model_kwargs(self):
         return {**super()._model_kwargs, "by_batch": self.by_batch, "offset": self.offset}
 
-    def _backend(self, device):
+    def _load_backend(self, resolved, device):
+        return PersistenceBackend(self)
+
+    def _backend(self, device):  # one backend per model (the fake reads the model's own settings), not one per process
         if self._fake is None:
-            self._fake = PersistenceBackend(self)
+            self._fake = self._load_backend(None, device)
         return self._fake
 
 
@@ -364,6 +367,7 @@ def test_the_adapter_suite_zero_shot(hourly, quarter, tmp_path, monkeypatch, reg
     suite.check_provenance(make, hourly, tmp_path / "provenance", test, information_set=INFO_AHEAD)
 
 
+@pytest.mark.filterwarnings("ignore:.*not the reference weights")
 @pytest.mark.parametrize("family", [T0Model, ChronosModel])
 def test_the_pre_flight_names_the_family_s_extra(hourly, monkeypatch, tmp_path, family):
     """With the extra's modules hidden, a run refuses before any model's run starts, naming `[t0]` or `[chronos]` (weights

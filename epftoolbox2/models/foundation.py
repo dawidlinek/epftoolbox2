@@ -50,6 +50,7 @@ import math
 import os
 import re
 import warnings
+from abc import abstractmethod
 from datetime import date
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
@@ -182,6 +183,12 @@ def _local_date(stamp: pd.Timestamp, tz: Any) -> datetime.date:
     return (stamp if tz is None else stamp.tz_convert(tz)).date()
 
 
+def _created_at() -> str:
+    """The wall-clock time a checkpoint's sidecar records (UTC, seconds): the one wall-clock read of this module, provenance
+    only (nothing compares it)."""
+    return datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
+
+
 def _digest(parts: Any) -> str:
     return hashlib.sha256(json.dumps(parts, sort_keys=True, default=str).encode()).hexdigest()
 
@@ -281,7 +288,7 @@ class FoundationModel(BaseModel):
         elif key in ("known_ahead", "past"):
             if isinstance(value, str):
                 raise ValueError(f"{cls}: {key} is a list of column names, got the string {value!r}: write [{value!r}]")
-            value = list(value)
+            value = [] if value is None else list(value)
             if any(not isinstance(name, str) or not name for name in value):
                 raise ValueError(f"{cls}: {key} holds column names, got {value!r}")
             takes = self._takes_known if key == "known_ahead" else self._takes_past
@@ -389,8 +396,10 @@ class FoundationModel(BaseModel):
         fields.pop("pad_to", None)
         return fields
 
-    def _load_backend(self, resolved: Any, device: Any) -> Any:  # pragma: no cover - every family defines it
-        raise NotImplementedError(f"{type(self).__name__} names no backend")
+    @abstractmethod
+    def _load_backend(self, resolved: Any, device: Any) -> Any:
+        """The family's `_fm.Backend` on `device`, from `resolved` (the card's files, or None for a card without weights),
+        importing the family's package here and nowhere else."""
 
     @contextlib.contextmanager
     def _scope(self) -> Any:
@@ -788,7 +797,7 @@ class _Checkpoints:
             "windows": len(data),
             "data_digest": data_digest,
             "stats": json.loads(json.dumps(stats, default=str)),
-            "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
+            "created_at": _created_at(),
         }
         written = sidecar.with_name(sidecar.name + ".partial")
         written.write_text(json.dumps(record, indent=2) + "\n")
@@ -806,12 +815,16 @@ T0_CARD = ModelCard(
     commercial_use=True,
     revenue_cap=None,
     attribution=None,
-    # The repository's history was squashed on 2026-10-15, so the files are pinned by their sha256 as well as the commit.
+    # The repository's history was squashed on 2026-10-15, so the files are pinned by their sha256 as well as the commit (the
+    # hashes recorded by the first `epf weights fetch`, 2026-11-10, equal to the repository's LFS hashes).
     weights=WeightsRef(
         "theforecastingcompany/t0-alpha",
         "741927847fe02367624749bb9290b2f09f128e7d",
-        {"config.json": None, "model.safetensors": None},
-        bytes=None,
+        {
+            "config.json": "b2b545685283c579b99c774da0d7f07525683efca2b27dc4ffec99c109d5beba",
+            "model.safetensors": "16c030d3fd70f06dc4238e9a8356e9b5a631d07f80f1bc76ba539991aed5897f",
+        },
+        bytes=406_601_742,
     ),
     runtime=("tfc-t0==0.5.0", "torch>=2.9"),
     corpus="GIFT-Eval pretraining split (real series, each ending before 2022) and synthetic corpora",
@@ -830,8 +843,11 @@ CHRONOS_CARD = ModelCard(
     weights=WeightsRef(
         "amazon/chronos-2",
         "29ec3766d36d6f73f0696f85560a422f50e8498c",
-        {"config.json": None, "model.safetensors": None},
-        bytes=None,
+        {
+            "config.json": "ef1143bfdc9c0376d9a056eefca46cb4b1ec3d0ffacd541ff56feb40fb708031",
+            "model.safetensors": "ddcda3c7508bf2528087723e98a20707cc04b7f370ae275a9fd88078ddba4f42",
+        },
+        bytes=477_931_539,
     ),
     runtime=("chronos-forecasting>=2.3.2,<3", "torch>=2.9", "transformers"),
     # The paper (arXiv 2510.15821) trains on real univariate series of the Chronos and GIFT-Eval pretraining corpora (no
