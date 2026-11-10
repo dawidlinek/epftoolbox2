@@ -266,6 +266,11 @@ def _append_line(path: Path, entry: Dict[str, Any]) -> None:
         _sync_directory(path.parent)
 
 
+def _as_json(value: Any) -> Any:
+    """`value` as `live.json` holds it once written and read back (`default=str` for what JSON has no type for)."""
+    return json.loads(json.dumps(value, default=str))
+
+
 def _fsync_file(path: Path) -> None:
     try:
         fd = os.open(path, os.O_RDONLY)
@@ -521,20 +526,26 @@ class LiveStore:
         return out
 
     def next_revision(self, issue: Any) -> int:
-        """1 + the highest revision any line of the issue day carries, committed or not: a call line, a record of that
-        `run_date` in any model's results (`results.store.max_revision`), or a revision folder. A crashed revision's number
-        is never used again."""
-        day = issue_day(issue)
+        """1 + the highest revision any line of the issue day carries, committed or not, so a crashed revision's number is
+        never used again: a call line, a revision folder, and a record of that `run_date` in any model's results
+        (`results.store.max_revision`). `begin` makes a revision's folder before any of its records, so the records are read
+        only for a day without any folder (records written by hand, or a directory from before the folders): reading every
+        record of every model on each call costs about 0.65 s per model-year of hourly JSONL. A folder removed by hand can let
+        its number be taken again; its old records then repeat their keys at that revision, and reading them raises."""
+        day = self.day(issue)
         highest = 0
         for line in self.calls():
             revision = line.get("revision")
             if line.get("issue") == day and isinstance(revision, int) and not isinstance(revision, bool):
                 highest = max(highest, revision)
         folder = self.save_dir / REVISIONS_DIR / day
-        if folder.is_dir():
-            for child in folder.iterdir():
-                if child.name[:1] == "r" and child.name[1:].isdigit():
-                    highest = max(highest, int(child.name[1:]))
+        reserved = [
+            int(child.name[1:])
+            for child in (folder.iterdir() if folder.is_dir() else ())
+            if child.name[:1] == "r" and child.name[1:].isdigit()
+        ]
+        if reserved:
+            return max(highest, *reserved) + 1
         for path in self.results():
             highest = max(highest, max_revision(path, day))
         return highest + 1
