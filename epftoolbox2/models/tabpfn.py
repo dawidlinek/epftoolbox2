@@ -22,6 +22,8 @@ REPO = "Prior-Labs/TabPFN-v2-reg"
 REVISION = "02a44705ff7790b50cded404bc59adb94da456a1"
 CHECKPOINT = "tabpfn-v2-regressor.ckpt"
 SHA256 = "2ab5a07d5c41dfe6db9aa7ae106fc6de898326c2765be66505a07e2868c10736"
+# tabpfn's memory saving (chunked computations), pinned: see `_Backend.fit`.
+MEMORY_SAVING = False
 
 CARD = ModelCard(
     family="tabpfn-v2",
@@ -102,6 +104,9 @@ class _Backend:
             random_state=self.random_state,
             n_preprocessing_jobs=1,
             inference_precision=self.precision,
+            # tabpfn's "auto" decides on a GPU from the free memory (`memory._should_save_peak_mem_cuda`), which another
+            # process on the card changes: pinned off, what "auto" gives the research's contexts (735 x 175 cells).
+            memory_saving_mode=MEMORY_SAVING,
         )
         regressor.fit(x, y)
         self._check_precision(regressor)
@@ -136,10 +141,12 @@ class TabPFNModel(InContextModel):
             block is predicted in one call (`block_predict`).
         n_estimators: Ensemble members of one call (preprocessed views of the context), 4 by default.
         random_state: The seed of every fit's preprocessing.
-        device: "auto" (every GPU a matmul runs on, worker k on GPU k modulo their number, else the CPU), "cpu", "cuda" or
-            "cuda:N", resolved once for a run. On a CPU the fits compute in float32, on a GPU with tabpfn's float16 autocast,
-            and the two differ by more than rounding: up to 4.3 EUR/MWh (mean 0.28) over 1,200 forecasts of the research's
-            rows. The device type and the precision are recorded and compared on resume.
+        device: "auto" (CUDA if GPU 0's probe passes, then every GPU of GPU 0's model, worker k on GPU k modulo their
+            number, GPUs of another model left out with a warning; else the CPU), "cpu", "cuda" or "cuda:N", resolved once
+            for a run. On a CPU the fits compute in float32, on a GPU with tabpfn's float16 autocast, and the two differ by
+            more than rounding: up to 4.3 EUR/MWh (mean 0.28) over 1,200 forecasts of the research's rows. tabpfn's memory
+            saving is pinned off (`memory_saving`), so no chunking follows a GPU's free memory. The device type, the
+            precision and that setting are recorded and compared on resume.
         weights: None (the cache `epf weights fetch` filled), a path to the checkpoint, or `"Prior-Labs/TabPFN-v2-reg@<rev>"`.
         block_predict: Predict a block's issue days in one call (True), or one row at a time.
         name: Display name.
@@ -149,6 +156,10 @@ class TabPFNModel(InContextModel):
 
     _card = CARD
     _PRECISION = {"cpu": "float32", "cuda": "float16 autocast"}
+
+    def _memory_settings(self, kind: str) -> Dict[str, Any]:
+        """tabpfn's memory saving, pinned (`MEMORY_SAVING`) where "auto" would follow a GPU's free memory."""
+        return {"memory_saving": MEMORY_SAVING}
 
     def __init__(
         self,

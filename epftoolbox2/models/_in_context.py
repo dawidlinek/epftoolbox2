@@ -17,10 +17,13 @@ package's own loader and its download paths (tabpfn's include a direct URL that 
 prediction runs inside `offline()` too. `_load_backend(resolved, device)` is each family's; tests replace it with a numpy fake
 (`tests/models/in_context_fakes.py`), or the real package's `fit`/`predict` with fakes in the extras job.
 
-**Devices.** The parent resolves the run's devices once (`_run_devices`: "auto" is every GPU whose probe passes, in a subprocess
-each, else the CPU; "cuda:N" that GPU) and hands them to the workers (`config["in_context_devices"]`); worker k fits on device
-k modulo their number (`cuda:{worker % n_gpus}`), checks that it can use it, and stops the run if it can't, so a report never
-mixes CPU and GPU forecasts. Nothing here starts CUDA in the parent before its pool forks.
+**Devices.** The parent resolves the run's devices once (`_run_devices`: "auto" is CUDA when GPU 0's probe passes, and then
+every GPU of GPU 0's model, name and compute capability, whose probe passes, each probe in a subprocess, GPUs of another model
+left out with a warning; else the CPU; "cuda:N" that GPU) and hands them to the workers (`config["in_context_devices"]`);
+worker k fits on device k modulo their number (`cuda:{worker % n_gpus}`, k from the last part of its multiprocessing
+identity), checks that it can use it, and stops the run if it can't, so a report never mixes CPU and GPU forecasts or two GPU
+models. Nothing here starts CUDA in the parent before its pool forks. What a package would size by a GPU's free memory is
+pinned (TabPFN's memory saving off, TabICL's batches at 50,000 and its outputs on the GPU) and recorded.
 
 **Determinism.** Every fit and its predictions run in `torch_scope(device, tf32=False, threads=1)` (one torch thread, TF32
 off, both put back after), and a run's workers pin torch to one thread (`config["torch_threads"]`, `_worker._pool_init`), so a
@@ -50,6 +53,7 @@ import re
 import subprocess
 import sys
 import threading
+import warnings
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
@@ -95,10 +99,13 @@ def cuda_device_count() -> int:
 
 
 def worker_index() -> int:
-    """This pool worker's number, counted from 0 in the order its parent started workers (0 outside a pool): which of the run's
-    devices it fits on (`InContextModel._device_text`)."""
+    """This pool worker's number among the processes its parent started, counted from 0 (0 outside a pool): which of the run's
+    devices it fits on (`InContextModel._device_text`). multiprocessing numbers a process by its ancestry, `(1,)`, `(2,)`, ...
+    for a parent's children and `(3, 1)`, `(3, 2)`, ... for the children of its third child, so the last part is the one that
+    tells a pool's workers apart (the first is the same for every worker of a pool started inside a child). A parent's count
+    goes on across its pools, so a second pool's workers continue it; modulo the number of devices they still spread."""
     identity = multiprocessing.current_process()._identity
-    return identity[0] - 1 if identity else 0
+    return identity[-1] - 1 if identity else 0
 
 
 def package(name: str, model: "InContextModel") -> Any:
@@ -203,8 +210,12 @@ class InContextModel(BaseModel):
 
     def _run_devices(self) -> Tuple[str, ...]:
         """The devices a run's fits use, resolved once in this process for the model's `device` (and kept for it): "cpu";
-        "cuda:N" for that GPU; for "auto" or "cuda" resolving to a GPU, every GPU whose probe passes (`cuda_device_count` and
-        `cuda_probe`, each in a subprocess), so worker k fits on GPU k modulo their number. ("cpu",) without torch."""
+        "cuda:N" for that GPU; for "auto" or "cuda", CUDA when GPU 0's probe passes (`_torch.runtime.resolve_device`), and then
+        every GPU of GPU 0's model (its name and compute capability) whose probe passes (`cuda_device_count`, `cuda_probe`,
+        `cuda_capability`, each in a subprocess), so worker k fits on GPU k modulo their number. GPUs of another model are
+        left out with a warning: under float16 autocast two models give other numbers, and which unit runs where depends on
+        the scheduling, so a run over both would not repeat (name them with `device="cuda:N"` or `CUDA_VISIBLE_DEVICES`).
+        ("cpu",) without torch."""
         memo = vars(self).get("_devices_memo")
         if memo is not None and memo[0] == self.device:
             return memo[1]
@@ -212,24 +223,49 @@ class InContextModel(BaseModel):
         if resolved is None:
             devices: Tuple[str, ...] = ("cpu",)
         elif resolved.type == "cuda" and self.device in ("auto", "cuda"):
-            from ._torch.runtime import cuda_probe
-
-            usable = tuple(f"cuda:{i}" for i in range(cuda_device_count()) if cuda_probe(i)[0])
-            devices = usable or (str(resolved),)
+            devices = self._same_model_gpus(resolved.index or 0) or (str(resolved),)
         else:
             devices = (str(resolved),)
         self._devices_memo = (self.device, devices)
         return devices
 
+    def _same_model_gpus(self, reference: int) -> Tuple[str, ...]:
+        """Every GPU whose probe passes and whose (name, compute capability) is GPU `reference`'s, warning about the others."""
+        from ._torch.runtime import cuda_capability, cuda_probe
+
+        def model_of(index: int) -> Tuple[Optional[str], Optional[str]]:
+            return cuda_probe(index)[1], cuda_capability(index)
+
+        usable = [index for index in range(cuda_device_count()) if cuda_probe(index)[0]]
+        if reference not in usable:
+            return ()
+        kept = [index for index in usable if model_of(index) == model_of(reference)]
+        left = [index for index in usable if index not in kept]
+        if left:
+            others = ", ".join(f"cuda:{i} ({model_of(i)[0]}, capability {model_of(i)[1]})" for i in left)
+            warnings.warn(
+                f"{type(self).__name__}({self.name!r}): device={self.device!r} uses cuda:{reference}'s model "
+                f"({model_of(reference)[0]}, capability {model_of(reference)[1]}) alone and leaves out {others}: on two GPU "
+                "models the float16 forecasts differ, and which unit runs where depends on the scheduling. Name the GPUs "
+                "with device='cuda:N' or CUDA_VISIBLE_DEVICES.",
+                UserWarning,
+                stacklevel=2,
+            )
+        return tuple(f"cuda:{index}" for index in kept)
+
     def _runtime_fields(self) -> Dict[str, Any]:
         """The device type and its kernels (`cpu_capability`, `cuda_capability`), the precision the fits compute in
-        (`precision`), the torch threads of a fit and the device's model name (`device_name`, warn-only), next to the card's
-        package versions: compared on resume. Read from the run's devices (`_run_devices`), the first of several GPUs."""
-        first = self._run_devices()[0]
+        (`precision`), the package's memory settings that would otherwise follow free memory (`_memory_settings`), the torch
+        threads of a fit, and the device's model name with every device the run uses (`device_name`, warn-only, as
+        `"NVIDIA H100 80GB HBM3 x 2 (cuda:0, cuda:1)"`), next to the card's package versions: compared on resume, but the
+        name. Read from the run's devices (`_run_devices`), all of one GPU model."""
+        devices = self._run_devices()
+        first = devices[0]
         kind = first.split(":")[0]
         fields: Dict[str, Any] = {
             "device": kind,
             "precision": self._PRECISION[kind],
+            **self._memory_settings(kind),
             "threads_per_fit": THREADS_PER_FIT,
         }
         if not has_torch():
@@ -244,8 +280,14 @@ class InContextModel(BaseModel):
         else:
             index = int(first.split(":")[1]) if ":" in first else 0
             fields["cuda_capability"] = cuda_capability(index)
-            fields["device_name"] = cuda_probe(index)[1] or "cuda"
+            name = cuda_probe(index)[1] or "cuda"
+            fields["device_name"] = name if len(devices) == 1 else f"{name} x {len(devices)} ({', '.join(devices)})"
         return fields
+
+    def _memory_settings(self, kind: str) -> Dict[str, Any]:
+        """The family's settings that pin what its package would size by the free memory of the device (`kind`), recorded in
+        the runtime fields; none here."""
+        return {}
 
     def _executor_config(self) -> tuple:
         """One fit at a time per process (torch's thread count and precision flags are the process's), in `MAX_PROCESSES`

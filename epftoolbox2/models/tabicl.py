@@ -21,6 +21,12 @@ from ._in_context import INVARIANT_TARGET, InContextModel, package, torch_fit_sc
 REPO = "jingang/TabICL"
 REVISION = "4dcd344ece2c00be9e831fdd35bed57b5ad83e19"  # main at 2026-11-10; the checkpoint was uploaded on 2026-02-12
 CHECKPOINT = "tabicl-regressor-v2-20260212.ckpt"
+# TabICL's inference managers size their batches on a GPU from its free memory and halve them on an out-of-memory error, which
+# another process on the card changes. A smallest batch of tabicl's own cap (50,000) makes every batch that size: one call
+# for the research's contexts (8 views of 735 rows), and an out-of-memory error stops the run instead of halving.
+MIN_BATCH_SIZE = 50_000
+# Where a GPU run keeps the managers' outputs: on the GPU, not moved by free memory (tabicl's "auto").
+GPU_OFFLOAD = "gpu"
 SHA256 = "0db9cb538f114e79026bf08f45f41ad8dd7ad2de2aaca9a5ca8cd3bd9748ae7a"
 
 CARD = ModelCard(
@@ -75,6 +81,10 @@ class _Backend:
             device=self.device,
             random_state=self.random_state,
             use_amp=self.use_amp,
+            offload_mode="auto" if self.on_cpu else GPU_OFFLOAD,
+            inference_config={
+                name: {"min_batch_size": MIN_BATCH_SIZE} for name in ("COL_CONFIG", "ROW_CONFIG", "ICL_CONFIG")
+            },
         )
         loaded = self.loaded
 
@@ -117,10 +127,13 @@ class TabICLModel(InContextModel):
         n_estimators: Ensemble members of one call (preprocessed, shuffled views of the context), 8 by default, run in one
             batch.
         random_state: The seed of every fit's views.
-        device: "auto" (every GPU a matmul runs on, worker k on GPU k modulo their number, else the CPU), "cpu", "cuda" or
-            "cuda:N", resolved once for a run. On a CPU the fits compute in float32; on a GPU TabICL autocasts to float16 for
-            contexts of 1,024 rows or 60 columns, and the two differ by up to 0.54 EUR/MWh (mean 0.044) over 1,200 forecasts of
-            the research's rows. The device type and the precision are recorded and compared on resume.
+        device: "auto" (CUDA if GPU 0's probe passes, then every GPU of GPU 0's model, worker k on GPU k modulo their
+            number, GPUs of another model left out with a warning; else the CPU), "cpu", "cuda" or "cuda:N", resolved once
+            for a run. On a CPU the fits compute in float32; on a GPU TabICL autocasts to float16 for contexts of 1,024 rows
+            or 60 columns, and the two differ by up to 0.54 EUR/MWh (mean 0.044) over 1,200 forecasts of the research's
+            rows. TabICL's batch sizes (`min_batch_size`) and on a GPU its output placement (`offload`) are pinned, so
+            neither follows a GPU's free memory. The device type, the precision and those settings are recorded and
+            compared on resume.
         weights: None (the cache `epf weights fetch` filled), a path to the checkpoint, or `"jingang/TabICL@<rev>"`.
         block_predict: Predict a block's issue days in one call (True), or one row at a time.
         name: Display name.
@@ -130,6 +143,11 @@ class TabICLModel(InContextModel):
 
     _card = CARD
     _PRECISION = {"cpu": "float32", "cuda": "float16 autocast from 1,024 rows or 60 columns"}
+
+    def _memory_settings(self, kind: str) -> Dict[str, Any]:
+        """TabICL's batch sizing and output placement, pinned where tabicl would follow a GPU's free memory (on a CPU it
+        neither batches nor offloads)."""
+        return {"min_batch_size": MIN_BATCH_SIZE, **({"offload": GPU_OFFLOAD} if kind == "cuda" else {})}
 
     def __init__(
         self,

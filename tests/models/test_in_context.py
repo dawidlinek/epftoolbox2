@@ -16,6 +16,7 @@ from datetime import date
 import os
 import subprocess
 import sys
+import types
 import warnings
 from concurrent.futures import Future
 from pathlib import Path
@@ -473,15 +474,17 @@ class FakeDevice:
 
 
 @pytest.mark.parametrize("cls", CLASSES)
-def test_auto_is_every_usable_gpu_and_cuda_n_that_one(cls, monkeypatch):
-    """`_run_devices`: "auto" resolving to a GPU is every GPU whose probe passes, in index order; "cuda:N" is that GPU; the
-    CPU and a missing torch are ("cpu",); the answer is kept for the model's `device` and asked again when it changes."""
+def test_auto_is_every_usable_gpu_of_gpu_0_s_model_and_cuda_n_that_one(cls, monkeypatch):
+    """`_run_devices`: "auto" resolving to a GPU (GPU 0's probe) is every GPU whose probe passes, in index order, of GPU 0's
+    model; "cuda:N" is that GPU; the CPU and a missing torch are ("cpu",); the answer is kept for the model's `device` and
+    asked again when it changes. The runtime names every GPU used (`device_name`, warn-only)."""
     from epftoolbox2.models._torch import runtime
 
     asked = []
     monkeypatch.setattr(_in_context, "has_torch", lambda: True)
     monkeypatch.setattr(_in_context, "cuda_device_count", lambda: 3)
-    monkeypatch.setattr(runtime, "cuda_probe", lambda index: (index != 1, f"GPU {index}", "ok"))
+    monkeypatch.setattr(runtime, "cuda_probe", lambda index: (index != 1, "NVIDIA H100 80GB HBM3", "ok"))
+    monkeypatch.setattr(runtime, "cuda_capability", lambda index: "9.0")
 
     def resolved(self):
         asked.append(self.device)
@@ -490,6 +493,10 @@ def test_auto_is_every_usable_gpu_and_cuda_n_that_one(cls, monkeypatch):
     monkeypatch.setattr(cls, "_resolved_device", resolved)
     model = cls(INPUTS)
     assert model._run_devices() == ("cuda:0", "cuda:2") and model._run_devices() == ("cuda:0", "cuda:2")
+    with monkeypatch.context() as patch:
+        patch.setitem(sys.modules, "torch", types.ModuleType("torch"))  # the CUDA branch reads nothing of it
+        fields = model._runtime_fields()
+    assert fields["device_name"] == "NVIDIA H100 80GB HBM3 x 2 (cuda:0, cuda:2)" and fields["cuda_capability"] == "9.0"
     model.device = "cuda:1"
     assert model._run_devices() == ("cuda:1",)
     model.device = "cpu"
@@ -497,6 +504,130 @@ def test_auto_is_every_usable_gpu_and_cuda_n_that_one(cls, monkeypatch):
     monkeypatch.setattr(cls, "_resolved_device", _in_context.InContextModel._resolved_device)
     monkeypatch.setattr(_in_context, "has_torch", lambda: False)
     assert cls(INPUTS)._run_devices() == ("cpu",)
+
+
+@pytest.mark.parametrize("cls", CLASSES)
+def test_auto_leaves_out_gpus_of_another_model_with_a_warning(cls, monkeypatch):
+    """An A100 at index 0 and an H100 at index 1: under "auto" the run keeps GPU 0's model alone (float16 forecasts differ
+    between the two, and which unit runs where depends on the scheduling) and says which GPU it left out; the manifest's
+    runtime names the A100 only, so a resume on an H100 refuses on its capability."""
+    from epftoolbox2.models._torch import runtime
+
+    gpus = {
+        0: ("NVIDIA A100-SXM4-80GB", "8.0"),
+        1: ("NVIDIA H100 80GB HBM3", "9.0"),
+        2: ("NVIDIA A100-SXM4-80GB", "8.0"),
+    }
+    monkeypatch.setattr(_in_context, "has_torch", lambda: True)
+    monkeypatch.setattr(_in_context, "cuda_device_count", lambda: 3)
+    monkeypatch.setattr(runtime, "cuda_probe", lambda index: (True, gpus[index][0], "ok"))
+    monkeypatch.setattr(runtime, "cuda_capability", lambda index: gpus[index][1])
+    monkeypatch.setattr(cls, "_resolved_device", lambda self: FakeDevice("cuda:0"))
+    model = cls(INPUTS, name="icl")
+    with pytest.warns(UserWarning, match=r"leaves out cuda:1 \(NVIDIA H100 80GB HBM3, capability 9.0\)"):
+        assert model._run_devices() == ("cuda:0", "cuda:2")
+    with monkeypatch.context() as patch:
+        patch.setitem(sys.modules, "torch", types.ModuleType("torch"))
+        fields = model._runtime_fields()
+    assert (fields["cuda_capability"], fields["device_name"]) == ("8.0", "NVIDIA A100-SXM4-80GB x 2 (cuda:0, cuda:2)")
+
+
+def test_worker_index_is_the_last_part_of_a_process_s_identity(monkeypatch):
+    """A pool's workers are told apart by the last part of their identity: `(3,)` is worker 2 of a top-level pool, and
+    `(12, 1)`, `(12, 2)` are workers 0 and 1 of a pool inside the parent's twelfth child (the first part is every one's)."""
+    import multiprocessing
+
+    for identity, index in (((), 0), ((1,), 0), ((3,), 2), ((12, 1), 0), ((12, 2), 1), ((12, 4, 2), 1)):
+        monkeypatch.setattr(
+            multiprocessing, "current_process", lambda identity=identity: types.SimpleNamespace(_identity=identity)
+        )
+        assert _in_context.worker_index() == index, identity
+
+
+def test_tabicl_s_precision_check_stops_a_fit_that_autocasts_where_the_manifest_says_it_doesn_t():
+    """On a GPU TabICL autocasts from 1,024 rows or 60 columns: a regressor that says it autocasts a 1,023 x 59 context stops
+    the run, as one that doesn't for 1,024 x 59 does; on a CPU any autocast stops it."""
+    from epftoolbox2.models import tabicl
+
+    def backend(on_cpu):
+        made = object.__new__(tabicl._Backend)
+        made.on_cpu, made.device = on_cpu, "cpu" if on_cpu else "cuda:0"
+        return made
+
+    def regressor(autocast):
+        return types.SimpleNamespace(_resolve_amp_fa3=lambda: (autocast, False))
+
+    with pytest.raises(RuntimeError, match="autocasts=True on cuda:0 for a context of 1023 rows and 59 columns"):
+        backend(False)._check_precision(regressor(True), (1023, 59))
+    with pytest.raises(RuntimeError, match="autocasts=False on cuda:0 for a context of 1024 rows"):
+        backend(False)._check_precision(regressor(False), (1024, 59))
+    with pytest.raises(RuntimeError, match="on cpu"):
+        backend(True)._check_precision(regressor(True), (728, 175))
+    backend(False)._check_precision(regressor(True), (728, 175))
+    backend(False)._check_precision(regressor(False), (1023, 59))
+    backend(True)._check_precision(regressor(False), (728, 175))
+
+
+def test_tabpfn_s_precision_check_stops_a_fit_that_autocasts_on_a_cpu():
+    """A regressor reporting autocast on a CPU (tabpfn's "auto" on an AVX512-BF16 or AMX CPU), or a forced dtype other than
+    float32, stops the run; on a GPU, one that doesn't autocast does."""
+    from epftoolbox2.models import tabpfn
+
+    torch = types.SimpleNamespace(float32="torch.float32")
+
+    def backend(on_cpu):
+        made = object.__new__(tabpfn._Backend)
+        made.on_cpu, made.device, made.torch = on_cpu, "cpu" if on_cpu else "cuda:0", torch
+        return made
+
+    def regressor(autocast, forced):
+        return types.SimpleNamespace(use_autocast_=autocast, forced_inference_dtype_=forced)
+
+    with pytest.raises(RuntimeError, match="autocast=True, dtype=None on cpu, not the float32 the manifest records"):
+        backend(True)._check_precision(regressor(True, None))
+    with pytest.raises(RuntimeError, match="on cpu"):
+        backend(True)._check_precision(regressor(False, "torch.bfloat16"))
+    with pytest.raises(RuntimeError, match="not the float16 autocast"):
+        backend(False)._check_precision(regressor(False, None))
+    backend(True)._check_precision(regressor(False, "torch.float32"))
+    backend(False)._check_precision(regressor(True, None))
+
+
+class _CudaCalls(types.ModuleType):
+    """A stand-in for `torch.cuda` that records every attribute the code reads of it (any call would start CUDA)."""
+
+    def __init__(self, seen):
+        super().__init__("torch.cuda")
+        self._seen = seen
+
+    def __getattr__(self, name):
+        self._seen.append(name)
+        raise AssertionError(f"torch.cuda.{name} read in the parent")
+
+
+@pytest.mark.parametrize("cls", CLASSES)
+def test_the_parent_never_touches_torch_cuda_while_resolving_a_gpu_run(cls, monkeypatch):
+    """Resolving a GPU run's devices, its runtime fields, its processes and its workers' inputs reads nothing of `torch.cuda`
+    in the parent (the probes run in subprocesses): a parent that started CUDA would break its forked workers. The stand-in
+    records any read, so the check can fail with CPU torch too."""
+    from epftoolbox2.models._torch import runtime
+
+    seen = []
+    fake = types.ModuleType("torch")
+    fake.cuda = _CudaCalls(seen)
+    fake.backends = types.SimpleNamespace(cpu=types.SimpleNamespace(get_cpu_capability=lambda: "AVX2"))
+    monkeypatch.setitem(sys.modules, "torch", fake)
+    monkeypatch.setitem(sys.modules, "torch.cuda", fake.cuda)
+    monkeypatch.setattr(_in_context, "has_torch", lambda: True)
+    monkeypatch.setattr(_in_context, "cuda_device_count", lambda: 2)
+    monkeypatch.setattr(runtime, "cuda_probe", lambda index: (True, "NVIDIA H100 80GB HBM3", "ok"))
+    monkeypatch.setattr(runtime, "cuda_capability", lambda index: "9.0")
+    monkeypatch.setattr(runtime, "resolve_device", lambda device: FakeDevice("cuda:0"))
+    monkeypatch.delenv("MAX_PROCESSES")
+    model = cls(INPUTS, device="auto")
+    assert model._run_devices() == ("cuda:0", "cuda:1")
+    assert model._runtime_fields()["device"] == "cuda" and model._executor_config()[0] == 1
+    assert seen == []
 
 
 def test_the_parent_resolves_the_device_once_and_every_worker_fits_on_its_answer(faked, market, monkeypatch):
@@ -651,6 +782,7 @@ def test_the_real_regressor_gets_the_research_s_settings(packaged, market):
 
         assert made["n_estimators"] == 4 and made["n_preprocessing_jobs"] == 1
         assert made["inference_precision"] is torch.float32, "float32 pinned on a CPU (auto autocasts to bf16 on some)"
+        assert made["memory_saving_mode"] is False, "not sized by free memory"
         assert all(
             isinstance(m["model_path"], ModelSpecs) and m["model_path"] is made["model_path"] for m in seen["made"]
         )
@@ -658,6 +790,10 @@ def test_the_real_regressor_gets_the_research_s_settings(packaged, market):
     else:
         assert (made["n_estimators"], made["batch_size"], made["allow_auto_download"]) == (8, 8, False)
         assert made["use_amp"] is False and Path(made["model_path"]).name == name
+        managers = made["inference_config"]
+        assert {key: value["min_batch_size"] for key, value in managers.items()} == dict.fromkeys(
+            ("COL_CONFIG", "ROW_CONFIG", "ICL_CONFIG"), 50_000
+        )
     assert len(seen["fits"]) == 24 and set(seen["fit_offline"]) == {"1"}, "every fit runs offline"
 
 
@@ -687,14 +823,23 @@ def test_the_runtime_records_the_package_and_torch(packaged, market, tmp_path):
 
 
 def test_tabpfn_never_reaches_a_download_path(monkeypatch, tmp_path, market, no_network):
-    """With tabpfn's own loader on a weights file that isn't a checkpoint, the run stops loudly at the load, and no download
-    path of tabpfn's (the Hugging Face one, or the direct URL that HF_HUB_OFFLINE doesn't stop) is ever reached."""
-    pytest.importorskip("tabpfn")
+    """The backend calls tabpfn's own loader by its real signature with downloads off; on a weights file that isn't a
+    checkpoint the run stops at the load with the loader's own error, and no download path of tabpfn's (the Hugging Face
+    one, or the direct URL that HF_HUB_OFFLINE doesn't stop) is reached. Without tabpfn the run stops at the pre-flight,
+    naming the extra."""
+    install_fake_weights(monkeypatch, tmp_path / "weights", TabPFNModel, real_extra=True)
+    monkeypatch.setattr(_in_context, "_BACKENDS", {})
+    model = TabPFNModel(INPUTS, training_window=28, device="cpu")
+    if importlib.util.find_spec("tabpfn") is None:
+        with pytest.raises(MissingExtraError, match=r"\[tabpfn\]"):
+            records(model, market, test=("2023-03-13", "2023-03-13"))
+        return
+    import inspect
     import urllib.request
 
     import tabpfn.model_loading as loading
 
-    attempts = []
+    attempts, calls = [], []
 
     def refuse(name):
         def call(*args, **kwargs):
@@ -706,11 +851,22 @@ def test_tabpfn_never_reaches_a_download_path(monkeypatch, tmp_path, market, no_
     for name in ("download_model", "_try_huggingface_downloads", "_try_direct_downloads"):
         monkeypatch.setattr(loading, name, refuse(name))
     monkeypatch.setattr(urllib.request, "urlopen", refuse("urlopen"))
-    install_fake_weights(monkeypatch, tmp_path / "weights", TabPFNModel, real_extra=True)
-    monkeypatch.setattr(_in_context, "_BACKENDS", {})
-    with pytest.raises(RuntimeError, match="failed to load"):
-        records(TabPFNModel(INPUTS, training_window=28, device="cpu"), market, test=("2023-03-13", "2023-03-13"))
-    assert attempts == []
+    real = loading.load_model_criterion_config
+
+    def bound(*args, **kwargs):
+        calls.append(inspect.signature(real).bind(*args, **kwargs).arguments)  # a TypeError for a call it doesn't take
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(loading, "load_model_criterion_config", bound)
+    with pytest.raises(RuntimeError, match="failed to load") as stopped:
+        records(model, market, test=("2023-03-13", "2023-03-13"))
+    (arguments,) = calls
+    assert arguments["download_if_not_exists"] is False and arguments["version"] == "v2"
+    with pytest.raises(Exception) as direct:  # the loader's own error on that file, called as the backend calls it
+        real(**arguments)
+    cause = stopped.value.__cause__
+    assert type(cause) is type(direct.value) and str(cause) == str(direct.value)
+    assert not isinstance(cause, AssertionError) and attempts == []
 
 
 def test_tabpfn_refuses_weights_its_package_reads_as_another_version(monkeypatch, tmp_path, market):
