@@ -993,16 +993,22 @@ def test_a_run_issues_every_model_on_the_day_it_read_once(market, monkeypatch):
 
 
 class _Provisional(DataSource):
-    """Hourly values up to `until` (the machine's now): the last day is provisional, and `revised` is its later revision."""
+    """Hourly values up to `until` (the machine's now): the last day is provisional, and `world["revised"]` its later
+    revision. What changes is the class's `world` (set by the test), not the instance's, whose attributes the single-file
+    cache's fingerprint reads."""
+
+    world: dict = {}
 
     def __init__(self, until):
-        self.until, self.revised, self.calls = until, False, []
+        self.until = until
 
     def fetch(self, start, end):
-        self.calls.append((start, end))
+        self.world["calls"].append((start, end))
         index = pd.date_range(self.until - pd.Timedelta(days=10), self.until, freq="1h", inclusive="left")
-        values = np.arange(len(index), dtype=float) + (np.arange(len(index)) >= len(index) - 24) * 1000.0 * self.revised
-        return pd.DataFrame({"load": values}, index=index).loc[start : end - pd.Timedelta("1ns")]
+        revised = (np.arange(len(index)) >= len(index) - 24) * 1000.0 * self.world["revised"]
+        return pd.DataFrame({"load": np.arange(len(index), dtype=float) + revised}, index=index).loc[
+            start : end - pd.Timedelta("1ns")
+        ]
 
     def _validate_config(self):
         return True
@@ -1013,18 +1019,21 @@ class _Provisional(DataSource):
 
 @pytest.mark.parametrize("cache", [True, "cache.parquet"])
 def test_a_clock_ahead_of_the_machine_settles_no_day_the_world_hasnt(cache, tmp_path, monkeypatch):
-    """A FakeClock four years ahead: the cache still settles against the machine's now, so a later run on the machine's clock
-    fetches the last days again and gets their revision, where the fake now would have kept the provisional values."""
+    """A FakeClock four years ahead: the cache still settles against the machine's now, so a run on the machine's clock a day
+    later (its `now` moved on) fetches the last days again and gets their revision, where the fake now would have called
+    them settled and kept the provisional values (in the per-source cache, and in a single file until 2030)."""
     monkeypatch.chdir(tmp_path)
+    world = {"revised": False, "calls": []}
+    monkeypatch.setattr(_Provisional, "world", world)
     until = SYSTEM.now().floor("h")
     first, last = (until - pd.Timedelta(days=9)).strftime("%Y-%m-%d"), until.strftime("%Y-%m-%d")
-    source = _Provisional(until)
     with use_clock(FakeClock(until + pd.Timedelta(days=4 * 365))):
-        before = DataPipeline().add_source(source).run(first, last, cache=cache)
-    source.revised = True
-    after = DataPipeline().add_source(source).run(first, last, cache=cache)
+        before = DataPipeline().add_source(_Provisional(until)).run(first, last, cache=cache)
+    world["revised"] = True
+    monkeypatch.setattr(SYSTEM, "now", lambda: until + pd.Timedelta(days=1))  # the machine, a day later
+    after = DataPipeline().add_source(_Provisional(until)).run(first, last, cache=cache)
     assert after["load"].iloc[-1] == before["load"].iloc[-1] + 1000.0
-    assert len(source.calls) == 2
+    assert len(world["calls"]) == 2
 
 
 def test_energy_charts_caches_no_answer_the_machine_hasnt_settled(tmp_path):
