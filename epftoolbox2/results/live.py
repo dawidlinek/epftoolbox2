@@ -385,7 +385,10 @@ class LiveStore:
     def init(self, **identity: Any) -> Dict[str, Any]:
         """Make `save_dir` a live directory with `identity` in `live.json`, or check an existing one: a key it holds with
         another value raises `LiveDirectoryError` (another pipeline's directory), a key it lacks is added. A directory holding a
-        backtest's results is refused. Returns what `live.json` holds."""
+        backtest's results is refused. Values are compared as `live.json` holds them, after the same JSON round trip (a tuple is
+        a list, a Timestamp its text, a dict's int keys text), so what was given yesterday compares equal today. Returns what
+        `live.json` holds."""
+        identity = {key: _as_json(value) for key, value in identity.items()}
         if self.is_live():
             stored = self.identity()
             differ = {
