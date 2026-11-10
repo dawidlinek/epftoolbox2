@@ -248,6 +248,19 @@ def test_patchtst_fm_takes_no_covariates():
         model.fine_tune_every = "12MS"
 
 
+def test_patchtst_fm_records_the_package_s_autocast_on_a_gpu(monkeypatch):
+    """On a CUDA device granite-tsfm runs PatchTST-FM's backbone under bfloat16 autocast: the runtime records it (compared on
+    resume), on the CPU it doesn't."""
+    from epftoolbox2.models.foundation import FoundationModel
+
+    for device, expected in (("cuda", {"autocast": "bfloat16"}), ("cpu", {})):
+        monkeypatch.setattr(
+            FoundationModel, "_runtime_fields", lambda self, d=device: {"device": d, "dtype": "float32"}
+        )
+        assert PatchTSTFMModel()._runtime_fields() == {"device": device, "dtype": "float32", **expected}
+        assert "autocast" not in TimesFMModel()._runtime_fields()
+
+
 def test_timestral_s_size_options_and_commit_are_checked():
     for size, card in TIMESTRAL_CARDS.items():
         model = TimestralModel(size=size.upper())
