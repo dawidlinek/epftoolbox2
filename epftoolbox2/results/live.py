@@ -331,6 +331,7 @@ class LiveStore:
     def __init__(self, save_dir: Any):
         self.save_dir = Path(os.path.expanduser(os.fspath(save_dir)))
         self._release: Optional[Callable[[], None]] = None
+        self._begun: List["LiveRevision"] = []  # the revisions begun under the lock held now
 
     # -- paths and identity --------------------------------------------------------------------------------------------
 
@@ -460,8 +461,26 @@ class LiveStore:
         try:
             yield self
         finally:
-            done, self._release = self._release, None
-            done()
+            try:
+                self._abandon_unfinished()
+            finally:
+                done, self._release = self._release, None
+                done()
+
+    def _abandon_unfinished(self) -> None:
+        """Close the stores of every revision begun under this hold that was neither committed, failed nor abandoned (the block
+        raised, or ended without finishing it), before `live.lock` is let go: no store of the directory keeps its lock or a
+        writer thread past the call."""
+        begun, self._begun = self._begun, []
+        error = None
+        for revision in begun:
+            if not revision._done:
+                try:
+                    revision.abandon()
+                except BaseException as exc:  # every revision's stores, then the first failure
+                    error = error or exc
+        if error is not None:
+            raise error
 
     def _require_held(self, what: str) -> None:
         if self._release is None:
@@ -544,7 +563,7 @@ class LiveStore:
         folder.mkdir(parents=True)  # exists: someone took the number meanwhile, which the lock forbids
         for directory in (*made, folder):
             _sync_directory(directory.parent)
-        return LiveRevision(
+        begun = LiveRevision(
             store=self,
             issue=day,
             revision=revision,
@@ -553,6 +572,8 @@ class LiveStore:
             call=call or uuid.uuid4().hex[:12],
             started=_iso(issued if started is None else _instant(started, "started")),
         )
+        self._begun.append(begun)
+        return begun
 
     def record_call(
         self,
@@ -710,7 +731,12 @@ class LiveStore:
 @dataclass
 class LiveRevision:
     """A revision being written (`LiveStore.begin`): `open` a store per model, write its records, then `commit` (the revision
-    becomes visible), `fail` (a call line that says it didn't) or `abandon` (nothing more: what a crash leaves)."""
+    becomes visible), `fail` (a call line that says it didn't) or `abandon` (nothing more: what a crash leaves).
+
+    Used as a context manager (`with store.begin(...) as rev:`), a revision the block leaves unfinished, raising or not, is
+    abandoned; `LiveStore.hold` abandons any left when its block ends, before `live.lock` goes. A `commit` that raised (a store's
+    write failed, `LiveLateError`, anything) leaves the revision unusable but for `fail` and `abandon`: a retry would commit it
+    without what the failed one didn't write."""
 
     store: LiveStore
     issue: str
@@ -720,7 +746,16 @@ class LiveRevision:
     call: str
     started: str
     _stores: List[_Store] = field(default_factory=list, repr=False)
+    _opened: List[str] = field(default_factory=list, repr=False)  # each model's stem, once
     _done: bool = field(default=False, repr=False)
+    _poisoned: Optional[BaseException] = field(default=None, repr=False)  # what made a commit fail
+
+    def __enter__(self) -> "LiveRevision":
+        return self
+
+    def __exit__(self, *exc_info: Any) -> None:
+        if not self._done:
+            self.abandon()
 
     @property
     def directory(self) -> Path:
@@ -736,9 +771,14 @@ class LiveRevision:
     ) -> _Store:
         """A store for `model`'s records of this revision (`<name>.jsonl` or `<name>.parquet` in the live directory), holding
         the model's own lock beneath `live.lock` (a model named "live" shares `live.lock`, held already). Every record saved is
-        stamped (`with_live`)."""
+        stamped (`with_live`). A model opened twice in one revision raises ValueError: its records are written once."""
         self._check_open()
+        self._check_not_poisoned("open()")
         stem = model.lower().replace(" ", "_")
+        if stem in self._opened:
+            raise ValueError(
+                f"{model!r} is open in revision {self.revision} of {self.issue} already: one store per model"
+            )
         if stem in LIVE_LOG_STEMS:
             raise ValueError(
                 f"a model of a live directory can't be named {model!r}: {stem}.jsonl is the directory's log"
@@ -756,11 +796,19 @@ class LiveRevision:
             writer=writer,
         )
         self._stores.append(store)
+        self._opened.append(stem)
         return store
 
     def _check_open(self) -> None:
         if self._done:
             raise RuntimeError(f"revision {self.revision} of {self.issue} is finished")
+
+    def _check_not_poisoned(self, what: str) -> None:
+        if self._poisoned is not None:
+            raise RuntimeError(
+                f"{what}: a commit of revision {self.revision} of {self.issue} failed ({self._poisoned!r}), so what it holds "
+                "is unknown: fail() or abandon() it, and write a new revision"
+            ) from self._poisoned
 
     def _close_stores(self) -> None:
         stores, self._stores = self._stores, []
@@ -787,8 +835,19 @@ class LiveRevision:
     ) -> Dict[str, Any]:
         """Close the revision's stores (a failed write raises here and nothing is committed), then append its `committed` line to
         `issues.jsonl`, synced: from then on readers see it. `finished` is the commit's instant (now by default), `deadline` the
-        call's: a commit after it raises `LiveLateError` and writes nothing. Returns the line."""
+        call's: a commit after it raises `LiveLateError` and writes nothing. Anything raised leaves the revision to `fail` or
+        `abandon` alone. Returns the line."""
         self._check_open()
+        self._check_not_poisoned("commit()")
+        try:
+            return self._commit(status, exit_code, finished, deadline, fields)
+        except BaseException as exc:
+            self._poisoned = exc
+            raise
+
+    def _commit(
+        self, status: str, exit_code: int, finished: Any, deadline: Any, fields: Dict[str, Any]
+    ) -> Dict[str, Any]:
         self.store._require_held("commit()")
         self._close_stores()
         end = _instant(now_utc() if finished is None else finished, "finished")
