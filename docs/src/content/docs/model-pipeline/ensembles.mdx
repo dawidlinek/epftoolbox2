@@ -129,6 +129,13 @@ ensemble uses what its members use. `report.vintages()` gives it its members' ro
 **A `top=1` ensemble is an exact clone of what it chose** (with `validation="previous_year"`, if one member wins every year). That is
 expected and works: see [exact clones](/epftoolbox2/model-pipeline/comparing-models/#exact-clones).
 
+## Fallbacks
+
+`FallbackEnsemble([...], per="day", name=...)` is an ensemble that takes each target day whole from the first member of a ladder
+that has all of it, for the mornings an input is late. Its records say which `rung` and `member` served, and `report.rungs()` scores
+each rung against rung 0 on identical keys. `ModelPipeline.frozen()` replaces each `top` ensemble by a plain average of what it chose
+for the newest segment, for live use. See [Fallbacks](/epftoolbox2/model-pipeline/fallback/).
+
 ## Ensembles of ensembles
 
 A plain average may have ensembles among its members: it is then the mean of their means, not a flat average of everything below them.

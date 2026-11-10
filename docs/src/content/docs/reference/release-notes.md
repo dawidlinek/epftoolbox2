@@ -211,6 +211,17 @@ an issue day it didn't sample.
 
 ### New
 
+- **`FallbackEnsemble`: a ladder of forecasts for the mornings an input is late.** `FallbackEnsemble(members, per="day", name=...)`
+  takes each (issue day, horizon, target day) whole from the first member whose forecasts of every planned key of that day exist
+  with a finite prediction (the clock's keys: 23 hours on a spring day), so a delivered day is never stitched from two models;
+  `per="key"` takes each key from the first member that has it. A skip record, `check_failed` included, is no forecast, and a day no
+  member serves is `member_missing`. Its records are the member's with `rung` and `member`, `status` `"ok"`, computed from stored
+  results like an average, in backtests and live alike. `report.rungs(name)` gives per rung the days and forecasts it served, its MAE
+  there, its and the rung-0 member's MAE on the keys both hold (identical keys, with the count) and each member's own MAE.
+  `ModelPipeline.frozen(save_dir)` returns the pipeline with every `top=` ensemble replaced by a plain `AverageEnsemble` of the
+  members chosen for the newest segment, chosen again from the members' results on validation alone, in `frozen_choices`. Nothing
+  else moves: without a fallback every record, manifest and table is bit for bit as before. See
+  [Fallbacks](/epftoolbox2/model-pipeline/fallback/).
 - **`target_transform="none"`: a pooled tree fits the raw target.** `HistGBModel`, `LightGBMModel`, `XGBoostModel` and
   `CatBoostModel` take a keyword-only `target_transform`: `"per_period"` (each period's own Invariant, the default and the only
   behaviour before), `"pooled"` (one Invariant over every row) or `"none"`, with which the estimator fits the stacked targets as
