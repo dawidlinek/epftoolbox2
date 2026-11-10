@@ -221,6 +221,17 @@ def test_a_requests_timeout_is_cut_to_the_time_left(clock):
     assert clock.monotonic() == pytest.approx(100.0)  # ended at the deadline: 60 s, a wait of 2 s, the 38 s left
 
 
+def test_no_request_is_sent_once_the_deadline_has_come(clock):
+    """Seven months are three requests (ENTSO-E asks three months at a time); each answer takes the whole timeout it was
+    given, so the first two spend the budget and the third is never sent."""
+    server = Server(clock, latency=None)
+    pipeline = DataPipeline(sources=[entsoe(server)])
+    with pytest.raises(SourceTimeout, match="no time is left for a request"):
+        pipeline.run("2026-01-01", "2026-07-31", budget=90)
+    assert [call["timeout"] for call in server.calls] == [60, 30]
+    assert pipeline.last_refresh.sources[0].requests == 2 and clock.monotonic() == 90.0
+
+
 def test_a_retry_after_longer_than_the_budget_is_not_waited(clock):
     server = Server(clock, mode="429", retry_after=100)
     pipeline = DataPipeline(sources=[entsoe(server)])
@@ -388,6 +399,8 @@ def test_every_sources_retry_loop_takes_the_runs_timeout_and_retries(loop):
             make(session)()
     assert not isinstance(raised.value, SourceTimeout)
     assert session.timeouts == [7, 7] and len(clock.sleeps) == 1
+    if loop == "openholidays":  # its own error, raised from the last one
+        assert isinstance(raised.value.__cause__, requests.HTTPError) and raised.value.__suppress_context__
 
 
 def test_energy_charts_does_not_start_a_rate_limit_wait_that_would_end_after_the_deadline(clock):
@@ -680,3 +693,15 @@ def test_a_full_hit_holds_the_lock_only_for_its_reads(clock, tmp_path, monkeypat
     df = DataPipeline(sources=[entsoe(server)]).run(START, "2026-10-15", cache=True)
     assert server.calls == [] and len(df) == 15 * 24
     assert held == [False]  # not held across the hit: only the read itself takes it
+
+
+def test_a_full_hit_whose_file_cannot_be_read_fetches_its_range_again(clock, tmp_path):
+    """The hit's second look for holes comes after its read: a file the read finds broken leaves the metadata, and its range
+    is fetched under the lock, never served as a hole."""
+    healthy = _fill_the_cache(clock)
+    [part] = tmp_path.glob(".cache/sources/*/data_*.parquet")
+    part.write_bytes(b"not parquet")
+    server = Server(clock)
+    df = DataPipeline(sources=[entsoe(server)]).run(START, "2026-10-15", cache=True)
+    assert len(server.calls) == 1
+    pd.testing.assert_frame_equal(df, healthy[healthy.index < utc("2026-10-16")], check_freq=False)
