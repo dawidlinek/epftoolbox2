@@ -214,6 +214,7 @@ POLICY_CELLS = [
     ("first", "10:12"),
     ("delivered", "deadline"),
     ("delivered", None),
+    ("delivered", "10:12"),  # day 2's delivery (08:20 UTC) is after 10:12 CEST: nothing
 ]
 
 
@@ -268,6 +269,20 @@ def test_model_result_ref_reads_by_policy_frame_and_records_alike(tmp_path, save
     assert first["revision"] == 1 and first["run_date"] == DAYS[0]
 
 
+def test_a_report_s_cached_frame_follows_a_new_commit(tmp_path):
+    from epftoolbox2.evaluators import MAEEvaluator
+    from epftoolbox2.results.report import EvaluationReport
+
+    path = write_live(tmp_path / "live")
+    ref = ModelResultRef("ols", path, 0, DAYS[0], DAYS[-1], 2, policy="latest", cutoff=None)
+    report = EvaluationReport({"ols": ref}, [MAEEvaluator()])
+    before = int(report.summary()["forecasts"].iloc[0])
+    assert before == len(expected("latest", None))
+    with open(path.parent / "issues.jsonl", "a") as f:  # day 1's r3 committed after all: its 8 keys replace r2's 7
+        f.write(json.dumps(commit_line(DAYS[0], 3, "2026-10-21T09:45:00+00:00")) + "\n")
+    assert int(report.summary()["forecasts"].iloc[0]) == before + 1
+
+
 def test_a_policy_on_a_backtest_s_results_raises_and_backtest_refs_read_as_before(tmp_path):
     directory = tmp_path / "bt"
     directory.mkdir()
@@ -288,6 +303,8 @@ def test_reading_a_live_directory_without_committed_raises(tmp_path, save_format
         list(read_records(path))
     with pytest.raises(LiveDirectoryError):
         list(read_records(path, statuses=None, transform=lambda r: None))
+    with pytest.raises(LiveDirectoryError, match="committed"):  # no record chosen to look at: refused all the same
+        list(read_records(path, statuses=("fit_error",)))
     with pytest.raises(LiveDirectoryError):
         ResultStore(str(path)) if save_format == "jsonl" else open_store(path)
 
@@ -299,6 +316,9 @@ def test_live_records_outside_a_live_directory_and_backtest_records_inside_one_r
     (moved / "ols.jsonl").write_bytes(live.read_bytes())
     with pytest.raises(LiveDirectoryError, match="outside a live directory"):
         list(read_records(moved / "ols.jsonl"))
+    convert(moved, "parquet")
+    with pytest.raises(LiveDirectoryError, match="outside a live directory"):
+        list(read_records(moved / "ols.parquet"))
     (live.parent / "bt.jsonl").write_text(lines(base_record(DAYS[0], h, 1, float(h)) for h in HOURS))
     committed = {DAYS[0]: {1: pd.Timestamp(REVISIONS[(DAYS[0], 1)])}}
     with pytest.raises(LiveDirectoryError, match="no live record"):
@@ -444,6 +464,9 @@ def test_a_crash_before_the_commit_is_invisible_and_its_number_is_never_reused(t
     assert store.next_revision(DAYS[0]) == 4
     (directory / "issues" / DAYS[0] / "r3").rmdir()
     assert store.next_revision(DAYS[0]) == 4  # r3's records still say so
+    with store.hold():  # a number a call line alone carries
+        store.record_call("2026-10-24", "error", 1, revision=1)
+    assert store.next_revision("2026-10-24") == 2
     # A crash mid-commit: the commit line half-written (truncated) commits nothing.
     with store.hold():
         rev = store.begin(DAYS[1], issued_at="2026-10-22T09:30:00+00:00", snapshot="x")
@@ -589,11 +612,11 @@ def test_a_backtest_run_into_a_live_directory_and_its_report_raise(tmp_path, mon
     write_live(directory)
     before = snapshot_files(directory)
     pipeline = ModelPipeline().add_model(OLSModel(PREDICTORS, 28, name="ols"))
-    with pytest.raises(LiveDirectoryError, match="live directory"):
+    with pytest.raises(LiveDirectoryError, match=r"run\(\) writes and reads a backtest"):
         pipeline.run(frame(), "2026-10-01", "2026-10-02", horizon=1, save_dir=str(directory))
-    with pytest.raises(LiveDirectoryError, match="live directory"):
+    with pytest.raises(LiveDirectoryError, match=r"run\(\) writes and reads a backtest"):
         pipeline.run({"DE": frame()}, "2026-10-01", "2026-10-02", horizon=1, save_dir=str(directory))
-    with pytest.raises(LiveDirectoryError, match="live directory"):
+    with pytest.raises(LiveDirectoryError, match=r"report\(\) writes and reads a backtest"):
         pipeline.report(directory)
     with pytest.raises(LiveDirectoryError, match="backtest run"):
         open_store(directory / "other.jsonl", lock=True)
