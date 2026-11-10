@@ -53,6 +53,9 @@ logger = get_logger(__name__)
 
 # In `forecast_counts()`: a planned forecast that a member the ensemble averages has no finite prediction for.
 SKIP_MEMBER_MISSING = "member_missing"
+# In `forecast_counts()`: a planned forecast of a frozen average (`AverageEnsemble(chosen_through=...)`) issued on or before the last
+# day its members' choice read, which it doesn't make: it would be scored on days its members were chosen on.
+SKIP_CHOSEN_IN_SAMPLE = "chosen_in_sample"
 
 # A choice below any of these is still made, with a warning: on the keys all members hold, as a share of those the fullest
 # member holds, on how many distinct target days, and on how many distinct issue days. A member's holes can decide what is left to
@@ -165,6 +168,7 @@ def compute(
     grid = _on_one_grid(ensemble, members)
 
     freq = next((member.freq for member in members.values() if member.freq is not None), like.freq)
+    chosen_through = getattr(ensemble, "chosen_through", None)
     choices: List[Dict[str, Any]] = []
     rung: Optional[np.ndarray] = None
     if ensemble.needs_validation:
@@ -174,6 +178,8 @@ def compute(
         prediction = grid.predictions[picked, rung]
     else:
         picked = np.flatnonzero(np.isfinite(grid.predictions).all(axis=1))
+        if chosen_through is not None:  # a frozen average: nothing issued on days its members' choice read
+            picked = picked[(grid.codes[picked] >> _RUN_SHIFT) > _ordinal(chosen_through)]
         prediction = ensemble.combine(grid.predictions[picked])
 
     records = _records(grid, picked, prediction, freq, stored, rung, ensemble.members)
@@ -204,6 +210,7 @@ def compute(
             # What its models read: an ensemble is compared as a model, and reads their inputs.
             union_vintages(refs[leaf].vintages for leaf in leaves),
             tuple(ensemble.members) if isinstance(ensemble, FallbackEnsemble) else None,
+            chosen_through,
         ),
         choices,
     )
@@ -648,7 +655,12 @@ def _write_manifest(
         return next((manifest[field] for manifest in recorded if manifest.get(field) is not None), None)
 
     created = json.loads(target.read_text()).get("created_at", now) if is_ensemble_manifest(target) else now
-    params = {key: value for key, value in vars(ensemble).items() if not key.startswith("_") and key != "name"}
+    unset = getattr(type(ensemble), "_WRITTEN_WHEN_SET", {})
+    params = {
+        key: value
+        for key, value in vars(ensemble).items()
+        if not key.startswith("_") and key != "name" and not (key in unset and value == unset[key])
+    }
     manifest = {
         "kind": ENSEMBLE_KIND,
         "model_class": type(ensemble).__name__,
@@ -689,10 +701,11 @@ def _ref(
     weekdays: Optional[Sequence[int]] = None,
     vintages: Optional[List[Dict[str, Any]]] = None,
     ladder: Optional[Tuple[str, ...]] = None,
+    chosen_through: Optional[str] = None,
 ) -> ModelResultRef:
     """The ref of the whole, with a ref per window of what this run or report names, as a model's has. `horizons` are the ones
-    the members were run with, `weekdays` the weekdays they issued on (None for every day), and `ladder` a fallback's members
-    in rung order."""
+    the members were run with, `weekdays` the weekdays they issued on (None for every day), `ladder` a fallback's members
+    in rung order, and `chosen_through` a frozen average's last day in sample, whose planned keys are `chosen_in_sample`."""
     horizons = tuple(horizons)
     weekdays = None if weekdays is None else tuple(weekdays)
     calendar = IssueCalendar(freq, like.zone, horizons, weekdays)
@@ -724,18 +737,28 @@ def _ref(
         if ref.issue_days is not None:  # and of the weekdays: an ordinal's weekday, 1 being a Monday
             read &= np.isin((run - 1) % 7, ref.issue_days)
         ref.produced = int(read.sum())
-        ref.skipped = _missing(ref.count - ref.produced)
+        in_sample = _in_sample(calendar, ref.test_start, ref.test_end, chosen_through)
+        ref.skipped = {**in_sample, **_missing(ref.count - ref.produced - sum(in_sample.values()))}
         _say_what_is_missing(ref.name, {None: ref})
         return ref
     parts = split_by_window(ref, like.windows, calendar, target_before=stored.target_before)
     if test_only:
         parts.pop(VALIDATION, None)
-    for part in parts.values():
-        part.skipped.update(_missing(part.count - part.produced - part.skipped.get(SKIP_TARGET_IN_TEST, 0)))
+    for window, part in parts.items():
+        every = like.windows.validation_every if window == VALIDATION else 1
+        in_sample = _in_sample(calendar, part.test_start, part.test_end, chosen_through, every)
+        part.skipped.update(in_sample)
+        part.skipped.update(
+            _missing(part.count - part.produced - part.skipped.get(SKIP_TARGET_IN_TEST, 0) - sum(in_sample.values()))
+        )
     ref.by_window = parts
     ref.count = sum(part.count for part in parts.values())
     ref.produced = sum(part.produced for part in parts.values())
-    ref.skipped = _missing(sum(part.skipped.get(SKIP_MEMBER_MISSING, 0) for part in parts.values()))
+    ref.skipped = {
+        reason: total
+        for reason in (SKIP_CHOSEN_IN_SAMPLE, SKIP_MEMBER_MISSING)
+        if (total := sum(part.skipped.get(reason, 0) for part in parts.values()))
+    }
     _say_what_is_missing(ref.name, parts)
     return ref
 
@@ -744,12 +767,30 @@ def _missing(count: int) -> Dict[str, int]:
     return {SKIP_MEMBER_MISSING: count} if count > 0 else {}
 
 
+def _in_sample(
+    calendar: IssueCalendar, start: str, end: str, chosen_through: Optional[str], every: int = 1
+) -> Dict[str, int]:
+    """What a frozen average plans from `start` to `end` on or before `chosen_through` and doesn't make, as a skip reason."""
+    if chosen_through is None or not start or start > chosen_through:
+        return {}
+    count = calendar.count(start, min(end, chosen_through), every)
+    return {SKIP_CHOSEN_IN_SAMPLE: count} if count else {}
+
+
 def _say_what_is_missing(name: str, parts: Mapping[Optional[str], ModelResultRef]) -> None:
-    """As loud as a model's shortfall: a warning for no forecast at all in a window, a log line for some missing."""
+    """As loud as a model's shortfall: a warning for no forecast at all in a window, a log line for some missing; and a warning
+    for the keys a frozen average leaves out as in sample."""
     for window, part in parts.items():
         where = "" if window is None else f" in the {window} window"
         missing = part.skipped.get(SKIP_MEMBER_MISSING, 0)
-        if part.produced == 0 and part.count > 0:
+        in_sample = part.skipped.get(SKIP_CHOSEN_IN_SAMPLE, 0)
+        if in_sample:
+            warnings.warn(
+                f"{name}: {in_sample} of {part.count} planned forecasts{where} are issued on or before the last day its members' "
+                f"choice read, so they would be scored on days it was made on: not made, and counted as {SKIP_CHOSEN_IN_SAMPLE}.",
+                stacklevel=2,
+            )
+        if part.produced == 0 and part.count > in_sample:
             warnings.warn(f"{name}: no forecasts{where}, for lack of a member's. See forecast_counts().", stacklevel=2)
         elif missing:
             logger.warning(
@@ -759,6 +800,7 @@ def _say_what_is_missing(name: str, parts: Mapping[Optional[str], ModelResultRef
 
 
 __all__ = [
+    "SKIP_CHOSEN_IN_SAMPLE",
     "Computed",
     "MIN_VALIDATION_DAYS",
     "MIN_VALIDATION_ISSUES",

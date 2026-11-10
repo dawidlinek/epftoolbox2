@@ -10,6 +10,7 @@ import datetime
 import json
 import shutil
 import warnings
+from concurrent.futures import Future
 from pathlib import Path
 
 import numpy as np
@@ -17,11 +18,15 @@ import pandas as pd
 import pytest
 
 from epftoolbox2.ensembles import AverageEnsemble, FallbackEnsemble
-from epftoolbox2.models import OLSModel
+from epftoolbox2.evaluators import MAEEvaluator
+from epftoolbox2.models import HistGBModel, LassoCVModel, NaiveModel, OLSModel, ResidualModel
+from epftoolbox2.models._worker import _worker_init
 from epftoolbox2.pipelines import ModelPipeline
+from epftoolbox2.pipelines._frozen import _model_params as model_params
 from epftoolbox2.pipelines.model_pipeline import COMPONENT_REGISTRY, write_zone_index
-from epftoolbox2.results import RunWindows
-from epftoolbox2.results.manifest import manifest_path
+from epftoolbox2.results import ManifestMismatchError, RunWindows
+from epftoolbox2.results.manifest import hash_predictor_layout, manifest_path
+from tests.synthetic import PREDICTORS, make_market_data
 
 ZONE = "Europe/Warsaw"
 KEY = ("run_date", "target_date", "hour", "horizon")
@@ -34,8 +39,39 @@ PLAIN = RunWindows.fixed(("2024-05-01", "2024-05-04"), ("2024-05-05", "2024-05-0
 SKIP_STATUSES = ("missing_test_predictors", "check_failed")
 
 
+# The model every hand-written member stands for (`pipeline()` adds one per name), whose configuration its manifest records.
+MEMBER = OLSModel(["x"], name="a")
+
+
+class InProcessPool:
+    """Stands in for the worker pool in the few real runs here, whose start is most of the time they would take."""
+
+    def __init__(self, max_workers=None, mp_context=None, initializer=None, initargs=()):
+        _worker_init(*initargs)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        return False
+
+    def submit(self, task, *args):
+        future = Future()
+        try:
+            future.set_result(task(*args))
+        except Exception as exc:
+            future.set_exception(exc)
+        return future
+
+    def shutdown(self, wait=True, cancel_futures=False):
+        pass
+
+
 @pytest.fixture(autouse=True)
-def offline(no_network):
+def offline(no_network, monkeypatch):
+    monkeypatch.setenv("MAX_PROCESSES", "1")
+    monkeypatch.setenv("THREADS_PER_PROCESS", "1")
+    monkeypatch.setattr("epftoolbox2.models.base.ProcessPoolExecutor", InProcessPool)
     yield
 
 
@@ -100,9 +136,15 @@ def skip_record(key, status, windows, freq="1h"):
 
 
 def manifest(windows, horizons, freq):
+    """What a run of `MEMBER` records, in the fields `frozen()` compares with the pipeline's model."""
+    periods = 24 if freq == "1h" else 96
     return {
         "model_class": "OLSModel",
         "predictors": ["x"],
+        "predictor_layout_hash": hash_predictor_layout({(p, h): ["x"] for p in range(periods) for h in horizons}),
+        "training_window": MEMBER.training_window,
+        # As a run writes it (the real runs below check the rule against the manifests runs write).
+        "model_params": model_params(MEMBER),
         "target": "price",
         "horizon": max(horizons),
         **({} if tuple(horizons) == tuple(range(1, max(horizons) + 1)) else {"horizons": list(horizons)}),
@@ -542,6 +584,8 @@ def test_frozen_takes_the_newest_segments_members_and_equals_the_top_ensemble_th
 
     best = frozen.ensembles[0]
     assert type(best) is AverageEnsemble and best.top is None and best.name == "best" and best.members == ["b", "c"]
+    # The last day whose actual the newest choice read: the day before its test period.
+    assert best.chosen_through == "2025-01-04"
     assert frozen.ensembles[1] is original.ensembles[1]
     assert original.ensembles[0].top == 2 and original.frozen_choices == {}
     newest = windows.segments[1]
@@ -549,6 +593,7 @@ def test_frozen_takes_the_newest_segments_members_and_equals_the_top_ensemble_th
         "members": ["a", "b", "c"],
         "top": 2,
         "chosen": ["b", "c"],
+        "chosen_through": "2025-01-04",
         "segment": 1,
         "validation": list(newest.validation),
         "test": list(newest.test),
@@ -574,6 +619,72 @@ def test_frozen_takes_the_newest_segments_members_and_equals_the_top_ensemble_th
     assert on_newest(tmp_path / "copy" / "live.jsonl") == on_newest(tmp_path / "study" / "live.jsonl")
 
 
+def test_a_frozen_pipeline_saved_reloaded_and_reported_forecasts_nothing_in_sample(tmp_path):
+    """The reviewer's case: freeze, save, reload and report the study's own days. The frozen average makes no forecast issued
+    on or before `chosen_through` (its MAE there would be the in-sample 1.25 of the days it was chosen on, against the honest
+    1.757 of the top ensemble on the same 1444 keys), counts them as `chosen_in_sample` and says so; what it makes is the top
+    ensemble's forecasts of the newest segment."""
+    windows = yearly_members(tmp_path / "study", ("2024-01-05", "2025-12-26"))
+    original = study().add_evaluator(MAEEvaluator())
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        honest = original.report(tmp_path / "study")
+        original.frozen(tmp_path / "study").save(tmp_path / "live.yaml")
+    assert "chosen_through: '2025-01-04'" in (tmp_path / "live.yaml").read_text()
+    reloaded = ModelPipeline.load(tmp_path / "live.yaml")
+    assert reloaded.ensembles[0].chosen_through == "2025-01-04"
+    shutil.copytree(tmp_path / "study", tmp_path / "copy")
+    with pytest.warns(UserWarning, match="chosen_in_sample"):
+        report = reloaded.report(tmp_path / "copy")
+
+    first, second = windows.segments
+    # Every period of a day is planned and the members hold two hours a day, so most of the planned keys are member_missing.
+    planned_in, planned_out = (len(planned_keys(RunWindows(test=s.test), (1,), "1h")) for s in (first, second))
+    in_sample = 2 * len(RunWindows(test=first.test).issue_days())
+    out_of_sample = 2 * len(RunWindows(test=second.test).issue_days())
+    counts = report.forecast_counts().set_index("model").loc["best"]
+    assert (counts["planned"], counts["produced"], counts["chosen_in_sample"], counts["member_missing"]) == (
+        planned_in + planned_out,
+        out_of_sample,
+        planned_in,
+        planned_out - out_of_sample,
+    )
+    validation = report.validation.forecast_counts().set_index("model").loc["best"]
+    assert validation["produced"] == 0 and validation["chosen_in_sample"] == validation["planned"] > 0
+    assert {r["run_date"] > "2025-01-04" for r in stored(tmp_path / "copy" / "best.jsonl")} == {True}
+    mae = report.summary().set_index("model").loc["best"]
+    assert (mae["forecasts"], mae["MAE"]) == (out_of_sample, 1.25)
+    # The top ensemble on the same keys: the same forecasts, so the same MAE; on all its own keys, the honest score.
+    top = {key_of(r): r for r in honest.refs["best"].iter_records()}
+    kept = [top[key_of(r)] for r in report.refs["best"].iter_records()]
+    assert np.mean([abs(r["prediction"] - r["actual"]) for r in kept]) == 1.25
+    assert honest.summary().set_index("model").loc["best", "forecasts"] == in_sample + out_of_sample == 1444
+    assert round(honest.summary().set_index("model").loc["best", "MAE"], 3) == 1.757
+
+
+def test_chosen_through_is_the_last_day_the_choice_read(tmp_path):
+    """Fixed windows with a gap and horizons to 3: the validation days serve targets up to their end plus 3, before the test
+    start; a validation-only study's choice reads every validation target."""
+    gap = RunWindows.fixed(("2024-05-01", "2024-05-04"), ("2024-05-10", "2024-05-12"))
+    keys = planned_keys(gap, (1, 2, 3), "1h")
+    for name, error in (("a", 2.0), ("b", 1.0), ("c", 3.0)):
+        records = [record(k, actual_of(k[1], k[2]) + error, gap) for k in keys]
+        write_member(tmp_path / "gap", name, records, gap, horizons=(1, 2, 3))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        frozen = pipeline(AverageEnsemble(["a", "b", "c"], top=1, name="best")).frozen(tmp_path / "gap")
+    assert frozen.frozen_choices["best"]["chosen_through"] == "2024-05-07" == frozen.ensembles[0].chosen_through
+    near = RunWindows.fixed(("2024-05-01", "2024-05-04"), ("2024-05-06", "2024-05-08"))
+    keys = planned_keys(near, (1, 2, 3), "1h")
+    for name, error in (("a", 2.0), ("b", 1.0), ("c", 3.0)):
+        records = [record(k, actual_of(k[1], k[2]) + error, near) for k in keys]
+        write_member(tmp_path / "near", name, records, near, horizons=(1, 2, 3))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        frozen = pipeline(AverageEnsemble(["a", "b", "c"], top=1, name="best")).frozen(tmp_path / "near")
+    assert frozen.ensembles[0].chosen_through == "2024-05-05"
+
+
 def test_frozen_chooses_from_the_members_not_from_a_stale_ensemble_file(tmp_path):
     yearly_members(tmp_path, ("2024-01-05", "2025-12-26"))
     with warnings.catch_warnings():
@@ -597,6 +708,8 @@ def test_frozen_of_a_validation_only_study_takes_its_one_choice(tmp_path):
         frozen = pipeline(AverageEnsemble(["a", "b", "c"], top=1, name="best")).frozen(tmp_path)
     assert frozen.ensembles[0].members == ["b"]
     assert frozen.frozen_choices["best"]["test"] is None and frozen.frozen_choices["best"]["segment"] == 0
+    # Every validation key counts with no test period: the last target is the validation end plus the horizon.
+    assert frozen.ensembles[0].chosen_through == "2024-05-09"
 
 
 def test_frozen_without_a_top_ensemble_is_a_copy_and_refuses_zones(tmp_path):
@@ -610,6 +723,92 @@ def test_frozen_without_a_top_ensemble_is_a_copy_and_refuses_zones(tmp_path):
     write_zone_index(tmp_path, ["DE", "PL"])
     with pytest.raises(ValueError, match="each zone's folder"):
         study().frozen(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "rebuilt, field",
+    [
+        (OLSModel(["something_else_d+{horizon}", "z"], training_window=7, name="b"), "predictors"),  # the reviewer's
+        (OLSModel(["x", "y"], name="b"), "predictors"),
+        (OLSModel(["x"], training_window=MEMBER.training_window + 1, name="b"), "training_window"),
+        (OLSModel(["x"], scaler="asinh", name="b"), "model_params"),
+        (LassoCVModel(["x"], name="b"), "model_class"),
+    ],
+)
+def test_frozen_refuses_members_that_are_other_models_than_the_results(tmp_path, rebuilt, field):
+    yearly_members(tmp_path, ("2024-01-05", "2025-12-26"))
+    p = ModelPipeline().add_model(OLSModel(["x"], name="a")).add_model(rebuilt).add_model(OLSModel(["x"], name="c"))
+    p.add_ensemble(AverageEnsemble(["a", "b", "c"], top=2, name="best"))
+    with pytest.raises(ManifestMismatchError, match=rf"b: {field}"):
+        p.frozen(tmp_path)
+    assert not (tmp_path / "best.jsonl").exists()  # refused before the report
+
+
+def horizon_list(horizon):
+    return [f"load_d+{horizon}", f"is_weekend_d+{horizon}"]
+
+
+def ctx_list(ctx):
+    return PREDICTORS
+
+
+def other_ctx_list(ctx):
+    return PREDICTORS[:2]
+
+
+def real_study(**changed):
+    """Models of every kind of list a manifest records (a fixed one, a function of the horizon, a function of `ctx`), a
+    `NaiveModel`, and a `ResidualModel` whose base isn't a member of the `top` ensemble; `changed` swaps one of them."""
+    models = {
+        "fixed": OLSModel(PREDICTORS, training_window=30, name="fixed"),
+        "by_horizon": OLSModel(horizon_list, training_window=30, name="by_horizon"),
+        "function": OLSModel(ctx_list, training_window=30, name="function"),
+        "naive": NaiveModel(["load_d+{horizon}"], name="naive"),
+        "base_ols": OLSModel([*PREDICTORS, "price_d-1"], training_window=21, name="base_ols"),
+        "res": ResidualModel(
+            "base_ols",
+            HistGBModel(["load_d+{horizon}", "base_fc_d+{horizon}"], max_iter=12, target_transform="none"),
+            training_window=28,
+            name="res",
+        ),
+        **changed,
+    }
+    built = ModelPipeline()
+    for model in models.values():
+        built.add_model(model)
+    return built.add_ensemble(AverageEnsemble(["fixed", "by_horizon", "function", "naive", "res"], top=2, name="best"))
+
+
+def test_frozen_accepts_the_models_a_real_run_wrote_and_refuses_others(tmp_path):
+    data = make_market_data(horizon=1, noise=5.0, seed=3)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        real_study().run(data, validation=("2023-03-28", "2023-03-31"), test=("2023-04-03", "2023-04-05"), horizon=1, save_dir=str(tmp_path))  # fmt: skip
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        frozen = real_study().frozen(tmp_path)
+    assert not [w for w in caught if "frozen()" in str(w.message)]  # every field compared, none differing
+    assert frozen.frozen_choices["best"]["chosen_through"] == "2023-04-01"
+    # The residual's base is no member: it stays bound, and its results aren't read.
+    (tmp_path / "base_ols.jsonl").unlink()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        assert real_study().frozen(tmp_path).ensembles[0].members == frozen.ensembles[0].members
+    others = {
+        "fixed": OLSModel(list(reversed(PREDICTORS)), training_window=30, name="fixed"),
+        "by_horizon": OLSModel(lambda horizon: [f"wind_d+{horizon}"], training_window=30, name="by_horizon"),
+        "function": OLSModel(other_ctx_list, training_window=30, name="function"),
+        "naive": NaiveModel(["wind_d+{horizon}"], name="naive"),
+        "res": ResidualModel(
+            "base_ols",
+            HistGBModel(["load_d+{horizon}", "base_fc_d+{horizon}"], max_iter=13, target_transform="none"),
+            training_window=28,
+            name="res",
+        ),
+    }
+    for name, model in others.items():
+        with pytest.raises(ManifestMismatchError, match=rf"{name}: (predictors|predictor_function|model_params)"):
+            real_study(**{name: model}).frozen(tmp_path)
 
 
 # ---------------------------------------------------------------------------------------------------------------------
