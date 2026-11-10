@@ -586,10 +586,13 @@ def test_a_leak_far_beyond_the_rerun_noise_stays_a_leak(data):
     class NoisyLeaky(FakeBatch):
         def _fit_predict(self, train_x, train_y, test_x):
             prediction, coefs = super()._fit_predict(train_x, train_y, test_x)
-            return prediction + 1e-12 * np.random.default_rng().standard_normal(), coefs
+            rng = np.random.default_rng()  # kept away from zero, as `Unseeded`: a tiny normal draw rounds away
+            return prediction + 1e-12 * (1.0 + rng.random()) * rng.choice((-1.0, 1.0)), coefs
 
     batch = on(data, MIDDLE, NoisyLeaky(CLEAN, leak=1e-3, name="NoisyLeaky"))
-    assert row(batch)["rerun"] == 24 and row(batch)["co_batch"] == 24 and row(batch)["status"] == "leak"
+    assert (
+        MOVED_BY_NOISE <= row(batch)["rerun"] <= 24 and row(batch)["co_batch"] == 24 and row(batch)["status"] == "leak"
+    )
 
 
 def _probe(day, change):
