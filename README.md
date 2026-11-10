@@ -216,3 +216,7 @@ relative to the target day.
 ## Examples
 
 See the `examples/` folder for complete working examples. Each script defines a `main()` that takes the date ranges it uses (and a directory for its output files when it writes any), so it can also be imported and called on a short window, for example `main(data_start="2024-01-01", data_end="2024-03-01")`. Most read ENTSO-E data and need `ENTSOE_API_KEY`; three need no API key. `examples/lear_lago.py` runs LEAR on the Lago et al. (2021) benchmark, exactly as the paper did and with the recommended settings. `examples/mlp_search.py` runs the default network search on the same benchmark (a random loop of `MLPDailyModel` configurations and an `AverageEnsemble` of the 4 best on validation; `[torch]` extra). `examples/chained_solar_price.py` chains a solar generation forecast into a day-ahead price forecast for DE-LU through `ForecastSource`, on Energy-Charts and Open-Meteo data, and compares the price model with and without it on identical keys.
+
+## License
+
+GNU Affero General Public License v3.0 or later (`AGPL-3.0-or-later`); the text is in [LICENSE](LICENSE).
