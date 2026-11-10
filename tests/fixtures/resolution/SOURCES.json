@@ -1,0 +1,23 @@
+{
+ "attribution": "Day-ahead prices of DE_LU and AT: ENTSO-E Transparency Platform (A44, sequence 1), https://transparency.entsoe.eu; the predictions are the study's own forecasts of them.",
+ "copied_read_only": "2026-11-08, rsync into epftoolbox2-research/library_check_step7/s02_copy/resolution",
+ "inputs": {
+  "out/at_grid.pkl": "105ee82cd125e17c45b655a5ef3677c2e0669f7133abe018b0d050753ff3e5c0",
+  "out/daily_r3_at_P_ren0.csv": "5fe492475ac144dbda9480c5abf9ed2b597d04ab86a2ad257707812e517e2d6b",
+  "out/daily_r3_de_lu_P_ren0.csv": "742e1a7ff83c20d227934b3eb6a99ed0286cdc78ed76ade03e6e1f61852382ed",
+  "out/de_lu_grid.pkl": "32e05d6fa84096c4c62096901bbfb3e81f63125533d8368846697483a4bdef89",
+  "out/pred_r1_at_ren0.npz": "3e3e5bb897755d5ad563abdd5e9a373e6c3b2452541418ad809f011415e94b2d",
+  "out/pred_r1_de_lu_ren0.npz": "ec03254155e997fa46081f027be724434dee51df74cc69e5c4e15a6268d7b6eb",
+  "out/table_r1.csv": "0ea3646bceebddd48c8c49161778b1dd3bb48cde713d945ebf43826bddac3a05",
+  "out/table_r1_dm.csv": "d42a6e65e9c3580428e820487dd0c7bda1aa3bce15e9d7ba939be526c3d02d56"
+ },
+ "numpy": "2.4.6",
+ "outputs": {
+  "r1_honest.parquet": "a599816751d5fe4779e574bad00a8cfd73fd04281df9884d91c6692a35e770c8",
+  "tables.json": "0ef2ba634cdf9e9bd70c13622f1522c1226a0265ecdcff173e6d91658b890849"
+ },
+ "pandas": "2.3.3",
+ "python": "3.14.6",
+ "s02_path": "~/epf2_modeling_research/resolution/",
+ "study": "resolution (epftoolbox2-research/resolution/REPORT.md), scripts evaluate.py, eval_all.py, run_daily.py"
+}

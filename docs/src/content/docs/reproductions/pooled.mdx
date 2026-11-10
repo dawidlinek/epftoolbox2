@@ -92,6 +92,9 @@ The 40 cells weigh the same however large the market: Czechia's minimum (a TSO M
 Keep `zone` in `by`; a cell without it would mostly score the largest markets.
 </Aside>
 
+In CI, `tests/reproductions/test_pooled_scoring.py` repeats this on 5 of the 20 markets (PL, DE, FR, FI, PT; a 0.3 MB
+fixture in `tests/fixtures/pooled/`), every cell within 1e-9 of the study's formula.
+
 ## Re-estimation (tier R): not reproduced in this version
 
 The study's pooled LightGBM is, for each Friday D and statistic:

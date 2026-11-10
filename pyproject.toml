@@ -105,6 +105,12 @@ torch = [{ index = "pytorch-cpu" }]
 [tool.hatch.build.targets.wheel]
 packages = ["epftoolbox2"]
 
+# The binary test fixtures (stored forecasts and prices of the reproduced studies, about 12 MB) stay in the repository for CI
+# and out of both distributions: the wheel holds the package only, and the sdist leaves them out (2.7 MB instead of about
+# 14 MB). The small CSV fixtures stay in the sdist, since .gitignore's `!tests/fixtures/**/*.csv` re-includes them.
+[tool.hatch.build.targets.sdist]
+exclude = ["/tests/fixtures"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]

@@ -1,0 +1,38 @@
+{
+ "attribution": "Forecasts of the week-ahead daily minimum and maximum load study (Dawid Linek, S02 final_final_tso_weekly_forecasting). Actual load and the TSO's week-ahead forecast (ENTSO-E A31) are from the ENTSO-E Transparency Platform (transparency.entsoe.eu), reused under its terms with attribution to ENTSO-E.",
+ "builder": {
+  "path": "/home/dawid-home-pc/Desktop/epftoolbox2-research/library_check_step7/pooled/build_fixture.py",
+  "sha256": "d018118a437f9fa3aabfd614ee5bea0f75f4ffdc8ed244b4472c449caaaaac25"
+ },
+ "copied": "rsync, read-only, from S02 on 2026-11-08; the Lasso from the local copy of the study",
+ "inputs": {
+  "S02:~/weather2/final_final_tso_weekly_forecasting/models_pooled_lgbm/DE_direct.csv": "d3086791821b90b97e2f4143b0bfa31a7b10bea2c4d54ab4bf31cf30fe942ea1",
+  "S02:~/weather2/final_final_tso_weekly_forecasting/models_pooled_lgbm/FI_direct.csv": "c1fe1f3401063c06d601ba4ba87d40831e5ba840455f3b5da333a43f09d17afa",
+  "S02:~/weather2/final_final_tso_weekly_forecasting/models_pooled_lgbm/FR_direct.csv": "037ecdb23439fffc0535d42665a2a91b597f33dd54e22c7687e2443b535b97dc",
+  "S02:~/weather2/final_final_tso_weekly_forecasting/models_pooled_lgbm/PL_direct.csv": "9ed856dcbdef03d3b8c375b79e0e8f6cce6a372b334c8044f8ff844290f7402f",
+  "S02:~/weather2/final_final_tso_weekly_forecasting/models_pooled_lgbm/PT_direct.csv": "f6d69de0ec2e228e2f3cc79713d88f57cf695f609f8417cce171c622c8c4e429",
+  "S02:~/weather2/final_final_tso_weekly_forecasting/models_pooled_lgbm/RUN_20261005T185044.json": "32db8cf392be4d7f95d27afed766467fd022b3e9e5e9ae5e71be6892352e385a",
+  "S02:~/weather2/final_final_tso_weekly_forecasting/models_pooled_mlp/DE_direct.csv": "36d80d1316f3f80cafb0149115a58738a94a3f92dfa35abecd344fe8fee3fee1",
+  "S02:~/weather2/final_final_tso_weekly_forecasting/models_pooled_mlp/FI_direct.csv": "81a8ce4083704bdbc1992dafe481e08e455bd88c14e9e700a2f3cb91aacada0c",
+  "S02:~/weather2/final_final_tso_weekly_forecasting/models_pooled_mlp/FR_direct.csv": "2590a86a44657c5df8b0c4a184bd7f883d9b1116a2127b748e0aba6b5a643371",
+  "S02:~/weather2/final_final_tso_weekly_forecasting/models_pooled_mlp/PL_direct.csv": "4db17831f99ac6b0965e6ca7c89faeafe7e38563cebdc1c3d213e0cc79dedf1c",
+  "S02:~/weather2/final_final_tso_weekly_forecasting/models_pooled_mlp/PT_direct.csv": "edc8d9f7d5dbd4cd59278117e4a164bf1c44dabbe8f4f41d796a901ec37bb88d",
+  "S02:~/weather2/final_final_tso_weekly_forecasting/models_pooled_mlp/RUN_20260927T181210.json": "1c569d97e223cf99b0276cb46d787abf278b87320585f97848b1b0d2e0f28e8f",
+  "S02:~/weather2/final_final_tso_weekly_forecasting/models_pooled_mlp/RUN_20260928T132353.json": "d2f30e31785e90159881aa6884aba792742a6635a68a299f1980ff0aeafb7cde",
+  "~/Desktop/min-max-hour-load-forecasting/data/parent/models_ecmwf/DE_direct.csv": "211a8807081715d9fbb9c63b96c20ce7c472d9df372d01d4f61b65e0f1fe3c13",
+  "~/Desktop/min-max-hour-load-forecasting/data/parent/models_ecmwf/FI_direct.csv": "068f6c81e79ff86cbab8bf9793e8e64557cff4c9f0b33e2b0593d96ecf241ee3",
+  "~/Desktop/min-max-hour-load-forecasting/data/parent/models_ecmwf/FR_direct.csv": "56b6bee90f68b779e5587f90a196ec7813bf951813ab5f5a4ad3fb97f2453f21",
+  "~/Desktop/min-max-hour-load-forecasting/data/parent/models_ecmwf/PL_direct.csv": "d740e10b14363a8c1aef580ba69ec9349860a8b7b9c623f1d6949b1abaf9866f",
+  "~/Desktop/min-max-hour-load-forecasting/data/parent/models_ecmwf/PT_direct.csv": "bd827223720a8b023678795e6d143ee132f9637634ac08a56bf4255f0681435e"
+ },
+ "note": "The Lasso file (models_ecmwf) labels the target date of the issues of 2024-10-25 and 2025-10-24 (autumn-switch weeks) a day early; it is matched on run date, horizon and statistic, where its actual and TSO equal the pooled files' on every key, and the fixture's target dates are run date + horizon, as the pooled files have them.",
+ "outputs": {
+  "forecasts.parquet": "f75b291c4798f7bef30be24b493a699986409756bc1b9bbb1955aed9f1738506",
+  "tables.json": "18018667631c858039911b90692caddc3b569811445d70ada8af736c4b147de1"
+ },
+ "python": "3.14.6",
+ "versions": {
+  "numpy": "2.4.6",
+  "pandas": "2.3.3"
+ }
+}

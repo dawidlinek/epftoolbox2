@@ -1,0 +1,30 @@
+{
+ "attribution": "Day-ahead prices (A44) and the TSOs' day-ahead wind and solar forecasts (A69) of DE_LU and AT: ENTSO-E Transparency Platform, https://transparency.entsoe.eu. Actual net generation of DE: Energy-Charts, Fraunhofer ISE, https://www.energy-charts.info, CC BY 4.0. The other forecasts are the study's own.",
+ "copied_read_only": "2026-11-08, rsync into epftoolbox2-research/library_check_step7/s02_copy/renewables",
+ "inputs": {
+  "data/arrays.pkl": "9ba920e1abe63092f96a680d8d9afe740146274b506e6e7f525067bea03d8a30",
+  "data/gen_de_lu_SOL_hgb.pkl": "d27bc14fd3d306f883e0947f9ff25cd390334faa264d2e010e7df5796251bebf",
+  "data/gen_de_lu_SOL_hgb_anchor.pkl": "82b75532725b1de98be2af03c647dacca011c5607b9c9707aa6cc1caeb7792fc",
+  "data/gen_de_lu_SOL_ridge.pkl": "ced52dcdc30d188a748aeaa50b9af3bd81558bf9fc0323334f34cbfd3548cdb5",
+  "data/gen_de_lu_WIND_hgb.pkl": "2747c98c395d20b7b6d8823f6157e6e65e1874f7d337eaf6e9e7acfc34e2373b",
+  "data/gen_de_lu_WIND_hgb_anchor.pkl": "683ff9a25a9e667f7ad271fa49525c7c7f34d987e2978f05984896844a071406",
+  "data/gen_de_lu_WIND_ridge.pkl": "c7eb0932bd06e6b17801d3d7037ff9a8e25a4b13d7c6efa26cbeb5d9427c3a06",
+  "data/price_preds.pkl": "27f03254aa46aba0fae5f13841b09b0b8b08d2cd3c45ab2e6145146dd2bb9ceb",
+  "data/price_preds_atde.pkl": "2852cdb988340f11b06b67c05e296cd7a35d33a0e8d1995bc4370ec3baf64148",
+  "data/price_preds_trainact.pkl": "16da78a88180a9ee11f79fda7ba5c7dbd468122f9eae916b2d3ac1844ce8cdc4",
+  "results/gen_dm.csv": "64a271a179f5d5bbb4e4d4b1a7f2386d192104fa0d8bd026bf2c3614225fd8a2",
+  "results/gen_table.csv": "a87673a5f75860e9aa2e54dd50a08a53d15a1e6e18f9103b9e94200e87386d61",
+  "results/price_dm.csv": "16fb61605f9b7dc8edfeb7ea2ebfae326cf15dd4afc4ecb41d8959570e598f97",
+  "results/price_table.csv": "ce21f1b0cab70404d3eb2dc6b210117a818cd4a45c7fe24b1dc99b340b298ea1"
+ },
+ "numpy": "2.4.6",
+ "outputs": {
+  "generation.parquet": "8061f777463a9e97912a2ffa6bb619909b58f2e8dbea6102301367f6a4efc838",
+  "prices.parquet": "08f8ea99d8dc201888ebc60a48fc5c710bb7b5f4ced1f305851da83df22e4903",
+  "tables.json": "87d0ba293af912cea8804d73765cd0dfb0ed8a140be61b90182d59e1915d2ea3"
+ },
+ "pandas": "2.3.3",
+ "python": "3.14.6",
+ "s02_path": "~/epf2_modeling_research/renewables/",
+ "study": "renewables (epftoolbox2-research/renewables/REPORT.md), scripts evaluate.py, gen_models.py, price_models.py"
+}
