@@ -1,4 +1,3 @@
-import time
 from functools import lru_cache
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -14,6 +13,7 @@ from rich.progress import (
     TimeRemainingColumn,
 )
 
+from ..._clock import current_clock
 from ..._date_utils import epoch_ns
 from ._open_meteo_common import OpenMeteoBase, parse_hourly, parse_run, run_cutoff, shift_local_days
 
@@ -504,7 +504,7 @@ class OpenMeteoSource(OpenMeteoBase):
         if not self._buckets:
             self._resolve_buckets(tz)
 
-        start_time = time.time()
+        start_time = current_clock().monotonic()
         # Valid times needed: rows' own times up to end + horizon local days (+1 day for DST and interpolation).
         horizon = self._effective_horizon()
         chunks = self._generate_chunks(start, end + DateOffset(days=horizon + 1), months=3)
@@ -538,7 +538,7 @@ class OpenMeteoSource(OpenMeteoBase):
         result, final = self._build_features(table, start, end)
         result = self._finish(result, final)
 
-        elapsed = time.time() - start_time
+        elapsed = current_clock().monotonic() - start_time
         self.logger.info(f"{self._label}: Download completed in {elapsed:.2f} sec")
         return result
 
@@ -621,7 +621,7 @@ class OpenMeteoSource(OpenMeteoBase):
         if rows.empty:
             return pd.DataFrame()
 
-        started = time.time()
+        started = current_clock().monotonic()
         cutoff, final = self._cutoff_instants(rows)
         horizon = self._effective_horizon()
         targets = {lead: shift_local_days(rows, tz, lead) for lead in range(1, horizon + 1)}
@@ -651,7 +651,7 @@ class OpenMeteoSource(OpenMeteoBase):
         result = pd.DataFrame(values, index=rows)
         result.index.name = "datetime"
         result = self._finish(result, final)
-        self.logger.info(f"{self._label}: Download completed in {time.time() - started:.2f} sec")
+        self.logger.info(f"{self._label}: Download completed in {current_clock().monotonic() - started:.2f} sec")
         return result
 
     def _fill_from_run(

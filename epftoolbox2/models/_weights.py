@@ -35,10 +35,10 @@ import re
 import sys
 import threading
 import warnings
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, Iterator, List, Mapping, NamedTuple, Optional, Sequence, Tuple, Union
 
+from .._clock import current_clock
 from .._extras import MissingExtraError
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -523,7 +523,7 @@ def fetch(
         "licence_url": card.licence_url,
         "accepted": card.licence if plan.flagged else None,
         "reference": not differ if any(ref.files.values()) else None,
-        "fetched_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "fetched_at": current_clock().now().isoformat(timespec="seconds"),
         "epftoolbox2": __version__,
     }
     target = directory / SIDECAR

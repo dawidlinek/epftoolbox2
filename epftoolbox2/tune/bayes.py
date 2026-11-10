@@ -40,7 +40,6 @@ import json
 import math
 import os
 import socket
-import time
 import types
 import warnings
 from dataclasses import dataclass
@@ -51,6 +50,7 @@ import numpy as np
 import pandas as pd
 import yaml
 
+from .._clock import current_clock
 from .._extras import MissingExtraError
 from ..logging import get_logger
 
@@ -933,9 +933,10 @@ class BayesSearch:
     def _wait_for_setup(self, study: Any, name: str) -> None:
         """Wait for the process that created `study` to set it up; a TimeoutError saying how to recover if it stopped."""
         timeout = _seconds(ENV_SETUP_TIMEOUT, 120.0)
-        started = time.monotonic()
+        clock = current_clock()
+        started = clock.monotonic()
         while _READY not in study.user_attrs:
-            if time.monotonic() - started > timeout:
+            if clock.monotonic() - started > timeout:
                 fix = (
                     "No trial ran: remove the journal file and start the search again."
                     if name == STUDY
@@ -945,29 +946,30 @@ class BayesSearch:
                     f"The study {name!r} in {self.storage} was created and not set up within {timeout:.0f} s: the process that "
                     f"created it stopped before. {fix}"
                 )
-            time.sleep(_poll())
+            clock.sleep(_poll())
 
     def _wait_for_rung(self, storage: Any, r: int) -> None:
         """Wait until every trial of rung `r` has finished, naming the ones still running now and then: a worker killed
         during a trial leaves it running, and only `epf tune --requeue` (with no worker running) puts it back."""
         every = _seconds(ENV_WAIT_NOTE, 900.0)
         limit = _seconds(ENV_WAIT_TIMEOUT, 0.0) if os.environ.get(ENV_WAIT_TIMEOUT) else None
-        noted = started = time.monotonic()
+        clock = current_clock()
+        noted = started = clock.monotonic()
         while not self._rung_done(storage, r):
-            if limit is not None and time.monotonic() - started > limit:
+            if limit is not None and clock.monotonic() - started > limit:
                 raise TimeoutError(
                     f"Waited {limit:.0f} s ({ENV_WAIT_TIMEOUT}) for trial(s) {_running(storage, r)} of rung {r} in "
                     f"{self.storage}: if no worker runs them, run `epf tune --requeue {self.storage}`."
                 )
-            if time.monotonic() - noted > every:
-                noted = time.monotonic()
+            if clock.monotonic() - noted > every:
+                noted = clock.monotonic()
                 warnings.warn(
                     f"Still waiting for trial(s) {_running(storage, r)} of rung {r} in {self.storage}. If no worker runs them "
                     f"any more, kill the workers, then run `epf tune --requeue {self.storage}` and start them again.",
                     UserWarning,
                     stacklevel=2,
                 )
-            time.sleep(_poll())
+            clock.sleep(_poll())
 
     def _record(self, storage: Any, settings: Dict[str, Any]) -> Dict[str, Any]:
         """The result's record, from the storage once every rung has finished: the same in every worker."""

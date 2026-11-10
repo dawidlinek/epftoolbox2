@@ -5,10 +5,12 @@ from typing import Any, Optional
 import numpy as np
 import pandas as pd
 
+from ._clock import today
+
 _DATE_PATTERN = re.compile(r"^(today|now)(?:_d([+-]\d+))?$", re.IGNORECASE)
 
 
-def resolve_date(s: Any) -> Any:
+def resolve_date(s: Any, tz: Optional[str] = None) -> Any:
     """Resolve relative date keywords to ISO date strings.
 
     Supported patterns:
@@ -20,6 +22,9 @@ def resolve_date(s: Any) -> Any:
 
     The offset N in _d±N accepts any integer, so training windows of any
     length can be expressed (e.g. 'now_d-800' for an 800-day history).
+
+    "Today" is a date of `tz` at the current clock's now (`epftoolbox2.clock`), or the host's local date when `tz` is None:
+    at 23:30 UTC on 2026-10-21, "today" is 2026-10-22 in "Europe/Warsaw" and 2026-10-21 in "UTC".
     """
     if isinstance(s, date) and not isinstance(s, datetime):
         return s.isoformat()
@@ -29,7 +34,7 @@ def resolve_date(s: Any) -> Any:
     if not m:
         return s
     delta = int(m.group(2)) if m.group(2) else 0
-    return (date.today() + timedelta(days=delta)).isoformat()
+    return (today(tz) + timedelta(days=delta)).isoformat()
 
 
 def epoch_ns(index: pd.DatetimeIndex) -> np.ndarray:

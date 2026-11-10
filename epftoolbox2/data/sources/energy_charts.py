@@ -11,7 +11,6 @@ import json
 import os
 import re
 import threading
-import time
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
@@ -19,6 +18,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 import pandas as pd
 import requests
 
+from epftoolbox2._clock import Clock, current_clock
 from epftoolbox2.logging import get_logger
 from .base import DataSource
 
@@ -139,15 +139,17 @@ class _TokenBucket:
             self.stamp = now
 
 
-_BUCKETS: Dict[str, _TokenBucket] = {}
+# By endpoint and clock: a bucket's stamps are seconds of one clock's `monotonic()` (a FakeClock's start at 0).
+_BUCKETS: Dict[Tuple[str, Clock], _TokenBucket] = {}
 _BUCKETS_LOCK = threading.Lock()
 
 
-def _bucket(endpoint: str) -> _TokenBucket:
+def _bucket(endpoint: str, clock: Clock) -> _TokenBucket:
     with _BUCKETS_LOCK:
-        if endpoint not in _BUCKETS:
-            _BUCKETS[endpoint] = _TokenBucket(BURST.get(endpoint, DEFAULT_BURST), RATE_PER_MINUTE / 60.0)
-        return _BUCKETS[endpoint]
+        key = (endpoint, clock)
+        if key not in _BUCKETS:
+            _BUCKETS[key] = _TokenBucket(BURST.get(endpoint, DEFAULT_BURST), RATE_PER_MINUTE / 60.0)
+        return _BUCKETS[key]
 
 
 def _retry_after_seconds(value: Optional[str]) -> Optional[float]:
@@ -158,7 +160,7 @@ def _retry_after_seconds(value: Optional[str]) -> Optional[float]:
     except ValueError:
         pass
     try:
-        return max(0.0, (parsedate_to_datetime(value) - pd.Timestamp.now(tz="UTC")).total_seconds())
+        return max(0.0, (parsedate_to_datetime(value) - current_clock().now()).total_seconds())
     except (TypeError, ValueError):
         return None
 
@@ -277,15 +279,22 @@ class EnergyChartsSource(DataSource):
         self.use_cache = use_cache
         self.session = requests.Session()
         self.logger = get_logger(__name__)
-        self._clock: Callable[[], float] = time.monotonic
-        self._sleep: Callable[[float], None] = time.sleep
-        self._now: Callable[[], pd.Timestamp] = lambda: pd.Timestamp.now(tz="UTC")
 
         self._validate_config()
 
     def __del__(self):
         if hasattr(self, "session") and self.session:
             self.session.close()
+
+    # The current clock (`epftoolbox2.clock`): the rate limit's seconds, its waits and the cache's "now".
+    def _clock(self) -> float:
+        return current_clock().monotonic()
+
+    def _sleep(self, seconds: float) -> None:
+        current_clock().sleep(seconds)
+
+    def _now(self) -> pd.Timestamp:
+        return current_clock().now()
 
     # -- configuration --------------------------------------------------------
 
@@ -401,7 +410,7 @@ class EnergyChartsSource(DataSource):
         if end <= start:
             raise ValueError(f"End timestamp ({end}) must be after start timestamp ({start})")
 
-        began = time.time()
+        began = current_clock().monotonic()
         self.logger.info(f"EnergyCharts [{self.country}]: downloading {', '.join(self._types)}; data {ATTRIBUTION}")
         chunks = self._chunks(start, end)
         parts: List[pd.DataFrame] = []
@@ -432,7 +441,7 @@ class EnergyChartsSource(DataSource):
             return pd.DataFrame()
         if self.prefix:
             result.columns = [f"{self.prefix}_{column}" for column in result.columns]
-        self.logger.info(f"EnergyCharts [{self.country}]: done in {time.time() - began:.2f} sec")
+        self.logger.info(f"EnergyCharts [{self.country}]: done in {current_clock().monotonic() - began:.2f} sec")
         return result
 
     def _chunks(self, start: pd.Timestamp, end: pd.Timestamp) -> List[Tuple[pd.Timestamp, pd.Timestamp]]:
@@ -530,7 +539,7 @@ class EnergyChartsSource(DataSource):
         return payload
 
     def _request(self, endpoint: str, query: Dict[str, str], label: str) -> Dict[str, Any]:
-        bucket = _bucket(endpoint)
+        bucket = _bucket(endpoint, current_clock())
         error = ""
         for attempt in range(self.MAX_RETRIES + 1):
             wait: Optional[float] = None

@@ -29,7 +29,6 @@ import json
 import os
 import shutil
 import threading
-import time
 import uuid
 import warnings
 import zlib
@@ -37,6 +36,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
 
+from .._clock import SYSTEM, current_clock
 from . import parquet_schema as schema
 from .store import (
     BACKTEST_REVISION,
@@ -624,7 +624,7 @@ class ParquetResultStore(_Store):
         self._tail_checked = False  # a torn last catalog line cut: at a locked open, else before the first part
         self._rows = 0
         self._io_lock = threading.Lock()
-        self._run_id = f"{time.strftime('%Y%m%dT%H%M%S', time.gmtime())}-{uuid.uuid4().hex[:8]}"
+        self._run_id = f"{current_clock().now().strftime('%Y%m%dT%H%M%S')}-{uuid.uuid4().hex[:8]}"
         self._seq = 0
         self._rows_per_part, self._flush_seconds, _ = limits()
         try:
@@ -671,7 +671,7 @@ class ParquetResultStore(_Store):
         year = record["run_date"][:4]
         buffer = self._buffers.get(year)
         if buffer is None:
-            buffer = self._buffers[year] = _YearBuffer(time.monotonic())
+            buffer = self._buffers[year] = _YearBuffer(SYSTEM.monotonic())  # real time, as the writer thread ages it
         buffer.records.append(record)
         buffer.layouts.append(layout)
         ok = record.get("status", STATUS_OK) == STATUS_OK
@@ -722,7 +722,7 @@ class ParquetResultStore(_Store):
                 try:
                     table = schema.to_table(records, str(self.path), layouts)
                 except BaseException as exc:  # the store's, raised by its next call, before the I/O lock is let go
-                    self._shared._fail(self, exc, time.monotonic())
+                    self._shared._fail(self, exc, SYSTEM.monotonic())
                     return
                 with self._shared._cond:
                     del buffer.records[: len(records)], buffer.layouts[: len(records)]
@@ -826,7 +826,7 @@ def _write_parquet_dir(target: Path, records: Iterable[Dict]) -> None:
     """Every record into a new directory (`target`, which must not exist), in their order, a part per year and at most
     `PARQUET_ROWS_PER_PART` rows."""
     rows_per_part = limits()[0]
-    run_id = f"{time.strftime('%Y%m%dT%H%M%S', time.gmtime())}-{uuid.uuid4().hex[:8]}"
+    run_id = f"{current_clock().now().strftime('%Y%m%dT%H%M%S')}-{uuid.uuid4().hex[:8]}"
     target.mkdir(parents=True)
     by_year: Dict[str, List[Dict]] = {}
     seq = 0
@@ -939,7 +939,7 @@ def compact(save_dir: Any, model: Optional[str] = None) -> Dict[str, Dict[str, i
             for entry in catalog.live():
                 by_year.setdefault(entry["file"].split("/", 1)[0], []).append(entry)
             merged = written = 0
-            run_id = f"{time.strftime('%Y%m%dT%H%M%S', time.gmtime())}-{uuid.uuid4().hex[:8]}"
+            run_id = f"{current_clock().now().strftime('%Y%m%dT%H%M%S')}-{uuid.uuid4().hex[:8]}"
             for partition, entries in sorted(by_year.items()):
                 if len(entries) < 2:
                     continue

@@ -2,7 +2,6 @@
 combined into one source."""
 
 import re
-import time
 from typing import Any, Dict, List, Optional, Tuple, Union
 from zoneinfo import ZoneInfo
 
@@ -11,6 +10,7 @@ import pandas as pd
 import requests
 from rich.console import Console
 
+from epftoolbox2._clock import current_clock
 from epftoolbox2.logging import get_logger
 from .._market_timezone import resolve as _resolve_timezone
 from .base import DataSource
@@ -351,7 +351,8 @@ class OpenMeteoBase(DataSource):
             self.session.proxies = {"http": self.proxy_url, "https": self.proxy_url}
 
     def _now(self) -> pd.Timestamp:
-        return pd.Timestamp.now(tz="UTC")
+        """Now on the current clock (`epftoolbox2.clock`), UTC."""
+        return current_clock().now()
 
     @staticmethod
     def _to_utc(ts: pd.Timestamp) -> pd.Timestamp:
@@ -561,7 +562,7 @@ class OpenMeteoBase(DataSource):
                 self.logger.warning(f"Request failed (attempt {attempt + 1}/{self.MAX_RETRIES}): {e}")
                 if last_attempt:
                     raise
-                time.sleep(self._backoff(attempt))
+                current_clock().sleep(self._backoff(attempt))
                 continue
 
             reason = data.get("reason", "Unknown error")
@@ -578,7 +579,7 @@ class OpenMeteoBase(DataSource):
 
             self.logger.warning(f"API error: {reason} (attempt {attempt + 1}/{self.MAX_RETRIES})")
             if not last_attempt:
-                time.sleep(wait)
+                current_clock().sleep(wait)
 
         raise RuntimeError(f"Failed to fetch data after {self.MAX_RETRIES} retries")
 

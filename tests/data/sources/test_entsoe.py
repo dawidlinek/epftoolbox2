@@ -2,14 +2,14 @@ import functools
 import json
 import re
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import Mock
 
 import numpy as np
 import pandas as pd
 import pytest
 import requests
 
-from epftoolbox2.data.sources import entsoe as entsoe_module
+from epftoolbox2.clock import FakeClock, use_clock
 from epftoolbox2.data.sources.entsoe import (
     EntsoeSource,
     lookup_area,
@@ -292,10 +292,10 @@ class TestApiRequest:
 
     def test_authentication_failure_is_not_retried(self):
         source = _source(lambda p: _response(p, _ack("Authentication failed."), status=401))
-        with patch.object(entsoe_module.time, "sleep") as sleep, pytest.raises(Exception, match="Authentication"):
+        with use_clock(FakeClock("2024-01-01")) as clock, pytest.raises(Exception, match="Authentication"):
             self._request(source)
         assert len(source.session.calls) == 1
-        sleep.assert_not_called()
+        assert clock.sleeps == []
 
     def test_retries_429_honouring_retry_after(self):
         responses = iter(["429", "ok"])
@@ -306,17 +306,17 @@ class TestApiRequest:
             return "<ok/>"
 
         source = _source(route, type=["load"])
-        with patch.object(entsoe_module.time, "sleep") as sleep:
+        with use_clock(FakeClock("2024-01-01")) as clock:
             assert self._request(source) == "<ok/>"
-        sleep.assert_called_once_with(7.0)
+        assert clock.sleeps == [7.0]
         assert len(source.session.calls) == 2
 
     def test_retries_server_errors_with_backoff_then_raises(self):
         source = _source(lambda p: _response(p, "Service Unavailable", status=503), type=["load"])
-        with patch.object(entsoe_module.time, "sleep") as sleep, pytest.raises(Exception, match="503"):
+        with use_clock(FakeClock("2024-01-01")) as clock, pytest.raises(Exception, match="503"):
             self._request(source)
         assert len(source.session.calls) == EntsoeSource.MAX_RETRIES + 1
-        waits = [c.args[0] for c in sleep.call_args_list]
+        waits = clock.sleeps
         assert waits == sorted(waits) and waits[0] > 0
 
     @pytest.mark.parametrize(
@@ -325,7 +325,7 @@ class TestApiRequest:
     def test_network_errors_are_retried_and_sanitised(self, error_type):
         error = error_type(f"HTTPSConnectionPool: Max retries exceeded (token {KEY})")
         source = _source(lambda p: error, type=["load"])
-        with patch.object(entsoe_module.time, "sleep"), pytest.raises(Exception) as info:
+        with use_clock(FakeClock("2024-01-01")), pytest.raises(Exception) as info:
             self._request(source)
         assert len(source.session.calls) == EntsoeSource.MAX_RETRIES + 1
         assert KEY not in str(info.value)
@@ -351,7 +351,7 @@ class TestApiRequest:
             return _doc(_series(_period("2024-01-01T00:00Z", "2024-01-01T01:00Z", "PT60M", {1: 1.0}, "price.amount")))
 
         source = _source(route)
-        with patch.object(entsoe_module.time, "sleep"), pytest.raises(Exception, match="502"):
+        with use_clock(FakeClock("2024-01-01")), pytest.raises(Exception, match="502"):
             source.fetch(_utc("2024-01-01"), _utc("2024-06-01"))
 
     def test_xml_with_doctype_is_rejected(self):

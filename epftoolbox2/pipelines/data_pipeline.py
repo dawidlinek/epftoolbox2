@@ -31,6 +31,7 @@ from epftoolbox2.data.cache_manager import (
     without_settled_until,
 )
 from epftoolbox2.logging import get_logger
+from epftoolbox2._clock import current_clock, wall_time
 from epftoolbox2._date_utils import _DATE_PATTERN, epoch_ns
 from epftoolbox2._frame_csv import EXACT_FLOATS
 from ._yaml import dump_yaml, to_yaml_value
@@ -424,7 +425,7 @@ class DataPipeline:
                 atomic_write(path, lambda tmp: _write_frame(result, tmp, path))
                 meta = {
                     "fingerprint": digest,
-                    "created_at": pd.Timestamp.now(tz="UTC").isoformat(),
+                    "created_at": current_clock().now().isoformat(),
                     "settled_at": unsettled_boundary().isoformat(),
                     # None when every source's rows were settled up to `end`.
                     "settled_until": settled_until.isoformat() if settled_until is not None else None,
@@ -640,8 +641,9 @@ _DATE_ONLY = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
 def _now(tz: Optional[str]) -> pd.Timestamp:
-    """Current time in ``tz``, or naive machine-local time when ``tz`` is None."""
-    return pd.Timestamp.now(tz=tz) if tz else pd.Timestamp.now()
+    """Current time in ``tz``, or naive machine-local time when ``tz`` is None, on the current clock
+    (``epftoolbox2.clock``)."""
+    return wall_time(tz if tz else None)
 
 
 def _cache_day_zone(source: DataSource, timezone: Optional[str]) -> Optional[str]:
