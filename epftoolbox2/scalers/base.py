@@ -1,5 +1,6 @@
+import json
 from abc import ABC, abstractmethod
-from typing import Any, Dict, Optional, Sequence, Tuple
+from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -88,6 +89,47 @@ class BaseScaler(ABC):
 
     def get_params(self) -> Dict[str, Any]:
         return {k: v for k, v in vars(self).items() if not k.startswith("_")}
+
+    # -- stored fits (`models._fits`, step 8d) ---------------------------------------------------------------------------
+
+    def transform(self, test_x: np.ndarray) -> np.ndarray:
+        """Test rows `(k, columns)` transformed as the last `fit_transform` transformed its `test_x`, value by value with the
+        parameters of that fit (or of `from_state`): what a stored fit's issue rows go through, to the bit."""
+        raise NotImplementedError(f"{type(self).__name__} has no transform of its own fit's parameters")
+
+    def state(self) -> Dict[str, np.ndarray]:
+        """The fitted scaler as arrays (`numpy.savez` without pickle): its spec as JSON text, and every parameter its `transform`
+        and `inverse` read. `BaseScaler.from_state` builds it back, to the bit. Raises before any fit."""
+        raise NotImplementedError(f"{type(self).__name__} has no state of its own: it can't be stored")
+
+    def _load_state(self, state: Mapping[str, np.ndarray]) -> None:
+        raise NotImplementedError(f"{type(self).__name__} has no state of its own: it can't be stored")
+
+    def _spec_state(self) -> Dict[str, np.ndarray]:
+        return {"spec": np.array(json.dumps({"name": self.name, "params": self.get_params()}, sort_keys=True))}
+
+    @classmethod
+    def from_state(cls, state: Mapping[str, np.ndarray]) -> "BaseScaler":
+        """The scaler `state()` stored: built from its spec (`scalers.registry.make_scaler`) with every fitted parameter put back,
+        so that its `transform` and `inverse` are the stored scaler's to the bit. Called on a class, the spec must be of it."""
+        from .registry import make_scaler  # it imports this module
+
+        if "spec" not in state:
+            raise ValueError("a scaler's state has no spec: it wasn't made by BaseScaler.state()")
+        scaler = make_scaler(json.loads(str(state["spec"][()])))
+        if not isinstance(scaler, cls):
+            raise ValueError(f"the state is of a {type(scaler).__name__}, not of a {cls.__name__}")
+        scaler._load_state(state)
+        return scaler
+
+    def _check_columns(self, test_x: np.ndarray, fitted: Optional[int]) -> np.ndarray:
+        """`test_x` as a float64 copy of shape (k, the fit's columns); a scaler not fitted, or rows of another width, raise."""
+        if fitted is None:
+            raise ValueError(f"{type(self).__name__} wasn't fitted: nothing to transform with")
+        test_x = np.array(test_x, dtype=np.float64)
+        if test_x.ndim != 2 or test_x.shape[1] != fitted:
+            raise ValueError(f"{type(self).__name__} was fitted on {fitted} columns, got rows of shape {test_x.shape}")
+        return test_x
 
     @staticmethod
     def get_scalable_mask(arr: np.ndarray) -> np.ndarray:
