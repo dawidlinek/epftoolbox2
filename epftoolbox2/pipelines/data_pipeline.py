@@ -30,6 +30,9 @@ from epftoolbox2.data.cache_manager import (
     without_ranges,
     without_settled_until,
 )
+from epftoolbox2.data.refresh import Refresh, RefreshRecord, SourceRefresh, last_valid, redact
+from epftoolbox2.data.sources import _http
+from epftoolbox2.data.sources._http import SourceTimeout
 from epftoolbox2.logging import get_logger
 from epftoolbox2._clock import current_clock, wall_time
 from epftoolbox2._date_utils import _DATE_PATTERN, epoch_ns
@@ -145,6 +148,8 @@ class DataPipeline:
         self.timezone = timezone
         self.on_invalid = on_invalid
         self.validation_results: Dict[str, ValidationResult] = {}
+        # What the last `run` did, source by source (`RefreshRecord`); None before a run.
+        self.last_refresh: Optional[RefreshRecord] = None
         self._validate_settings()
 
     def _validate_settings(self) -> None:
@@ -268,13 +273,24 @@ class DataPipeline:
 
         # Without a pipeline zone a source can still say which zone its one-day values are stamped at.
         day_zone = _cache_day_zone(source, self.timezone)
-        # Held across the fetch: parallel processes wait for the one fetching this source, then read its result.
+
+        def missing() -> List[Tuple[pd.Timestamp, pd.Timestamp]]:
+            # Holes are fetched from the start of their local day, see ``align_to_local_days``.
+            return align_to_local_days(cache_manager.find_missing_ranges(cache_key, start, end), start, day_zone)
+
+        # A full hit fetches nothing, so it holds the lock only inside each of its reads, never across them. The read comes
+        # before the second look for holes: a file it finds broken leaves the metadata, and its range is then fetched.
+        if not missing():
+            cached = cache_manager.read_cached_data(cache_key, start, end)
+            if not missing():
+                logger.info(f"Cache: Full hit for {source_type} source")
+                return (cached if cached is not None else pd.DataFrame()), None
+
+        # Held around the fetch and its write: parallel processes wait for the one fetching this source, then read its
+        # result. A fetch that raises (a timeout of the refresh's budget too) releases it as it leaves the block.
         with cache_manager.lock(cache_key):
             cached = cache_manager.read_cached_data(cache_key, start, end)
-            # Holes are fetched from the start of their local day, see ``align_to_local_days``.
-            missing_ranges = align_to_local_days(
-                cache_manager.find_missing_ranges(cache_key, start, end), start, day_zone
-            )
+            missing_ranges = missing()
 
             if not missing_ranges:
                 logger.info(f"Cache: Full hit for {source_type} source")
@@ -360,15 +376,65 @@ class DataPipeline:
         start: Union[str, date, pd.Timestamp],
         end: Union[str, date, pd.Timestamp],
         cache: Union[bool, str] = False,
+        *,
+        budget: Optional[float] = None,
+        deadline: Union[None, str, datetime, pd.Timestamp] = None,
+        timeout: Optional[float] = None,
+        retries: Optional[int] = None,
+        on_failure: str = "raise",
     ) -> pd.DataFrame:
+        """The sources' joined output for ``[start, end)`` (see ``resolve_range``), transformed and validated.
+
+        Args:
+            start, end: The range; see the class docstring for dates, keywords and timestamps.
+            cache: ``False``, ``True`` (one cache per source, ``.cache/sources/``) or a path (one file for the whole
+                source output); see the caching page of the docs.
+            budget: Seconds the sources may take, from now on the clock (``epftoolbox2.clock``). The sources are asked
+                one after another, each within what is left of it and of ``deadline``: a request is sent only while time
+                is left, with its timeout cut to what is left, and a wait (a retry's backoff, a Retry-After, a rate
+                limit) that would end at or after the deadline is never started. The source then raises
+                ``SourceTimeout`` (``epftoolbox2.data.refresh``).
+            deadline: An instant the sources must be done by; a naive one is a time of ``timezone`` (UTC without one).
+            timeout: Seconds every HTTP request may take, in place of each source's own (60 for most).
+            retries: How many times a failed HTTP request is asked again, in place of each source's own (0: once).
+            on_failure: ``"raise"`` (the default): a source's error, a ``SourceTimeout`` included, is raised.
+                ``"cache"`` (needs ``cache=True``): a source that failed, ran out of time or got no time at all gives
+                only what its cache holds, which is settled rows, never the last two days before now or a tail the
+                source declared unsettled; its recent cells are missing, never filled with an older value. The run goes
+                on and ``last_refresh`` says what happened.
+
+        Without ``budget``, ``deadline``, ``timeout``, ``retries`` and ``on_failure`` a run is what it was before
+        they existed: the same requests, waits and frame. ``last_refresh`` holds a ``RefreshRecord`` of the run, each
+        source's status, time, requests and retries, redacted error, rows and last valid timestamp per column; it is
+        set when a source raised, too. Retry settings are arguments of the run, not of the sources, so no YAML file or
+        cache key moves.
+        """
+        self.last_refresh = None
         if not self.sources:
             raise ValueError("At least one data source is required")
         self._validate_settings()  # settings (e.g. timezone) may have changed via add_transformer since __init__
+        if on_failure == "cache" and cache is not True:
+            raise ValueError(
+                "on_failure='cache' gives a source that failed its rows from the per-source cache: pass cache=True"
+            )
+        refresh = Refresh(
+            clock=current_clock(),
+            budget=budget,
+            deadline=deadline,
+            timeout=timeout,
+            retries=retries,
+            on_failure=on_failure,
+            cache="sources" if cache is True else "file" if isinstance(cache, (str, os.PathLike)) else "none",
+            timezone=self.timezone,
+        )
 
         start, end = self.resolve_range(start, end)
         self.validation_results = {}
 
-        result = self._load_or_fetch_sources(start, end, cache)
+        try:
+            result = self._load_or_fetch_sources(start, end, cache, refresh)
+        finally:
+            self.last_refresh = refresh.record(start, end)
         if result.empty:
             return result
 
@@ -380,14 +446,14 @@ class DataPipeline:
         return result
 
     def _load_or_fetch_sources(
-        self, start: pd.Timestamp, end: pd.Timestamp, cache: Union[bool, str, os.PathLike]
+        self, start: pd.Timestamp, end: pd.Timestamp, cache: Union[bool, str, os.PathLike], refresh: Refresh
     ) -> pd.DataFrame:
         if isinstance(cache, (str, os.PathLike)):
-            return self._run_sources_with_file_cache(start, end, cache)
-        return self._run_sources(start, end, cache)[0]
+            return self._run_sources_with_file_cache(start, end, cache, refresh)
+        return self._run_sources(start, end, cache, refresh)[0]
 
     def _run_sources_with_file_cache(
-        self, start: pd.Timestamp, end: pd.Timestamp, cache: Union[str, os.PathLike]
+        self, start: pd.Timestamp, end: pd.Timestamp, cache: Union[str, os.PathLike], refresh: Refresh
     ) -> pd.DataFrame:
         """Cache the combined source output in one file, reused only for the same sources, dates and settledness
         (see ``_is_file_cache_stale``), which includes the instant from which a source declared its rows
@@ -407,6 +473,9 @@ class DataPipeline:
                 try:
                     result = _read_frame(path, meta)
                     logger.info(f"Cache: Loading source data from {path}")
+                    # No source is asked: each is ok, with what it gave the file unknown.
+                    for name in self._source_names():
+                        refresh.add(SourceRefresh(name, "ok"))
                     return result
                 except Exception as e:  # noqa: BLE001 - an unreadable cache file is a cache miss
                     logger.warning(f"Cache: cannot read {path} ({type(e).__name__}: {e}); fetching again")
@@ -418,7 +487,7 @@ class DataPipeline:
             elif path.exists():
                 logger.info(f"Cache: {path} holds data for {_describe_mismatch(meta, fingerprint)}; fetching again")
 
-            result, settled_until = self._run_sources(start, end, cache=False)
+            result, settled_until = self._run_sources(start, end, cache=False, refresh=refresh)
             if not result.empty:
                 # Invalidate first: a crash between the two writes must not pair old metadata with new data.
                 meta_path.unlink(missing_ok=True)
@@ -449,29 +518,60 @@ class DataPipeline:
             "sources": [_component_fingerprint(source) for source in self.sources],
         }
 
+    def _source_names(self) -> List[str]:
+        """``"<class> #<position>"`` of every source, its name in warnings and in ``last_refresh``."""
+        return [f"{type(source).__name__} #{number}" for number, source in enumerate(self.sources, start=1)]
+
     def _run_sources(
-        self, start: pd.Timestamp, end: pd.Timestamp, cache: Union[bool, str]
+        self, start: pd.Timestamp, end: pd.Timestamp, cache: Union[bool, str], refresh: Refresh
     ) -> Tuple[pd.DataFrame, Optional[pd.Timestamp]]:
         """The sources' joined output for ``[start, end)`` and the earliest instant from which any source declared
-        its rows unsettled (``None`` if none did)."""
+        its rows unsettled (``None`` if none did). Each source's part goes into ``refresh``."""
         cache_manager = CacheManager() if cache is True else None
         labelled = []
         unsettled_from = []
+        secrets = _secrets(self.sources)
 
-        for number, source in enumerate(self.sources, start=1):
-            if cache_manager is not None:
-                df, settled_until = self._fetch_with_cache(source, start, end, cache_manager)
-            else:
-                df, settled_until = self._fetch_source(source, start, end)
+        for name, source in zip(self._source_names(), self.sources):
+            began = refresh.began()
+            df, settled_until, status, failure, counted = self._refresh_source(
+                name, source, start, end, cache_manager, refresh
+            )
+            error = None if failure is None else redact(f"{type(failure).__name__}: {failure}", secrets)
+            if failure is not None and refresh.on_failure == "raise":
+                refresh.add(
+                    SourceRefresh(
+                        name,
+                        status,
+                        seconds=refresh.began() - began,
+                        requests=counted.requests if counted is not None else 0,
+                        retries=counted.retried if counted is not None else 0,
+                        error=error,
+                    )
+                )
+                raise failure
+            if failure is not None:
+                logger.warning(f"Pipeline: {name} {status} ({error}); it gives only the settled rows its cache holds")
             if settled_until is not None:
                 unsettled_from.append(settled_until)
-            if df is None or df.empty:
-                continue
             # Sources may return rows outside the request (ENTSO-E load from start - 1 day, Open-Meteo up to
             # end + horizon); every path returns exactly [start, end) so cached and uncached runs agree.
-            df = clip_to_range(df, start, end)
-            if not df.empty:
-                labelled.append((f"{type(source).__name__} #{number}", df))
+            if df is not None and not df.empty:
+                df = clip_to_range(df, start, end)
+            refresh.add(
+                SourceRefresh(
+                    name,
+                    status,
+                    seconds=refresh.began() - began,
+                    requests=counted.requests if counted is not None else 0,
+                    retries=counted.retried if counted is not None else 0,
+                    error=error,
+                    rows=0 if df is None else len(df),
+                    last_valid=last_valid(df),
+                )
+            )
+            if df is not None and not df.empty:
+                labelled.append((name, df))
 
         unsettled = min(unsettled_from) if unsettled_from else None
         if not labelled:
@@ -488,6 +588,54 @@ class DataPipeline:
             df.index.tz == first.tz and np.array_equal(epoch_ns(df.index), epoch_ns(first)) for df in frames[1:]
         )
         return pd.concat(frames, axis=1, sort=not aligned), unsettled
+
+    def _refresh_source(
+        self,
+        name: str,
+        source: DataSource,
+        start: pd.Timestamp,
+        end: pd.Timestamp,
+        cache_manager: Optional[CacheManager],
+        refresh: Refresh,
+    ) -> Tuple[Optional[pd.DataFrame], Optional[pd.Timestamp], str, Optional[Exception], Optional[_http.Limits]]:
+        """One source's fetch within the refresh's limits: its frame, the instant it declared its rows unsettled from,
+        its status, what it raised (None when ok) and its request counts. A source that raised, or got no time, has the
+        rows its cache holds (``on_failure="cache"``: settled ones only, see ``_cached_rows``)."""
+        counted = None
+        if refresh.time_is_up():
+            failure: Exception = SourceTimeout(
+                f"{name}: no time was left for it before the refresh's deadline {refresh.deadline.isoformat()}",
+                refresh.deadline,
+            )
+            status = "skipped"
+        else:
+            try:
+                with _http.limits(refresh.deadline, refresh.timeout, refresh.retries) as counted:
+                    if cache_manager is not None:
+                        df, settled_until = self._fetch_with_cache(source, start, end, cache_manager)
+                    else:
+                        df, settled_until = self._fetch_source(source, start, end)
+                return df, settled_until, "ok", None, counted
+            except Exception as exc:  # noqa: BLE001 - recorded, then raised or answered from the cache (on_failure)
+                failure, status = exc, "timeout" if isinstance(exc, SourceTimeout) else "failed"
+        if refresh.on_failure == "raise":
+            return None, None, status, failure, counted
+        return self._cached_rows(source, start, end, cache_manager), None, status, failure, counted
+
+    @staticmethod
+    def _cached_rows(
+        source: DataSource, start: pd.Timestamp, end: pd.Timestamp, cache_manager: Optional[CacheManager]
+    ) -> pd.DataFrame:
+        """What the source's per-source cache holds of ``[start, end)``: only settled rows, as the cache records
+        nothing of the last ``UNSETTLED_PERIOD`` before now and nothing from a ``settled_until`` a source declared. Its
+        recorded ranges are read after the failed fetch let go of the lock, so a range it wrote before failing counts."""
+        config = source.get_cache_config() if cache_manager is not None else None
+        if config is None:
+            return pd.DataFrame()
+        cached = cache_manager.read_cached_data(
+            cache_manager.get_cache_key(config, _qualified_name(source)), start, end
+        )
+        return cached if cached is not None else pd.DataFrame()
 
     def _run_transformers(self, df: pd.DataFrame) -> pd.DataFrame:
         for transformer in self.transformers:
@@ -675,6 +823,17 @@ def _calendar_day(text: str, tz: Optional[str]) -> Optional[pd.Timestamp]:
     except ValueError:
         return None
     return ts if ts.tzinfo is None and ts == ts.normalize() else None
+
+
+def _secrets(components: List[Any]) -> List[str]:
+    """Every secret value of the components (``_SECRET_ATTRIBUTES``), for redaction."""
+    found = []
+    for component in components:
+        for key in _SECRET_ATTRIBUTES:
+            value = getattr(component, key, None)
+            if isinstance(value, str) and value:
+                found.append(value)
+    return found
 
 
 def _check_unique_columns(labelled: List[Tuple[str, pd.DataFrame]]) -> None:
