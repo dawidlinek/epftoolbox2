@@ -322,14 +322,16 @@ revision of every model's forecasts, and a revision becomes visible only once it
 In Parquet these are three more columns of a part with live records; a backtest's parts are written as before, without them.
 
 - `issues.jsonl` has one line per call: `issue`, `call`, `started`, `finished`, `status`, `exit_code`, `revision`, `committed`,
-  and for a committed revision its `issued_at`, `snapshot` and the call's `deadline`.
+  and for a committed revision its `issued_at`, `snapshot` and the call's `deadline`; before it, a line with status `"begun"`
+  for each revision the call starts.
 - `delivered.jsonl` has one line per delivery: `issue`, `revision`, `delivered_at`, `receipt_sha256` and `receipt_path`.
 - `issues/<issue>/r<n>/` holds a revision's own files. It is made before anything else of the revision.
 
 **Revisions and commits.** A call for issue day D takes revision 1 + the highest revision any line of D carries, committed or not
 (a call line, a revision folder; the records of D in every model's results only for a day without any folder, such as files
-written by hand). Its folder is made first, so a number is taken before any of its records is written and is never taken again,
-whatever a crash leaves. The call writes every model's records, then the revision's files, and last one line in `issues.jsonl`
+written by hand). Its `"begun"` line and its folder are written first, so a number is taken before any of its records is written
+and is never taken again, whatever a crash leaves or a hand removes of one of them. A record read whose `issued_at` or `snapshot`
+isn't what its revision's commit line says (another call's records under a number taken again, a hand edit) raises. The call writes every model's records, then the revision's files, and last one line in `issues.jsonl`
 with `committed: true`, appended and synced: only that line makes the revision visible. A crash before it, or a half-written
 commit line (skipped with a warning, cut off by the next call), leaves records no reader sees, so a crash between two models
 never mixes two revisions into one curve. A commit after the deadline its call was given is refused (`LiveLateError`), and a
@@ -352,7 +354,8 @@ issue day; a revision committed after the deadline its own call recorded is left
 only revisions whose call recorded a deadline and committed by it are read: the default fails closed, never open. `None` reads
 every committed revision; an instant, `"HH:MM"`, a function of the issue day (its `None`: no cut-off that day) or a mapping give
 other cut-offs. A mapping's keys are issue days however written (`"2026-10-21"`, a `date`, a `Timestamp`), and a day it doesn't
-name sees nothing. An uncommitted revision, or one committed after the cut-off, is never read: for a
+name sees nothing. A `ModelResultRef` whose cut-off leaves out committed revisions of its days warns with how many, so a
+reader that fails closed never does so silently. An uncommitted revision, or one committed after the cut-off, is never read: for a
 [chained](/epftoolbox2/data-sources/forecast/#a-live-upstream) model that would be a look-ahead.
 
 ```python

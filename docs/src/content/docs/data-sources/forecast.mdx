@@ -172,7 +172,7 @@ rule is the same `published(...)` as for a backtest's results.
 
 A live upstream commits until its deadline, after its issue time, so **give it `available` at or after its deadline**
 (`ForecastSource(path, "lear", "lear_fc", available="11:55")`): without, the revisions it commits on schedule are left out, and
-the source warns with the number of issue days where a newer commit was.
+the source warns with the number of issue days of the fetched range where a newer commit was.
 
 ## What It Refuses
 
