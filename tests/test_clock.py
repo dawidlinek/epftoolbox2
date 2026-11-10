@@ -5,7 +5,7 @@ through `current_clock()`.
 - `FakeClock`: `sleep(3600)` returns at once and advances an hour; `tick`, `advance`, `use_clock` nesting.
 - Under a `FakeClock` follow it: "today" (`resolve_date(value, tz)`, at 23:30 UTC on 10-21 it is 10-22 in Warsaw), the
   per-source cache's unsettled boundary, Retry-After waits (ENTSO-E, PSE, Energy-Charts), Open-Meteo's cut between final and
-  provisional rows, manifest and ensemble timestamps.
+  provisional rows, manifest and ensemble timestamps, and `forecast_only`'s "today", which is the issue zone's.
 - With `SYSTEM` and under a `FakeClock` a run writes the same records; pool workers never read the clock.
 """
 
@@ -27,6 +27,7 @@ from epftoolbox2.clock import SYSTEM, Clock, FakeClock, current_clock, use_clock
 from epftoolbox2.data import cache_manager
 from epftoolbox2.data.sources.base import DataSource
 from epftoolbox2.ensembles import AverageEnsemble
+from epftoolbox2.information_set import InformationSet
 from epftoolbox2.models import OLSModel
 from epftoolbox2.pipelines import DataPipeline, ModelPipeline
 from epftoolbox2.pipelines import data_pipeline as data_pipeline_module
@@ -481,8 +482,8 @@ def market():
     return make_market_data(start="2026-06-01", days=150, tz=WARSAW, horizon=1)
 
 
-def pipeline(engine="off"):
-    mp = ModelPipeline(engine=engine)
+def pipeline(engine="off", information_set=None):
+    mp = ModelPipeline(engine=engine, information_set=information_set)
     mp.add_model(OLSModel(PREDICTORS, training_window=28, name="ols"))
     mp.add_model(OLSModel(PREDICTORS[:2], training_window=14, name="ols_small"))
     mp.add_ensemble(AverageEnsemble(["ols", "ols_small"], name="avg"))
@@ -530,3 +531,49 @@ def test_parquet_parts_are_named_by_the_clock(market, tmp_path, monkeypatch):
         mp.run(market, "2026-09-01", "2026-09-02", horizon=1, save_dir=str(tmp_path), save_format="parquet")
     parts = [path.name for path in (tmp_path / "ols.parquet").rglob("part-*.parquet")]
     assert parts and all(name.startswith("part-20300101T080000-") for name in parts)
+
+
+# The data's last row is 10-28 in Warsaw; a host in UTC at 23:30 on 10-21 is still on 10-21, Warsaw on 10-22.
+WARSAW_ISSUE = InformationSet("11:45", WARSAW, use_defaults=False, unknown="ignore")
+
+
+@pytest.mark.parametrize(
+    "information_set, expected",
+    [
+        (WARSAW_ISSUE, "2026-10-22"),
+        (InformationSet("11:45", "data", use_defaults=False, unknown="ignore"), "2026-10-22"),  # the frame's zone
+        (InformationSet("11:45", "UTC", use_defaults=False, unknown="ignore"), "2026-10-21"),
+        (None, host_date(LATE)),  # no issue zone: the host's date, as before
+    ],
+)
+def test_forecast_only_issues_on_the_issue_zones_today(information_set, expected, market, tmp_path, monkeypatch):
+    monkeypatch.setenv("MAX_PROCESSES", "1")
+    monkeypatch.setenv("THREADS_PER_PROCESS", "1")
+    with use_clock(FakeClock(LATE)):
+        model = OLSModel(PREDICTORS, training_window=28, name="ols")
+        ref = model.run(market, horizon=1, forecast_only=True, information_set=information_set)
+        assert ref.test_start == ref.test_end == expected
+        mp = ModelPipeline(information_set=information_set).add_model(
+            OLSModel(PREDICTORS, training_window=28, name="ols")
+        )
+        report = mp.run(market, horizon=1, forecast_only=True, save_dir=str(tmp_path))
+        assert set(report.predictions()["run_date"].astype(str)) == {expected}
+        # The report of those results on the same clock reads the same day, also without the frame.
+        again = mp.report(str(tmp_path), horizon=1, forecast_only=True)
+        assert set(again.predictions()["run_date"].astype(str)) == {expected}
+
+
+def test_forecast_only_over_zones_issues_on_one_day(market, tmp_path, monkeypatch):
+    """issue_timezone="data" over markets in two zones whose dates differ at the clock's now: the host's date for both."""
+    monkeypatch.setenv("MAX_PROCESSES", "1")
+    monkeypatch.setenv("THREADS_PER_PROCESS", "1")
+    lisbon = make_market_data(start="2026-06-01", days=150, tz="Europe/Lisbon", horizon=1)
+    info = InformationSet("11:45", "data", use_defaults=False, unknown="ignore")
+    mp = ModelPipeline(information_set=info).add_model(OLSModel(PREDICTORS, training_window=28, name="ols"))
+    with use_clock(FakeClock(LATE)):
+        report = mp.run({"PL": market, "PT": lisbon}, horizon=1, forecast_only=True)
+    for zone in ("PL", "PT"):
+        assert set(report.zones[zone].predictions()["run_date"].astype(str)) == {host_date(LATE)}
+    with use_clock(FakeClock(LATE)):  # one zone, or zones on one clock: that zone's date
+        report = mp.run({"PL": market, "PL2": market}, horizon=1, forecast_only=True)
+    assert set(report.zones["PL2"].predictions()["run_date"].astype(str)) == {"2026-10-22"}

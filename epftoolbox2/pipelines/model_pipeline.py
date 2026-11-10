@@ -23,7 +23,7 @@ from ..models._calendar import (
     resolve_horizons,
     resolve_issue_days,
 )
-from ..models.base import BaseModel, _RunChecks
+from ..models.base import BaseModel, _RunChecks, today_zone
 from ..models._worker import pool_native_threads
 from ..models._engine import (
     ENGINE_CHECK,
@@ -571,7 +571,8 @@ class ModelPipeline:
         if windows is not None:
             check_start, check_end = windows.first_day, windows.last_day
         elif forecast_only:
-            check_start, check_end = resolve_date(test_start or "today"), resolve_date(test_end or "today")
+            zone = today_zone(self.information_set, data.index)  # "today" in the issue zone, as each model's run has it
+            check_start, check_end = resolve_date(test_start or "today", zone), resolve_date(test_end or "today", zone)
         else:
             check_start, check_end = test_start, test_end
         for name, (start, end) in windows.periods if windows is not None else [("test", (check_start, check_end))]:
@@ -817,7 +818,12 @@ class ModelPipeline:
         if windows is not None:
             check_start, check_end = windows.first_day, windows.last_day
         elif forecast_only:
-            check_start, check_end = resolve_date(test_start or "today"), resolve_date(test_end or "today")
+            # One "today" for every zone, given to each zone's run (a pooled model fits over them all): the zones' issue zone,
+            # or the host's date where their zones differ (issue_timezone="data" over markets in several zones).
+            zone = {today_zone(self.information_set, frames[name].index) for name in zones}
+            zone = zone.pop() if len(zone) == 1 else None
+            check_start, check_end = resolve_date(test_start or "today", zone), resolve_date(test_end or "today", zone)
+            test_start, test_end = check_start, check_end
         else:
             check_start, check_end = test_start, test_end
         for name, (start, end) in windows.periods if windows is not None else [("test", (check_start, check_end))]:
@@ -1267,7 +1273,12 @@ class ModelPipeline:
             test_start, test_end = windows.first_day, windows.last_day
         else:
             if forecast_only:
-                test_start, test_end = resolve_date(test_start or "today"), resolve_date(test_end or "today")
+                # "Today" in the issue zone, as the runs had it; issue_timezone="data" without a frame: the runs' data zone.
+                zone = today_zone(self.information_set, None if data is None else data.index)
+                if zone is None and self.information_set is not None:
+                    zone = next(filter(None, (read_zone(manifest_path(path)) for path in paths.values())), None)
+                test_start = resolve_date(test_start or "today", zone)
+                test_end = resolve_date(test_end or "today", zone)
             test_start, test_end = resolve_date(test_start), resolve_date(test_end)
 
         refs: Dict[str, ModelResultRef] = {}

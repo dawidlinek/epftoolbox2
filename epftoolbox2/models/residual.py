@@ -64,7 +64,7 @@ from ._calendar import (
 from ._units import DAY, PER_PERIOD, PERIOD, unit_kind
 from ._units import manifest_fields as unit_fields
 from ._worker import block_calls, issue_row
-from .base import BaseModel, _days_back, _test_days
+from .base import BaseModel, _days_back, _test_days, today_zone
 
 # The names a learner's list gives the base's forecasts: `base_fc_d+{h}` (the row's own period) and `base_fc_hHH_d+{h}` or
 # `base_fc_sNN_d+{h}` (period HH or NN of the target day, day-level), always at the list's own horizon.
@@ -490,13 +490,14 @@ class ResidualModel(BaseModel):
         return path.with_name(path.stem + BASE_SUFFIX + path.suffix)
 
     def _issue_span(
-        self, test_start: Any, test_end: Any, windows: Any, forecast_only: bool = False
+        self, test_start: Any, test_end: Any, windows: Any, forecast_only: bool = False, zone: Optional[str] = None
     ) -> Optional[Tuple[datetime.date, datetime.date]]:
-        """(first, last) issue day of a run, None for a check without a test period."""
+        """(first, last) issue day of a run, None for a check without a test period. `zone` is the zone of `forecast_only`'s
+        "today" (`today_zone`)."""
         if windows is not None:
             return _date(windows.first_day), _date(windows.last_day)
         if forecast_only:
-            return _date(resolve_date(test_start or "today")), _date(resolve_date(test_end or "today"))
+            return _date(resolve_date(test_start or "today", zone)), _date(resolve_date(test_end or "today", zone))
         if test_start is None or test_end is None:
             return None
         return _date(resolve_date(test_start)), _date(resolve_date(test_end))
@@ -726,7 +727,7 @@ class ResidualModel(BaseModel):
             )
         # Before the base runs: a learner given a per-row target after it was set would otherwise be run without it.
         self._check_learner(self.learner, f"ResidualModel({self.name!r})")
-        span = self._issue_span(test_start, test_end, windows, forecast_only)
+        span = self._issue_span(test_start, test_end, windows, forecast_only, today_zone(information_set, data.index))
         if span is None:
             raise ValueError("test_start and test_end are required unless forecast_only=True")
         largest, planned = resolve_horizons(horizon, horizons, 7)
