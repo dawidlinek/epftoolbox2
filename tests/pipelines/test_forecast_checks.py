@@ -9,6 +9,7 @@ unchecked run wrote it, line for line, and give each forecast of a failing day a
 """
 
 import datetime
+import hashlib
 import json
 import math
 from concurrent.futures import Future
@@ -26,6 +27,7 @@ from epftoolbox2.models._worker import _worker_init, current_fit
 from epftoolbox2.pipelines import ModelPipeline, Workflow
 from epftoolbox2.results import ManifestMismatchError
 from epftoolbox2.results.checks import CHECK_FAILED, ForecastChecks
+from epftoolbox2.results import manifest as manifest_module
 from epftoolbox2.results.manifest import configuration_digest, manifest_path
 from epftoolbox2.results.store import read_records
 from tests.synthetic import PREDICTORS, calendar_shift, make_market_data
@@ -251,9 +253,12 @@ def test_the_manifest_records_the_checks_and_a_resume_with_others_raises(tmp_pat
     assert manifest["checks"] == checks.to_dict()
     without = {key: value for key, value in manifest.items() if key != "checks"}
     assert configuration_digest(without) != configuration_digest(manifest)
-    assert configuration_digest({**without, "checks": None}) == configuration_digest(
-        without
-    )  # no key: digests don't move
+    assert configuration_digest({**without, "checks": None}) == configuration_digest(without)
+    # Without checks a digest is what it was before the field: the hash of the other compared fields alone.
+    fields = [name for name in manifest_module._COMPARED_FIELDS if name != "checks"]
+    kept = {name: without.get(name) for name in fields if name != "history_ahead" or without.get(name) is not None}
+    before = hashlib.sha256(json.dumps(kept, sort_keys=True, default=str).encode()).hexdigest()
+    assert configuration_digest(without) == before
     mp.run(data, *TEST, horizon=2, save_dir=str(tmp_path))  # the same checks resume
     for other in (ForecastChecks(range=(0.0, 300.0)), None):
         again = ModelPipeline(checks=other).add_model(OLSModel(PREDICTORS, training_window=21, name="ols"))

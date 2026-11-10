@@ -170,6 +170,13 @@ def test_a_detail_names_what_failed():
     assert many == "1 of 24, missing 1, 2, 3, 4, 5, 6 and 17 more"
     # A one-period day ("1D") is never one value all day, and has no neighbours.
     assert ForecastChecks(max_step=1).failures({0: 5.0}, (0,)) == []
+    # The bounds are in the range, and a step of exactly max_step is allowed.
+    assert ForecastChecks(range=(0, 200), max_step=200).failures({0: 0.0, 1: 200.0}, (0, 1)) == []
+    # Neighbours in clock order: on a spring day 01:00 and 03:00, whose step alone is too large here.
+    spring = planned_periods("1h", ZONE)(plus(SPRING, -1), 1)
+    ramp = {p: float(p) for p in spring}
+    ramp.update({p: ramp[p] + 50.0 for p in spring if p >= 3})
+    assert dict(ForecastChecks(max_step=10).failures(ramp, spring)) == {"max_step": "52 from period 1 to 3, above 10"}
 
 
 def test_settings_are_checked_and_read_back():
@@ -390,3 +397,73 @@ def test_overrule_refuses_a_forecast_not_yet_written(tmp_path, monkeypatch):
             store.overrule(check_failed_record(record, "x"))
     finally:
         store.close()
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# The gate of a run, on its own
+# ---------------------------------------------------------------------------------------------------------------------
+
+
+class FakeStore:
+    """What the gate reads of a store: whether it has results, and its forecasts."""
+
+    def __init__(self, records):
+        self.records = records
+
+    def has_results(self):
+        return bool(self.records)
+
+    def iter_lines(self, cols=None):
+        return iter(self.records)
+
+
+class FakeState:
+    """What the gate reads of a run's state, and the skips it is told of."""
+
+    def __init__(self, tasks, pending, store):
+        self.tasks, self.pending, self.store = tasks, pending, store
+        self.skipped = []
+
+    def skip(self, task, outcome, example, sink, overrule=False):
+        self.skipped.append((task, outcome.partition(": ")[0], overrule))
+
+
+class FakeSink:
+    def __init__(self):
+        self.saved = []
+
+    def save(self, record):
+        self.saved.append(record)
+
+
+def test_the_gate_checks_a_day_whose_new_records_are_all_skips_with_its_forecasts_on_file():
+    """A member-day whose keys left to do are all skips decided before any fit (no task) and whose other keys are on file is
+    checked when the run starts, from the forecasts on file alone: here they lack the skipped periods, so `periods` fails and
+    they are overruled. A day with nothing left to do isn't checked again."""
+    from epftoolbox2.models._checks import CheckGate
+
+    first = datetime.date.fromisoformat(PLAIN)
+    on_file = [{"hour": p, "horizon": 1, "run_date": PLAIN, "prediction": 100.0 + p} for p in range(20)]
+    on_file += [{"hour": p, "horizon": 1, "run_date": plus(PLAIN, 1), "prediction": 100.0 + p} for p in range(24)]
+    state = FakeState(tasks=[], pending=[(p, 1, 0) for p in range(20, 24)], store=FakeStore(on_file))
+    gate = CheckGate(ForecastChecks(), "1h", ZONE, first)
+    sink = FakeSink()
+    gate.finish(None, state, sink)
+    assert sorted(state.skipped) == [((p, 1, 0), CHECK_FAILED, True) for p in range(20)]
+    assert sink.saved == []
+
+
+def test_the_gate_holds_a_day_until_every_task_of_it_is_back():
+    from epftoolbox2.models._checks import CheckGate
+
+    first = datetime.date.fromisoformat(PLAIN)
+    tasks = [(p, 1, 0) for p in range(24)]
+    state = FakeState(tasks=tasks, pending=tasks, store=None)
+    gate = CheckGate(ForecastChecks(), "1h", ZONE, first)
+    sink = FakeSink()
+    day = day_records(PLAIN, 1, "1h", {p: 100.0 + p for p in range(24)})
+    gate.collect(None, state, day[:10], [], sink)
+    assert sink.saved == []  # 14 periods still out
+    gate.collect(None, state, day[10:23], [((23, 1, 0), "missing_test_predictors")], sink)
+    assert sink.saved == [] and [s[1] for s in state.skipped] == ["missing_test_predictors"] + [CHECK_FAILED] * 23
+    assert not any(s[2] for s in state.skipped)
