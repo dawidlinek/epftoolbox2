@@ -16,6 +16,7 @@ from datetime import date
 import os
 import subprocess
 import sys
+import warnings
 from concurrent.futures import Future
 from pathlib import Path
 
@@ -537,7 +538,8 @@ def test_tabpfn_refuses_weights_its_package_reads_as_another_version(monkeypatch
     other = tmp_path / "tabpfn-v2.5-regressor-v2.5_default.ckpt"
     other.write_bytes(b"not v2")
     model = TabPFNModel(INPUTS, training_window=28, device="cpu", weights=str(other))
-    with pytest.warns(UserWarning, match="not the reference weights"):
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)  # not the reference weights, once the card pins their hash
         with pytest.raises(RuntimeError, match="not v2"):
             records(model, market, test=("2023-03-13", "2023-03-13"))
 

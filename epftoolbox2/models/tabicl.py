@@ -21,6 +21,7 @@ from ._in_context import INVARIANT_TARGET, InContextModel, package, torch_fit_sc
 REPO = "jingang/TabICL"
 REVISION = "4dcd344ece2c00be9e831fdd35bed57b5ad83e19"  # main at 2026-11-10; the checkpoint was uploaded on 2026-02-12
 CHECKPOINT = "tabicl-regressor-v2-20260212.ckpt"
+SHA256 = "0db9cb538f114e79026bf08f45f41ad8dd7ad2de2aaca9a5ca8cd3bd9748ae7a"
 
 CARD = ModelCard(
     family="tabicl-v2",
@@ -30,7 +31,8 @@ CARD = ModelCard(
     commercial_use=True,
     revenue_cap=None,
     attribution=None,
-    weights=WeightsRef(REPO, REVISION, {CHECKPOINT: None}, bytes=114_324_594),
+    # sha256 recorded by the first `epf weights fetch` (S02, 2026-11-10), the repository's LFS hash of the file too.
+    weights=WeightsRef(REPO, REVISION, {CHECKPOINT: SHA256}, bytes=114_324_594),
     runtime=("tabicl>=2.2,<3", "torch"),
     corpus="synthetic priors",
     corpus_end=None,

@@ -652,6 +652,18 @@ def said(capsys) -> str:
     return " ".join(capsys.readouterr().out.split())
 
 
+def only_the_tests_families(monkeypatch):
+    """The model registry without the shipped families that have weights to fetch (the in-context models, step 6e, and those
+    after them), so that `epf weights fetch all` fetches the test's own families alone."""
+    import importlib
+
+    def weightless(name, module):  # as `epf weights fetch all` asks (`cli._carded_classes`)
+        return not getattr(getattr(getattr(importlib.import_module(module), name), "_card", None), "weights", None)
+
+    kept = {name: module for name, module in COMPONENT_REGISTRY["models"].items() if weightless(name, module)}
+    monkeypatch.setitem(COMPONENT_REGISTRY, "models", kept)
+
+
 def test_epf_weights_fetch_list_and_verify(weights_root, monkeypatch, capsys, no_network):
     calls = []
     monkeypatch.setattr(_weights, "snapshot_download", fake_download({WEIGHTS_FILE: REFERENCE}, calls))
@@ -677,6 +689,7 @@ def test_epf_weights_fetch_list_and_verify(weights_root, monkeypatch, capsys, no
     assert "Unknown model class 'NoSuchModel'" in said(capsys)
     assert epf(monkeypatch, "weights", "fetch", CLASS_PATH, "--size", "209m") == 1
     assert "has no size '209m'" in said(capsys)
+    only_the_tests_families(monkeypatch)
     assert epf(monkeypatch, "weights", "fetch", "all") == 0
     assert "No registered model has weights to fetch" in said(capsys)
     monkeypatch.setitem(COMPONENT_REGISTRY["models"], "CardedModel", "tests.models.carded_fake")
@@ -1197,6 +1210,7 @@ def test_epf_weights_fetch_reports_a_failed_download_and_goes_on(weights_root, m
     assert "the download of fake-org/fake-fm@v1 failed (GatedRepoError: 401 Client Error" in out
     assert "huggingface-cli login" in out and "Traceback" not in out
     assert not (weights_root / REPO / REVISION / SIDECAR).exists()
+    only_the_tests_families(monkeypatch)
     monkeypatch.setitem(COMPONENT_REGISTRY["models"], "CardedModel", "tests.models.carded_fake")
     monkeypatch.setitem(COMPONENT_REGISTRY["models"], "OtherCardedModel", "tests.models.carded_fake")
     assert (

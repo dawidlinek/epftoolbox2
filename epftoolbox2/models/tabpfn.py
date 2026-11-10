@@ -21,6 +21,7 @@ REPO = "Prior-Labs/TabPFN-v2-reg"
 # The repository's main at 2026-11-10; the checkpoint itself last changed on 2025-01-05 (commit 230d61748bae).
 REVISION = "02a44705ff7790b50cded404bc59adb94da456a1"
 CHECKPOINT = "tabpfn-v2-regressor.ckpt"
+SHA256 = "2ab5a07d5c41dfe6db9aa7ae106fc6de898326c2765be66505a07e2868c10736"
 
 CARD = ModelCard(
     family="tabpfn-v2",
@@ -33,7 +34,8 @@ CARD = ModelCard(
         "Built with PriorLabs-TabPFN (Prior Labs License 1.1, section 10: shown wherever a product or its documentation built "
         "on the weights or their outputs is made available; internal benchmarking needs none)"
     ),
-    weights=WeightsRef(REPO, REVISION, {CHECKPOINT: None}, bytes=44_390_977),
+    # sha256 recorded by the first `epf weights fetch` (S02, 2026-11-10), the repository's LFS hash of the file too.
+    weights=WeightsRef(REPO, REVISION, {CHECKPOINT: SHA256}, bytes=44_390_977),
     runtime=("tabpfn>=6,<10", "torch"),
     corpus="synthetic priors",
     corpus_end=None,
