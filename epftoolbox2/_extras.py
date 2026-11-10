@@ -18,7 +18,29 @@ EXTRAS: Dict[str, Tuple[str, ...]] = {
     "tune": ("optuna",),
     "t0": ("t0", "torch", "safetensors"),
     "chronos": ("chronos", "torch", "transformers"),
+    # 6j's foundation families. `timestral` isn't on PyPI: its extra installs the package's PyPI dependencies, and the package
+    # comes from its pinned commit (`TIMESTRAL_COMMIT`, `install_line`).
+    "patchtst-fm": ("tsfm_public", "torch", "transformers"),
+    "timesfm": ("timesfm3", "torch", "safetensors"),
+    "timestral": ("timestral", "torch", "safetensors"),
 }
+
+# The commit of github.com/mistralai/timestral that TimestralModel runs on (the research's, 2026-10-15, its first): its card
+# pins it, and the pre-flight refuses another installed commit unless the model says otherwise (`runtime_commit=`, `weights=`).
+TIMESTRAL_COMMIT = "a534bdbd244d64f3d9d743f46c7bf6fc330ed4ff"
+TIMESTRAL_SOURCE = f"timestral @ git+https://github.com/mistralai/timestral@{TIMESTRAL_COMMIT}"
+# Packages an extra needs that pip can't get from the index: `install_line` adds them after `epftoolbox2[extra]`.
+EXTRA_SOURCES: Dict[str, Tuple[str, ...]] = {
+    "timestral": (TIMESTRAL_SOURCE,),
+}
+
+
+def install_line(extra: str) -> str:
+    """The command that installs `extra` (one name, or several comma-separated): `pip install 'epftoolbox2[extra]'`, followed
+    by the packages `EXTRA_SOURCES` lists for it (the timestral package at its commit)."""
+    names = [name.strip() for name in extra.split(",") if name.strip()]
+    sources = [source for name in names for source in EXTRA_SOURCES.get(name, ())]
+    return f"pip install 'epftoolbox2[{','.join(names)}]'" + "".join(f" '{source}'" for source in sources)
 
 
 class MissingExtraError(ImportError):
@@ -31,7 +53,7 @@ class MissingExtraError(ImportError):
         self.what = what
         self.extra = extra
         self.message = message
-        super().__init__(message if message is not None else f"{what} needs: pip install 'epftoolbox2[{extra}]'")
+        super().__init__(message if message is not None else f"{what} needs: {install_line(extra)}")
 
     def __reduce__(self):
         return type(self), (self.what, self.extra, self.message)

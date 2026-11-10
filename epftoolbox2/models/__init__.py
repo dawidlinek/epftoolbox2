@@ -15,6 +15,11 @@ from .residual import ResidualModel
 from .shape import ShapeModel
 from .foundation import ChronosModel, FoundationModel, T0Model
 
+# 6j's foundation families
+from .patchtst_fm import PatchTSTFMModel
+from .timestral import TimestralModel
+from .timesfm import TimesFMModel
+
 __all__ = [
     "BaseModel",
     "OLSModel",
@@ -35,6 +40,10 @@ __all__ = [
     "FoundationModel",
     "T0Model",
     "ChronosModel",
+    # 6j
+    "PatchTSTFMModel",
+    "TimestralModel",
+    "TimesFMModel",
     "PredictorContext",
     "PredictorPlan",
     "Use",

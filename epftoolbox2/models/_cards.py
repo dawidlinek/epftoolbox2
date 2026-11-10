@@ -34,7 +34,7 @@ from datetime import date
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Mapping, NamedTuple, Optional, Sequence, Tuple, Union
 
-from .._extras import EXTRAS, MissingExtraError, has_extra
+from .._extras import EXTRAS, MissingExtraError, has_extra, install_line
 from ._weights import REPO_PATTERN, REVISION_PATTERN, MissingWeightsError, ResolvedWeights, check_file_name, resolve
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -515,6 +515,14 @@ def resolve_model_weights(model: Any, seen: Optional[Dict] = None) -> Optional[R
     return found
 
 
+def runtime_pins(model: Any) -> Tuple[str, ...]:
+    """The runtime pins the pre-flight checks for `model`: its card's, or what the model's class makes of them
+    (`_runtime_pins()`, an explicit override of a commit such as `TimestralModel(runtime_commit=...)`). The manifest records the
+    versions and commits installed whatever the pins say, and a resume compares them."""
+    own = getattr(model, "_runtime_pins", None)
+    return tuple(own()) if callable(own) else model._card.runtime
+
+
 def card_problems(model: Any, seen: Optional[Dict] = None) -> List[Problem]:
     """What `model` lacks to run, from its card: the extra's modules, the runtime pins (checked once the extra is there) and
     its weights. Empty for a model without a card. Warns when the weights are not the card's (`not the reference weights`)."""
@@ -536,15 +544,15 @@ def card_problems(model: Any, seen: Optional[Dict] = None) -> List[Problem]:
                 Problem(
                     who,
                     "extra",
-                    f"needs the [{card.extra}] extra ({modules} not found): pip install 'epftoolbox2[{card.extra}]'",
+                    f"needs the [{card.extra}] extra ({modules} not found): {install_line(card.extra)}",
                     card.extra,
                 )
             )
     if extra_ok:
-        for pin in card.runtime:
+        for pin in runtime_pins(model):
             name, specifiers, commit = parse_pin(pin)
             found = installed_distribution(name, seen)
-            install = f"pip install 'epftoolbox2[{card.extra}]'" if card.extra else f"pip install '{pin}'"
+            install = install_line(card.extra) if card.extra else f"pip install '{pin}'"
             providers = runtime_providers(name, seen)
             if len(providers) > 1:
                 problems.append(
@@ -562,7 +570,10 @@ def card_problems(model: Any, seen: Optional[Dict] = None) -> List[Problem]:
                 where = f"commit {found[1]}" if found[1] else "not from a repository"
                 problems.append(
                     Problem(
-                        who, "runtime", f"needs {name} at commit {commit}, installed: {found[0]} ({where})", card.extra
+                        who,
+                        "runtime",
+                        f"needs {name} at commit {commit}, installed: {found[0]} ({where}): {install}",
+                        card.extra,
                     )
                 )
             elif specifiers and not version_matches(found[0], specifiers):

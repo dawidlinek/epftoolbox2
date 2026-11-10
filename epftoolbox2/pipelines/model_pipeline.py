@@ -206,6 +206,10 @@ COMPONENT_REGISTRY = {
         "ShapeModel": "epftoolbox2.models.shape",
         "T0Model": "epftoolbox2.models.foundation",
         "ChronosModel": "epftoolbox2.models.foundation",
+        # 6j's foundation families
+        "PatchTSTFMModel": "epftoolbox2.models.patchtst_fm",
+        "TimestralModel": "epftoolbox2.models.timestral",
+        "TimesFMModel": "epftoolbox2.models.timesfm",
     },
     "ensembles": {
         "AverageEnsemble": "epftoolbox2.ensembles.average",

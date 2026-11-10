@@ -1,4 +1,4 @@
-"""The backends of the foundation-model families (step 6i; 6j adds PatchTST-FM, Timestral and TimesFM-3 here).
+"""The backends of the foundation-model families (step 6i: t0, Chronos-2; 6j: PatchTST-FM-r2, Timestral, TimesFM-3).
 
 A family's heavy calls sit behind a small `Backend` (decision 23), so every library-side line runs in CI with a deterministic
 numpy fake, and with the real package in the extras jobs. A backend is built by its model class (`FoundationModel._load_backend`)
@@ -18,8 +18,8 @@ whole) inside `_weights.offline()`, and is called with history batches (`models.
   back, and `reset()` the base weights, which every fine-tune starts from (decision 13: never from the previous anchor's).
 
 Which inputs a family takes is the model class's (`_takes_known`, `_takes_past`, `_accepts_missing`), so a univariate family
-refuses covariates when it is built, without its package. Nothing here imports an extra; `t0` and `chronos` do, and only the
-model's `_load_backend` imports them.
+refuses covariates when it is built, without its package. Nothing here imports an extra; `t0`, `chronos`, `patchtst_fm`,
+`timestral` and `timesfm` do, and only the model's `_load_backend` imports them.
 """
 
 from __future__ import annotations
@@ -129,6 +129,12 @@ class Backend:
         return levels.index(self.point_level)
 
 
+def nearest_level(levels: Sequence[float], level: float = 0.5) -> float:
+    """The one of `levels` nearest `level` (the lower of two as near): a family's point level where its levels may lack 0.5
+    exactly (Timestral takes the level nearest 0.5 of its 21)."""
+    return min((float(candidate) for candidate in levels), key=lambda candidate: (abs(candidate - level), candidate))
+
+
 @contextlib.contextmanager
 def staged(resolved: Any, names: Sequence[str]) -> Iterator[Path]:
     """A temporary directory holding a link to each of `names` of `resolved` (`ResolvedWeights.path(name)`) and nothing else,
@@ -150,4 +156,4 @@ def staged(resolved: Any, names: Sequence[str]) -> Iterator[Path]:
         shutil.rmtree(root, ignore_errors=True)
 
 
-__all__ = ["LEVELS_19", "Backend", "FineTuneData", "FineTuneOutcome", "NonFiniteLoss", "staged"]
+__all__ = ["LEVELS_19", "Backend", "FineTuneData", "FineTuneOutcome", "NonFiniteLoss", "nearest_level", "staged"]

@@ -95,6 +95,23 @@ chronos = [
     "chronos-forecasting>=2.3.2,<3",
     "torch>=2.9",
 ]
+# 6j's foundation families (epftoolbox2/models/patchtst_fm.py, timestral.py, timesfm.py), one extra each, imported by the first
+# forecast. PatchTST-FM's granite-tsfm needs Python < 3.14 and pins torch < 2.12 and scikit-learn < 1.8, so it is resolved apart
+# from the other extras ([tool.uv] conflicts below) and moves no other extra's or the core's lock. TimesFM-3's and Timestral's
+# weights carry flagged licences (non-commercial; a revenue cap) and neither extra is in any extra of everything. The timestral
+# package is not on PyPI: this extra holds its PyPI dependencies, and the package itself is installed from its pinned commit
+# (docs, models/foundation-models).
+patchtst-fm = [
+    "granite-tsfm>=0.3.10,<0.4; python_version < '3.14'",
+]
+timesfm = [
+    "timesfm[torch]==3.0.2",
+]
+timestral = [
+    "torch>=2.9",
+    "safetensors>=0.4",
+    "huggingface_hub>=1",
+]
 dev = [
     "pytest>=7.4.0",
     "pytest-cov>=4.1.0",
@@ -113,6 +130,14 @@ explicit = true
 
 [tool.uv.sources]
 torch = [{ index = "pytorch-cpu" }]
+
+[tool.uv]
+# granite-tsfm (the patchtst-fm extra) pins torch < 2.12 and scikit-learn < 1.8: resolved with every other extra, it would move
+# the core's scikit-learn and every torch family's torch for everyone. Declared as conflicting with the other extras that hold
+# torch, it gets a resolution of its own, and every install without it keeps today's lock.
+conflicts = [
+    [{ extra = "patchtst-fm" }, { extra = "torch" }],
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["epftoolbox2"]
