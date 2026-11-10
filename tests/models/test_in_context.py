@@ -593,6 +593,44 @@ def test_tabpfn_s_precision_check_stops_a_fit_that_autocasts_on_a_cpu():
     backend(False)._check_precision(regressor(True, None))
 
 
+def test_a_gpu_fit_gets_the_pinned_memory_settings():
+    """On a GPU nothing a fit computes with is sized by the card's free memory: tabpfn's memory saving off, TabICL's batches
+    at 50,000 in each of its three managers and its outputs kept on the GPU, with autocast left to the packages' "auto"."""
+    from epftoolbox2.models import tabicl, tabpfn
+
+    made = []
+
+    class Regressor:
+        def __init__(self, *args, **kwargs):
+            made.append(kwargs)
+            self.use_autocast_, self.forced_inference_dtype_ = True, None
+
+        create_default_for_version = classmethod(lambda cls, version, **kwargs: cls(**kwargs))
+
+        def fit(self, x, y):
+            pass
+
+        def _resolve_amp_fa3(self):
+            return True, False
+
+    x, y = np.zeros((735, 175)), np.zeros(735)
+    backend = object.__new__(tabpfn._Backend)
+    backend.__dict__.update(on_cpu=False, device="cuda:0", torch=None, regressor=Regressor, version="v2", specs="specs")
+    backend.__dict__.update(precision="auto", n_estimators=4, random_state=0)
+    backend.fit(x, y)
+    assert made.pop()["memory_saving_mode"] is False and tabpfn.TabPFNModel(INPUTS)._memory_settings("cuda") == {
+        "memory_saving": False
+    }
+    backend = object.__new__(tabicl._Backend)
+    backend.__dict__.update(on_cpu=False, device="cuda:0", use_amp="auto", regressor=Regressor, path="weights")
+    backend.__dict__.update(n_estimators=8, random_state=0, loaded=(None, None, None))
+    backend.fit(x, y)
+    kwargs = made.pop()
+    assert kwargs["offload_mode"] == "gpu" and kwargs["use_amp"] == "auto"
+    assert kwargs["inference_config"] == dict.fromkeys(("COL_CONFIG", "ROW_CONFIG", "ICL_CONFIG"), {"min_batch_size": 50_000})
+    assert tabicl.TabICLModel(INPUTS)._memory_settings("cuda") == {"min_batch_size": 50_000, "offload": "gpu"}
+
+
 class _CudaCalls(types.ModuleType):
     """A stand-in for `torch.cuda` that records every attribute the code reads of it (any call would start CUDA)."""
 
