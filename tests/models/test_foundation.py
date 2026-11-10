@@ -979,3 +979,24 @@ def test_windows_kept_with_gaps_warn_though_none_is_dropped(hourly):
     holed.loc[holed.index == pd.Timestamp("2023-05-20 03:00", tz=ZONE), "price"] = np.nan
     with pytest.warns(UserWarning, match=r"(\d+) of them with gaps the backend masks: dropped none for missing data"):
         run(tuned("FakeFM"), holed, ("2023-06-12", "2023-06-12"))
+
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        T0Model(known_ahead=["load_forecast"], fine_tune={"lr": 2e-5}, seeds=2, random_state=3, device="cuda"),
+        T0Model(fine_tune_every=None, newest_target="published"),
+        ChronosModel(context=182, past=["load_actual"], batch_size=8, device="cuda:1"),
+        FakeFM(by_batch=0.5, offset=1.0, fine_tune_every="7D", fine_tune=QUICK),
+    ],
+    ids=["t0", "t0-zero-shot", "chronos", "fake"],
+)
+def test_the_gpu_host_rebuilds_a_family_from_its_public_attributes(model):
+    """The GPU host process builds the model again from its public attributes (`_public_params`): every family's settings must
+    be constructor parameters stored under their own names, or the hosted backend is another model's."""
+    from epftoolbox2.models.foundation import _public_params
+
+    again = type(model)(**_public_params(model))
+    assert _public_params(again) == _public_params(model)
+    assert again._model_kwargs == model._model_kwargs
+    assert again._backend_options() == model._backend_options() and again._predict_options() == model._predict_options()
