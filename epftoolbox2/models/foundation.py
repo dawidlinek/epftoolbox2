@@ -61,6 +61,7 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 import numpy as np
 import pandas as pd
 
+from .._clock import current_clock
 from ._calendar import EXPANDING, FREQ_STEPS, block_days, check_refit, periods_per_day, refit_anchor, unit_seed
 from ._cards import ModelCard, WeightsRef, resolve_model_weights, runtime_versions
 from ._fm import NonFiniteLoss
@@ -467,9 +468,9 @@ class _RemoteBackend:
 
 
 def _created_at() -> str:
-    """The wall-clock time a checkpoint's sidecar records (UTC, seconds): the one wall-clock read of this module, provenance
-    only (nothing compares it)."""
-    return datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
+    """The time a checkpoint's sidecar records (UTC, seconds, on the current clock): the one time-of-day read of this module,
+    provenance only (nothing compares it)."""
+    return current_clock().now().isoformat(timespec="seconds")
 
 
 def _digest(parts: Any) -> str:

@@ -267,10 +267,15 @@ def package_files():
     return sorted(path for path in PACKAGE.rglob("*.py") if "__pycache__" not in path.parts)
 
 
-# The timed waits the package makes on real time: the results store's writer thread idles between its batches.
+# The timed waits the package makes on real time: the results store's writer thread idles between its batches, and the
+# device worker (`models/_device_worker.py`) waits on another process: its child watches for the parent's death, and the
+# parent gives a child it stops ten seconds to exit. Other processes run on real time whatever clock this one is on.
 REAL_TIME_WAITS = {
     ("results/store.py", "timed wait: self._write_queue.get(timeout=0.1)"),
     ("results/store.py", "timed wait: self._cond.wait(_TICK_SECONDS)"),
+    ("models/_device_worker.py", "timed wait: idle.wait(1.0)"),
+    ("models/_device_worker.py", "timed wait: self._process.join(timeout=10)"),
+    ("models/_device_worker.py", "timed wait: process.join(timeout=10)"),
 }
 
 
