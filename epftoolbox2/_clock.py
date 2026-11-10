@@ -15,10 +15,14 @@ What doesn't read the current clock, on purpose:
 
 - Pool workers. They never read the clock (a forked worker would see the parent's clock, a spawned one `SYSTEM`).
 - `time.perf_counter`, which times compute (a plan's `seconds`, a torch fit's), never a time of day or a wait.
-- The results store's writer thread, whose batching ages and polls are real time by nature: they use `SYSTEM` itself, so
-  that a buffer stamped in one thread and aged in another is on one clock (a context variable isn't a thread's).
+- Threads. The package reads the clock in the calling thread only. Whether a thread sees the caller's clock depends on the
+  build: free-threaded 3.14 copies the caller's context into a new thread by default (`sys.flags.thread_inherit_context`),
+  the GIL builds start it with an empty one (`SYSTEM`). The results store's writer thread uses `SYSTEM` itself for its
+  batching ages and polls, so that a buffer stamped in one thread and aged in another is on one clock.
+- Waits on other processes, which run on real time: the tuner's waits for its workers (`tune/bayes.py`) and the results
+  lock's wait for another process's moment on a lock file (`results/store.py`) use `SYSTEM` too.
 
-`tests/test_clock.py` scans the package's source for other clock reads.
+`tests/test_clock.py` scans the package's source for other clock reads and timed waits.
 """
 
 import contextlib
@@ -135,8 +139,9 @@ def current_clock() -> Clock:
 
 @contextlib.contextmanager
 def use_clock(clock: Clock) -> Iterator[Clock]:
-    """Read every clock of the package from `clock` inside the block (a context variable: this thread and the tasks it
-    starts in this context, not threads started without it, nor pool workers, which never read it). Yields `clock`."""
+    """Read every clock of the package from `clock` inside the block. It is a context variable: this thread's, and that of
+    a thread started inside the block only where threads inherit the context (free-threaded 3.14 by default, not the GIL
+    builds); the package reads the clock in the calling thread alone, and pool workers never read it. Yields `clock`."""
     missing = [name for name in ("now", "sleep", "monotonic") if not callable(getattr(clock, name, None))]
     if missing:
         raise TypeError(f"use_clock needs a clock with now(), sleep() and monotonic(); {clock!r} has no {missing}")
