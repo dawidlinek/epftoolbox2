@@ -51,6 +51,7 @@ import json
 import math
 import os
 import re
+import sys
 import warnings
 from abc import abstractmethod
 from datetime import date
@@ -62,6 +63,7 @@ import pandas as pd
 
 from ._calendar import EXPANDING, FREQ_STEPS, block_days, check_refit, periods_per_day, refit_anchor, unit_seed
 from ._cards import ModelCard, WeightsRef, resolve_model_weights, runtime_versions
+from ._fm import NonFiniteLoss
 from ._history import HistorySpec, history_batch, history_batches
 from ._units import DAY, NO_TRANSFORM
 from ._weights import offline, sha256_of
@@ -196,88 +198,269 @@ def _public_params(model: Any) -> Dict[str, Any]:
     return {key: value for key, value in vars(model).items() if not key.startswith("_")}
 
 
+def _check_hostable(cls: type) -> None:
+    """Refuse, before the GPU host process starts, a model class it can't import: one defined inside a function, or in the
+    `__main__` of an interactive session, a notebook or `python -c` (a `__main__` with no file to re-run)."""
+    where = f"{cls.__module__}.{cls.__qualname__}"
+    if "<locals>" in cls.__qualname__:
+        raise TypeError(
+            f"{where} is defined inside a function: on a GPU a foundation model runs in a spawned process, which can't import "
+            "it. Define the class at the top level of a module."
+        )
+    if cls.__module__ == "__main__" and getattr(sys.modules.get("__main__"), "__file__", None) is None:
+        raise TypeError(
+            f"{where} is defined in __main__ of an interactive session, a notebook or `python -c`: on a GPU a foundation model "
+            "runs in a spawned process, which can't import it. Move the class into a .py module and import it from there."
+        )
+
+
+# The torch flags of the process that runs the pipeline that its GPU work must follow: process-wide, so the GPU host process
+# takes them at every call (`_torch_flags`, `_apply_torch_flags`).
+_SDP_KINDS = ("flash", "mem_efficient", "math", "cudnn")
+_MATMUL_FLAGS = ("allow_fp16_reduced_precision_reduction", "allow_bf16_reduced_precision_reduction")
+# Environment variables CUDA and torch read as the GPU host process starts: one set after that doesn't reach it (a warning).
+HOST_ENV = (
+    "CUBLAS_WORKSPACE_CONFIG",
+    "PYTORCH_CUDA_ALLOC_CONF",
+    "PYTORCH_ALLOC_CONF",
+    "CUDA_VISIBLE_DEVICES",
+    "CUDA_DEVICE_ORDER",
+    "CUDA_LAUNCH_BLOCKING",
+    "NVIDIA_TF32_OVERRIDE",
+)
+_ENV_WARNED: set = set()
+
+
+def _torch_flags() -> Dict[str, Any]:
+    """This process's process-wide torch flags (deterministic algorithms, cuDNN, attention kernels, reduced-precision
+    reductions); empty where torch isn't imported (nothing set them). Reading them initialises nothing."""
+    torch = sys.modules.get("torch")
+    if torch is None or not hasattr(torch, "are_deterministic_algorithms_enabled"):
+        return {}
+    cuda, cudnn = torch.backends.cuda, torch.backends.cudnn
+    out: Dict[str, Any] = {
+        "deterministic_algorithms": bool(torch.are_deterministic_algorithms_enabled()),
+        "deterministic_warn_only": bool(torch.is_deterministic_algorithms_warn_only_enabled()),
+        "cudnn_enabled": bool(cudnn.enabled),
+        "cudnn_deterministic": bool(cudnn.deterministic),
+        "cudnn_benchmark": bool(cudnn.benchmark),
+    }
+    for kind in _SDP_KINDS:
+        getter = getattr(cuda, f"{kind}_sdp_enabled", None)
+        if getter is not None:
+            out[f"{kind}_sdp"] = bool(getter())
+    for name in _MATMUL_FLAGS:
+        if hasattr(cuda.matmul, name):
+            out[name] = bool(getattr(cuda.matmul, name))
+    return out
+
+
+def _apply_torch_flags(flags: Mapping[str, Any]) -> None:
+    """Set the flags `_torch_flags` read in the pipeline's process, here (the GPU host process), where torch is imported."""
+    torch = sys.modules.get("torch")
+    if not flags or not hasattr(torch, "use_deterministic_algorithms"):
+        return
+
+    torch.use_deterministic_algorithms(
+        flags["deterministic_algorithms"], warn_only=flags.get("deterministic_warn_only", False)
+    )
+    cudnn = torch.backends.cudnn
+    cudnn.enabled, cudnn.deterministic, cudnn.benchmark = (
+        flags["cudnn_enabled"],
+        flags["cudnn_deterministic"],
+        flags["cudnn_benchmark"],
+    )
+    for kind in _SDP_KINDS:
+        setter = getattr(torch.backends.cuda, f"enable_{kind}_sdp", None)
+        if f"{kind}_sdp" in flags and setter is not None:
+            setter(flags[f"{kind}_sdp"])
+    for name in _MATMUL_FLAGS:
+        if name in flags and hasattr(torch.backends.cuda.matmul, name):
+            setattr(torch.backends.cuda.matmul, name, flags[name])
+
+
+def _torch_threads() -> Optional[int]:
+    """torch's intra-op threads here, None where torch isn't imported."""
+    torch = sys.modules.get("torch")
+    get = getattr(torch, "get_num_threads", None)
+    return None if get is None else int(get())
+
+
+def _host_env() -> Dict[str, Optional[str]]:
+    return {name: os.environ.get(name) for name in HOST_ENV}
+
+
+def _pack_windows(data: Any) -> Any:
+    """A fine-tune's windows as the GPU host process gets them (`_PackedWindows`), or `data` itself without its grid."""
+    return _PackedWindows(data) if getattr(data, "grid", None) else data
+
+
+class _PackedWindows:
+    """`FineTuneData` for a pickle: each series' values over the windows' span once (`data.grid`), and every window's arrays
+    as (offset, length) into them, a past series cut at its newest known step as (offset, length, first NaN): a fine-tune's
+    windows then cost what their grid does, not a copy of each window's context (about 460 MB for a year of windows of a
+    year-long hourly context, against 0.7 MB). An array that is neither stays as it is. `unpack()` gives back `FineTuneData`
+    whose arrays are equal to the bit, read-only views of the grid."""
+
+    def __init__(self, data: Any):
+        self.grid = {name: np.ascontiguousarray(values) for name, values in data.grid.items()}
+        self.refs: List[Dict[str, Any]] = []
+        items = []
+        for item in data.items:
+            first = self._offset(item.target, self.grid.get(data.target))
+            refs = {"target": self._ref(item.target, data.target, first)}
+            refs.update({("past", n): self._ref(a, n, first) for n, a in (item.past or {}).items()})
+            refs.update({("known", n): self._ref(a, n, first) for n, a in (item.known or {}).items()})
+            self.refs.append(refs)
+            items.append(
+                dataclasses.replace(
+                    item,
+                    target=None,
+                    past=None if item.past is None else dict.fromkeys(item.past),
+                    known=None if item.known is None else dict.fromkeys(item.known),
+                )
+            )
+        self.data = dataclasses.replace(data, items=tuple(items), grid={})
+
+    @staticmethod
+    def _offset(array: Any, base: Any) -> Optional[int]:
+        """Where `array` starts in `base` when it is a view of it (same memory, one step apart), else None."""
+        if not isinstance(array, np.ndarray) or base is None or array.ndim != 1 or array.dtype != base.dtype:
+            return None
+        if array.strides != (array.itemsize,) or not np.shares_memory(array, base):
+            return None
+        offset, rest = divmod(
+            array.__array_interface__["data"][0] - base.__array_interface__["data"][0], array.itemsize
+        )
+        return offset if rest == 0 and 0 <= offset and offset + len(array) <= len(base) else None
+
+    def _ref(self, array: Any, name: str, first: Optional[int]) -> Any:
+        base = self.grid.get(name)
+        offset = self._offset(array, base)
+        if offset is not None:
+            return ("view", offset, len(array))
+        if first is not None and isinstance(array, np.ndarray) and base is not None and first + len(array) <= len(base):
+            known = np.flatnonzero(~np.isnan(array))
+            cut = int(known[-1]) + 1 if len(known) else 0
+            rebuilt = base[first : first + len(array)].copy()
+            rebuilt[cut:] = np.nan
+            if rebuilt.dtype == array.dtype and rebuilt.tobytes() == array.tobytes():
+                return ("tail", first, len(array), cut)
+        return ("array", array)
+
+    def _array(self, ref: Any, name: str) -> Any:
+        kind = ref[0]
+        if kind == "array":
+            return ref[1]
+        base = self.grid[name]
+        if kind == "view":
+            return base[ref[1] : ref[1] + ref[2]]
+        out = base[ref[1] : ref[1] + ref[2]].copy()
+        out[ref[3] :] = np.nan
+        out.setflags(write=False)
+        return out
+
+    def unpack(self) -> Any:
+        for values in self.grid.values():
+            values.setflags(write=False)
+        target = self.data.target
+        items = []
+        for item, refs in zip(self.data.items, self.refs):
+            items.append(
+                dataclasses.replace(
+                    item,
+                    target=self._array(refs["target"], target),
+                    past=None if item.past is None else {n: self._array(refs[("past", n)], n) for n in item.past},
+                    known=None if item.known is None else {n: self._array(refs[("known", n)], n) for n in item.known},
+                )
+            )
+        return dataclasses.replace(self.data, items=tuple(items))
+
+
 def _hosted_backend(
     cls: type, params: Dict[str, Any], resolved: Any, device: str, options: Dict[str, Any], threads: int
 ):
-    """In the child that hosts GPU work (`_device_worker`): the model rebuilt from its parameters, its backend loaded
-    offline from `resolved`, and every call of it run inside torch's scope on `device` (TF32 off, `threads`)."""
+    """In the child that hosts GPU work (`_device_worker`): the model rebuilt from its parameters and its backend loaded
+    offline from `resolved` inside the model's host scope (`_host_scope`: torch's, on `device`, TF32 off, `threads`)."""
     model = cls(**params)
-    scoped = _ScopedBackend(None, device, threads, model._uses_torch)
-    with scoped.scope(), offline():
-        scoped.backend = model._load_backend(resolved, device, options)
-    return scoped
+    with model._host_scope(device, threads), offline():
+        backend = model._load_backend(resolved, device, options)
+    return _ScopedBackend(model, backend, device)
 
 
 class _ScopedBackend:
-    """A backend whose calls run inside `torch_scope(device, tf32=False, threads)` (a torch family), in the hosting child."""
+    """A backend in the hosting child whose every call runs inside its model's host scope with the threads and the torch flags
+    of the call (`run`), and says how many torch threads it ran on."""
 
-    def __init__(self, backend: Any, device: str, threads: int, uses_torch: bool):
-        self.backend, self.device, self.threads, self.uses_torch = backend, device, threads, uses_torch
-
-    def scope(self) -> Any:
-        if not self.uses_torch:
-            return contextlib.nullcontext()
-        from ._torch.runtime import torch_scope
-
-        return torch_scope(self.device, tf32=False, threads=self.threads)
+    def __init__(self, model: Any, backend: Any, device: str):
+        self.model, self.backend, self.device = model, backend, device
 
     def describe(self) -> Dict[str, Any]:
         return {"levels": tuple(self.backend.levels), "point_level": self.backend.point_level, "pid": os.getpid()}
 
-    def predict(self, call: Any, options: Mapping[str, Any]) -> np.ndarray:
-        with self.scope():
-            return np.asarray(self.backend.predict(call, options))
-
-    def fine_tune(self, data: Any, settings: Mapping[str, Any], seed: int) -> Any:
-        with self.scope():
-            return self.backend.fine_tune(data, settings, seed)
-
-    def save_state(self, path: str) -> None:
-        with self.scope():
-            self.backend.save_state(Path(path))
-
-    def load_state(self, path: str) -> None:
-        with self.scope():
-            self.backend.load_state(Path(path))
-
-    def reset(self) -> None:
-        with self.scope():
-            self.backend.reset()
+    def run(self, method: str, threads: int, flags: Mapping[str, Any], args: tuple) -> Tuple[Any, Optional[int]]:
+        if method == "fine_tune" and isinstance(args[0], _PackedWindows):
+            args = (args[0].unpack(), *args[1:])
+        elif method in ("save_state", "load_state"):
+            args = (Path(args[0]),)
+        with self.model._host_scope(self.device, threads):
+            _apply_torch_flags(flags)
+            used = _torch_threads()
+            out = getattr(self.backend, method)(*args)
+        return (np.asarray(out) if method == "predict" else out), used
 
 
 class _RemoteBackend:
     """This process's handle of a backend hosted on a GPU in the spawned child (`_device_worker.shared()`): each method runs
-    there, with the call, the windows and the paths of checkpoint files pickled to it."""
+    there with this process's threads (`threads`, set by `FoundationModel._backend` for the model in use) and torch flags,
+    the call, the windows (packed, `_PackedWindows`) and the paths of checkpoint files pickled to it; `seen` collects the
+    torch threads the child ran on and `flags` the flags it was given."""
 
     def __init__(self, model: Any, resolved: Any, device: Any, options: Dict[str, Any]):
         from ._device_worker import shared
 
+        _check_hostable(type(model))
         self._process = shared()
+        self.threads = model._threads()
         factory = functools.partial(
-            _hosted_backend, type(model), _public_params(model), resolved, str(device), dict(options), model._threads()
+            _hosted_backend, type(model), _public_params(model), resolved, str(device), dict(options), self.threads
         )
         self._key = self._process.host(factory)
         described = self._process.call(self._key, "describe")
         self.levels, self.point_level, self.pid = described["levels"], described["point_level"], described["pid"]
+        self.env = {name: self._process.environ.get(name) for name in HOST_ENV}  # as the child started
+        self.seen: set = set()
+        self.flags: Dict[str, Any] = {}
 
     @property
     def point_index(self) -> int:
         return [float(level) for level in self.levels].index(float(self.point_level))
 
+    def alive(self) -> bool:
+        """Whether the child that hosts this backend still runs (`_device_worker.DeviceProcess.holds`)."""
+        return self._process.holds(self._key)
+
+    def _run(self, method: str, *args: Any) -> Any:
+        self.flags = _torch_flags()
+        out, used = self._process.call(self._key, "run", method, self.threads, self.flags, args)
+        if used is not None:
+            self.seen.add(used)
+        return out
+
     def predict(self, call: Any, options: Mapping[str, Any]) -> np.ndarray:
-        return self._process.call(self._key, "predict", call, dict(options))
+        return self._run("predict", call, dict(options))
 
     def fine_tune(self, data: Any, settings: Mapping[str, Any], seed: int) -> Any:
-        return self._process.call(self._key, "fine_tune", data, dict(settings), int(seed))
+        return self._run("fine_tune", _pack_windows(data), dict(settings), int(seed))
 
     def save_state(self, path: Path) -> None:
-        self._process.call(self._key, "save_state", str(path))
+        self._run("save_state", str(path))
 
     def load_state(self, path: Path) -> None:
-        self._process.call(self._key, "load_state", str(path))
+        self._run("load_state", str(path))
 
     def reset(self) -> None:
-        self._process.call(self._key, "reset")
+        self._run("reset")
 
     def release(self) -> None:
         self._process.drop(self._key)
@@ -533,13 +716,29 @@ class FoundationModel(BaseModel):
         with torch_scope(self.device, tf32=False, threads=self._threads()) as device:
             yield device
 
+    @contextlib.contextmanager
+    def _host_scope(self, device: str, threads: int) -> Any:
+        """The scope of a call in the GPU host process (`_device_worker`): torch's on `device` (TF32 off, `threads`) for a
+        torch family, else none."""
+        if not self._uses_torch:
+            yield device
+            return
+        from ._torch.runtime import torch_scope
+
+        with torch_scope(device, tf32=False, threads=threads) as resolved:
+            yield resolved
+
     def _backend(self, device: Any) -> Any:
-        """This family's backend on `device`, loaded once per process from the weights the pre-flight resolved, offline."""
+        """This family's backend on `device`, loaded once per process from the weights the pre-flight resolved, offline. A
+        backend hosted by a GPU host process that has died since is loaded again, in a new one."""
         resolved = resolve_model_weights(self)
         files = None if resolved is None else tuple(sorted(resolved.files.items()))
         options = self._backend_options()
         key = (type(self).__module__, type(self).__qualname__, files, str(device), json.dumps(options, sort_keys=True))
         backend = _LOADED.get(key)
+        if isinstance(backend, _RemoteBackend) and not backend.alive():
+            del _LOADED[key]  # its process died (a crash, host RAM) or this process was forked from the one it served
+            backend = None
         if backend is None:
             if _on_gpu(device):
                 # On a GPU the backend lives in a spawned child (`_device_worker`): this process never initialises CUDA, so
@@ -554,7 +753,30 @@ class FoundationModel(BaseModel):
                 if isinstance(gone, _RemoteBackend):
                     gone.release()
         _LOADED.move_to_end(key)
+        if isinstance(backend, _RemoteBackend):
+            backend.threads = self._threads()  # this model's, not the first one's that loaded it
+            self._warn_about_host_env(backend)
+            hosts = self.__dict__.setdefault("_gpu_hosts", set())
+            if backend not in hosts:  # this run's first use: what the child ran on is counted for this run
+                backend.seen.clear()
+                hosts.add(backend)
         return backend
+
+    def _warn_about_host_env(self, backend: "_RemoteBackend") -> None:
+        """Warn, once per value, about a CUDA or torch variable of `HOST_ENV` this process set after its GPU host process
+        started: the host read it as it started, so it doesn't apply there."""
+        now = _host_env()
+        for name, value in now.items():
+            started = backend.env.get(name)
+            if value != started and (name, value) not in _ENV_WARNED:
+                _ENV_WARNED.add((name, value))
+                warnings.warn(
+                    f"{self.name}: {name} is {value!r} in this process but was {started!r} when the process hosting its GPU "
+                    "work started, which read it then: it doesn't apply to this run. Set it before the first GPU model of the "
+                    "process runs (or in the job's environment).",
+                    UserWarning,
+                    stacklevel=3,
+                )
 
     # --- the run -----------------------------------------------------------------------------------------------------
 
@@ -630,6 +852,7 @@ class FoundationModel(BaseModel):
         store = self._store(state)
         self._window_counts = {}
         self._run_counts = (self._fine_tunes, self._checkpoints_loaded)
+        self.__dict__["_gpu_hosts"] = set()
         jobs = self._call_jobs(tasks, state.first_day)
         done = state.n_days - len({task[2] for task in tasks})
         with self._scope() as device, Progress() as progress:
@@ -641,6 +864,7 @@ class FoundationModel(BaseModel):
                 self._collect(state, results, skipped, sink)
                 progress.advance(bar, len({task[2] for task in job}))
         self._record_fine_tunes(state, store)
+        self._record_gpu_host(state)
 
     def _run_block_calls(
         self,
@@ -761,6 +985,22 @@ class FoundationModel(BaseModel):
             },
         )
 
+    def _record_gpu_host(self, state: Any) -> None:
+        """Where this run's backend ran in the GPU host process, what it ran with into the manifest's provenance (`gpu_host`):
+        the torch threads it really used and the torch flags this process gave it."""
+        hosts = self.__dict__.get("_gpu_hosts") or set()
+        if not hosts or not state.store or state.manifest is None:
+            return
+        from ..results.manifest import manifest_path, record_gpu_host
+
+        threads = sorted({n for host in hosts for n in host.seen})
+        flags = next(iter(hosts)).flags
+        record_gpu_host(
+            manifest_path(state.store.path),
+            state.manifest,
+            {"start": "spawn", "threads": threads, **({"torch_flags": dict(flags)} if flags else {})},
+        )
+
     def _anchor_cut(
         self, anchor: datetime.date, frame: pd.DataFrame, spec: HistorySpec
     ) -> Tuple[pd.Timestamp, datetime.date]:
@@ -860,7 +1100,16 @@ class FoundationModel(BaseModel):
                 UserWarning,
                 stacklevel=2,
             )
-        data = FineTuneData(tuple(items), tuple(ys), dates, cut_date, tuple(spec.past), tuple(spec.known_ahead))
+        data = FineTuneData(
+            tuple(items),
+            tuple(ys),
+            dates,
+            cut_date,
+            tuple(spec.past),
+            tuple(spec.known_ahead),
+            spec.target,
+            dict(batch.values) if issue_days else {},
+        )
         digest = hashlib.sha256()
         digest.update(dates.astype("int64").tobytes())
         for item, y in zip(items, ys):
@@ -927,13 +1176,30 @@ class FoundationModel(BaseModel):
                 self._checkpoints_loaded += 1
             else:
                 backend.reset()
-                outcome = backend.fine_tune(data, settings, seed)
+                try:
+                    outcome = backend.fine_tune(data, settings, seed)
+                except NonFiniteLoss as error:
+                    raise self._non_finite(error, unit, index, seed, data) from error
                 self._fine_tunes += 1
                 if store is not None:
                     store.save(backend, unit, index, seed, key, data_digest, data, cut, outcome, counts)
             per_seed.append(self._forecast(batch, backend))
         backend.reset()
         return per_seed, None
+
+    def _non_finite(self, error: NonFiniteLoss, unit: Any, index: int, seed: int, data: Any) -> NonFiniteLoss:
+        """The trainer's error with the model, the anchor, the horizon and the seed it stopped at, and the issue days of the
+        windows it names."""
+        days = [data.items[i].issue_day.isoformat() for i in error.windows if 0 <= i < len(data.items)]
+        named = f"; the windows issued on {', '.join(days[:8])}{f' and {len(days) - 8} more' if len(days) > 8 else ''}"
+        return NonFiniteLoss(
+            f"{self.name}: the fine-tune at {unit.anchor} (horizon {unit.horizon}, seed {index + 1} of {self.seeds}: {seed}) "
+            f"stopped: {error}{named if days else ''}",
+            where=error.where,
+            step=error.step,
+            windows=error.windows,
+            diverged=error.diverged,
+        )
 
 
 # Why a window of a fine-tune is dropped where no data is to blame: its context starts before the frame's first row.

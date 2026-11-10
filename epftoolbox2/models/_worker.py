@@ -108,9 +108,16 @@ def pool_context() -> Any:
     return multiprocessing.get_context("spawn" if _POOLS_SPAWN else "fork")
 
 
-def pool_start_note(context: Any) -> Optional[str]:
-    """`POOL_SPAWN_FOR_CUDA` for a pool context that spawns where pools fork (CUDA in this process), else None."""
-    return POOL_SPAWN_FOR_CUDA if context.get_start_method() == "spawn" and not _POOLS_SPAWN else None
+def platform_start_method() -> str:
+    """How this platform's pools start their workers: "spawn" on Windows, else "fork"."""
+    return "spawn" if _POOLS_SPAWN else "fork"
+
+
+def pool_start_note(context: Any) -> str:
+    """How a pool of this context starts, as a manifest lists it (`pool_start`): `POOL_SPAWN_FOR_CUDA` for one that spawns
+    where pools fork (CUDA in this process), else its start method."""
+    method = context.get_start_method()
+    return POOL_SPAWN_FOR_CUDA if method == "spawn" and not _POOLS_SPAWN else method
 
 
 # Reasons a task produces no forecast without being an error. They are counted per model and reported.

@@ -142,7 +142,9 @@ horizon and each of `seeds` seeds (3), a copy of the **base** weights, never the
   and why) where data dropped any or a kept window has a gap, and the manifest records them (`fine_tunes`). The research's
   `t0_ft.py` dropped no window: its DST-resolved data had no missing value. The model raises if a window's target is after the
   cut, before the trainer runs, and the trainer checks it again; a training or holdout loss that isn't finite stops the
-  fine-tune with `FloatingPointError` instead of keeping the base weights as its best state.
+  fine-tune with `FloatingPointError` (`NonFiniteLoss`) instead of keeping the base weights as its best state. It names the
+  model, the anchor, the horizon and the seed, and says "training diverged" where the weights are no longer finite after a
+  step (lower `lr`, or keep `grad_clip`), else the issue days of the windows whose loss isn't finite.
 - **The recipe** is the research's (`fine_tune`, a dict, merged over these defaults): AdamW at `lr` 1e-5, batches of 16
   windows, at most 400 steps, the last 61 days of windows held out and evaluated every 25 steps, a stop after 4 evaluations
   without a gain and the best state restored, gradients clipped at norm 1. The loss is t0's pinball loss over its five native
@@ -190,14 +192,44 @@ steps by the package; each model's run warns about it, and its manifest records 
 On the CPU the backend runs in the process that runs the pipeline. On a GPU it runs in one spawned process that hosts the GPU
 work, started by the first such model and shared by the ones after it, so the pipeline's process never initialises CUDA and
 the worker pools of the models after it still fork (a process forked from one that has initialised CUDA can't use CUDA). Each
-batch of contexts, each fine-tune's windows and each checkpoint's path pass to it and its forecasts come back, so the numbers
-are the in-process ones; a subclass of a foundation model run on a GPU must be importable there (defined in a module, not in a
-notebook cell). If that host process dies (out of memory on the device), the run raises and the next model starts a new one.
+batch of contexts, each fine-tune's windows (as their series' values once and offsets into them, not a copy of each window's
+context) and each checkpoint's path pass to it and its forecasts come back, so the numbers are the in-process ones. Each call
+runs there with the pipeline process's `THREADS_PER_PROCESS` and its process-wide torch flags (deterministic algorithms,
+cuDNN's, the attention kernels', reduced-precision reductions) as they are at that call, and the manifest records what the
+host ran on (`gpu_host`: the threads it really used, the flags it was given). An environment variable CUDA reads as it starts
+(`CUBLAS_WORKSPACE_CONFIG`, `PYTORCH_CUDA_ALLOC_CONF`, `CUDA_VISIBLE_DEVICES`, ...) must be set before the first GPU model of
+the process runs: one set later doesn't reach the host, and the run warns.
+
+Spawning re-runs the main script in the host, so a script that runs a foundation model on a GPU needs its work under an
+`if __name__ == "__main__":` block; one without it is refused before the host starts. A notebook, an interactive session or
+`python -c` needs none, but a model class defined there (or inside a function) can't be imported by the host and is refused:
+define a subclass of a foundation model in a module.
+
+```python
+from epftoolbox2.models import T0Model
+from epftoolbox2.pipelines import ModelPipeline
+
+
+def main(data):
+    pipeline = ModelPipeline(issue_time="11:45").add_model(T0Model(device="cuda"))
+    return pipeline.run(data, "2024-01-01", "2024-12-31", horizon=1)
+
+
+if __name__ == "__main__":
+    main(data)  # your frame
+```
+
+The host ends with the process that started it, also when that is killed in the middle of a call (on Linux the kernel tells
+it; elsewhere it watches its parent), so a killed pipeline leaves no process holding the GPU. If the host dies (the machine's
+RAM ran out, a crash in native code, a kill), the call raises an error that names the cause from its exit code and points at
+its own message on stderr; an out-of-memory error on the device is raised as itself. The next model of the run loads its
+backend again in a new host.
 
 If CUDA is initialised in the pipeline's process anyway (GPU work of your own, or another library's, before the run), every
 worker pool spawns its workers from then on, as on Windows: their start costs a few seconds more, a class or setting changed in
 the session after import doesn't reach them, and a class defined in `__main__` or a notebook cell can't be found. The first such
-pool warns, once per process, and each such run's manifest records it (`pool_start`).
+pool warns, once per process, and the manifest lists the start methods its file's records were made under (`pool_start`,
+kept over resumes: `["spawn: CUDA was initialised ...", "fork"]` for a file resumed by a forking run).
 
 ## Reproducing the research
 

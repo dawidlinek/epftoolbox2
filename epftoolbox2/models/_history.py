@@ -227,6 +227,9 @@ class HistoryBatch:
     periods_per_day: int  # of an ordinary day, which every forecast's series serve
     series: Tuple[SeriesInfo, ...]
     items: Tuple[HistoryItem, ...] = field(default=())
+    # Each series' values on the steps the items read (read-only), of which every item's arrays are views but a past series'
+    # cut at its newest known step: what a fine-tune's windows send to another process (`foundation._PackedWindows`).
+    values: Dict[str, np.ndarray] = field(default_factory=dict, repr=False)
 
     def late(self) -> Dict[str, List[datetime.date]]:
         """The issue days each series is late on, of those late on any."""
@@ -427,7 +430,9 @@ def history_batches(
     over = {name for name, col in resolved.items() if over_time(col.rule)}
     cuts = _Cuts(spec, grid, StepsReader(rules, grid.steps, days, freq), days, horizons, steps, over)
     return {
-        h: HistoryBatch(spec, freq, int(h), steps, periods, series, tuple(cuts.item(i, h) for i in range(len(days))))
+        h: HistoryBatch(
+            spec, freq, int(h), steps, periods, series, tuple(cuts.item(i, h) for i in range(len(days))), grid.values
+        )
         for h in horizons
     }
 

@@ -718,7 +718,8 @@ class ChronosModel(FoundationModel):        # Chronos-2, zero-shot ([chronos])
 reads `context` local days of the target and its `known_ahead` and `past` base columns through the information set, `weights`
 come from `epf weights fetch`, and a fine-tune (`fine_tune_every`) is stored in `<save_dir>/<name>.fits/` and reused on resume
 (`epftoolbox2.models.foundation.prune_fine_tunes` removes the ones no current run uses, and raises `ResultsLockedError` while
-a run of the model writes there). On a GPU the backend runs in a spawned process of its own, so later worker pools still fork.
+a run of the model writes there). On a GPU the backend runs in a spawned process of its own, so later worker pools still fork; a script that runs one
+needs an `if __name__ == "__main__":` block.
 
 `LightGBMModel`, `XGBoostModel` and `CatBoostModel` are in [Gradient-Boosted Trees](/epftoolbox2/models/trees/): they build, save and load without their package (one extra each), a fit's `threads`, the package's version and XGBoost's `device` are compared on resume, and `threads > 1` is refused where workers fork (Linux, macOS). `HistGBModel` and `ResidualModel` are in [Residual Model](/epftoolbox2/models/residual/): `INVARIANT_TARGET` is
 `{"name": "asinh", "params": {"apply_to": "target", "standardise": False}}` (`epftoolbox2.models.hgb`), the predictors as they are

@@ -53,6 +53,10 @@ class FineTuneData:
     cut: Any  # datetime.date
     past: Tuple[str, ...] = ()
     known_ahead: Tuple[str, ...] = ()
+    # The target's name and each series' values over the windows' steps (`HistoryBatch.values`), which the items' arrays view:
+    # what another process gets in their place (`foundation._PackedWindows`). Empty: the items' arrays are all there is.
+    target: str = ""
+    grid: Dict[str, np.ndarray] = field(default_factory=dict, repr=False)
 
     def __len__(self) -> int:
         return len(self.items)
@@ -63,6 +67,23 @@ class FineTuneData:
         for position, index in enumerate(indices):
             out.setdefault(self.items[int(index)].steps_ahead, []).append(position)
         return dict(sorted(out.items()))
+
+
+class NonFiniteLoss(FloatingPointError):
+    """A fine-tune's loss that isn't finite (`_torch.finetune.fine_tune`): `where` ("training" or "holdout"), `step`, `windows`
+    (positions in the fine-tune's windows whose own loss isn't finite) and `diverged` (the weights are no longer finite after a
+    step: the training diverged, not the data). It keeps them through a pickle (the GPU host process raises it here)."""
+
+    def __init__(
+        self, message: str, where: str = "training", step: int = 0, windows: Sequence[int] = (), diverged=False
+    ):
+        super().__init__(message)
+        self.where, self.step, self.windows, self.diverged = (
+            where,
+            int(step),
+            tuple(int(i) for i in windows),
+            bool(diverged),
+        )
 
 
 @dataclass
@@ -129,4 +150,4 @@ def staged(resolved: Any, names: Sequence[str]) -> Iterator[Path]:
         shutil.rmtree(root, ignore_errors=True)
 
 
-__all__ = ["LEVELS_19", "Backend", "FineTuneData", "FineTuneOutcome", "staged"]
+__all__ = ["LEVELS_19", "Backend", "FineTuneData", "FineTuneOutcome", "NonFiniteLoss", "staged"]

@@ -694,6 +694,13 @@ def an_ols_run(frame, save_dir=None):
     )
 
 
+def resumed_ols_run(frame, save_dir):
+    """`an_ols_run` again into `save_dir` with half its records gone, so the resume has tasks (and a pool) to run."""
+    path = suite.results(save_dir, "OLS")
+    path.write_text("".join(f"{line}\n" for line in suite.lines(path)[::2]))
+    return an_ols_run(frame, save_dir)
+
+
 def test_after_cuda_starts_in_this_process_every_pool_spawns(hourly, monkeypatch, tmp_path):
     """The safety net: once `torch.cuda.is_initialized()` in this process (a stand-in here: GPU work that ran outside the
     library's host process) every pool of the library spawns its workers, as on Windows, warns once per process naming CUDA,
@@ -717,7 +724,22 @@ def test_after_cuda_starts_in_this_process_every_pool_spawns(hourly, monkeypatch
         an_ols_run(hourly)
     assert CapturePool.contexts == (["spawn"] * 3 if _worker._POOLS_SPAWN else ["fork", "spawn", "spawn"])
     manifest = json.loads((tmp_path / "after" / "ols.manifest.json").read_text())
-    assert manifest["pool_start"] == _worker.POOL_SPAWN_FOR_CUDA
+    assert manifest["pool_start"] == [_worker.POOL_SPAWN_FOR_CUDA]
+    # A resume of each file under the other way lists both, in the order the file's records were made: a later fork run doesn't
+    # erase that the earlier records were made by spawned workers, nor a CUDA run that the earlier ones forked.
+    resumed_ols_run(hourly, tmp_path / "before")
+    assert json.loads((tmp_path / "before" / "ols.manifest.json").read_text())["pool_start"] == [
+        _worker.platform_start_method(),
+        _worker.POOL_SPAWN_FOR_CUDA,
+    ]
+    monkeypatch.setitem(
+        sys.modules, "torch", types.SimpleNamespace(cuda=types.SimpleNamespace(is_initialized=lambda: False))
+    )
+    resumed_ols_run(hourly, tmp_path / "after")
+    assert json.loads((tmp_path / "after" / "ols.manifest.json").read_text())["pool_start"] == [
+        _worker.POOL_SPAWN_FOR_CUDA,
+        _worker.platform_start_method(),
+    ]
     package = _Path(_worker.__file__).parents[1]
     forked = [p for p in package.rglob("*.py") if 'get_context("fork"' in p.read_text()]
     assert forked == [], f"a pool that forks whatever CUDA did: {forked}"
@@ -902,8 +924,85 @@ def test_fine_tune_raises_on_a_loss_that_isnt_finite():
             return out + mask
 
         windows = FineTuneWindows(dates=dates, cut=dates.max(), loss=loss)
-        with pytest.raises(FloatingPointError, match=f"the {bad} loss"):
+        with pytest.raises(
+            FloatingPointError, match=f"the {bad} loss of step {int(bad == 'training')} is nan with finite"
+        ) as e:
             fine_tune(model, windows, max_steps=5, batch_size=30, holdout_days=5, eval_every=1, seed=0)
+        assert e.value.windows and set(e.value.windows) <= bad_rows and not e.value.diverged
+        assert e.value.where == bad
+
+
+def test_fine_tune_says_training_diverged_when_the_weights_did():
+    """Finite windows whose loss has no finite gradient at the base weights (the square root of |y| at 0): the first step makes
+    the weights NaN, and the error says the training diverged (after step 1), not that the data has a NaN."""
+    torch = pytest.importorskip("torch")
+    from epftoolbox2.models._torch.finetune import FineTuneWindows, fine_tune
+
+    dates = np.array([np.datetime64("2023-01-01") + np.timedelta64(i, "D") for i in range(40)])
+
+    def loss(module, indices):
+        return module(torch.ones(len(indices), 1)).abs().sqrt().sum(dim=1)
+
+    model = torch.nn.Linear(1, 1)
+    torch.nn.init.zeros_(model.weight)
+    torch.nn.init.zeros_(model.bias)
+    windows = FineTuneWindows(dates=dates, cut=dates.max(), loss=loss)
+    expected = r"training diverged: the weights are no longer finite after step 1"
+    with pytest.raises(FloatingPointError, match=expected) as e:
+        fine_tune(model, windows, grad_clip=None, max_steps=5, holdout_days=5, eval_every=1)
+    assert e.value.diverged and e.value.step == 1 and e.value.where == "holdout"
+
+
+class Diverges(PersistenceBackend):
+    def fine_tune(self, data, settings, seed):
+        from epftoolbox2.models._fm import NonFiniteLoss
+
+        raise NonFiniteLoss("fine_tune: the training loss of step 3 is nan with finite weights", step=3, windows=(0, 2))
+
+
+class DivergesFM(FakeFM):
+    def _load_backend(self, resolved, device, options):
+        return Diverges(self)
+
+
+class DivergesOnGpu(DivergesFM):
+    def _backend(self, device):
+        return FoundationModel._backend(self, device)
+
+    @contextlib.contextmanager
+    def _scope(self):
+        yield "cuda:0"
+
+
+@pytest.mark.parametrize("where", ["here", "gpu host"])
+def test_a_non_finite_loss_names_the_model_anchor_horizon_seed_and_windows(hourly, where, request):
+    """The trainer's error names window positions alone: the model adds itself, the anchor, the horizon, the seed and the
+    windows' issue days, here and through the GPU host process (the error keeps its fields through the pickle)."""
+    from epftoolbox2.models._fm import NonFiniteLoss
+
+    if where == "gpu host":
+        request.getfixturevalue("own_host")
+    cls = DivergesFM if where == "here" else DivergesOnGpu
+    model = cls(name="FakeFM", fine_tune_every="7D", fine_tune=QUICK)
+    pattern = (
+        r"FakeFM: the fine-tune at 2023-06-12 \(horizon 1, seed 1 of 1: \d+\) stopped: fine_tune: the training loss of step 3 "
+        r"is nan with finite weights; the windows issued on 2023-01-\d\d, 2023-01-\d\d"
+    )
+    with pytest.raises(NonFiniteLoss, match=pattern) as e:
+        run(model, hourly, ("2023-06-12", "2023-06-12"))
+    assert e.value.windows == (0, 2) and e.value.step == 3 and not e.value.diverged
+
+
+@pytest.fixture
+def own_host(monkeypatch):
+    """A GPU host process of this test's own (`_device_worker.shared()`), closed after it: what one test hosts (a stand-in
+    torch) never reaches another's."""
+    from epftoolbox2.models import _device_worker
+
+    process = _device_worker.DeviceProcess()
+    monkeypatch.setattr(_device_worker, "_SHARED", process)
+    yield process
+    process.close()
 
 
 class OnGpu(FakeFM):
@@ -924,7 +1023,7 @@ class OnGpu(FakeFM):
         return PersistenceBackend(self)
 
 
-def test_gpu_work_runs_in_a_spawned_child_and_this_process_keeps_forking(hourly, monkeypatch, tmp_path):
+def test_gpu_work_runs_in_a_spawned_child_and_this_process_keeps_forking(hourly, monkeypatch, tmp_path, own_host):
     """A model on a GPU hosts its backend in a spawned child: zero-shot forecasts and a stored fine-tune are the in-process
     fake's, the backend's process is another, this process never initialises CUDA (the stand-in is the child's), and the pool of
     a model after it still forks, with nothing in its manifest."""
@@ -981,22 +1080,280 @@ def test_windows_kept_with_gaps_warn_though_none_is_dropped(hourly):
         run(tuned("FakeFM"), holed, ("2023-06-12", "2023-06-12"))
 
 
-@pytest.mark.parametrize(
-    "model",
-    [
-        T0Model(known_ahead=["load_forecast"], fine_tune={"lr": 2e-5}, seeds=2, random_state=3, device="cuda"),
-        T0Model(fine_tune_every=None, newest_target="published"),
-        ChronosModel(context=182, past=["load_actual"], batch_size=8, device="cuda:1"),
-        FakeFM(by_batch=0.5, offset=1.0, fine_tune_every="7D", fine_tune=QUICK),
-    ],
-    ids=["t0", "t0-zero-shot", "chronos", "fake"],
-)
-def test_the_gpu_host_rebuilds_a_family_from_its_public_attributes(model):
+def registered_families():
+    """Every `FoundationModel` subclass in the pipeline's registry (6j's families too, once registered), and the fake."""
+    import importlib
+
+    from epftoolbox2.pipelines.model_pipeline import COMPONENT_REGISTRY
+
+    out = {}
+    for name, module in COMPONENT_REGISTRY["models"].items():
+        cls = getattr(importlib.import_module(module), name)
+        if isinstance(cls, type) and issubclass(cls, FoundationModel):
+            out[name] = cls
+    return {**dict(sorted(out.items())), "FakeFM": FakeFM}
+
+
+# Values other than a family's defaults for the settings families share, and by type for the others: each instance of the guard
+# test changes one setting, so a setting stored under another name (or not at all) comes back as its default and is seen.
+OTHER_VALUES = {
+    "context": 33,
+    "known_ahead": ("load_forecast",),
+    "past": ("load_actual",),
+    "batch_size": 7,
+    "device": "cuda:1",
+    "weights": "/weights/elsewhere",
+    "fine_tune_every": "6MS",
+    "fine_tune": {"lr": 2e-5},
+    "seeds": 2,
+    "random_state": 5,
+    "newest_target": "published",
+    "name": "other",
+}
+
+
+def changed_settings(cls):
+    """(parameter, value) of every constructor parameter of `cls` for which a value other than its default is known."""
+    import inspect
+
+    out = []
+    for name, parameter in inspect.signature(cls.__init__).parameters.items():
+        if name == "self" or parameter.kind in (parameter.VAR_POSITIONAL, parameter.VAR_KEYWORD):
+            continue
+        default = parameter.default
+        if name in OTHER_VALUES:
+            value = OTHER_VALUES[name]
+        elif isinstance(default, bool):
+            value = not default
+        elif isinstance(default, int):
+            value = default + 1
+        elif isinstance(default, float):
+            value = default * 2 + 0.5
+        else:
+            continue
+        out.append((name, value))
+    return out
+
+
+@pytest.mark.parametrize("family", list(registered_families()), ids=str)
+def test_the_gpu_host_rebuilds_a_family_from_its_public_attributes(family):
     """The GPU host process builds the model again from its public attributes (`_public_params`): every family's settings must
-    be constructor parameters stored under their own names, or the hosted backend is another model's."""
+    be constructor parameters stored under their own names, or the hosted backend is another model's. For each registered
+    family (and the fake), its defaults and each setting changed in turn (a value the family refuses is left out)."""
     from epftoolbox2.models.foundation import _public_params
 
-    again = type(model)(**_public_params(model))
-    assert _public_params(again) == _public_params(model)
-    assert again._model_kwargs == model._model_kwargs
-    assert again._backend_options() == model._backend_options() and again._predict_options() == model._predict_options()
+    cls = registered_families()[family]
+    tried = 0
+    for change in [{}] + [{name: value} for name, value in changed_settings(cls)]:
+        try:
+            model = cls(**change)
+        except (ValueError, TypeError):
+            continue
+        tried += 1
+        again = cls(**_public_params(model))
+        assert _public_params(again) == _public_params(model), change
+        assert again._model_kwargs == model._model_kwargs, change
+        assert again._backend_options() == model._backend_options(), change
+        assert again._predict_options() == model._predict_options(), change
+        for name, value in change.items():
+            assert getattr(again, name) == getattr(model, name), (name, value)
+    assert tried >= 5, f"{family}: too few settings could be changed to check it"
+
+
+# ---------------------------------------------------------------------------------------------------------------------------
+# The GPU host process's lifecycle (review of 28bee7e): a dead host, a class it can't import, the windows it is sent, the
+# threads and flags it runs with
+# ---------------------------------------------------------------------------------------------------------------------------
+
+
+def test_after_its_gpu_host_dies_the_next_model_loads_its_backend_again(hourly, own_host):
+    """The host process is killed between two models of a family (host RAM, a crash): the next one loads the backend again in
+    a new host and forecasts what it forecast, instead of calling the dead host's backend (`KeyError` before)."""
+    import os
+    import signal
+    import time
+
+    test = ("2023-06-12", "2023-06-12")
+    here = by_key(run(make("FakeFM"), hourly, test))
+    first = OnGpu(name="FakeFM")
+    assert by_key(run(first, hourly, test)) == here
+    dead = first._backend("cuda:0").pid
+    os.kill(dead, signal.SIGKILL)
+    deadline = time.monotonic() + 10
+    while own_host.holds(f"hosted-{own_host.generation}-0") and time.monotonic() < deadline:
+        time.sleep(0.05)
+    again = OnGpu(name="FakeFM")
+    assert by_key(run(again, hourly, test)) == here
+    assert again._backend("cuda:0").pid not in (None, dead)
+
+
+def test_a_class_the_gpu_host_cant_import_is_refused_before_it_starts(hourly, monkeypatch, own_host):
+    """A model class defined inside a function, or in the `__main__` of a notebook, an interactive session or `python -c`,
+    can't be imported by the spawned GPU host: the run refuses it with that reason before any host starts."""
+    import types
+
+    from epftoolbox2.models import foundation
+
+    class Local(OnGpu):
+        pass
+
+    with pytest.raises(TypeError, match="is defined inside a function"):
+        run(Local(name="FakeFM"), hourly, ("2023-06-12", "2023-06-12"))
+    assert own_host.pid is None
+    monkeypatch.setitem(sys.modules, "__main__", types.ModuleType("__main__"))  # no __file__: a notebook's
+    in_main = type("InMain", (OnGpu,), {"__module__": "__main__"})
+    with pytest.raises(TypeError, match="__main__ of an interactive session, a notebook or `python -c`"):
+        foundation._check_hostable(in_main)
+    foundation._check_hostable(OnGpu)
+
+
+INFO_PAST = InformationSet(rules={"load_actual": Availability.realised("36h")})
+
+
+class Keeps(PersistenceBackend):
+    """The fake's backend, keeping each fine-tune's windows (`kept`)."""
+
+    kept: list = []
+
+    def fine_tune(self, data, settings, seed):
+        Keeps.kept.append(data)
+        return super().fine_tune(data, settings, seed)
+
+
+class KeepsFM(FakeFM):
+    def _load_backend(self, resolved, device, options):
+        return Keeps(self)
+
+
+def kept_windows(hourly, monkeypatch, context=28):
+    """The windows of one fine-tune of the fake with a past series known 36 hours late (its contexts cut before the target's:
+    a copy per window, NaN at its end)."""
+    monkeypatch.setattr(Keeps, "kept", [])
+    model = KeepsFM(name="FakeFM", context=context, past=("load_actual",), fine_tune_every="7D", fine_tune=QUICK)
+    run(model, hourly, ("2023-06-12", "2023-06-12"), information_set=INFO_PAST)
+    return Keeps.kept[0]
+
+
+def test_fine_tune_windows_travel_as_their_grid_and_offsets(hourly, monkeypatch):
+    """Packed for the GPU host (`_PackedWindows`), a fine-tune's windows are their series' values once and offsets: a small
+    share of the windows pickled one by one, and unpacked they are the same windows, every array equal to the bit, read-only."""
+    import pickle
+
+    from epftoolbox2.models.foundation import _PackedWindows
+
+    data = kept_windows(hourly, monkeypatch)
+    packed = _PackedWindows(data)
+    kinds = {ref[0] for refs in packed.refs for ref in refs.values()}
+    assert kinds == {"view", "tail"}
+    whole = len(pickle.dumps(dataclasses.replace(data, grid={})))
+    blob = pickle.dumps(packed)
+    assert len(blob) < 0.25 * whole, (len(blob), whole)
+    back = pickle.loads(blob).unpack()
+    assert len(back) == len(data) and np.array_equal(back.dates, data.dates) and back.cut == data.cut
+    for a, b, ya, yb in zip(data.items, back.items, data.targets, back.targets):
+        assert (a.issue_day, a.horizon, a.first_step, a.newest, a.gaps, a.missing) == (
+            b.issue_day,
+            b.horizon,
+            b.first_step,
+            b.newest,
+            b.gaps,
+            b.missing,
+        )
+        assert a.target.tobytes() == b.target.tobytes() and not b.target.flags.writeable
+        assert all(a.past[n].tobytes() == b.past[n].tobytes() for n in a.past)
+        assert all(a.known[n].tobytes() == b.known[n].tobytes() for n in a.known)
+        assert np.array_equal(a.slot_periods, b.slot_periods) and ya.tobytes() == yb.tobytes()
+
+
+class KeepsOnGpu(OnGpu):
+    pass
+
+
+def test_the_gpu_host_is_sent_a_fine_tune_s_windows_packed(hourly, monkeypatch, own_host):
+    """Through the GPU host a fine-tune sends its windows packed, a small share of what they weigh one by one (each seed's
+    call), and the stored fine-tune and the forecasts are the in-process ones."""
+    import pickle
+
+    from epftoolbox2.models import _device_worker
+
+    data = kept_windows(hourly, monkeypatch)
+    whole = len(pickle.dumps(dataclasses.replace(data, grid={})))
+    sent = []
+    exchange = _device_worker.DeviceProcess._exchange
+
+    def measured(self, function, args):
+        if len(args) > 2 and args[1] == "run" and args[2][0] == "fine_tune":
+            sent.append(len(pickle.dumps(args)))
+        return exchange(self, function, args)
+
+    monkeypatch.setattr(_device_worker.DeviceProcess, "_exchange", measured)
+    settings = dict(context=28, past=("load_actual",), fine_tune_every="7D", fine_tune=QUICK, seeds=2)
+    here = by_key(
+        run(FakeFM(name="FakeFM", **settings), hourly, ("2023-06-12", "2023-06-12"), information_set=INFO_PAST)
+    )
+    there = KeepsOnGpu(name="FakeFM", **settings)
+    assert by_key(run(there, hourly, ("2023-06-12", "2023-06-12"), information_set=INFO_PAST)) == here
+    assert len(sent) == 2 and max(sent) < 0.25 * whole, (sent, whole)
+
+
+class FlagsBackend(PersistenceBackend):
+    """Forecasts the torch threads the call ran on, plus 100 where deterministic algorithms are on."""
+
+    def predict(self, call, options):
+        import torch
+
+        out = super().predict(call, options)
+        return out * 0 + torch.get_num_threads() + 100 * torch.are_deterministic_algorithms_enabled()
+
+
+class FlagsOnGpu(OnGpu):
+    @contextlib.contextmanager
+    def _host_scope(self, device, threads):
+        from epftoolbox2.models._torch.runtime import torch_scope
+
+        with torch_scope("cpu", tf32=False, threads=threads):
+            yield device
+
+    def _load_backend(self, resolved, device, options):
+        import torch  # noqa: F401  (the host's own)
+
+        return FlagsBackend(self)
+
+
+def test_the_gpu_host_runs_each_call_with_this_process_s_threads_and_torch_flags(
+    hourly, monkeypatch, tmp_path, own_host
+):
+    """A second model of a family shares the first one's hosted backend but runs on its own threads, and a process-wide torch
+    flag set here (deterministic algorithms) reaches the host at the next call; the manifest records what the host ran on."""
+    torch = pytest.importorskip("torch")
+    test = ("2023-06-12", "2023-06-12")
+    monkeypatch.setenv("THREADS_PER_PROCESS", "3")
+    assert set(by_key(run(FlagsOnGpu(name="FakeFM"), hourly, test)).values()) == {3.0}
+    monkeypatch.setenv("THREADS_PER_PROCESS", "2")
+    was = torch.are_deterministic_algorithms_enabled()
+    torch.use_deterministic_algorithms(True)
+    try:
+        second = by_key(run(FlagsOnGpu(name="FakeFM"), hourly, test, save_dir=tmp_path))
+    finally:
+        torch.use_deterministic_algorithms(was)
+    assert set(second.values()) == {102.0}
+    host = json.loads((tmp_path / "fakefm.manifest.json").read_text())["gpu_host"]
+    assert host["start"] == "spawn" and host["threads"] == [2]
+    assert host["torch_flags"]["deterministic_algorithms"] is True
+
+
+def test_a_cuda_variable_set_after_the_gpu_host_started_warns(hourly, monkeypatch, own_host):
+    """CUDA reads CUBLAS_WORKSPACE_CONFIG (and the allocator's settings) as the host starts: one set in this process after that
+    doesn't reach it, and the next run says so, once per value."""
+    from epftoolbox2.models import foundation
+
+    monkeypatch.setattr(foundation, "_ENV_WARNED", set())
+    monkeypatch.delenv("CUBLAS_WORKSPACE_CONFIG", raising=False)
+    test = ("2023-06-12", "2023-06-12")
+    run(OnGpu(name="FakeFM"), hourly, test)
+    monkeypatch.setenv("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+    with pytest.warns(UserWarning, match="CUBLAS_WORKSPACE_CONFIG is ':4096:8' in this process but was None when"):
+        run(OnGpu(name="FakeFM"), hourly, test)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UserWarning)
+        run(OnGpu(name="FakeFM"), hourly, test)
