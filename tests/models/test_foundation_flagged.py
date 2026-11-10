@@ -579,3 +579,26 @@ def test_the_attribution_and_the_verdicts_show_in_every_report(hourly, tmp_path,
     manifest = json.loads((tmp_path / "out" / "t.manifest.json").read_text())
     assert manifest["card"]["attribution"] == "2026 - Mistral AI"
     assert manifest["card"]["verdicts"] == {"test": POSSIBLY_CONTAMINATED}
+
+
+@pytest.mark.parametrize(
+    "family, change",
+    [
+        ("timestral", {"clip_nonnegative": True}),
+        ("timestral", {"symmetric_averaging": False}),
+        ("timestral", {"size": "28m"}),
+        ("timestral", {"past": []}),
+        ("timesfm", {"known_ahead": []}),
+        ("patchtst", {"context": 6}),
+        ("patchtst", {"batch_size": 4}),
+    ],
+)
+def test_a_changed_setting_refuses_the_resume(hourly, tmp_path, family, change):
+    """Each setting that changes a family's forecasts is in its manifest's model parameters: resuming results made with
+    another value refuses."""
+    from epftoolbox2.results.manifest import ManifestMismatchError
+
+    test = ("2023-06-12", "2023-06-13")
+    pipeline(MAKERS[family]("M")).run(hourly, *test, horizon=1, forecast_only=True, save_dir=tmp_path)
+    with pytest.raises(ManifestMismatchError):
+        pipeline(MAKERS[family]("M", **change)).run(hourly, *test, horizon=1, forecast_only=True, save_dir=tmp_path)
