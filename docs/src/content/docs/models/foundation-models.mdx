@@ -167,17 +167,30 @@ a run warns about.
 
 On the research's own rows (frames built from `recent/data/{DE_LU,AT}.npz` on a fixed-offset `Etc/GMT-1` clock, every day 24
 hours, rules given on that clock, `newest_target="published"`, every series on time in `report.availability()`), the library's
-forecasts against the stored ones, made on an H100 with tfc-t0 0.5.0 and stored to 4 decimals. Library on a CPU (AMD EPYC
-7713, 16 torch threads, torch 2.15.0), validation (8,736 forecasts) and test year (8,760) of each market:
+forecasts against the stored ones (made on an H100 with tfc-t0 0.5.0, stored to 4 decimals), validation (8,736 forecasts) and
+test year (8,760) of each market, max |library - stored| in EUR/MWh:
 
-| Run | DE_LU val / test max \|library - stored\| | AT val / test | MAE library = stored (DE_LU test, AT test) | Gate |
+| Run | H100, DE_LU val / test | H100, AT val / test | CPU, worst of the four | Gate |
 |---|---|---|---|---|
-| t0-alpha, ctx 364, load forecast | 4.7e-4 / 8.5e-4 | 2.7e-4 / 4.7e-4 | 20.1547, 17.1686 | 1e-3 |
-| t0-alpha, ctx 364, univariate | 2.4e-4 / 2.8e-4 | 3.2e-4 / 2.6e-4 | 20.4937, 17.3034 | 1e-3 |
-| Chronos-2, ctx 182, load forecast | 5.6e-4 / 4.0e-4 | 7.6e-4 / 4.5e-4 | 20.5627, 17.3322 | 0.1 |
+| t0-alpha, ctx 364, load forecast | 3.2e-4 / 6.8e-4 | 3.2e-4 / 4.1e-4 | 8.5e-4 | 1e-3 |
+| t0-alpha, ctx 364, univariate | 2.0e-4 / 2.9e-4 | 1.5e-4 / 2.9e-4 | 3.2e-4 | 1e-3 |
+| Chronos-2, ctx 182, load forecast | 5.1e-4 / 3.1e-4 | 2.7e-4 / 3.9e-4 | 7.6e-4 | 0.1 |
 
-The mean absolute difference is 3 to 4 x 10⁻⁵ in every run, about the stored files' rounding. A market-year took 111 to 144 s
-(t0 univariate), 218 to 295 s (t0 with the load forecast) and 193 to 337 s (Chronos-2) on those 16 threads of a shared machine
-that was loaded beyond its cores. `verify` with the real weights on that CPU, on five issue days with a spring switch among
-them, is ok with its positive control, the rerun and the co-batch checks for Chronos-2 and for t0-alpha fine-tuned monthly (two
-steps, a 28-day context). The checks and their scripts are in the project's research folder (`library_check_step6/foundation/`).
+The MAEs equal the stored ones to 4 decimals (test: t0 20.1547 and 17.1686 with the load forecast, 20.4937 and 17.3034
+univariate; Chronos-2 20.5627 and 17.3322), and the mean difference is 3 to 4 x 10⁻⁵, the files' rounding. The library on the CPU
+against itself on the GPU differs by at most 8.5 x 10⁻⁴ (mean 1 to 3 x 10⁻⁵).
+
+**The fine-tune.** The research's October-2024 re-fine-tune (seed 0, DE_LU and AT pooled, 1,886 training and 122 holdout
+windows) run through the library's trainer with the t0 backend's loss stops at the research's best step (75 of 175) with its
+holdout losses (0.58644 zero-shot, 0.56388 best), and its forecasts of the month are within 6.1 x 10⁻⁴ EUR/MWh of the stored
+ones (720 per market), from the research's inputs and from the library's history accessor alike.
+
+**Time** of a market-year, zero-shot, the whole library run included: 1.3 to 2.4 s on an H100 for t0-alpha (5.5 s with the first
+load of the weights), 2.2 to 2.5 s for Chronos-2; on a CPU (AMD EPYC 7713, 16 torch threads, a machine loaded beyond its cores)
+111 to 144 s (t0 univariate), 218 to 295 s (t0 with the load forecast), 193 to 337 s (Chronos-2). The pooled fine-tune took 46 s
+on the H100; a single-market `T0Model(fine_tune_every="1MS")` run over October 2024 (1,005 windows, 325 steps, its fine-tune and
+its month of forecasts) 81 s.
+
+`verify` with the real weights on that CPU, on five issue days with a spring switch among them, is ok with its positive control,
+the rerun and the co-batch checks for Chronos-2 and for t0-alpha fine-tuned monthly (two steps, a 28-day context). The checks and
+their scripts are in the project's research folder (`library_check_step6/foundation/`).
