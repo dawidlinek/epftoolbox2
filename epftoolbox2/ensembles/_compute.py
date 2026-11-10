@@ -158,6 +158,7 @@ def compute(
     test_only: bool,
     leaves: Sequence[str],
     provenance: Optional[Callable[[], Tuple[str, Optional[str]]]] = None,
+    in_sample_through: Optional[str] = None,
 ) -> Computed:
     """Compute `ensemble` from `refs`, which hold its members and its `leaves`, and write it to `path`, if any.
 
@@ -169,6 +170,10 @@ def compute(
 
     A `FallbackEnsemble`'s member missing from `refs` (`report(allow_missing=True)` passed over it) serves nothing: its rung
     stays in place, with no forecast.
+
+    `in_sample_through` is the latest `chosen_through` of a frozen average among its members, however nested: what is issued on
+    or before it was chosen on, for this ensemble too, which then makes no forecast of it (`chosen_in_sample`), so a fallback
+    over a frozen average doesn't serve those days from its lower rungs. Its own `chosen_through`, if it has one, counts as well.
     """
     absent = [name for name in ensemble.members if name not in refs] if isinstance(ensemble, FallbackEnsemble) else []
     members = {
@@ -182,7 +187,8 @@ def compute(
     grid = _on_one_grid(ensemble, members)
 
     freq = next((member.freq for member in members.values() if member.freq is not None), like.freq)
-    chosen_through = getattr(ensemble, "chosen_through", None)
+    bounds = [day for day in (getattr(ensemble, "chosen_through", None), in_sample_through) if day is not None]
+    chosen_through = max(bounds) if bounds else None
     choices: List[Dict[str, Any]] = []
     rung: Optional[np.ndarray] = None
     if ensemble.needs_validation:
@@ -192,9 +198,11 @@ def compute(
         prediction = grid.predictions[picked, rung]
     else:
         picked = np.flatnonzero(np.isfinite(grid.predictions).all(axis=1))
-        if chosen_through is not None:  # a frozen average: nothing issued on days its members' choice read
-            picked = picked[(grid.codes[picked] >> _RUN_SHIFT) > _ordinal(chosen_through)]
         prediction = ensemble.combine(grid.predictions[picked])
+    if chosen_through is not None:  # in sample for a frozen choice: nothing issued on or before the last day it read
+        kept = (grid.codes[picked] >> _RUN_SHIFT) > _ordinal(chosen_through)
+        picked, prediction = picked[kept], prediction[kept]
+        rung = None if rung is None else rung[kept]
 
     records = _records(grid, picked, prediction, freq, stored, rung, ensemble.members)
     if path is not None:
@@ -801,8 +809,9 @@ def _say_what_is_missing(name: str, parts: Mapping[Optional[str], ModelResultRef
         in_sample = part.skipped.get(SKIP_CHOSEN_IN_SAMPLE, 0)
         if in_sample:
             warnings.warn(
-                f"{name}: {in_sample} of {part.count} planned forecasts{where} are issued on or before the last day its members' "
-                f"choice read, so they would be scored on days it was made on: not made, and counted as {SKIP_CHOSEN_IN_SAMPLE}.",
+                f"{name}: {in_sample} of {part.count} planned forecasts{where} are issued on or before the last day a frozen "
+                "choice of its members (or of theirs) read, so they would be scored on days it was made on: not made, and "
+                f"counted as {SKIP_CHOSEN_IN_SAMPLE}.",
                 stacklevel=2,
             )
         if part.produced == 0 and part.count > in_sample:

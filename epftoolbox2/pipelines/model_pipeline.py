@@ -1579,6 +1579,7 @@ class ModelPipeline:
         held = dict(refs)
         leaves: Dict[str, List[str]] = {}
         test_only_names: set = set()
+        through: Dict[str, str] = {}  # each ensemble's latest `chosen_through`, its own or a member's
         computed: Dict[str, ModelResultRef] = {}
         choices: Dict[str, List[Dict]] = {}
         for ensemble in ensembles:
@@ -1595,7 +1596,22 @@ class ModelPipeline:
                     for leaf in leaves.get(member, [member])
                 )
             )
-            result = compute(ensemble, held, stored, like, path, test_only, leaves[ensemble.name], provenance)
+            # A frozen choice's in-sample days stay in sample for every ensemble made of it, nested too.
+            bounds = [through[member] for member in ensemble.members if member in through]
+            bounds += [ensemble.chosen_through] if getattr(ensemble, "chosen_through", None) is not None else []
+            if bounds:
+                through[ensemble.name] = max(bounds)
+            result = compute(
+                ensemble,
+                held,
+                stored,
+                like,
+                path,
+                test_only,
+                leaves[ensemble.name],
+                provenance,
+                through.get(ensemble.name),
+            )
             held[ensemble.name] = result.ref
             # A ref with no window to show, as a `top` ensemble has in a validation report, is not a row of its tables.
             if result.ref.by_window is None or result.ref.by_window:

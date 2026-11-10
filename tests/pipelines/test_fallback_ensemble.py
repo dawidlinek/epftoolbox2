@@ -655,10 +655,10 @@ def yearly_members(directory, test):
     return windows
 
 
-def study(*extra):
+def study(*extra, per="day"):
     return pipeline(
         AverageEnsemble(["a", "b", "c"], top=2, name="best"),
-        FallbackEnsemble(["best", "c"], name="live"),
+        FallbackEnsemble(["best", "c"], per=per, name="live"),
         *extra,
     )
 
@@ -715,9 +715,14 @@ def test_a_frozen_pipeline_saved_reloaded_and_reported_forecasts_nothing_in_samp
     """The reviewer's case: freeze, save, reload and report the study's own days. The frozen average makes no forecast issued
     on or before `chosen_through` (its MAE there would be the in-sample 1.25 of the days it was chosen on, against the honest
     1.757 of the top ensemble on the same 1444 keys), counts them as `chosen_in_sample` and says so; what it makes is the top
-    ensemble's forecasts of the newest segment."""
+    ensemble's forecasts of the newest segment.
+
+    The same holds for every ensemble made of it: a per-key fallback over it would serve every in-sample day from c (1444
+    forecasts at an MAE of 1.123, 732 of them by c), an average over it would count those keys as member_missing. Both, and a
+    fallback over the average, make nothing issued on or before `chosen_through` and count it as `chosen_in_sample`."""
     windows = yearly_members(tmp_path / "study", ("2024-01-05", "2025-12-26"))
-    original = study().add_evaluator(MAEEvaluator())
+    over = [AverageEnsemble(["best", "c"], name="over"), FallbackEnsemble(["over", "a"], per="key", name="outer")]
+    original = study(*over, per="key").add_evaluator(MAEEvaluator())
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         honest = original.report(tmp_path / "study")
@@ -746,6 +751,13 @@ def test_a_frozen_pipeline_saved_reloaded_and_reported_forecasts_nothing_in_samp
     assert {r["run_date"] > "2025-01-04" for r in stored(tmp_path / "copy" / "best.jsonl")} == {True}
     mae = report.summary().set_index("model").loc["best"]
     assert (mae["forecasts"], mae["MAE"]) == (out_of_sample, 1.25)
+    table = report.forecast_counts().set_index("model")
+    for name in ("live", "over", "outer"):
+        assert {r["run_date"] > "2025-01-04" for r in stored(tmp_path / "copy" / f"{name}.jsonl")} == {True}, name
+        assert table.loc[name, "chosen_in_sample"] == planned_in, name
+        assert table.loc[name, "produced"] == out_of_sample, name
+    assert set(pd.DataFrame(stored(tmp_path / "copy" / "live.jsonl"))["member"]) == {"best"}
+    assert report.summary().set_index("model").loc["live", "MAE"] == 1.25
     # The top ensemble on the same keys: the same forecasts, so the same MAE; on all its own keys, the honest score.
     top = {key_of(r): r for r in honest.refs["best"].iter_records()}
     kept = [top[key_of(r)] for r in report.refs["best"].iter_records()]
