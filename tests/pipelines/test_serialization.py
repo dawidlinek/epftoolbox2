@@ -23,6 +23,8 @@ from epftoolbox2.models import (
     ResidualModel,
     RidgeModel,
     ShapeModel,
+    T0Model,
+    ChronosModel,
     TorchModel,
     XGBoostModel,
 )
@@ -893,6 +895,22 @@ class TestModelPipelineParameterFidelity:
                     native="2025-10-01",
                     name="Shape2",
                 ),
+                # Foundation models build and load without their packages or weights.
+                T0Model(
+                    context=91,
+                    known_ahead=["load_forecast"],
+                    past=["load_actual"],
+                    fine_tune_every="1MS",
+                    seeds=2,
+                    fine_tune={"max_steps": 50, "window": 365},
+                    batch_size=16,
+                    device="cpu",
+                    weights="/somewhere/t0",
+                    random_state=7,
+                    newest_target="published",
+                    name="T0",
+                ),
+                ChronosModel(context=182, known_ahead=["load_forecast"], batch_size=32, device="cuda:1", name="C2"),
             ],
             "ensembles": [AverageEnsemble(["O", "L"], top=1, by="validation", name="best")],
             "evaluators": [

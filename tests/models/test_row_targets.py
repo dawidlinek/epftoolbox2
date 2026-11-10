@@ -988,6 +988,8 @@ ROW_TARGET_EXCEPTIONS = {
     "ResidualModel": (set(), "its forecast is the learner's plus the base's, made after the learner's fit"),
     "PooledModel": (set(), "a pooled fit reads each zone's rows itself"),
     "ShapeModel": (set(), "its learner's target is already the target less its hour's mean, through the same seam"),
+    "T0Model": (set(), "a foundation model reads series (history), not the rows a per-row target divides"),
+    "ChronosModel": (set(), "a foundation model reads series (history), not the rows a per-row target divides"),
 }
 
 

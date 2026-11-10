@@ -648,11 +648,23 @@ def epf(monkeypatch, *argv):
     return 0
 
 
+def without_shipped_weights(monkeypatch) -> None:
+    """Take the registered families that ship with weights (`T0Model`, `ChronosModel`, ...) out of the registry for one test,
+    so `epf weights fetch all` sees this module's fake families alone."""
+    import importlib
+
+    for name, module in list(COMPONENT_REGISTRY["models"].items()):
+        card = getattr(getattr(importlib.import_module(module), name), "_card", None)
+        if isinstance(card, ModelCard) and card.weights is not None:
+            monkeypatch.delitem(COMPONENT_REGISTRY["models"], name)
+
+
 def said(capsys) -> str:
     return " ".join(capsys.readouterr().out.split())
 
 
 def test_epf_weights_fetch_list_and_verify(weights_root, monkeypatch, capsys, no_network):
+    without_shipped_weights(monkeypatch)
     calls = []
     monkeypatch.setattr(_weights, "snapshot_download", fake_download({WEIGHTS_FILE: REFERENCE}, calls))
     assert epf(monkeypatch, "weights", "list") == 0
@@ -1186,6 +1198,8 @@ class GatedRepoError(OSError):
 
 
 def test_epf_weights_fetch_reports_a_failed_download_and_goes_on(weights_root, monkeypatch, capsys, no_network):
+    without_shipped_weights(monkeypatch)
+
     def download(repo_id, revision, allow_patterns=None, local_dir=None, **kwargs):
         if repo_id == REPO:
             raise GatedRepoError(f"401 Client Error: access to model {repo_id} is restricted")

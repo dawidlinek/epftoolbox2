@@ -164,12 +164,17 @@ a run warns about.
 ## Reproducing the research
 
 On the research's own rows (frames built from `recent/data/{DE_LU,AT}.npz` on a fixed-offset `Etc/GMT-1` clock, every day 24
-hours, rules given on that clock, `newest_target="published"`, nothing late in `report.availability()`), the library's forecasts
-against the stored ones, validation and test years:
+hours, rules given on that clock, `newest_target="published"`, every series on time in `report.availability()`), the library's
+forecasts against the stored ones, made on an H100 with tfc-t0 0.5.0 and stored to 4 decimals. Library on a CPU (AMD EPYC
+7713, 16 torch threads, torch 2.15.0), validation (8,736 forecasts) and test year (8,760) of each market:
 
-| Run | Forecasts compared | Max \|library - stored\| (EUR/MWh) | Gate |
-|---|---|---|---|
-| t0-alpha zero-shot, ctx 364, with and without the load forecast, DE_LU and AT | see the reproduction page of the release | | 1e-3 |
-| Chronos-2 zero-shot, ctx 182, load forecast, DE_LU and AT | | | 0.1 |
+| Run | DE_LU val / test max \|library - stored\| | AT val / test | MAE library = stored (DE_LU test, AT test) | Gate |
+|---|---|---|---|---|
+| t0-alpha, ctx 364, load forecast | 4.7e-4 / 8.5e-4 | 2.7e-4 / 4.7e-4 | 20.1547, 17.1686 | 1e-3 |
+| t0-alpha, ctx 364, univariate | 2.4e-4 / 2.8e-4 | 3.2e-4 / 2.6e-4 | 20.4937, 17.3034 | 1e-3 |
+| Chronos-2, ctx 182, load forecast | 5.6e-4 / 4.0e-4 | 7.6e-4 / 4.5e-4 | 20.5627, 17.3322 | 0.1 |
 
-The checks and their scripts are in the project's research folder (`library_check_step6/foundation/`).
+The mean absolute difference is 3 to 4 x 10⁻⁵ in every run, about the stored files' rounding. A market-year took 111 to 144 s
+(t0 univariate), 218 to 295 s (t0 with the load forecast) and 193 to 337 s (Chronos-2) on those 16 threads of a shared machine
+that was loaded beyond its cores. The checks and their scripts are in the project's research folder
+(`library_check_step6/foundation/`).
