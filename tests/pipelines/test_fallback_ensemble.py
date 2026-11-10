@@ -456,18 +456,23 @@ def test_rungs_per_key_against_hand_counts(tmp_path):
 
 
 def test_rungs_compare_on_identical_keys_with_counts(tmp_path):
-    """b's MAE on what it served equals its MAE on the common keys only because its error is constant: with an error that
-    differs on the hour a lacks, the two differ, and rung0_mae is a's on the keys b's common_mae is on."""
+    """b serves the 6th, where a lacks 05:00. b errs 24 at 05:00 and 2 elsewhere, a 5 on the 6th and 1 elsewhere: b's MAE on
+    what it served, on the keys it shares with a, a's on those keys and a's on all of its own are four different numbers."""
     keys = planned_keys(PLAIN, (1,), "1h")
-    write_member(tmp_path, "a", [record(k, actual_of(k[1], k[2]) + 1.0, PLAIN) for k in keys if k[2] != 5], PLAIN)
-    write_member(
-        tmp_path, "b", [record(k, actual_of(k[1], k[2]) + (24.0 if k[2] == 5 else 2.0), PLAIN) for k in keys], PLAIN
-    )
+    sixth = "2024-05-06"
+    a = [
+        record(k, actual_of(k[1], k[2]) + (5.0 if k[0] == sixth else 1.0), PLAIN) for k in keys if k[:3:2] != (sixth, 5)
+    ]
+    write_member(tmp_path, "a", a, PLAIN)
+    b = [record(k, actual_of(k[1], k[2]) + (24.0 if k[2] == 5 else 2.0), PLAIN) for k in keys]
+    write_member(tmp_path, "b", b, PLAIN)
     rows = report_of(tmp_path, FallbackEnsemble(["a", "b"], name="live"), models=("a", "b")).rungs("live")
-    b = rows.set_index("member").loc["b"]
-    assert (b["forecasts"], b["common_forecasts"]) == (5 * 24, 5 * 23)
+    a, b = rows.set_index("member").loc["a"], rows.set_index("member").loc["b"]
+    assert (b["days"], b["forecasts"], b["common_forecasts"]) == (1, 24, 23)
     assert b["mae"] == (23 * 2.0 + 24.0) / 24
-    assert (b["common_mae"], b["rung0_mae"]) == (2.0, 1.0)
+    assert (b["common_mae"], b["rung0_mae"]) == (2.0, 5.0)
+    assert (a["member_forecasts"], a["member_mae"]) == (5 * 24 - 1, (4 * 24 * 1.0 + 23 * 5.0) / (5 * 24 - 1))
+    assert (a["forecasts"], a["mae"], a["rung0_mae"]) == (4 * 24, 1.0, 1.0)
 
 
 def test_rungs_refuses_what_is_not_a_fallback(tmp_path):
