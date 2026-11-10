@@ -150,6 +150,13 @@ def test_the_fine_tune_runs_through_the_trainer_and_is_stored_and_reused(hourly,
     assert {r["prediction"] for r in zero.refs["t0"]._results} != {json.loads(line)["prediction"] for line in lines}
     # The backend this process loaded once is back on the base weights for a zero-shot model after the fine-tunes.
     assert suite.forecasts(zero, "t0") == suite.forecasts(before, "t0")
+    # Even when a run left it on a fine-tune (a crash between the fine-tune and its reset): a zero-shot call resets it.
+    from epftoolbox2.models import foundation
+
+    backend = next(b for key, b in foundation._LOADED.items() if key[1] == "T0Model" and key[3] == "cpu")
+    backend.load_state(stored[0])
+    again = pipeline(make("t0", tiny)).run(hourly, *test, horizon=1, forecast_only=True)
+    assert suite.forecasts(again, "t0") == suite.forecasts(before, "t0")
     suite.check_verify(lambda name: tuned(name), hourly, INFO, ["2023-06-12"], items=6)
 
 
