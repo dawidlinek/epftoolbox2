@@ -1155,8 +1155,12 @@ def check_and_write_live(
     *,
     model_name: str = "Model",
     allow_mismatch: bool = False,
+    save_format: str = "jsonl",
+    save_coefficients: bool = True,
 ) -> None:
-    """Compare a live call's `manifest` with the live directory's manifest at `path` (if any), then write it with `mode` "live".
+    """Compare a live call's `manifest` with the live directory's manifest at `path` (if any), then write it with `mode` "live",
+    `save_format` (provenance) and `save_coefficients` (compared, as by `check_and_write`: one file never mixes records with
+    and without coefficients).
 
     A live manifest compares the configuration: today's compared fields but the data (`LIVE_UNCOMPARED`), each chained column's
     upstream (`chained_differences`), and what decides when an input is known in the information set (the issue time and zone,
@@ -1172,6 +1176,8 @@ def check_and_write_live(
             f"{model_name}: {path.parent} is no live directory: a live manifest is written into one"
         )
     manifest.mode = MODE_LIVE
+    manifest.save_format = None if save_format == "jsonl" else save_format
+    manifest.save_coefficients = None if save_coefficients else False  # compared below, as the configuration is
     if path.exists():
         existing = _read_manifest_of_a_model(path, model_name)
         if existing.mode != MODE_LIVE:
