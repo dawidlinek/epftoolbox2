@@ -23,6 +23,9 @@ EXTRAS: Dict[str, Tuple[str, ...]] = {
     "patchtst-fm": ("tsfm_public", "torch", "transformers"),
     "timesfm": ("timesfm3", "torch", "safetensors"),
     "timestral": ("timestral", "torch", "safetensors"),
+    # The in-context families (step 6e), each with torch, which its package imports.
+    "tabpfn": ("tabpfn", "torch"),
+    "tabicl": ("tabicl", "torch"),
 }
 
 # The commit of github.com/mistralai/timestral that TimestralModel runs on (the research's, 2026-10-15, its first): its card

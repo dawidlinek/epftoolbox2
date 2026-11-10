@@ -210,6 +210,9 @@ COMPONENT_REGISTRY = {
         "PatchTSTFMModel": "epftoolbox2.models.patchtst_fm",
         "TimestralModel": "epftoolbox2.models.timestral",
         "TimesFMModel": "epftoolbox2.models.timesfm",
+        # The in-context families (step 6e).
+        "TabPFNModel": "epftoolbox2.models.tabpfn",
+        "TabICLModel": "epftoolbox2.models.tabicl",
     },
     "ensembles": {
         "AverageEnsemble": "epftoolbox2.ensembles.average",

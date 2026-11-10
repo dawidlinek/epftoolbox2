@@ -64,7 +64,7 @@ jobs:
         uv sync --extra dev
 
     - name: Check that no extra is installed (this is the core-only job)
-      run: uv run python -c "import importlib.util, sys; sys.exit(any(importlib.util.find_spec(m) is not None for m in ('numba', 'torch', 'lightgbm', 'xgboost', 'catboost', 'optuna')))"
+      run: uv run python -c "import importlib.util, sys; sys.exit(any(importlib.util.find_spec(m) is not None for m in ('numba', 'torch', 'lightgbm', 'xgboost', 'catboost', 'optuna', 'tabpfn', 'tabicl')))"
 
     - name: Run tests
       env:
@@ -169,6 +169,47 @@ jobs:
 
     - name: Check that the packages import (their tests would skip without them)
       run: uv run python -c "import importlib, importlib.metadata as m; [print(n, m.version(n), importlib.import_module(n).__name__) for n in (${{ matrix.modules }})]"
+
+    - name: Run tests
+      run: uv run pytest -m "not integration" -n auto --dist worksteal -q
+
+  families-extra:
+    # The pretrained families' extras, packages installed and no weights: the in-context models [tabpfn] and [tabicl]
+    # (tests/models/test_in_context.py: the real regressors around a fake fit/predict, their settings, the TabPFN version guard,
+    # one checkpoint read per process; the adapter suite), the foundation models [t0] and [chronos] (tests/models/test_t0.py,
+    # test_chronos.py: the real backends around package-level fakes), and the rest of the suite with the packages installed.
+    # The test job above installs no extra, so there these tests skip. The free-threaded cell installs [tabicl] alone: tabpfn,
+    # t0 and chronos need safetensors, which has no free-threaded wheels. No job has weights or a GPU (`-m weights` runs where
+    # EPFTOOLBOX2_WEIGHTS_DIR holds them).
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - python-version: '3.12'
+            extras: '--extra tabpfn --extra tabicl --extra t0 --extra chronos'
+            modules: "'tabpfn', 'tabicl', 't0', 'chronos', 'torch'"
+          - python-version: '3.13'
+            extras: '--extra tabpfn --extra tabicl --extra t0 --extra chronos'
+            modules: "'tabpfn', 'tabicl', 't0', 'chronos', 'torch'"
+          - python-version: '3.14t'
+            extras: '--extra tabicl'
+            modules: "'tabicl', 'torch'"
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up uv with Python ${{ matrix.python-version }}
+      uses: astral-sh/setup-uv@v6
+      with:
+        python-version: ${{ matrix.python-version }}
+
+    - name: Install dependencies with the families' extras
+      run: uv sync --locked --extra dev ${{ matrix.extras }}
+
+    - name: Check that the packages import (their tests would skip without them)
+      run: uv run python -c "import importlib, importlib.metadata as m; d = m.packages_distributions(); [print(n, m.version(d.get(n, [n])[0]), importlib.import_module(n).__name__) for n in (${{ matrix.modules }})]"
 
     - name: Run tests
       run: uv run pytest -m "not integration" -n auto --dist worksteal -q

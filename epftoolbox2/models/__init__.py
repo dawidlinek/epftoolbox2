@@ -20,6 +20,10 @@ from .patchtst_fm import PatchTSTFMModel
 from .timestral import TimestralModel
 from .timesfm import TimesFMModel
 
+# The in-context families (step 6e): their packages are imported by a worker's first fit, never here.
+from .tabpfn import TabPFNModel
+from .tabicl import TabICLModel
+
 __all__ = [
     "BaseModel",
     "OLSModel",
@@ -44,6 +48,8 @@ __all__ = [
     "PatchTSTFMModel",
     "TimestralModel",
     "TimesFMModel",
+    "TabPFNModel",
+    "TabICLModel",
     "PredictorContext",
     "PredictorPlan",
     "Use",

@@ -1,0 +1,199 @@
+---
+title: In-Context Models
+description: TabPFNModel and TabICLModel, pretrained tabular regressors shown each refit unit's rows as their context; licences and attribution, the [tabpfn] and [tabicl] extras, epf weights fetch, input-size limits, devices, and the reproduction of the research's members
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+An in-context model is a transformer pretrained on synthetic tabular problems. It is not trained on your data: each fit shows it
+the training rows (the *context*) and asks for the predictive distribution of new rows, and the forecast is that distribution's
+median. `TabPFNModel` wraps Prior Labs' [TabPFN v2](https://huggingface.co/Prior-Labs/TabPFN-v2-reg) regressor and
+`TabICLModel` the regressor of [TabICLv2](https://huggingface.co/jingang/TabICL). In the research's recent DE_LU and AT test
+years, on the HONEST LEAR rows, TabPFN v2's MAE was 19.58 and 16.58 EUR/MWh and TabICLv2's 19.92 and 16.93, against 20.89 and
+17.78 for LEAR's window average (6 to 7 % and 5 % below it, all significant); averaging TabPFN and TabICL gained nothing
+significant (19.50 and 16.56).
+
+Both run on the [refit calendar](/epftoolbox2/time-and-calendars/): one model per period, horizon and refit day (`refit="7D"`,
+Mondays, by default), whose context is the rows of that period dated in the training window, and one call per refit block that
+predicts the issue rows of every day of the block at once (padded to the block's 7 rows), so the context is paid for once a
+week and a forecast is the same whatever days a run holds.
+
+## Installing
+
+```bash
+pip install 'epftoolbox2[tabpfn]'    # TabPFNModel: tabpfn, torch, huggingface_hub
+pip install 'epftoolbox2[tabicl]'    # TabICLModel: tabicl, torch, huggingface_hub
+```
+
+Each package is imported by a worker's first fit, never when the class is imported, built, saved to YAML or loaded: a data
+pipeline or a core model never imports torch or a model package. A run's pre-flight names a missing extra (and missing weights)
+before any model fits. `[tabicl]` installs on Python 3.11 to 3.15, free-threaded 3.14t included; `[tabpfn]` needs a build with
+the GIL: tabpfn depends on safetensors, which has no free-threaded wheels. For a GPU install torch's CUDA wheel first, as on the
+[Neural Networks](/epftoolbox2/models/neural-networks/#installing-torch) page.
+
+## Weights and licences
+
+The weights are never downloaded by a run: fetch them once, on a machine with network
+([Licences and Weights](/epftoolbox2/models/licences-and-weights/)):
+
+```bash
+epf weights fetch TabPFNModel     # Prior-Labs/TabPFN-v2-reg, tabpfn-v2-regressor.ckpt, 44.4 MB
+epf weights fetch TabICLModel     # jingang/TabICL, tabicl-regressor-v2-20260212.ckpt, 114.3 MB
+```
+
+| Class | Weights | Licence | Attribution | Corpus | Verdict |
+|-------|---------|---------|-------------|--------|---------|
+| `TabPFNModel` | `Prior-Labs/TabPFN-v2-reg` at `02a44705ff77`, `tabpfn-v2-regressor.ckpt`, sha256 `2ab5a07d5c41…` (last changed 2025-01-05) | [Prior Labs License 1.1](https://huggingface.co/Prior-Labs/TabPFN-v2-reg/blob/main/LICENSE.txt): Apache-2.0 with an attribution clause; commercial use allowed | "Built with PriorLabs-TabPFN" wherever a product built on the weights or their outputs, or its documentation, is made available (section 10; internal benchmarking needs none) | synthetic priors | `clean (synthetic)` |
+| `TabICLModel` | `jingang/TabICL` at `4dcd344ece2c`, `tabicl-regressor-v2-20260212.ckpt`, sha256 `0db9cb538f11…` | [BSD-3-Clause](https://github.com/soda-inria/tabicl/blob/main/LICENSE); commercial use allowed | none beyond the licence notice | synthetic priors | `clean (synthetic)` |
+
+The card pins each file's sha256, so a file replaced upstream is refused at fetch; the manifest records the hashes and the
+packages' and torch's versions, and a resume with others refuses. `report.provenance()` and the exporters print the licence, the
+attribution and the verdict.
+
+<Aside type="caution">
+`TabPFNModel` uses the **v2** regression weights only. The tabpfn package's own default weights (2.5 and later) are under
+non-commercial licences: the adapter builds its regressor with `ModelVersion.V2` and the checkpoint the run resolved, and refuses a
+`weights=` file that tabpfn would read as another version.
+</Aside>
+
+## Basic Usage
+
+```python
+from epftoolbox2.models import TabICLModel, TabPFNModel
+from epftoolbox2.pipelines import ModelPipeline
+from epftoolbox2.presets import lear_predictors
+
+inputs = lear_predictors(["load_forecast"])  # the research's HONEST rows: 175 raw inputs
+
+pipeline = (
+    ModelPipeline(issue_time="11:45")
+    .add_model(TabPFNModel(inputs, name="tabpfn"))  # 728 days of context, refitted weekly, 4 estimators
+    .add_model(TabICLModel(inputs, name="tabicl"))  # the same, 8 estimators
+)
+report = pipeline.run(df, test=("2025-10-01", "2026-09-30"), horizon=1, save_dir="runs/in_context")
+```
+
+## Parameters
+
+Both classes take, in this order, `predictors`, `training_window`, `refit`, `n_estimators`, `random_state`, `device`, `weights`,
+`block_predict` and `name`; `scaler`, `newest_target`, `binary_mask`, `normalise_by`, `bounds` and `zero_when` are keyword-only.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `predictors` | list | Required | Full names, `{horizon}` allowed, saved verbatim; the context's columns, raw |
+| `training_window` | int | `728` | Days of context (364 was 3 to 5 % worse in the research, 1,092 gave nothing) |
+| `refit` | str | `"7D"` | How often the context is refreshed, on the fixed calendar: `"7D"` Mondays, `"1D"` every day, `"1MS"` monthly |
+| `n_estimators` | int | `4` (TabPFN), `8` (TabICL) | Ensemble members of one call: preprocessed views of the context (TabPFN 8 gave 19.56 against 4's 19.58, not significant) |
+| `random_state` | int | `0` | The seed of every fit's preprocessing, the same for each |
+| `device` | str | `"auto"` | `"auto"` (CUDA if a matmul runs on it, else the CPU), `"cpu"`, `"cuda"` or `"cuda:N"` |
+| `weights` | str | `None` | `None` reads the cache; a path to the checkpoint (hashed and recorded; written to YAML and compared on resume), or `"<repo>@<revision>"` of the cache |
+| `block_predict` | bool | `True` | Predict a block's issue days in one call; `False` one row a call (7 times the cost) |
+| `name` | str | `"TabPFN"`, `"TabICL"` | Display name |
+| `scaler` | spec | the Invariant on the target | The target through epftoolbox's Invariant (asinh of median and MAD), the inputs raw |
+| `newest_target`, `binary_mask`, `normalise_by`, `bounds`, `zero_when` | | | As for every model ([Common Parameters](/epftoolbox2/models/common-parameters/)) |
+
+## How a fit works
+
+- **Rows.** A unit's context is the rows of its period dated in `training_span(anchor, W, h)`, as for every refit model: with
+  `newest_target="d-1"` the newest target is the day before the anchor, so nothing the issue time doesn't know trains.
+- **Target.** The target goes through the Invariant, the package predicts its distribution in that space and the median is mapped
+  back by the inverse: the transform is monotone, so the median maps exactly.
+- **One call a block.** The issue rows of every day of the block that the frame has with finite inputs, padded to 7 rows with
+  copies of the first, whichever of them the run forecasts. A row's forecast must not depend on the other rows of its call:
+  `verify`'s co-batch check replaces them by noise and requires the forecast to stay where it is.
+- **Loaded once per worker.** Each worker process builds the network once, from the one file the run resolved, with
+  `HF_HUB_OFFLINE=1` and `TRANSFORMERS_OFFLINE=1` held, and hands it to every fit's regressor (TabPFN's `ModelSpecs`, TabICL's
+  loaded model), so no fit reaches the package's own loader or its download paths (tabpfn's include a direct URL the
+  variables don't stop); every fit and prediction runs with the variables held too.
+- **Errors stop the run.** Whatever the package raises in a fit or a prediction stops the run with the model's name, never a
+  silently skipped forecast. A context whose targets are all equal (a night period of a solar target) predicts that value
+  without calling the package.
+
+## Input-size limits
+
+| Model | Pretrained on | What happens beyond it |
+|-------|---------------|------------------------|
+| TabPFN v2 | up to 10,000 rows and 500 columns | the package refuses larger contexts; on a CPU it refuses more than 1,000 rows unless `TABPFN_ALLOW_CPU_LARGE_DATASET=1` is set (a 728-day window fits) |
+| TabICLv2 | 2 to 100 columns | the research's 175 and 247 columns worked; whether it degrades there is untested |
+| Mitra-v2 (not shipped) | up to 50 columns | see below |
+
+## Devices, processes and determinism
+
+A run starts one fit at a time per process, each on one torch thread with TF32 off, in `MAX_PROCESSES` processes: every usable
+CPU by default, or 6 per GPU (the research ran 4 to 6 per GPU). The run resolves its devices once, in the parent process:
+`device="auto"` is CUDA when a matmul runs on GPU 0, and then every GPU of GPU 0's model (its name and compute capability) whose
+matmul runs (worker k fits on GPU k modulo their number), or else the CPU; `"cuda:N"` is that GPU. GPUs of another model are left
+out with a warning, since under float16 autocast an A100 and an H100 give other forecasts and which unit runs on which depends on
+the scheduling: name the ones to use with `device="cuda:N"` or `CUDA_VISIBLE_DEVICES`. A worker that can't use the device its
+parent resolved stops the run rather than fit elsewhere. The seed is the same for every
+fit, so on a CPU a forecast is the same alone, in a loop, across array shards and after a resume, to the bit.
+
+A CPU and a GPU forecast differ by more than rounding (up to 4.3 EUR/MWh for TabPFN and 0.5 for TabICL on the research's
+rows, below). On a CPU both compute in float32, pinned: left to itself tabpfn autocasts to bfloat16 on CPUs with AVX512-BF16
+or AMX (Sapphire Rapids, Zen 4), whose capability reads "AVX512" as an older one's does. On a GPU both autocast to float16:
+TabPFN always, TabICL for contexts of 1,024 rows or more, or 60 columns or more (the research's). What the packages would
+size by a GPU's free memory, which another process on the card changes, is pinned: TabPFN's memory saving off (what its
+"auto" gives contexts of the research's size), TabICL's batches at its cap of 50,000 (one call for 8 views of 735 rows; an
+out-of-memory error stops the run instead of halving the batch) and its outputs kept on the GPU; what a GPU leaves
+unpinned is which float16 kernels CUDA picks on each card, driver and version (reruns, below). The manifest's `runtime`
+records the device type, its kernels (`cpu_capability`, `cuda_capability`), the precision (`precision`), those memory settings
+(`memory_saving`, `min_batch_size`, `offload`), the versions of the package, torch, numpy, scipy and scikit-learn (which
+preprocess every context), and the GPU's or CPU's name with every GPU the run used; a resume with another of any but the name
+refuses, and a fit whose package computes in another precision than the one recorded stops the
+run. A GPU's reruns are not guaranteed to be bitwise (on an H100 TabPFN's were and TabICL's moved by 2e-5): `verify` runs each
+issue day twice and calls a difference `inconclusive`, so verify on the CPU, `verify(..., device="cpu")`. The package's version
+moves forecasts too (tabpfn 9.1.0 against 9.2.0 by up to 0.42 EUR/MWh on the same rows). `[tabpfn]` needs tabpfn 9.1 or later
+(the first with `ModelSpecs`).
+
+## Reproducing the research's members
+
+The library was run on the research's own rows: the DE_LU HONEST layout of the research's data (every local day 24 hours, on
+an `Etc/GMT-1` clock), `lear_predictors(["load_forecast"])` in the research's column order, an information set whose price
+(13:00) and load forecast (10:00 on the day before) rules are given in that zone, issued at 11:45 with `availability="raise"`
+(`report.availability()` listed nothing), and the refit epoch moved to the research's block starts, so that every library fit
+is a research fit on the same rows and the same call. Eight stored blocks of the validation and test years were compared (blocks
+0, 13, 26 and 51 of the validation year and 0, 13, 26 and 52 of the test year, the last one day long), 24 periods each: 1,200
+forecasts per model, every key in the stored file.
+
+| Model | Library on | Compared with | Forecasts | max \|diff\| | mean \|diff\| | MAE library / other |
+|-------|-----------|---------------|-----------|--------------|---------------|---------------------|
+| TabPFNModel | an H100 (torch 2.15, tabpfn 9.2.0) | the stored member (H100) | 1,200 | 0.434 | 0.030 | 19.651 / 19.653 (−0.008 %) |
+| TabPFNModel | S02's CPU, one thread a fit | the research's own code (`tabfm_run.py`) on the same CPU and tabpfn | 22 | 9.3e-4 | | |
+| TabPFNModel | S02's CPU | the stored member | 1,200 | 4.26 | 0.283 | 19.660 / 19.653 (+0.037 %) |
+| TabICLModel | an H100 (torch 2.15, tabicl 2.2.0) | the stored member (H100) | 1,200 | 0.526 | 0.053 | 20.546 / 20.541 (+0.022 %) |
+| TabICLModel | S02's CPU | the research's own code on the same CPU | 22 | 6.8e-6 | | |
+| TabICLModel | S02's CPU | the stored member | 1,200 | 0.449 | 0.042 | 20.544 / 20.541 (+0.015 %) |
+
+On one device and one package version the library gives the research's code's forecasts: within 5e-8 EUR/MWh for a full block
+of TabPFN and 7e-6 for TabICL (the two compute the Invariant in another operation order, and TabICL takes the target in float32).
+The largest TabPFN difference, 9.3e-4, is the test year's last block, one day long: the research called the model on that one
+row, the library on its block's 7 (the row and 6 copies), and TabPFN's output moves in its last digits with the length of a call,
+not with the other rows' values (verify's co-batch check), which is why every library call has its block's nominal length. The
+package version moves more: on the CPU tabpfn 9.1.0 (the research's) and 9.2.0 differed by up to 0.42 EUR/MWh on the same rows,
+which is why the manifest records it and a resume refuses another. The device moves most: both packages compute in half
+precision on a GPU (TabPFN's autocast, TabICL's for contexts of 1,024 rows or 60 columns) and in float32 on a CPU. The CPU and
+H100 rows differ in numpy, scipy and scikit-learn too (the lock's 2.4.6, 1.16.3 and 1.8.0 on S02, 2.5.4, 1.18.1 and 1.9.1 on the
+H100), whose preprocessing moves results in their last digits (a Yeo-Johnson transform by up to 2.9e-15), so most of the CPU
+and GPU gap is the device's, not all of it; the manifest compares the three as well.
+
+On the H100 TabPFN meets B1's tolerances (0.5 EUR/MWh per value and 0.1 % of the MAE). TabICL is 0.53 EUR/MWh from its stored
+member at most, 0.053 on average, against B1's 1e-3, on another torch and CUDA (2.15 with CUDA 13.2) than the research's (2.14.1
+with CUDA 12.6), whose half-precision kernels need not round alike; a rerun on the H100 moved TabPFN by nothing and TabICL by 2e-5
+at most.
+
+`verify` with the real weights on a CPU, on five issue days of a synthetic Warsaw frame (a block's first, middle and last day, the
+day before the spring switch and the switch day), with the control, the rerun and the co-batch checks: `ok` for both, no forecast
+moved by the probe, the rerun or the noise in the other rows of a call, and the control moved them.
+
+Time: on the H100, with four runs sharing the GPU, each took 30 to 37 s for a block of 24 fits; at that rate the 53 blocks of a
+market-year of weekly refits (1,272 fits) take about 8 minutes. On S02's EPYC, one thread a fit, a fit (728 days, 175 columns) took about 2.5
+minutes for TabICL and about 6 for TabPFN, about 55 and 125 core-hours a market-year: in-context models are a GPU's work.
+
+## Mitra-v2
+
+`MitraModel` is not shipped. AutoGluon's Mitra-v2 regressor (Apache-2.0) predicts through a 1,000-bin head that the released
+`autogluon.tabular` cannot select: the research wired it with the `mitra-finetune` patches from a Hugging Face git repository,
+which rewrite AutoGluon's internals by editing the source of its trainer at run time (about 325 lines, with the predictive
+distribution's quantiles another 250). That is more than this library vendors, and `autogluon.tabular` 1.6.3 needs Python below
+3.14 and torch below 2.14, which would hold back the `[torch]` extra's torch. The Mitra-v2 and TabPFN average (1.0 to 1.4 %
+better than TabPFN alone in the research) waits for a released AutoGluon that exposes the head.
