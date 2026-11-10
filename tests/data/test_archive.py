@@ -638,6 +638,9 @@ def test_the_replay_holds_for_any_known_at_days_before_and_zone(week):
         ("23:00", 1, "Europe/Helsinki", True),
         ("23:00", 2, "Europe/Helsinki", False),  # two days ahead is never out
         ("12:00", -1, "Europe/Lisbon", True),
+        # A Helsinki day starts at 23:00 Brussels, before the newest fetch's range (whole Brussels days): its first hour is
+        # the older fetch's, which asked for it.
+        ("12:00", -3, "Europe/Helsinki", True),
     ]:
         source = ArchiveSource(path, "EntsoeSource", known_at, days_before, zone, columns=["load_forecast"])
         frame = source.fetch(start, end)
