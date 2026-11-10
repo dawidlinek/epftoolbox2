@@ -1,7 +1,6 @@
 import html
 import re
 import xml.etree.ElementTree as ET
-from email.utils import parsedate_to_datetime
 from typing import Dict, List, Optional, Tuple, Union
 
 import numpy as np
@@ -19,6 +18,7 @@ from rich.progress import (
 from epftoolbox2._clock import current_clock
 from epftoolbox2.logging import get_logger
 from .._market_timezone import resolve as _resolve_timezone
+from . import _http
 from .base import DataSource
 
 # Bump whenever the output for the same parameters changes, so that cached frames are rebuilt instead of served.
@@ -288,19 +288,6 @@ def _combine(parts: List[pd.Series]) -> pd.Series:
         return pd.Series(dtype=float)
     combined = pd.concat(parts).sort_index(kind="stable")
     return combined[~combined.index.duplicated(keep="first")]
-
-
-def _retry_after_seconds(value: Optional[str]) -> Optional[float]:
-    if not value:
-        return None
-    try:
-        return max(0.0, float(value))
-    except ValueError:
-        pass
-    try:
-        return max(0.0, (parsedate_to_datetime(value) - current_clock().now()).total_seconds())
-    except (TypeError, ValueError):
-        return None
 
 
 def _acknowledgement_reason(text: str) -> Optional[str]:
@@ -777,62 +764,50 @@ class EntsoeSource(DataSource):
 
     def _api_request(self, params: Dict, start: pd.Timestamp, end: pd.Timestamp) -> Optional[str]:
         """GET one document. Returns None for "No matching data"; retries 429/5xx and network errors; raises
-        EntsoeApiError otherwise. The key travels in the SECURITY_TOKEN header, never in the URL."""
+        EntsoeApiError otherwise. The key travels in the SECURITY_TOKEN header, never in the URL. Every error raised
+        is redacted and carries no exception context (`_http.request` raises outside its `except`)."""
         query = dict(params, periodStart=self._format_time(start), periodEnd=self._format_time(end))
         label = "/".join(v for v in (params.get("documentType"), params.get("processType")) if v)
         label = f"{label} {start:%Y-%m-%d %H:%M} to {end:%Y-%m-%d %H:%M} UTC"
-        error = ""
-        fatal = None
+        where = f"ENTSOE [{self._area_name}]: {label}"
 
-        for attempt in range(self.MAX_RETRIES + 1):
-            wait = None
-            try:
-                response = self.session.get(
-                    url=self.API_URL,
-                    params=query,
-                    headers={"SECURITY_TOKEN": self.api_key},
-                    timeout=self.REQUEST_TIMEOUT,
+        def read(response) -> Union[None, str, _http.Retry]:
+            status = response.status_code
+            text = response.text
+            if "No matching data found" in text:
+                self.logger.warning(f"ENTSOE [{self._area_name}]: no matching data for {label}")
+                return None
+            if status < 400 and "Acknowledgement_MarketDocument" not in text[:1000]:
+                return text
+            reason = _acknowledgement_reason(text) or response.reason or text[:200]
+            error = f"HTTP {status}: {reason}"
+            if status < 400 or (status != 429 and status < 500):
+                raise EntsoeApiError(self._redact(f"{where} failed with {error}"))
+            return _http.Retry(error, wait=_http.retry_after_seconds(response.headers.get("Retry-After")))
+
+        def log(attempt: int, retries: int, retry: _http.Retry, wait: Optional[float]) -> None:
+            if wait is not None:
+                self.logger.warning(
+                    self._redact(f"{where}: {retry.error}; retrying in {wait:.0f} s ({attempt + 1}/{retries})")
                 )
-            except (requests.ConnectionError, requests.Timeout, requests.exceptions.ChunkedEncodingError) as exc:
-                error = f"{type(exc).__name__}: {exc}"
-            except requests.RequestException as exc:
-                # Not retried. Record the message and raise once we're outside the except block, like the
-                # retries-exhausted raise below: raising here would leave __context__ pointing at exc even
-                # with `from None`, which only clears __cause__ and traceback display.
-                fatal = self._redact(f"ENTSOE [{self._area_name}]: {label} failed: {exc}")
-                break
-            else:
-                status = response.status_code
-                text = response.text
-                if "No matching data found" in text:
-                    self.logger.warning(f"ENTSOE [{self._area_name}]: no matching data for {label}")
-                    return None
-                if status < 400 and "Acknowledgement_MarketDocument" not in text[:1000]:
-                    return text
-                reason = _acknowledgement_reason(text) or response.reason or text[:200]
-                error = f"HTTP {status}: {reason}"
-                if status < 400 or (status != 429 and status < 500):
-                    raise EntsoeApiError(self._redact(f"ENTSOE [{self._area_name}]: {label} failed with {error}"))
-                wait = _retry_after_seconds(response.headers.get("Retry-After"))
 
-            if attempt == self.MAX_RETRIES:
-                break
-            if wait is None:
-                wait = self.RETRY_BACKOFF_SECONDS * 2**attempt
-            wait = min(wait, self.MAX_RETRY_WAIT_SECONDS)
-            self.logger.warning(
-                self._redact(
-                    f"ENTSOE [{self._area_name}]: {label}: {error}; retrying in {wait:.0f} s "
-                    f"({attempt + 1}/{self.MAX_RETRIES})"
-                )
-            )
-            current_clock().sleep(wait)
-
-        if fatal is not None:
-            raise EntsoeApiError(fatal)
-
-        raise EntsoeApiError(
-            self._redact(f"ENTSOE [{self._area_name}]: {label} failed after {self.MAX_RETRIES + 1} attempts: {error}")
+        return _http.request(
+            self.session,
+            self.API_URL,
+            params=query,
+            headers={"SECURITY_TOKEN": self.api_key},
+            timeout=self.REQUEST_TIMEOUT,
+            retries=self.MAX_RETRIES,
+            backoff=self.RETRY_BACKOFF_SECONDS,
+            max_wait=self.MAX_RETRY_WAIT_SECONDS,
+            read=read,
+            refuse=lambda exc: EntsoeApiError(self._redact(f"{where} failed: {exc}")),
+            give_up=lambda last, attempts: EntsoeApiError(
+                self._redact(f"{where} failed after {attempts} attempts: {last.error}")
+            ),
+            log=log,
+            label=where,
+            redact=self._redact,
         )
 
     def _redact(self, text: str) -> str:

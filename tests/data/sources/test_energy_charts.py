@@ -132,8 +132,9 @@ def make(tmp_path, api=None, clock=None, **kwargs):
     source = EnergyChartsSource(**kwargs)
     source.session = api if api is not None else FakeApi()
     clock = clock or Clock()
-    source._clock = clock
-    source._sleep = clock.sleep
+    source._clock = clock  # the rate limit's clock (real time by default)
+    source._sleep = clock.sleep  # and its waits
+    source._wait = clock.sleep  # a retry's waits (the current clock's by default)
     source._now = lambda: pd.Timestamp("2026-11-08 09:00", tz="UTC")
     return source
 

@@ -11,16 +11,15 @@ import json
 import os
 import re
 import threading
-import weakref
-from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import pandas as pd
 import requests
 
-from epftoolbox2._clock import Clock, current_clock, settled_now
+from epftoolbox2._clock import SYSTEM, current_clock, settled_now
 from epftoolbox2.logging import get_logger
+from . import _http
 from .base import DataSource
 
 # Bump whenever the output for the same parameters changes, so that cached frames are rebuilt instead of served.
@@ -140,46 +139,17 @@ class _TokenBucket:
             self.stamp = now
 
 
-# By endpoint and clock (its `id`): a bucket's stamps are seconds of one clock's `monotonic()` (a FakeClock's start at 0).
-# A clock's buckets go when it does (`_CLOCKS`: a finalizer, or the clock itself where it can't be weakly referenced, so that
-# its id isn't reused while its buckets are kept); the key is no clock, which may be unhashable (a dataclass with `__eq__`).
-_BUCKETS: Dict[Tuple[str, int], _TokenBucket] = {}
-_CLOCKS: Dict[int, Any] = {}
-_BUCKETS_LOCK = threading.RLock()  # a finalizer can run, and take it, while this thread holds it
+# By endpoint: the server's limit is per client IP, in real seconds, so the whole process shares one bucket per endpoint
+# whatever clock is in use (a bucket's stamps are `EnergyChartsSource._clock()` seconds, the machine's).
+_BUCKETS: Dict[str, _TokenBucket] = {}
+_BUCKETS_LOCK = threading.Lock()
 
 
-def _forget_clock(ident: int) -> None:
+def _bucket(endpoint: str) -> _TokenBucket:
     with _BUCKETS_LOCK:
-        _CLOCKS.pop(ident, None)
-        for key in [key for key in _BUCKETS if key[1] == ident]:
-            del _BUCKETS[key]
-
-
-def _bucket(endpoint: str, clock: Clock) -> _TokenBucket:
-    with _BUCKETS_LOCK:
-        ident = id(clock)
-        if ident not in _CLOCKS:
-            try:
-                _CLOCKS[ident] = weakref.finalize(clock, _forget_clock, ident)
-            except TypeError:  # no weak reference to it (__slots__ without __weakref__): kept, with its buckets
-                _CLOCKS[ident] = clock
-        key = (endpoint, ident)
-        if key not in _BUCKETS:
-            _BUCKETS[key] = _TokenBucket(BURST.get(endpoint, DEFAULT_BURST), RATE_PER_MINUTE / 60.0)
-        return _BUCKETS[key]
-
-
-def _retry_after_seconds(value: Optional[str]) -> Optional[float]:
-    if not value:
-        return None
-    try:
-        return max(0.0, float(value))
-    except ValueError:
-        pass
-    try:
-        return max(0.0, (parsedate_to_datetime(value) - current_clock().now()).total_seconds())
-    except (TypeError, ValueError):
-        return None
+        if endpoint not in _BUCKETS:
+            _BUCKETS[endpoint] = _TokenBucket(BURST.get(endpoint, DEFAULT_BURST), RATE_PER_MINUTE / 60.0)
+        return _BUCKETS[endpoint]
 
 
 def default_cache_dir() -> Path:
@@ -303,12 +273,17 @@ class EnergyChartsSource(DataSource):
         if hasattr(self, "session") and self.session:
             self.session.close()
 
-    # The current clock (`epftoolbox2.clock`): the rate limit's seconds and its waits; the response cache settles against
-    # `settled_now` (never later than the machine's now).
+    # The rate limit keeps real time (`_clock`, `_sleep`: the machine's clock, `SYSTEM`), whatever clock is in use: the
+    # server counts a client's requests in real seconds, so a replay on a `FakeClock` against the real API must not send
+    # them faster. A retry's wait (`_wait`) is on the current clock (`epftoolbox2.clock`), like every source's, and the
+    # response cache settles against `settled_now` (never later than the machine's now). Tests replace the three.
     def _clock(self) -> float:
-        return current_clock().monotonic()
+        return SYSTEM.monotonic()
 
     def _sleep(self, seconds: float) -> None:
+        SYSTEM.sleep(seconds)
+
+    def _wait(self, seconds: float) -> None:
         current_clock().sleep(seconds)
 
     def _now(self) -> pd.Timestamp:
@@ -557,52 +532,58 @@ class EnergyChartsSource(DataSource):
         return payload
 
     def _request(self, endpoint: str, query: Dict[str, str], label: str) -> Dict[str, Any]:
-        bucket = _bucket(endpoint, current_clock())
-        error = ""
-        for attempt in range(self.MAX_RETRIES + 1):
-            wait: Optional[float] = None
-            bucket.acquire(self._clock, self._sleep)
-            try:
-                response = self.session.get(
-                    f"{BASE_URL}/{endpoint}",
-                    params=query,
-                    headers={"User-Agent": _user_agent(), "Accept": "application/json"},
-                    timeout=self.REQUEST_TIMEOUT,
-                )
-            except (requests.ConnectionError, requests.Timeout, requests.exceptions.ChunkedEncodingError) as exc:
-                error = f"{type(exc).__name__}: {exc}"
-            except requests.RequestException as exc:
-                raise EnergyChartsApiError(f"EnergyCharts: {label} failed: {exc}") from None
-            else:
-                status = response.status_code
-                if status == 200:
-                    try:
-                        payload = response.json()
-                    except ValueError:
-                        raise EnergyChartsApiError(f"EnergyCharts: {label}: the answer is not JSON") from None
-                    if not isinstance(payload, dict):
-                        raise EnergyChartsApiError(f"EnergyCharts: {label}: unexpected answer {str(payload)[:200]}")
-                    return payload
-                error = f"HTTP {status}: {(response.reason or response.text or '')[:200]}"
-                if status != 429 and status < 500:
-                    raise EnergyChartsApiError(f"EnergyCharts: {label} failed with {error}")
-                wait = _retry_after_seconds(response.headers.get("Retry-After"))
-                if status == 429:
-                    wait = wait if wait is not None else 60.0
-                    if wait > self.MAX_RETRY_WAIT_SECONDS:
-                        raise EnergyChartsApiError(f"EnergyCharts: {label}: rate limited, Retry-After {wait:.0f} s")
-                    bucket.block(self._clock(), wait)
+        bucket = _bucket(endpoint)
 
-            if attempt == self.MAX_RETRIES:
-                break
-            if wait is None:
-                wait = self.RETRY_BACKOFF_SECONDS * 2**attempt
-            wait = min(wait, self.MAX_RETRY_WAIT_SECONDS)
-            self.logger.warning(
-                f"EnergyCharts: {label}: {error}; retrying in {wait:.0f} s ({attempt + 1}/{self.MAX_RETRIES})"
-            )
-            self._sleep(wait)
-        raise EnergyChartsApiError(f"EnergyCharts: {label} failed after {self.MAX_RETRIES + 1} attempts: {error}")
+        def read(response) -> Union[Dict[str, Any], _http.Retry]:
+            status = response.status_code
+            if status == 200:
+                try:
+                    payload = response.json()
+                except ValueError:
+                    raise EnergyChartsApiError(f"EnergyCharts: {label}: the answer is not JSON") from None
+                if not isinstance(payload, dict):
+                    raise EnergyChartsApiError(f"EnergyCharts: {label}: unexpected answer {str(payload)[:200]}")
+                return payload
+            error = f"HTTP {status}: {(response.reason or response.text or '')[:200]}"
+            if status != 429 and status < 500:
+                raise EnergyChartsApiError(f"EnergyCharts: {label} failed with {error}")
+            wait = _http.retry_after_seconds(response.headers.get("Retry-After"))
+            if status == 429:
+                wait = wait if wait is not None else 60.0
+                if wait > self.MAX_RETRY_WAIT_SECONDS:
+                    raise EnergyChartsApiError(f"EnergyCharts: {label}: rate limited, Retry-After {wait:.0f} s")
+                bucket.block(self._clock(), wait)
+            return _http.Retry(error, wait=wait)
+
+        def log(attempt: int, retries: int, retry: _http.Retry, wait: Optional[float]) -> None:
+            if wait is not None:
+                self.logger.warning(
+                    f"EnergyCharts: {label}: {retry.error}; retrying in {wait:.0f} s ({attempt + 1}/{retries})"
+                )
+
+        def throttle(pause: Callable[[float], None]) -> None:
+            # The rate limit's wait keeps real time (`_sleep`), and to the refresh's deadline (`pause` checks it first).
+            bucket.acquire(self._clock, lambda seconds: pause(seconds, self._sleep))
+
+        return _http.request(
+            self.session,
+            f"{BASE_URL}/{endpoint}",
+            params=query,
+            headers={"User-Agent": _user_agent(), "Accept": "application/json"},
+            timeout=self.REQUEST_TIMEOUT,
+            retries=self.MAX_RETRIES,
+            backoff=self.RETRY_BACKOFF_SECONDS,
+            max_wait=self.MAX_RETRY_WAIT_SECONDS,
+            read=read,
+            refuse=lambda exc: EnergyChartsApiError(f"EnergyCharts: {label} failed: {exc}"),
+            give_up=lambda last, attempts: EnergyChartsApiError(
+                f"EnergyCharts: {label} failed after {attempts} attempts: {last.error}"
+            ),
+            log=log,
+            before=throttle,
+            label=f"EnergyCharts: {label}",
+            sleep=self._wait,
+        )
 
     # -- disk cache -----------------------------------------------------------------
 

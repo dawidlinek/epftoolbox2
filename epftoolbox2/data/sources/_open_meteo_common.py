@@ -10,9 +10,10 @@ import pandas as pd
 import requests
 from rich.console import Console
 
-from epftoolbox2._clock import current_clock, settled_now
+from epftoolbox2._clock import settled_now
 from epftoolbox2.logging import get_logger
 from .._market_timezone import resolve as _resolve_timezone
+from . import _http
 from .base import DataSource
 
 _RUN_RE = re.compile(r"^([01]\d|2[0-3])$")
@@ -550,39 +551,54 @@ class OpenMeteoBase(DataSource):
         """GET with retries: capped exponential backoff on network errors and short-term rate limits.
 
         Returns None when the API reports an error containing `unavailable` (e.g. a model run it doesn't have).
+        `MAX_RETRIES` counts attempts here, not retries after the first.
         """
-        for attempt in range(self.MAX_RETRIES):
-            last_attempt = attempt == self.MAX_RETRIES - 1
+
+        def read(response) -> Union[None, Dict, _http.Retry]:
             try:
-                response = self.session.get(url, params=params, timeout=self.REQUEST_TIMEOUT_S)
                 data = response.json()
                 if not (isinstance(data, dict) and data.get("error")):
                     response.raise_for_status()
                     return data
             except requests.RequestException as e:
-                self.logger.warning(f"Request failed (attempt {attempt + 1}/{self.MAX_RETRIES}): {e}")
-                if last_attempt:
-                    raise
-                current_clock().sleep(self._backoff(attempt))
-                continue
+                return _http.Retry(str(e), exception=e)
 
             reason = data.get("reason", "Unknown error")
             if unavailable and unavailable in reason:
                 return None
             if "Minutely API request limit exceeded" in reason:
-                wait = self.BACKOFF_CAP_S
-            elif "Too many concurrent requests" in reason:
-                wait = self._backoff(attempt)
-            elif "Hourly API request limit exceeded" in reason or "Daily API request limit exceeded" in reason:
+                return _http.Retry(reason, wait=self.BACKOFF_CAP_S)
+            if "Too many concurrent requests" in reason:
+                return _http.Retry(reason)  # the backoff
+            if "Hourly API request limit exceeded" in reason or "Daily API request limit exceeded" in reason:
                 raise RuntimeError(f"Open-Meteo: {reason} Retry later or fetch fewer variables per request.")
+            raise ValueError(f"Open-Meteo API error: {reason}")
+
+        def log(attempt: int, retries: int, retry: _http.Retry, wait: Optional[float]) -> None:
+            if retry.exception is not None:
+                self.logger.warning(f"Request failed (attempt {attempt + 1}/{retries + 1}): {retry.exception}")
             else:
-                raise ValueError(f"Open-Meteo API error: {reason}")
+                self.logger.warning(f"API error: {retry.error} (attempt {attempt + 1}/{retries + 1})")
 
-            self.logger.warning(f"API error: {reason} (attempt {attempt + 1}/{self.MAX_RETRIES})")
-            if not last_attempt:
-                current_clock().sleep(wait)
+        def give_up(last: _http.Retry, attempts: int) -> BaseException:
+            if last.exception is not None:
+                return last.exception
+            return RuntimeError(f"Failed to fetch data after {attempts} retries")
 
-        raise RuntimeError(f"Failed to fetch data after {self.MAX_RETRIES} retries")
+        return _http.request(
+            self.session,
+            url,
+            params=params,
+            timeout=self.REQUEST_TIMEOUT_S,
+            retries=self.MAX_RETRIES - 1,
+            backoff=self.BACKOFF_BASE_S,
+            max_wait=self.BACKOFF_CAP_S,
+            read=read,
+            give_up=give_up,
+            retry_on=(requests.RequestException,),
+            log=log,
+            label=f"{self._label} {url}",
+        )
 
     def _cutoff_instants(self, rows: pd.DatetimeIndex) -> Tuple[pd.DatetimeIndex, np.ndarray]:
         """Cutoff instant per row (D's run:00 UTC) and a mask of final rows (the cutoff has passed).

@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 import requests
 
-from epftoolbox2._clock import current_clock
+from . import _http
 
 ATTRIBUTION = "School holidays: OpenHolidays API (https://www.openholidaysapi.org), ODbL 1.0"
 
@@ -26,20 +26,32 @@ QUERY_MARGIN_DAYS = 400
 
 def get(session: requests.Session, path: str, params: dict) -> list:
     """GET one OpenHolidays endpoint, with retries on a server error or a network failure."""
-    error: Exception = RuntimeError("no attempt made")
-    for attempt in range(3):
-        try:
-            response = session.get(f"{API_URL}/{path}", params=params, headers={"accept": "text/json"}, timeout=30)
-        except requests.RequestException as e:
-            error = e
-        else:
-            if response.status_code < 500:
-                response.raise_for_status()
-                return response.json()
-            error = requests.HTTPError(f"HTTP {response.status_code}")
-        if attempt < 2:
-            current_clock().sleep(2**attempt)
-    raise RuntimeError(f"OpenHolidays API request to {path} failed after 3 attempts: {error}") from error
+
+    def read(response):
+        if response.status_code < 500:
+            response.raise_for_status()
+            return response.json()
+        error = requests.HTTPError(f"HTTP {response.status_code}")
+        return _http.Retry(str(error), exception=error)
+
+    def give_up(last: _http.Retry, attempts: int) -> BaseException:
+        failure = RuntimeError(f"OpenHolidays API request to {path} failed after {attempts} attempts: {last.exception}")
+        failure.__cause__ = last.exception
+        return failure
+
+    return _http.request(
+        session,
+        f"{API_URL}/{path}",
+        params=params,
+        headers={"accept": "text/json"},
+        timeout=30,
+        retries=2,
+        backoff=1.0,
+        read=read,
+        give_up=give_up,
+        retry_on=(requests.RequestException,),
+        label=f"OpenHolidays {path}",
+    )
 
 
 def top_level_subdivisions(session: requests.Session, country: str) -> List[str]:
