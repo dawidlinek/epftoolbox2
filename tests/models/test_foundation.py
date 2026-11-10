@@ -1109,6 +1109,9 @@ OTHER_VALUES = {
     "random_state": 5,
     "newest_target": "published",
     "name": "other",
+    # 6j's TimestralModel
+    "size": "28m",
+    "runtime_commit": "0123abcd",
 }
 
 
@@ -1142,14 +1145,18 @@ def test_the_gpu_host_rebuilds_a_family_from_its_public_attributes(family):
     family (and the fake), its defaults and each setting changed in turn (a value the family refuses is left out)."""
     from epftoolbox2.models.foundation import _public_params
 
+    import inspect
+
     cls = registered_families()[family]
     tried = 0
+    changed = set()
     for change in [{}] + [{name: value} for name, value in changed_settings(cls)]:
         try:
             model = cls(**change)
         except (ValueError, TypeError):
             continue
         tried += 1
+        changed.update(change)
         again = cls(**_public_params(model))
         assert _public_params(again) == _public_params(model), change
         assert again._model_kwargs == model._model_kwargs, change
@@ -1158,6 +1165,13 @@ def test_the_gpu_host_rebuilds_a_family_from_its_public_attributes(family):
         for name, value in change.items():
             assert getattr(again, name) == getattr(model, name), (name, value)
     assert tried >= 5, f"{family}: too few settings could be changed to check it"
+    # Every setting of the family is changed once: one left at its default is never seen to come back in the host.
+    parameters = {
+        name
+        for name, parameter in inspect.signature(cls.__init__).parameters.items()
+        if name != "self" and parameter.kind not in (parameter.VAR_POSITIONAL, parameter.VAR_KEYWORD)
+    }
+    assert parameters <= changed, f"{family}: no value of {sorted(parameters - changed)} is tried (OTHER_VALUES)"
 
 
 # ---------------------------------------------------------------------------------------------------------------------------
