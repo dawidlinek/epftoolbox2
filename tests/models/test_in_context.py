@@ -627,7 +627,9 @@ def test_a_gpu_fit_gets_the_pinned_memory_settings():
     backend.fit(x, y)
     kwargs = made.pop()
     assert kwargs["offload_mode"] == "gpu" and kwargs["use_amp"] == "auto"
-    assert kwargs["inference_config"] == dict.fromkeys(("COL_CONFIG", "ROW_CONFIG", "ICL_CONFIG"), {"min_batch_size": 50_000})
+    assert kwargs["inference_config"] == dict.fromkeys(
+        ("COL_CONFIG", "ROW_CONFIG", "ICL_CONFIG"), {"min_batch_size": 50_000}
+    )
     assert tabicl.TabICLModel(INPUTS)._memory_settings("cuda") == {"min_batch_size": 50_000, "offload": "gpu"}
 
 
@@ -902,9 +904,10 @@ def test_tabpfn_never_reaches_a_download_path(monkeypatch, tmp_path, market, no_
     assert arguments["download_if_not_exists"] is False and arguments["version"] == "v2"
     with pytest.raises(Exception) as direct:  # the loader's own error on that file, called as the backend calls it
         real(**arguments)
-    cause = stopped.value.__cause__
-    assert type(cause) is type(direct.value) and str(cause) == str(direct.value)
-    assert not isinstance(cause, AssertionError) and attempts == []
+    assert not isinstance(direct.value, AssertionError) and attempts == []
+    # The worker's error reaches the parent as text (`TaskFailed`): the run names the loader's own error, type and first line.
+    first = (str(direct.value).strip().splitlines() or [""])[0]
+    assert f"failed to load: {type(direct.value).__name__}: {first}" in str(stopped.value)
 
 
 def test_tabpfn_refuses_weights_its_package_reads_as_another_version(monkeypatch, tmp_path, market):
