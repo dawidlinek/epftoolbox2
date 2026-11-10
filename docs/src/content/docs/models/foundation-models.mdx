@@ -178,5 +178,6 @@ forecasts against the stored ones, made on an H100 with tfc-t0 0.5.0 and stored 
 
 The mean absolute difference is 3 to 4 x 10⁻⁵ in every run, about the stored files' rounding. A market-year took 111 to 144 s
 (t0 univariate), 218 to 295 s (t0 with the load forecast) and 193 to 337 s (Chronos-2) on those 16 threads of a shared machine
-that was loaded beyond its cores. The checks and their scripts are in the project's research folder
-(`library_check_step6/foundation/`).
+that was loaded beyond its cores. `verify` with the real weights on that CPU, on five issue days with a spring switch among
+them, is ok with its positive control, the rerun and the co-batch checks for Chronos-2 and for t0-alpha fine-tuned monthly (two
+steps, a 28-day context). The checks and their scripts are in the project's research folder (`library_check_step6/foundation/`).
