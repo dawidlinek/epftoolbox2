@@ -833,6 +833,7 @@ class TestModelPipelineParameterFidelity:
                     max_features=0.8,
                     random_state=3,
                     name="H",
+                    target_transform="none",
                 ),
                 # The trees build, save and load without their packages (imported by the first fit).
                 LightGBMModel(
@@ -851,6 +852,7 @@ class TestModelPipelineParameterFidelity:
                     random_state=3,
                     threads=2,
                     name="LG",
+                    target_transform="pooled",
                 ),
                 XGBoostModel(
                     ["price_d-1"],
@@ -865,7 +867,13 @@ class TestModelPipelineParameterFidelity:
                     name="XG",
                 ),
                 CatBoostModel(
-                    ["price_d-1", "period"], iterations=200, depth=6, l2_leaf_reg=3.0, random_state=5, name="CB"
+                    ["price_d-1", "period"],
+                    iterations=200,
+                    depth=6,
+                    l2_leaf_reg=3.0,
+                    random_state=5,
+                    name="CB",
+                    target_transform="none",
                 ),
                 # A base by name, and a base and learner nested in it.
                 ResidualModel(
@@ -873,7 +881,9 @@ class TestModelPipelineParameterFidelity:
                 ),
                 ResidualModel(
                     RidgeModel(["price_d-1"], training_window=40, alphas=[2.0], name="b"),
-                    HistGBModel(["price_d-1", "base_fc_h05_d+{horizon}"], max_iter=12),  # its name isn't written
+                    HistGBModel(  # its name isn't written
+                        ["price_d-1", "base_fc_h05_d+{horizon}"], max_iter=12, target_transform="none"
+                    ),
                     name="Res2",
                 ),
                 # The learner nested in it, with its own window, refit rule and newest target.

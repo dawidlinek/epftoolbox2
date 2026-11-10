@@ -16,7 +16,6 @@ from threadpoolctl import ThreadpoolController
 from ..results.store import with_status
 from ..scalers.registry import make_scaler
 from ..scalers.standard import StandardScaler
-from ..scalers.target import MultiTargetAsinh
 from ._calendar import (
     MASK_FIT,
     FitUnit,
@@ -36,7 +35,7 @@ from ._row_target import (
     usable_scale,
     zero_outcome,
 )
-from ._units import DAY, PER_PERIOD, PERIOD, POOLED, day_arrays, kind_of, pooled_values
+from ._units import DAY, PER_PERIOD, PERIOD, POOLED, day_arrays, kind_of, pooled_values, target_of
 
 # What `_worker_init` loads into a pool's worker: the default `TaskInputs` of every task function (`_pool_inputs`).
 _W_HOUR_ARRAYS: Dict = {}
@@ -1389,7 +1388,8 @@ def _fit_day_unit(
     autumn hour, a missing value). X is each date's value of the list's day-level columns; a date with a missing input, or with no target to train on,
     drops out. The binary-column mask is read from the span's dates before any filter, the scaler (`config["scaler"]`) fitted on
     the training dates and applied to the call's rows value by value, and the targets go through `MultiTargetAsinh`, each
-    period's Invariant fitted on its own training slots.
+    period's Invariant fitted on its own training slots (`target_transform="per_period"`), or stay as they are (`"none"`,
+    `RawTarget`).
 
     One `_fit_days(x, y, y_mask)` and one `_predict_days(fitted, rows)` over the issue dates of every day of the block that the
     frame has with finite inputs, the run's tasks or not, in date order, padded to the rule's nominal length with copies of the
@@ -1469,7 +1469,7 @@ def _fit_day_unit(
     fit_x, _, call_x = scaler.fit_transform(
         train_x.copy(), np.zeros(len(train_x)), block_x[call].copy(), scalable_mask=scalable_mask, columns=predictors
     )
-    target = MultiTargetAsinh().fit(train_y, valid)
+    target = target_of(cfg["units"]["target_transform"]).fit(train_y, valid)
     fit_y = np.where(valid, target.transform(train_y), np.nan)
     row_days = np.arange(first, last + 1, dtype=np.int64)[keep]  # one row per date
     try:
@@ -1506,12 +1506,13 @@ def _fit_pooled_unit(
     predictor is read on its period's own row, and the virtual `period` is the row's period. Rows with a missing input or
     target drop out; the binary-column mask is read from the stacked rows before any filter, and the scaler
     (`config["scaler"]`) is fitted on the kept rows. The targets go through `MultiTargetAsinh`: each period's own Invariant
-    (`target_transform="per_period"`) or one over every row (`"pooled"`).
+    (`target_transform="per_period"`) or one over every row (`"pooled"`); with `"none"` they stay as they are (`RawTarget`:
+    the learner fits the raw stacked targets and its predictions are the forecasts).
 
     One `_fit_model` and one `_predict_block` over the issue row (the second of a repeated hour) of each period on each day of
     the block that the frame has with finite inputs, the run's tasks or not, by date then period, padded to the rule's nominal
     length times the periods of a day with copies of the first: one shape and the same rows whatever the run holds. A forecast is
-    its own row's, mapped back with its period's Invariant (or the pooled one). Skips as for a day unit.
+    its own row's, mapped back with its period's Invariant (or the pooled one, or as it is). Skips as for a day unit.
 
     A per-row target (`models._row_target`) as in `_fit_unit`: each stacked row's target divided by its own period row's
     `normalise_by` value (a row without a positive one drops out), each forecast's scale and `zero_when` read on its own issue row,
@@ -1657,7 +1658,7 @@ def _fit_pooled_unit(
     )
     del train_x
     target_groups = groups if per_period else np.zeros(len(groups), dtype=np.int64)
-    target = MultiTargetAsinh().fit_groups(train_y, target_groups, periods if per_period else 1)
+    target = target_of(units["target_transform"]).fit_groups(train_y, target_groups, periods if per_period else 1)
     try:
         with fit_scope(unit, _window_of(cfg, unit), _unit_list_hash(cfg, unit.list_id)):
             fitted = model._fit_model(fit_x, target.transform(train_y, target_groups))

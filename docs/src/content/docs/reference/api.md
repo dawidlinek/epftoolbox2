@@ -623,8 +623,8 @@ class HistGBModel(BaseModel):               # scikit-learn's HistGradientBoostin
                  refit: Optional[str] = "7D", periods: str = "pooled", loss: str = "l1", max_iter: int = 500,
                  learning_rate: float = 0.05, max_leaf_nodes: int = 31, min_samples_leaf: int = 20,
                  l2_regularization: float = 1.0, max_features: float = 0.5, random_state: int = 0,
-                 name: str = "hgb", *, scaler: Any = INVARIANT_TARGET, newest_target: str = "d-1",
-                 binary_mask: Optional[str] = None, normalise_by: Optional[str] = None,
+                 name: str = "hgb", *, scaler: Any = INVARIANT_TARGET, target_transform: str = "per_period",
+                 newest_target: str = "d-1", binary_mask: Optional[str] = None, normalise_by: Optional[str] = None,
                  bounds: Optional[Tuple[Optional[float], Optional[float]]] = None, zero_when: Optional[str] = None): ...
 
 class LightGBMModel(BaseModel):             # LightGBM's LGBMRegressor, pooled over periods by default ([lightgbm])
@@ -633,7 +633,7 @@ class LightGBMModel(BaseModel):             # LightGBM's LGBMRegressor, pooled o
                  learning_rate: float = 0.05, num_leaves: int = 31, min_child_samples: int = 20,
                  subsample: float = 0.8, subsample_freq: int = 1, colsample_bytree: float = 0.5,
                  reg_lambda: float = 1.0, random_state: int = 0, threads: int = 1, name: str = "lgbm", *,
-                 scaler: Any = INVARIANT_TARGET, newest_target: str = "d-1",
+                 scaler: Any = INVARIANT_TARGET, target_transform: str = "per_period", newest_target: str = "d-1",
                  binary_mask: Optional[str] = None, normalise_by: Optional[str] = None,
                  bounds: Optional[Tuple[Optional[float], Optional[float]]] = None, zero_when: Optional[str] = None): ...
 
@@ -643,7 +643,7 @@ class XGBoostModel(BaseModel):              # XGBoost's XGBRegressor (tree_metho
                  learning_rate: float = 0.05, max_depth: int = 6, subsample: float = 0.8,
                  colsample_bytree: float = 0.5, min_child_weight: float = 5.0, reg_lambda: float = 1.0,
                  random_state: int = 0, threads: int = 1, device: str = "cpu", name: str = "xgb", *,
-                 scaler: Any = INVARIANT_TARGET, newest_target: str = "d-1",
+                 scaler: Any = INVARIANT_TARGET, target_transform: str = "per_period", newest_target: str = "d-1",
                  binary_mask: Optional[str] = None, normalise_by: Optional[str] = None,
                  bounds: Optional[Tuple[Optional[float], Optional[float]]] = None, zero_when: Optional[str] = None): ...
 
@@ -652,7 +652,7 @@ class CatBoostModel(BaseModel):             # CatBoost's CatBoostRegressor ([cat
                  refit: Optional[str] = "7D", periods: str = "pooled", objective: str = "l1", iterations: int = 1000,
                  learning_rate: float = 0.05, depth: int = 8, l2_leaf_reg: float = 5.0, random_state: int = 0,
                  threads: int = 1, name: str = "catboost", *, scaler: Any = INVARIANT_TARGET,
-                 newest_target: str = "d-1",
+                 target_transform: str = "per_period", newest_target: str = "d-1",
                  binary_mask: Optional[str] = None, normalise_by: Optional[str] = None,
                  bounds: Optional[Tuple[Optional[float], Optional[float]]] = None, zero_when: Optional[str] = None): ...
 
