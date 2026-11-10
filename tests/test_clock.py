@@ -10,6 +10,7 @@ through `current_clock()`.
 """
 
 import ast
+import contextlib
 import datetime
 import json
 import os
@@ -269,14 +270,13 @@ def test_a_clock_of_ones_own_is_any_class_with_the_three_methods():
 # ---------------------------------------------------------------------------------------------------------------------
 
 
-@pytest.fixture
-def host_in_new_york():
-    """The host's own zone is New York (`TZ`, `time.tzset`) for the test, so that its date at the clock's now is known: at
-    23:30 UTC on 10-21 it is 19:30 on 10-21 there, and at 02:00 UTC on 10-22 still 22:00 on 10-21."""
+@contextlib.contextmanager
+def host_zone(name: str):
+    """The host's own zone is `name` inside the block (`TZ`, `time.tzset`), so that its date at the clock's now is known."""
     if not hasattr(time, "tzset"):
         pytest.skip("time.tzset is Unix-only")
     before = os.environ.get("TZ")
-    os.environ["TZ"] = "America/New_York"
+    os.environ["TZ"] = name
     time.tzset()
     try:
         yield
@@ -286,6 +286,13 @@ def host_in_new_york():
         else:
             os.environ["TZ"] = before
         time.tzset()
+
+
+@pytest.fixture
+def host_in_new_york():
+    """At 23:30 UTC on 10-21 it is 19:30 on 10-21 in New York, and at 02:00 UTC on 10-22 still 22:00 on 10-21."""
+    with host_zone("America/New_York"):
+        yield
 
 
 def test_today_is_a_date_of_the_zone_asked_on_the_clock(host_in_new_york):
@@ -617,18 +624,31 @@ def test_a_residual_model_issues_on_the_issue_zones_today(
     assert ref.test_start == ref.test_end == expected and ref.produced == 24
 
 
-def test_forecast_only_over_zones_issues_on_one_day(market, tmp_path, monkeypatch, host_in_new_york):
+@pytest.mark.parametrize("host, expected", [("America/New_York", "2026-10-21"), ("Asia/Tokyo", "2026-10-22")])
+def test_forecast_only_over_zones_issues_on_one_day(host, expected, market, monkeypatch):
     """issue_timezone="data" over markets in two zones whose dates differ at the clock's now (Warsaw on 10-22, Reykjavik on
-    10-21): the host's date for both."""
+    10-21): the host's date for both, whichever of the two it is."""
     monkeypatch.setenv("MAX_PROCESSES", "1")
     monkeypatch.setenv("THREADS_PER_PROCESS", "1")
     reykjavik = make_market_data(start="2026-06-01", days=150, tz="Atlantic/Reykjavik", horizon=1)
     info = InformationSet("11:45", "data", use_defaults=False, unknown="ignore")
     mp = ModelPipeline(information_set=info).add_model(OLSModel(PREDICTORS, training_window=28, name="ols"))
-    with use_clock(FakeClock(LATE)):
+    with host_zone(host), use_clock(FakeClock(LATE)):
         report = mp.run({"PL": market, "IS": reykjavik}, horizon=1, forecast_only=True)
-    for zone in ("PL", "IS"):
-        assert set(report.zones[zone].predictions()["run_date"].astype(str)) == {"2026-10-21"}
-    with use_clock(FakeClock(LATE)):  # one zone, or zones on one clock: that zone's date
-        report = mp.run({"PL": market, "PL2": market}, horizon=1, forecast_only=True)
-    assert set(report.zones["PL2"].predictions()["run_date"].astype(str)) == {"2026-10-22"}
+        for zone in ("PL", "IS"):
+            assert set(report.zones[zone].predictions()["run_date"].astype(str)) == {expected}
+        report = mp.run({"PL": market, "PL2": market}, horizon=1, forecast_only=True)  # zones on one clock: its date
+        assert set(report.zones["PL2"].predictions()["run_date"].astype(str)) == {"2026-10-22"}
+
+
+def test_forecast_only_checks_its_issue_days_on_the_issue_zones_today(market, monkeypatch, host_in_new_york):
+    """2026-10-22, Warsaw's today at the clock's now, is a Thursday (the host's 10-21 a Wednesday): the pipeline's check of the
+    weekdays reads the day the models issue on."""
+    monkeypatch.setenv("MAX_PROCESSES", "1")
+    monkeypatch.setenv("THREADS_PER_PROCESS", "1")
+    mp = ModelPipeline(information_set=WARSAW_ISSUE).add_model(OLSModel(PREDICTORS, training_window=28, name="ols"))
+    with use_clock(FakeClock(LATE)):
+        report = mp.run(market, horizon=1, forecast_only=True, issue_days=["thursday"])
+        assert set(report.predictions()["run_date"].astype(str)) == {"2026-10-22"}
+        with pytest.raises(ValueError, match="(?i)wednesday|weekday|issue day"):
+            mp.run(market, horizon=1, forecast_only=True, issue_days=["wednesday"])
