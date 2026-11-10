@@ -50,6 +50,23 @@ def resolve_dates(values: Any, tz: Optional[str] = None, at: Optional[pd.Timesta
     return out
 
 
+def resolve_span(
+    start: Any, end: Any, tz: Optional[str] = None, at: Optional[pd.Timestamp] = None, where: str = ""
+) -> List[Any]:
+    """`forecast_only`'s first and last issue day: `start` and `end` ("today" when None) as `resolve_dates` resolves them in
+    `tz`, and a `ValueError` when they are dates and the first is after the last, as `to_period` refuses a reversed period
+    (`where` names the zone in the message). Without the check such a run plans no forecast and says nothing."""
+    first, last = resolve_dates([start or "today", end or "today"], tz, at)
+    try:
+        reversed_ = date.fromisoformat(str(first)[:10]) > date.fromisoformat(str(last)[:10])
+    except ValueError:
+        return [first, last]  # not dates: what reads them says so
+    if reversed_:
+        zone = f" in {tz}" if tz else ""
+        raise ValueError(f"{where}The test period is reversed{zone}: it starts on {first} and ends on {last}")
+    return [first, last]
+
+
 def epoch_ns(index: pd.DatetimeIndex) -> np.ndarray:
     """The instants of `index` as int64 nanoseconds since the epoch (`NaT` is the smallest int64).
 

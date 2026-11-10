@@ -13,7 +13,7 @@ import pandas as pd
 import yaml
 
 from .._clock import current_clock
-from .._date_utils import resolve_date, resolve_dates
+from .._date_utils import resolve_date, resolve_span
 from ..information_set import DATA_ZONE, InformationSet, InformationSetError, check_level
 from ..models._calendar import (
     DAILY,
@@ -86,7 +86,7 @@ from ..results.store import (
     check_save_format,
     read_records,
 )
-from ..results.windows import SKIP_TARGET_IN_TEST, TEST, RunWindows, check_validation_every, to_period
+from ..results.windows import SKIP_TARGET_IN_TEST, TEST, RunWindows, check_validation_every, period_ends, to_period
 from ..results.vintages import read_vintages
 from ..verification import VerifyReport, sample_issue_days, verify_model
 from ..logging import get_logger
@@ -574,7 +574,7 @@ class ModelPipeline:
             check_start, check_end = windows.first_day, windows.last_day
         elif forecast_only:
             # Read once and given to every model, so a clock passing midnight between two models' runs issues both on one day.
-            check_start, check_end = resolve_dates([test_start or "today", test_end or "today"], zone)
+            check_start, check_end = resolve_span(test_start, test_end, zone)
             test_start, test_end = check_start, check_end
         else:
             check_start, check_end = test_start, test_end
@@ -789,9 +789,9 @@ class ModelPipeline:
             for zone in zones:
                 self._check_source_columns(frames[zone])
         if forecast_only and validation is None and test is not None and test_start is None and test_end is None:
-            # Its keywords are each zone's, as test_start's and test_end's are: checked here, resolved per zone below.
-            days = to_period(test, TEST)
-            test_start, test_end = (raw if isinstance(raw, str) else day for raw, day in zip(test, days))
+            # Its keywords are each zone's, as test_start's and test_end's are: its shape checked here, its order in each zone
+            # below (on the host's date a period valid in every zone could read as reversed).
+            test_start, test_end = period_ends(test, TEST)
             test = None
         windows, test_start, test_end = self._resolve_windows(
             validation, test, test_start, test_end, forecast_only, validation_every=validation_every
@@ -833,10 +833,12 @@ class ModelPipeline:
             instant = current_clock().now()
             spans = {
                 zone: tuple(
-                    resolve_dates(
-                        [test_start or "today", test_end or "today"],
+                    resolve_span(
+                        test_start,
+                        test_end,
                         today_zone(self.information_set, frames[zone].index),
                         at=instant,
+                        where=f"Zone {zone!r}: ",
                     )
                 )
                 for zone in zones
@@ -1317,7 +1319,7 @@ class ModelPipeline:
             test_start, test_end = windows.first_day, windows.last_day
         else:
             if forecast_only:
-                test_start, test_end = resolve_dates([test_start or "today", test_end or "today"], zone)
+                test_start, test_end = resolve_span(test_start, test_end, zone)
             test_start, test_end = resolve_date(test_start), resolve_date(test_end)
 
         refs: Dict[str, ModelResultRef] = {}

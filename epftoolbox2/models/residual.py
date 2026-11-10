@@ -45,7 +45,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 import numpy as np
 import pandas as pd
 
-from .._date_utils import resolve_date, resolve_dates
+from .._date_utils import resolve_date, resolve_span
 from ..results.availability import merge_listings
 from ..results.manifest import ManifestMismatchError, _block_params, configuration_digest, manifest_path
 from ..results.store import is_parquet_path, outside_stacklevel
@@ -497,7 +497,7 @@ class ResidualModel(BaseModel):
         if windows is not None:
             return _date(windows.first_day), _date(windows.last_day)
         if forecast_only:
-            first, last = resolve_dates([test_start or "today", test_end or "today"], zone)
+            first, last = resolve_span(test_start, test_end, zone)
             return _date(first), _date(last)
         if test_start is None or test_end is None:
             return None

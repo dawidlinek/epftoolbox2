@@ -1061,3 +1061,42 @@ def test_open_meteo_calls_no_row_final_before_the_machine_does():
     with use_clock(FakeClock(SYSTEM.now() + pd.Timedelta(days=4 * 365))):
         cutoff, final = source._cutoff_instants(rows)
     assert not final.any() and (cutoff <= SYSTEM.now()).all()
+
+
+def test_a_reversed_forecast_only_period_raises_however_it_is_given(market, monkeypatch):
+    """ "today" to 10-21 on a clock where today is 10-22 in the issue zone: a reversed period raises, in a run, a model's own
+    run, a residual model's, and per zone in a run over zones, where it used to plan no forecast and say nothing."""
+    from epftoolbox2.models import ResidualModel
+
+    monkeypatch.setenv("MAX_PROCESSES", "1")
+    monkeypatch.setenv("THREADS_PER_PROCESS", "1")
+    reykjavik = make_market_data(start="2026-06-01", days=150, tz="Atlantic/Reykjavik", horizon=1)
+    mp = ModelPipeline(information_set=DATA_ISSUE).add_model(OLSModel(PREDICTORS, training_window=28, name="ols"))
+    residual = ResidualModel(
+        OLSModel(PREDICTORS, training_window=28), OLSModel(["base_fc_d+{horizon}"], training_window=28), 28, refit="1D"
+    )
+    reversed_ = [{"test": ("today", "2026-10-21")}, {"test_start": "today", "test_end": "2026-10-21"}]
+    with host_zone("UTC"), use_clock(FakeClock(LATE)):
+        for kwargs in reversed_:
+            with pytest.raises(ValueError, match="reversed"):
+                mp.run(market, horizon=1, forecast_only=True, **kwargs)
+            with pytest.raises(ValueError, match=r"Zone 'PL'.*reversed"):
+                mp.run({"PL": market, "IS": reykjavik}, horizon=1, forecast_only=True, **kwargs)
+        for model in (OLSModel(PREDICTORS, training_window=28), residual):
+            with pytest.raises(ValueError, match="reversed"):
+                model.run(market, "today", "2026-10-21", horizon=1, forecast_only=True, information_set=DATA_ISSUE)
+
+
+def test_a_period_valid_in_every_zone_runs_though_the_host_reads_it_reversed(monkeypatch):
+    """On a UTC host at 23:30 UTC the host's today is 10-21, so ("2026-10-22", "today") reads as reversed there; in Berlin and
+    Paris it is one day, 10-22, and the run over the two zones issues on it."""
+    monkeypatch.setenv("MAX_PROCESSES", "1")
+    monkeypatch.setenv("THREADS_PER_PROCESS", "1")
+    frames = {
+        zone: make_market_data(start="2026-06-01", days=150, tz=tz, horizon=1)
+        for zone, tz in (("DE", "Europe/Berlin"), ("FR", "Europe/Paris"))
+    }
+    mp = ModelPipeline(information_set=DATA_ISSUE).add_model(OLSModel(PREDICTORS, training_window=28, name="ols"))
+    with host_zone("UTC"), use_clock(FakeClock(LATE)):
+        panel = mp.run(frames, horizon=1, forecast_only=True, test=("2026-10-22", "today"))
+    assert {zone: run_dates(panel.zones[zone]) for zone in frames} == {"DE": {"2026-10-22"}, "FR": {"2026-10-22"}}

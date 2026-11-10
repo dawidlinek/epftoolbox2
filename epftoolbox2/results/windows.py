@@ -24,7 +24,7 @@ import datetime
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from .._date_utils import resolve_date, resolve_dates
+from .._date_utils import _DATE_PATTERN, resolve_date, resolve_dates
 
 VALIDATION = "validation"
 TEST = "test"
@@ -60,6 +60,18 @@ def check_validation_every(value: Any) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 1:
         raise ValueError(f"validation_every must be a whole number of at least 1, got {value!r}")
     return int(value)
+
+
+def period_ends(value: Any, label: str) -> Tuple[Any, Any]:
+    """`value`'s two ends as `to_period` checks them, without their order: a date keyword ("today", "now_d-7") as it is, to
+    be resolved in a zone later, any other end as an ISO day. A `ValueError` naming `label` if it isn't such a pair."""
+    if isinstance(value, (str, bytes)) or not isinstance(value, Sequence) or len(value) != 2:
+        raise ValueError(f"The {label} period must be (start, end), got {value!r}")
+    ends = []
+    for end, what in zip(value, ("start", "end")):
+        keyword = isinstance(end, str) and _DATE_PATTERN.match(end.strip())
+        ends.append(end if keyword else _iso_day(end, f"{label} {what}"))
+    return ends[0], ends[1]
 
 
 def to_period(value: Any, label: str, tz: Optional[str] = None) -> Period:
