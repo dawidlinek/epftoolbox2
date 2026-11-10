@@ -145,6 +145,7 @@ def manifest(windows, horizons, freq):
         "training_window": MEMBER.training_window,
         # As a run writes it (the real runs below check the rule against the manifests runs write).
         "model_params": model_params(MEMBER),
+        "training_cut": {"rows": "dates"},
         "target": "price",
         "horizon": max(horizons),
         **({} if tuple(horizons) == tuple(range(1, max(horizons) + 1)) else {"horizons": list(horizons)}),
@@ -824,6 +825,8 @@ def test_frozen_without_a_top_ensemble_is_a_copy_and_refuses_zones(tmp_path):
         (OLSModel(["x"], training_window=MEMBER.training_window + 1, name="b"), "training_window"),
         (OLSModel(["x"], scaler="asinh", name="b"), "model_params"),
         (LassoCVModel(["x"], name="b"), "model_class"),
+        (OLSModel(["x"], refit="7D", name="b"), "training_cut"),
+        (OLSModel(["x"], binary_mask="fit", name="b"), "training_cut"),
     ],
 )
 def test_frozen_refuses_members_that_are_other_models_than_the_results(tmp_path, rebuilt, field):
@@ -845,6 +848,14 @@ def ctx_list(ctx):
 
 def other_ctx_list(ctx):
     return PREDICTORS[:2]
+
+
+def ctx_list_edited(ctx):
+    return PREDICTORS[:3]
+
+
+# `ctx_list` with its body edited in place: the same import path, another source.
+ctx_list_edited.__name__ = ctx_list_edited.__qualname__ = "ctx_list"
 
 
 def real_study(**changed):
@@ -885,21 +896,38 @@ def test_frozen_accepts_the_models_a_real_run_wrote_and_refuses_others(tmp_path)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         assert real_study().frozen(tmp_path).ensembles[0].members == frozen.ensembles[0].members
-    others = {
-        "fixed": OLSModel(list(reversed(PREDICTORS)), training_window=30, name="fixed"),
-        "by_horizon": OLSModel(lambda horizon: [f"wind_d+{horizon}"], training_window=30, name="by_horizon"),
-        "function": OLSModel(other_ctx_list, training_window=30, name="function"),
-        "naive": NaiveModel(["wind_d+{horizon}"], name="naive"),
-        "res": ResidualModel(
-            "base_ols",
-            HistGBModel(["load_d+{horizon}", "base_fc_d+{horizon}"], max_iter=13, target_transform="none"),
-            training_window=28,
-            name="res",
+    others = [
+        ("fixed", OLSModel(list(reversed(PREDICTORS)), training_window=30, name="fixed"), "predictors"),
+        ("fixed", OLSModel(PREDICTORS, training_window=30, refit="7D", name="fixed"), "training_cut"),
+        ("fixed", OLSModel(PREDICTORS, training_window=30, refit="auto", name="fixed"), "training_cut"),
+        ("fixed", OLSModel(PREDICTORS, training_window=30, binary_mask="fit", name="fixed"), "training_cut"),
+        (
+            "by_horizon",
+            OLSModel(lambda horizon: [f"wind_d+{horizon}"], training_window=30, name="by_horizon"),
+            "predictors",
         ),
-    }
-    for name, model in others.items():
-        with pytest.raises(ManifestMismatchError, match=rf"{name}: (predictors|predictor_function|model_params)"):
+        ("function", OLSModel(other_ctx_list, training_window=30, name="function"), "predictor_function"),
+        ("naive", NaiveModel(["wind_d+{horizon}"], name="naive"), "predictors"),
+        (
+            "res",
+            ResidualModel(
+                "base_ols",
+                HistGBModel(["load_d+{horizon}", "base_fc_d+{horizon}"], max_iter=13, target_transform="none"),
+                training_window=28,
+                name="res",
+            ),
+            "model_params",
+        ),
+    ]
+    for name, model, field in others:
+        with pytest.raises(ManifestMismatchError, match=rf"{name}: {field}"):
             real_study(**{name: model}).frozen(tmp_path)
+    # The function's body edited in place, under the same import path: its fingerprint differs, which only warns, since a
+    # comment edited in it would change it too.
+    edited = OLSModel(ctx_list_edited, training_window=30, name="function")
+    assert edited._ctx_fn.__qualname__ == "ctx_list"
+    with pytest.warns(UserWarning, match="fingerprint"):
+        real_study(function=edited).frozen(tmp_path)
 
 
 # ---------------------------------------------------------------------------------------------------------------------

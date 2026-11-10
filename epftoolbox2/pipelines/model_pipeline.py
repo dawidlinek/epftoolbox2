@@ -1651,9 +1651,10 @@ class ModelPipeline:
         `validation="previous_year"`, the latest 12 months of test), or the one validation period of a study without a test.
 
         Before choosing, each member's manifest is compared with this pipeline's model of that name (`pipelines._frozen`: class,
-        predictors, training window, parameters, unit kind and target transform), and a difference raises
-        `ManifestMismatchError`: a choice made on another model's results is no choice of this one. A field a manifest lacks
-        can't be compared, and warns.
+        predictors, training window, parameters, unit kind and target transform, and what of `training_cut` the model sets:
+        `refit`, `binary_mask`, `newest_target`), and a difference raises `ManifestMismatchError`: a choice made on another
+        model's results is no choice of this one. A field a manifest lacks can't be compared, and warns; so does a predictor
+        function's fingerprint that differs (its source or the information set it reads), which a comment edit changes too.
 
         The frozen average has `chosen_through`, the last day whose actual the choice read (the newest segment's validation end
         plus the largest horizon on file, at most the day before its test period): it makes no forecast issued on or before that
@@ -1729,20 +1730,23 @@ class ModelPipeline:
     ) -> Dict[str, Dict[str, Any]]:
         """{model: its manifest in `save_dir`} of `models`, after `ManifestMismatchError` for one whose manifest records another
         model than this pipeline's of its name (`pipelines._frozen.model_differences`), and a warning naming what can't be
-        compared. A model with no manifest is left to the report, which says so."""
+        compared and what only may differ (a predictor function's fingerprint). A model with no manifest is left to the report,
+        which says so."""
         manifests: Dict[str, Dict[str, Any]] = {}
         differences: Dict[str, List[str]] = {}
         lacking: Dict[str, List[str]] = {}
+        notes: List[str] = []
         for model in models:
             path = manifest_path(self.results_path(save_dir, model))
             if not path.exists():
                 continue
             manifests[model.name] = json.loads(path.read_text())
-            found, unknown = model_differences(model, manifests[model.name])
-            if found:
-                differences[model.name] = found
-            if unknown:
-                lacking[model.name] = unknown
+            compared = model_differences(model, manifests[model.name], self.information_set)
+            if compared.differences:
+                differences[model.name] = compared.differences
+            if compared.lacking:
+                lacking[model.name] = compared.lacking
+            notes += [f"{model.name}: {note}" for note in compared.notes]
         if differences:
             shown = "; ".join(f"{name}: {', '.join(found)}" for name, found in differences.items())
             raise ManifestMismatchError(
@@ -1753,6 +1757,11 @@ class ModelPipeline:
             warnings.warn(
                 f"frozen(): the manifests in {save_dir} don't record {lacking}, so those can't be compared with this pipeline's "
                 "models.",
+                stacklevel=3,
+            )
+        for note in notes:
+            warnings.warn(
+                f"frozen(): {note}. If the function now returns other lists, the choice was made on another model's results.",
                 stacklevel=3,
             )
         return manifests
