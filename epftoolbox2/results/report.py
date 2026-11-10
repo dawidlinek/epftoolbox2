@@ -51,6 +51,7 @@ from .breakdowns import (
 from .breakdowns import error_split as split_errors
 from .matching import rows_of_refs, training_day_frame
 from .ref import ModelResultRef
+from .live import live_fingerprint
 from .store import fingerprint_path
 from .vintages import flag_mixed_classes, vintage_frame
 from .windows import TEST, VALIDATION, RunWindows
@@ -1370,6 +1371,7 @@ class EvaluationReport:
             ref.window,
             ref.target_before,
             str(ref.zone),
+            *live_fingerprint(path, ref.policy, ref.cutoff),  # a live directory's commits change what is read
         )
         cached = self._read_frames.get(name)
         if cached is None or cached[0] != fingerprint:

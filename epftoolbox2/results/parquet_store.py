@@ -40,15 +40,21 @@ from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Sequ
 from . import parquet_schema as schema
 from .store import (
     BACKTEST_REVISION,
+    LIVE_LOCK_STEM,
+    LIVE_LOG_STEMS,
+    MODE_LIVE,
     OK_ONLY,
     STATUS_OK,
     ResultsLockedError,
     StoreWriter,
     _hold_lock,
+    _live_mismatch,
     _LockHeld,
     _preview,
     _Store,
+    check_reading,
     forecast_text,
+    is_live_dir,
     is_parquet_path,
     outside_stacklevel,
     repeat_verdict,
@@ -61,8 +67,8 @@ PARQUET_ROWS_PER_PART = 200_000
 PARQUET_FLUSH_SECONDS = 300.0
 PARQUET_MAX_BUFFERED_ROWS = 1_000_000
 _CRC_FIELD = b',"crc32":"'
-# The columns the per-key rule reads.
-_RULE_COLUMNS = ("hour", "horizon", "run_date", "revision", "status")
+# The columns the per-key rule reads, and `mode`, which says whether a record is live (`results.store.check_reading`).
+_RULE_COLUMNS = ("hour", "horizon", "run_date", "revision", "status", "mode")
 # What a part is written with: zstd, page checksums, dictionaries for everything but the floats, which are split by byte.
 _FLOAT_COLUMNS = ("prediction", "actual")
 _ZSTD_LEVEL = 3
@@ -312,7 +318,28 @@ def _read_part(directory: Path, entry: Dict[str, Any], columns: Optional[Sequenc
     )
     if table.num_rows != entry["rows"]:
         raise ValueError(f"{path} holds {table.num_rows} rows, its catalog line says {entry['rows']}")
-    return table
+    return _conform(table, columns)
+
+
+def _conform(table, columns: Optional[Sequence[str]]):
+    """`table` with the schema's columns it lacks (`columns`, or all of them) as nulls, in schema order: a part written before a
+    column was added to the schema (the live keys of step 8c) reads, and concatenates, as one written after."""
+    import pyarrow as pa
+
+    names = [*schema.NAMES, schema.KEYS_COLUMN] if columns is None else list(columns)
+    if table.column_names == names:
+        return table
+    held = set(table.column_names)
+    full = schema.arrow_schema()
+    arrays, fields = [], []
+    for name in names:
+        if name in held:
+            arrays.append(table.column(name))
+            fields.append(table.schema.field(name))
+        elif name in full.names:
+            arrays.append(pa.nulls(table.num_rows, full.field(name).type))
+            fields.append(full.field(name))
+    return pa.Table.from_arrays(arrays, schema=pa.schema(fields))
 
 
 def _read_columns(columns: Optional[Sequence[str]]) -> Optional[List[str]]:
@@ -376,10 +403,27 @@ def _rule_arrays(table):
     )
 
 
-def choose(table) -> Tuple[Any, List[Tuple[int, int]]]:
+def _visible_rows(valid, day, revision, visible: frozenset):
+    """Whether each row's (run_date, revision) is one of `visible`, for rows with a whole key."""
+    import numpy as np
+
+    from datetime import date
+
+    epoch = date(1970, 1, 1)
+    codes = np.fromiter(
+        ((date.fromisoformat(run_date) - epoch).days * 65536 + revision for run_date, revision in visible),
+        dtype=np.int64,
+        count=len(visible),
+    )
+    return valid & np.isin(day * 65536 + revision, codes)
+
+
+def choose(table, visible: Optional[frozenset] = None) -> Tuple[Any, List[Tuple[int, int]]]:
     """The rows the readers' rule chooses, one per key, in table order, and (chosen, repeat) pairs of the forecasts repeating a
     chosen forecast at its revision. Per key: the highest revision; within it the first forecast, else the last skip record
-    (the JSONL reader's rule, `results.store._choose`). A row without a whole key is its own."""
+    (the JSONL reader's rule, `results.store._choose`). A row without a whole key is its own. With `visible` ((run_date,
+    revision) pairs of a live directory's reader, `results.store.visible_revisions`) only the rows of those revisions are
+    there, as the JSONL reader passes the other lines over."""
     import numpy as np
 
     n = table.num_rows
@@ -387,12 +431,18 @@ def choose(table) -> Tuple[Any, List[Tuple[int, int]]]:
         return np.zeros(0, dtype=np.int64), []
     valid, day, hour, horizon, revision, ok = _rule_arrays(table)
     order = np.arange(n, dtype=np.int64)
+    if visible is not None:
+        seen = _visible_rows(valid, day, revision, visible)
+        order = order[seen]
+        valid, day, hour, horizon, revision, ok = (a[seen] for a in (valid, day, hour, horizon, revision, ok))
+        if not len(order):
+            return order, []
     alone = np.where(valid, 0, order + 1)
     skip = ~ok
     tie = np.where(skip, -order, order)
     idx = np.lexsort((tie, skip, -revision, horizon, hour, day, alone))
     s_alone, s_day, s_hour, s_horizon = alone[idx], day[idx], hour[idx], horizon[idx]
-    start = np.ones(n, dtype=bool)
+    start = np.ones(len(order), dtype=bool)
     start[1:] = (
         (s_alone[1:] != s_alone[:-1])
         | (s_day[1:] != s_day[:-1])
@@ -405,8 +455,8 @@ def choose(table) -> Tuple[Any, List[Tuple[int, int]]]:
     group = np.cumsum(start) - 1
     chosen_of = chosen[group]
     candidate = ~start & ok[idx] & ok[chosen_of] & (revision[idx] == revision[chosen_of])
-    repeats = list(zip(chosen_of[candidate].tolist(), idx[candidate].tolist()))
-    return np.sort(chosen), repeats
+    repeats = list(zip(order[chosen_of[candidate]].tolist(), order[idx[candidate]].tolist()))
+    return np.sort(order[chosen]), repeats
 
 
 def _check_repeats(directory: Path, table, repeats: List[Tuple[int, int]], duplicates: str, stacklevel: int) -> None:
@@ -440,15 +490,33 @@ def _status_mask(table, rows, statuses: Optional[Iterable[str]]):
 
 
 def chosen_rows(
-    directory: Path, table, statuses: Optional[Iterable[str]], duplicates: str = "raise", stacklevel: int = 5
+    directory: Path,
+    table,
+    statuses: Optional[Iterable[str]],
+    duplicates: str = "raise",
+    stacklevel: int = 5,
+    visible: Optional[frozenset] = None,
 ):
     """The rows of `table` (read from `directory`, any columns with the rule's) that the readers' rule gives for `statuses`, in
-    table order. Repeats are compared on every column, read again for them if `table` holds fewer."""
-    chosen, repeats = choose(table)
+    table order; with `visible`, of those revisions alone (`choose`). Repeats are compared on every column, read again for them
+    if `table` holds fewer. A chosen live record read without `visible`, or one that isn't read with it, raises
+    `LiveDirectoryError`, as the JSONL reader's second pass does."""
+    import numpy as np
+    import pyarrow as pa
+    import pyarrow.compute as pc
+
+    chosen, repeats = choose(table, visible)
     if repeats:
         full = table if set(schema.NAMES) <= set(table.column_names) else read_table(directory)
         _check_repeats(directory, full, repeats, duplicates, stacklevel)
-    return chosen[_status_mask(table, chosen, statuses)]
+    rows = chosen[_status_mask(table, chosen, statuses)]
+    if len(rows):
+        mode = table.column("mode").take(pa.array(rows, pa.int64()))
+        live = pc.fill_null(pc.equal(pc.cast(mode, pa.string()), MODE_LIVE), False).to_numpy(zero_copy_only=False)
+        wrong = np.flatnonzero(live != (visible is not None))
+        if len(wrong):
+            raise _live_mismatch(directory, f"the record of row {int(rows[wrong[0]])}", visible)
+    return rows
 
 
 def read_records(
@@ -457,19 +525,33 @@ def read_records(
     transform: Optional[Callable[[Dict], Any]] = None,
     duplicates: str = "raise",
     columns: Optional[Sequence[str]] = None,
+    visible: Optional[frozenset] = None,
 ) -> Iterator[Any]:
     """One record per forecast key of a Parquet results directory, by the JSONL reader's rules (`results.store.read_records`),
     in catalog order, `transform(record)` of each if given (None drops it). With `columns`, the records hold those keys (and the
-    rule's) alone."""
+    rule's) alone. `visible` are the revisions a live directory's reader may see (`results.store.visible_revisions`)."""
     if duplicates not in ("raise", "first"):
         raise ValueError(f"duplicates must be 'raise' or 'first', not {duplicates!r}")
+    check_reading(directory, visible)
     table = read_table(directory, columns)
-    rows = chosen_rows(directory, table, statuses, duplicates, stacklevel=6)
+    rows = chosen_rows(directory, table, statuses, duplicates, stacklevel=6, visible=visible)
     for start in range(0, len(rows), 8192):  # dicts a batch at a time
         for record in schema.iter_dicts(table, rows=rows[start : start + 8192].tolist()):
             out = record if transform is None else transform(record)
             if out is not None:
                 yield out
+
+
+def max_revision(directory: Path, run_date: str) -> int:
+    """The highest `revision` any committed part's record of `run_date` carries (0 for none), whatever its status
+    (`results.store.max_revision`)."""
+
+    table = read_table(Path(directory), ["run_date", "revision"])
+    valid, day, _, _, revision, _ = _rule_arrays(table)
+    from datetime import date
+
+    mine = valid & (day == (date.fromisoformat(run_date) - date(1970, 1, 1)).days)
+    return int(revision[mine].max()) if mine.any() else 0
 
 
 def iter_file_records(directory: Path) -> Iterator[Dict]:
@@ -532,15 +614,17 @@ def read_frame(
     keep: Callable[[Any], Any],
     statuses: Optional[Iterable[str]] = OK_ONLY,
     extra: Sequence[str] = (),
+    visible: Optional[frozenset] = None,
 ):
     """The records `read_records` gives, as a DataFrame of `columns` (`_series` per column), without a dict per record: the
     rule's rows, then those `keep(table, rows)` (a boolean array over `rows`) keeps, in catalog order. `extra` are the columns
-    `keep` reads."""
+    `keep` reads; `visible` the revisions a live directory's reader may see."""
     import pandas as pd
     import pyarrow as pa
 
+    check_reading(directory, visible)
     table = read_table(directory, [*columns, *extra])
-    rows = chosen_rows(directory, table, statuses, stacklevel=7)
+    rows = chosen_rows(directory, table, statuses, stacklevel=7, visible=visible)
     rows = rows[keep(table, rows)]
     taken = table.take(pa.array(rows, pa.int64()))
     return pd.DataFrame({name: _series(taken.column(name).combine_chunks(), name) for name in columns})
@@ -760,6 +844,8 @@ def _models_in(save_dir: Path, model: Optional[str]) -> List[str]:
         {p.stem for p in save_dir.glob("*.jsonl") if p.is_file()}
         | {p.stem for p in save_dir.glob("*.parquet") if p.is_dir()}
     )
+    if is_live_dir(save_dir):  # a live directory's call and delivery logs are no model's results
+        stems = [stem for stem in stems if stem not in LIVE_LOG_STEMS]
     if model is not None:
         wanted = model.lower().replace(" ", "_")
         stems = [stem for stem in stems if stem == wanted]
@@ -791,6 +877,8 @@ def _refuse_residual_models(save_dir: Path, stems: List[str]) -> None:
 
 
 def _lock_model(save_dir: Path, stem: str) -> Callable[[], None]:
+    if stem == LIVE_LOCK_STEM and is_live_dir(save_dir):
+        return lambda: None  # `live.lock`, which `_live_lock` holds around every model of the directory
     lock_path = save_dir / f"{stem}.lock"
     try:
         return _hold_lock(lock_path)
@@ -863,6 +951,22 @@ def convert(save_dir: Any, to: str, model: Optional[str] = None) -> List[Tuple[s
     stems = _models_in(save_dir, model)
     if to == "parquet":
         _refuse_residual_models(save_dir, stems)
+    with _live_lock(save_dir):
+        return _convert(save_dir, stems, to, iter_any, atomic_write)
+
+
+def _live_lock(save_dir: Path):
+    """A live directory's `live.lock` held (`results.live.LiveStore.hold`, so no live call writes meanwhile), or nothing."""
+    from contextlib import nullcontext
+
+    from .live import LiveStore
+
+    return LiveStore(save_dir).hold() if is_live_dir(save_dir) else nullcontext()
+
+
+def _convert(
+    save_dir: Path, stems: List[str], to: str, iter_any: Callable, atomic_write: Callable
+) -> List[Tuple[str, int]]:
     done = []
     for stem in stems:
         source = save_dir / f"{stem}.{'jsonl' if to == 'parquet' else 'parquet'}"
@@ -922,12 +1026,18 @@ def compact(save_dir: Any, model: Optional[str] = None) -> Dict[str, Dict[str, i
     """Merge each (model, year)'s live parts into one, under the model's lock: every record of them in catalog and row order,
     sorted stably as a part is, written and committed as superseding them, then the old parts deleted; then files the catalog
     doesn't list (orphans a crash left) and superseded ones still on disk are deleted. A (model, year) with one part is left as
-    it is, so compacting twice changes nothing. Returns model stem -> {"parts_merged", "parts_written", "files_removed"}."""
+    it is, so compacting twice changes nothing. Returns model stem -> {"parts_merged", "parts_written", "files_removed"}. In a
+    live directory, under its `live.lock` too."""
+    save_dir = Path(save_dir)
+    with _live_lock(save_dir):
+        return _compact(save_dir, _models_in(save_dir, model))
+
+
+def _compact(save_dir: Path, stems: List[str]) -> Dict[str, Dict[str, int]]:
     import pyarrow as pa
 
-    save_dir = Path(save_dir)
     summary = {}
-    for stem in _models_in(save_dir, model):
+    for stem in stems:
         directory = save_dir / f"{stem}.parquet"
         if not directory.is_dir():
             continue
@@ -1024,6 +1134,11 @@ def verify(save_dir: Any, model: Optional[str] = None) -> List[Finding]:
 
     save_dir = Path(save_dir)
     found: List[Finding] = []
+    committed = None  # a live directory's records are read as its committed revisions are (`results.live`)
+    if is_live_dir(save_dir):
+        from .live import LiveStore
+
+        committed = LiveStore(save_dir).visible("latest", cutoff=None)
     for stem in _models_in(save_dir, model):
         jsonl, directory = save_dir / f"{stem}.jsonl", save_dir / f"{stem}.parquet"
         if jsonl.exists() and directory.exists():
@@ -1036,7 +1151,7 @@ def verify(save_dir: Any, model: Optional[str] = None) -> List[Finding]:
             try:  # the reader's own rule: a repeat with another forecast raises, the same one warns, as a torn last line does
                 with warnings.catch_warnings(record=True) as caught:
                     warnings.simplefilter("always")
-                    for _ in read_any(jsonl, statuses=None, transform=lambda r: None):
+                    for _ in read_any(jsonl, statuses=None, transform=lambda r: None, committed=committed):
                         pass
                 found.extend(Finding("note", stem, str(w.message)) for w in caught)
             except ValueError as exc:

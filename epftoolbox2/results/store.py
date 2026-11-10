@@ -26,6 +26,89 @@ BACKTEST_REVISION = 1
 RECORD_SCHEMA = 2  # recorded in a manifest as provenance (`record_schema`)
 _KEY_FIELDS = ("hour", "horizon", "run_date")
 
+# A live directory (step 8c, `results.live`) is one with `live.json` in it. Its records end with three more keys after D4's,
+# `issued_at`, `mode` ("live") and `snapshot`, and a revision of an issue day is read only once `issues.jsonl` commits it: a
+# reader of its files says which revisions it may see (`read_records(committed=...)`), and a reader that doesn't is refused.
+LIVE_FILE = "live.json"
+MODE_LIVE = "live"
+LIVE_KEYS = ("issued_at", "mode", "snapshot")
+# The stems of a live directory's call and delivery logs (`issues.jsonl`, `delivered.jsonl`), which are no model's results, and
+# of its lock (`live.lock`), which a model named "live" shares (the live call holds it for the model's store too).
+LIVE_LOG_STEMS = ("issues", "delivered")
+LIVE_LOCK_STEM = "live"
+
+
+class LiveDirectoryError(ValueError):
+    """Live records read or written as a backtest's, or the reverse: a backtest run into a live directory, a live writer into
+    a backtest's, a reader of a live directory's records that doesn't say which revisions are committed."""
+
+
+def is_live_dir(directory: Any) -> bool:
+    """Whether `directory` is a live directory: it holds `live.json`."""
+    return (Path(directory) / LIVE_FILE).is_file()
+
+
+def _instant(value: Any, what: str = "an instant") -> Any:
+    """`value` (a Timestamp, a datetime or ISO text with an offset) as a UTC `pandas.Timestamp`; ValueError for a naive one."""
+    import pandas as pd
+
+    stamp = pd.Timestamp(value)
+    if stamp.tzinfo is None:
+        raise ValueError(f"{what} must be an instant with a time zone or offset, got {value!r}")
+    return stamp.tz_convert("UTC")
+
+
+def visible_revisions(committed: Optional[Any], issued_by: Any = None) -> Optional[frozenset]:
+    """The (run_date, revision) pairs a reader of live records may see, or None for a backtest's reader.
+
+    `committed` maps each issue day (ISO date, a record's `run_date`) to its committed revisions, each to the instant it was
+    committed (None where that isn't known). `issued_by` is the reader's cut-off: None for none, one instant for every issue
+    day, a mapping of issue day to instant (None: no cut-off that day), or a function of the issue day giving one. A revision
+    committed after its day's cut-off, or of unknown instant under one, isn't seen."""
+    if committed is None:
+        if issued_by is not None:
+            raise ValueError("issued_by is a cut-off of live records: it needs committed=")
+        return None
+    if callable(issued_by):
+        limit_of = issued_by
+    elif isinstance(issued_by, dict):
+        limit_of = issued_by.get
+    else:
+        limit_of = lambda day: issued_by  # noqa: E731 (one instant, or None)
+    pairs = set()
+    for run_date, revisions in committed.items():
+        limit = limit_of(str(run_date))
+        limit = None if limit is None else _instant(limit, "issued_by")
+        for revision, at in revisions.items():
+            if limit is not None and (at is None or _instant(at) > limit):
+                continue
+            pairs.add((str(run_date), int(revision)))
+    return frozenset(pairs)
+
+
+def check_reading(path: Any, visible: Optional[frozenset]) -> None:
+    """Refuse a reader of a live directory's records that doesn't say which revisions it may see (`visible`): it would read
+    revisions no `issues.jsonl` line commits, and every revision as a backtest's."""
+    path = Path(path)
+    if visible is None and is_live_dir(path.parent):
+        raise LiveDirectoryError(
+            f"{path} is a live directory's ({path.parent / LIVE_FILE}): its revisions are read once committed, by a reader "
+            "that says which it may see. Read it with ModelResultRef(path, ..., policy='latest' | 'first' | 'delivered'), or "
+            "read_records(path, committed=LiveStore(save_dir).visible(...))."
+        )
+
+
+def _live_mismatch(path: Path, where: str, visible: Optional[frozenset]) -> LiveDirectoryError:
+    if visible is None:
+        return LiveDirectoryError(
+            f"{path}: {where} is a live record (`mode` 'live') outside a live directory: read it as live records, with "
+            "committed= (results.live.LiveStore), from the live directory it was written in."
+        )
+    return LiveDirectoryError(
+        f"{path}: {where} is no live record (no `mode` 'live') in a live directory: a backtest's records were written into "
+        "it. Keep backtests and live forecasts in separate directories."
+    )
+
 
 _PACKAGE_DIR = str(Path(__file__).resolve().parent.parent)
 
@@ -152,11 +235,20 @@ def read_records(
     transform: Optional[Callable[[Dict], Any]] = None,
     duplicates: str = "raise",
     columns: Optional[Sequence[str]] = None,
+    *,
+    committed: Optional[Any] = None,
+    issued_by: Any = None,
 ) -> Iterator[Any]:
     """One record per forecast key `(hour, horizon, run_date)` of a JSONL results file, in file order, `transform(record)` of
     each if given (None drops it). A Parquet results directory (`<name>.parquet`) is read by the same rules, in the order its
     catalog commits its parts (`results.parquet_store.read_records`); `columns`, if given, are the keys `transform` reads, which
     a Parquet directory reads alone (a JSONL line is parsed whole).
+
+    Records of a live directory (step 8c, `results.live`) are read with `committed`: issue day (`run_date`) -> its committed
+    revisions -> the instant each was committed, and optionally `issued_by`, a cut-off (`visible_revisions`). A line of any other
+    revision is not there for the rule below, so an uncommitted revision, or one committed after the cut-off, is never seen and
+    never hides a revision that is; a line without a whole key isn't seen either. Without `committed`, a file in a live directory
+    raises `LiveDirectoryError`, and so does a live record read without it or a record that isn't one read with it.
 
     Per key the highest `revision` wins; within it a record with `status` "ok" wins over skip records (a key a later run forecast)
     and is the first ok one in the file. Of skip records alone the last is the key's. `statuses` keeps the keys whose chosen
@@ -175,16 +267,18 @@ def read_records(
     forecast) isn't parsed, so a damaged one of those isn't reported; a chosen or repeated one raises with its line number."""
     if duplicates not in ("raise", "first"):
         raise ValueError(f"duplicates must be 'raise' or 'first', not {duplicates!r}")
+    visible = visible_revisions(committed, issued_by)
+    check_reading(path, visible)
     if is_parquet_path(path):
         from .parquet_store import read_records as read_parquet
 
-        yield from read_parquet(Path(path), statuses, transform, duplicates, columns)
+        yield from read_parquet(Path(path), statuses, transform, duplicates, columns, visible=visible)
         return
     wanted = None if statuses is None else frozenset(statuses)
     with open(
         path, "rb"
     ) as f:  # once: a file replaced between the passes (an ensemble's, `os.replace`d) stays this one
-        chosen, repeats = _choose(path, f)
+        chosen, repeats = _choose(path, f, visible)
         if repeats:
             _check_repeats(path, f, chosen, repeats, duplicates)
         # (offset, CRC-32 of the line, key, revision, status) of each line to parse, in file order
@@ -212,6 +306,8 @@ def read_records(
             found = None if record is None else _fields_of(record, number)
             if found != expected[2:]:
                 raise _changed(path, number, f"the line holds {found}, its first pass read {expected[2:]}")
+            if (record.get("mode") == MODE_LIVE) != (visible is not None):
+                raise _live_mismatch(path, f"line {number}", visible)
             out = record if transform is None else transform(record)
             if out is not None:
                 yield out
@@ -221,9 +317,12 @@ def read_records(
     raise _changed(path, number, "it ends before the lines its first pass chose")
 
 
-def _choose(path: Path, f: BinaryIO) -> Tuple[Dict[Any, Tuple[int, str, int, int]], Dict[Any, List[int]]]:
+def _choose(
+    path: Path, f: BinaryIO, visible: Optional[frozenset] = None
+) -> Tuple[Dict[Any, Tuple[int, str, int, int]], Dict[Any, List[int]]]:
     """The first pass of `read_records`: key -> (revision, status, offset of its chosen line, CRC-32 of that line), and key ->
-    offsets of the forecasts repeating its chosen one."""
+    offsets of the forecasts repeating its chosen one. With `visible` ((run_date, revision) pairs), the lines of other
+    revisions, and lines without a whole key, are passed over as if they weren't in the file."""
     chosen: Dict[Any, Tuple[int, str, int, int]] = {}
     repeats: Dict[Any, List[int]] = {}
     offset = 0
@@ -236,6 +335,8 @@ def _choose(path: Path, f: BinaryIO) -> Tuple[Dict[Any, Tuple[int, str, int, int
         if fields is None:
             break  # a half-written last line
         key, revision, status = fields
+        if visible is not None and (not isinstance(key, tuple) or (key[2], revision) not in visible):
+            continue  # an uncommitted revision, or one after the cut-off: not there for this reader
         held = chosen.get(key)
         if held is not None:
             if revision < held[0]:
@@ -322,6 +423,32 @@ def iter_file_records(path: Path) -> Iterator[Dict]:
         return
     for _, _, _, record in _parse_lines(path):
         yield record
+
+
+def max_revision(path: Any, run_date: str) -> int:
+    """The highest `revision` any record of `run_date` in a results file or Parquet directory carries, whatever its status and
+    whether or not it is committed (0 for none): what a live directory's next revision of that day must exceed. A half-written
+    last line isn't read."""
+    path = Path(path)
+    if not path.exists():
+        return 0
+    if is_parquet_path(path):
+        from .parquet_store import max_revision as parquet_max
+
+        return parquet_max(path, run_date)
+    highest = 0
+    with open(path, "rb") as f:
+        for number, raw in enumerate(f, 1):
+            line = raw.strip()
+            if not line:
+                continue
+            fields = _key_fields(path, number, raw, line)
+            if fields is None:
+                break
+            key, revision, _ = fields
+            if isinstance(key, tuple) and key[2] == run_date and revision > highest:
+                highest = revision
+    return highest
 
 
 class ResultsLockedError(RuntimeError):
@@ -418,6 +545,7 @@ class _Store:
     """
 
     save_format = DEFAULT_SAVE_FORMAT
+    _live = False  # a live revision's store (`results.live`), which writes into live directories alone
 
     def __init__(
         self,
@@ -428,6 +556,15 @@ class _Store:
         writer: Optional["StoreWriter"],
     ):
         self.path = Path(path)
+        if self._live != is_live_dir(self.path.parent) and (lock or self._live):
+            raise LiveDirectoryError(
+                f"{self.path}: {self.path.parent} is a live directory ({LIVE_FILE}), which a backtest run doesn't write "
+                "into: its revisions are written and committed by the live calls (step 8). Run the backtest into another "
+                "save_dir."
+                if not self._live
+                else f"{self.path}: {self.path.parent} is no live directory (no {LIVE_FILE}): live revisions are written "
+                "into a directory of their own, never beside a backtest's results."
+            )
         self.test_start = test_start
         self._lock = Lock()
         self._completed: Set[tuple] = set()  # keys whose forecast is on file (read at open, or written by this store)

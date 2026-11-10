@@ -3,8 +3,9 @@ row, and back, exactly.
 
 One column per record key a model writes, in the order a forecast's record has them (`COLUMNS`): dates `date32`; `hour`,
 `horizon`, `revision` `int16`; `run_weekday` `int8`; `day_in_test`, `training_days` `int32`; `prediction`, `actual` `float64`;
-`coefficients`, `member_predictions` `list<float64>`; `freq`, `window`, `status` dictionary strings; hashes and `detail` strings.
-Every column is nullable. A record's keys and their order are one more column, `_keys` (a dictionary string, so a model's few
+`coefficients`, `member_predictions` `list<float64>`; `freq`, `window`, `status`, `mode` dictionary strings; hashes, `detail`,
+`issued_at` and `snapshot` strings. Every column is nullable; a live revision's three keys (step 8c) are null in a backtest's
+rows, and a part written before them reads with them null. A record's keys and their order are one more column, `_keys` (a dictionary string, so a model's few
 layouts cost next to nothing), because a JSONL record says two things a column of values can't: which keys it has (a skip record
 has `prediction: null`, a forecast of a model without `refit` has no `newest_target_day`) and in what order (a refit record has
 `refit_anchor` after `freq`, any other after `list_hash`). With it a record converts both ways exactly: its keys in its order, a
@@ -41,6 +42,11 @@ COLUMNS: Tuple[Tuple[str, str], ...] = (
     ("list_hash", "string"),
     ("revision", "int16"),
     ("detail", "string"),
+    # A live revision's record (step 8c, `results.live`): when it was issued (ISO UTC), "live", and its inputs' snapshot hash.
+    # Null in every backtest record; a part written before them reads as if it had them null (`parquet_store._conform`).
+    ("issued_at", "string"),
+    ("mode", "category"),
+    ("snapshot", "string"),
 )
 NAMES: Tuple[str, ...] = tuple(name for name, _ in COLUMNS)
 KINDS: Dict[str, str] = dict(COLUMNS)

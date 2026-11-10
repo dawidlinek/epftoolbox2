@@ -8,7 +8,7 @@ from pathlib import Path
 import warnings
 from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Tuple
 
-from .store import OK_ONLY, STATUS_OK, is_parquet_path, iter_file_records, read_records
+from .store import OK_ONLY, STATUS_OK, is_parquet_path, iter_file_records, read_records, visible_revisions
 from .windows import SKIP_TARGET_IN_TEST, TEST, VALIDATION, RunWindows
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -63,6 +63,12 @@ class ModelResultRef:
 
     `provenance` is a carded model's `card`, `runtime` and `weights` as its manifest records them (`models._cards.run_provenance`),
     which `EvaluationReport.provenance()` shows; None for a model without a card and for an ensemble.
+
+    Results in a live directory (step 8c, `results.live`) are revisions, read once committed: `policy` says which of an issue
+    day's committed revisions a key is read from ("latest", the default there, the newest; "first"; "delivered", up to the
+    newest delivered one), of those committed at or before `cutoff` ("deadline", the default: the deadline `live.json` records,
+    on each issue day; None for every committed revision; an instant, "HH:MM", a mapping or a function of the issue day). An
+    uncommitted revision, or one committed after the cut-off, is never read. A `policy` on a backtest's results raises.
     """
 
     name: str
@@ -88,6 +94,8 @@ class ModelResultRef:
     issue_days: Optional[Tuple[int, ...]] = None
     vintages: Optional[List[Dict]] = None
     provenance: Optional[Dict[str, Any]] = None
+    policy: Optional[str] = None
+    cutoff: Any = "deadline"
 
     def frame(self, columns: Sequence[str]) -> Optional["pd.DataFrame"]:
         """The forecasts `iter_records(columns)` gives, as a DataFrame of `columns` read without a dict per record, for results
@@ -103,11 +111,25 @@ class ModelResultRef:
         return len(frame) if frame is not None else sum(1 for _ in self.iter_records(cols=["hour"]))
 
     def _frame(self, columns: Sequence[str], clock: bool) -> Optional["pd.DataFrame"]:
+        committed = self._committed()
         if self.path is None or not is_parquet_path(self.path) or not Path(self.path).exists():
             return None
         from .parquet_store import read_frame
 
-        return read_frame(Path(self.path), list(columns), self._keep_rows(clock), extra=_FILTER_FIELDS)
+        return read_frame(
+            Path(self.path),
+            list(columns),
+            self._keep_rows(clock),
+            extra=_FILTER_FIELDS,
+            visible=visible_revisions(committed),
+        )
+
+    def _committed(self) -> Optional[Dict[str, Dict[int, Any]]]:
+        """The revisions this ref may read of a live directory's results (`policy`, `cutoff`; `results.live.live_reading`),
+        for `read_records(committed=...)`; None for a backtest's or results held in memory."""
+        from .live import live_reading
+
+        return live_reading(self.path, self.policy, self.cutoff)
 
     def _keep_rows(self, clock: bool) -> Callable[[Any, Any], Any]:
         """`_records`' filter (and the clock's, with `clock` and a zone) over rows of a Parquet table: a boolean per row."""
@@ -261,6 +283,7 @@ class ModelResultRef:
                 return False
             return self.target_before is None or r["target_date"] < self.target_before
 
+        committed = self._committed()
         if self.path is not None:
             path = Path(self.path)
             if path.exists():
@@ -273,11 +296,18 @@ class ModelResultRef:
 
                 if not first:
                     yield from read_records(
-                        path, statuses, read, columns=None if cols is None else [*cols, *_FILTER_FIELDS]
+                        path,
+                        statuses,
+                        read,
+                        columns=None if cols is None else [*cols, *_FILTER_FIELDS],
+                        committed=committed,
                     )
                     return
                 wanted = None if statuses is None else frozenset(statuses)
+                visible = visible_revisions(committed)
                 for r in iter_file_records(path):
+                    if visible is not None and (r.get("run_date"), r.get("revision")) not in visible:
+                        continue  # a revision this ref doesn't see
                     if wanted is None or r.get("status", STATUS_OK) in wanted:
                         out = read(r)
                         if out is not None:
