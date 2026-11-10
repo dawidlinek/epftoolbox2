@@ -1046,20 +1046,22 @@ def test_a_block_that_raises_leaves_no_store_open_and_no_lock_held(tmp_path):
             rev = store.begin(DAYS[0], issued_at="2026-10-21T07:00:00+00:00")
             rev.open("ols").save(base_record(DAYS[0], 0, 1, 1.0))
             raise RuntimeError("a fit failed")
-    with pytest.raises(RuntimeError, match="a fit failed"):
-        with store.hold():
+    with store.hold():
+        with pytest.raises(RuntimeError, match="a fit failed"):
             with store.begin(DAYS[0], issued_at="2026-10-21T08:00:00+00:00") as rev:
                 rev.open("ols").save(base_record(DAYS[0], 0, 1, 2.0))
                 raise RuntimeError("a fit failed")
-            assert rev._done
+        assert rev._done  # abandoned by its own exit, while the lock is still held
+        with store.begin(DAYS[0], issued_at="2026-10-21T08:30:00+00:00") as again:
+            again.open("ols")  # the model's own lock is free within the same call
     with store.hold():
         with store.begin(DAYS[0], issued_at="2026-10-21T09:00:00+00:00") as rev:
             rev.open("ols").save(base_record(DAYS[0], 0, 1, 3.0))  # the model's lock is free again
             rev.commit(finished="2026-10-21T09:01:00+00:00")
     assert [r["revision"] for r in read_records(directory / "ols.jsonl", committed=store.visible("latest", None))] == [
-        3
+        4
     ]
-    assert store.next_revision(DAYS[0]) == 4
+    assert store.next_revision(DAYS[0]) == 5
 
 
 @pytest.mark.parametrize(
