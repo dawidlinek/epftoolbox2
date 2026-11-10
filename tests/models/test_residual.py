@@ -465,6 +465,36 @@ def test_another_learner_window_or_refit_refuses_before_the_base_runs(market, tm
         assert {name: (tmp_path / name).read_bytes() for name in kept} == kept
 
 
+def test_another_learner_target_transform_refuses_before_the_base_runs(market, tmp_path):
+    """A pooled learner's `target_transform` (the manifest's own field, outside `model_params`) is compared before the base
+    runs: a resume with "none" over results of the default refuses, from an earlier start too, with no fit, and the base's
+    results, the base's manifest and the model's results stay as they were."""
+
+    def model(transform):
+        return residual(learner=HistGBModel(LEARNER_INPUTS, target_transform=transform, **HGB))
+
+    run(model("per_period"), market, ("2023-03-20", "2023-03-26"), save_dir=tmp_path)
+    kept = {
+        name: (tmp_path / name).read_bytes()
+        for name in ("residual.base.jsonl", "residual.base.manifest.json", "residual.jsonl", "residual.manifest.json")
+    }
+    fits = []
+    real = HistGBModel._fit_model
+
+    def spy(self, train_x, train_y):
+        fits.append(len(train_y))
+        return real(self, train_x, train_y)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(HistGBModel, "_fit_model", spy)
+        with pytest.raises(
+            ManifestMismatchError, match="target_transform: 'per_period' \\(existing results\\) vs 'none'"
+        ):
+            run(model("none"), market, ("2023-03-13", "2023-03-26"), save_dir=tmp_path)
+    assert fits == [] and {name: (tmp_path / name).read_bytes() for name in kept} == kept
+    run(model("per_period"), market, ("2023-03-13", "2023-03-26"), save_dir=tmp_path)  # the same: resumes
+
+
 def test_a_check_left_by_a_failed_pipeline_isn_t_run_for_a_changed_base(market):
     """A pipeline whose other model fails its check leaves the residual model's check of its base behind; replacing the base
     afterwards runs the new one, as a fresh model with it does."""

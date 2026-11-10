@@ -62,6 +62,7 @@ from ._calendar import (
     resolve_horizons,
 )
 from ._units import DAY, PER_PERIOD, PERIOD, unit_kind
+from ._units import manifest_fields as unit_fields
 from ._worker import block_calls, issue_row
 from .base import BaseModel, _days_back, _test_days
 
@@ -800,8 +801,9 @@ class ResidualModel(BaseModel):
 
     def _refuse_before_the_base(self, save_to: Union[str, Path], start: datetime.date) -> None:
         """A ManifestMismatchError, before the base runs and writes anything, where this model's results were made with
-        another base, learner or warm-up start: what its manifest's `model_params` and `residual` say, compared as the
-        manifest's own check would. The base's configuration digest is compared after its run, by that check."""
+        another base, learner or warm-up start: what its manifest's `model_params`, `residual`, `unit_kind` and
+        `target_transform` (a pooled learner's, `models._units.manifest_fields`) say, compared as the manifest's own check
+        would. The base's configuration digest is compared after its run, by that check."""
         path = manifest_path(Path(save_to))
         if not path.exists():
             return
@@ -816,6 +818,11 @@ class ResidualModel(BaseModel):
         ours = None if self.warmup is None else start.isoformat()
         if theirs != ours:
             diffs.append(f"residual.base_start: {theirs!r} (existing results) vs {ours!r} (this run)")
+        # A pooled learner's unit kind and target transform, which the manifest records outside `model_params`.
+        units = unit_fields(self)
+        for field in ("unit_kind", "target_transform"):
+            if existing.get(field) != units.get(field):
+                diffs.append(f"{field}: {existing.get(field)!r} (existing results) vs {units.get(field)!r} (this run)")
         # The learner's own window and refit rule, which the manifest records outside `model_params`.
         window = json.loads(json.dumps(self.training_window))
         if existing.get("training_window") != window:
