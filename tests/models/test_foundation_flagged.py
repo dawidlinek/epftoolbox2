@@ -12,6 +12,7 @@ series over the context. The real packages' adapters, with tiny random weights, 
 import dataclasses
 import json
 import tomllib
+from types import SimpleNamespace
 from datetime import date
 from pathlib import Path
 
@@ -283,7 +284,10 @@ def test_timestral_s_size_options_and_commit_are_checked():
             TimestralModel(**bad)
     assert TimestralModel(runtime_commit="deadbeef")._runtime_pins() == ["timestral@deadbeef", "torch"]
     assert TimestralModel()._runtime_pins() == [f"timestral@{TIMESTRAL_COMMIT}", "torch"]
-    assert TimestralModel(weights="/mine")._runtime_pins() == ["timestral", "torch"]
+    assert TimestralModel(weights="/mine")._runtime_pins() == [
+        f"timestral@{TIMESTRAL_COMMIT}",
+        "torch",
+    ]  # no such weights
 
 
 def test_nearest_level_is_the_point_level_of_a_family_without_an_exact_half():
@@ -384,10 +388,10 @@ def test_patchtst_fm_is_fetched_without_an_accept(tmp_path, monkeypatch, no_netw
     assert len(calls) == 1
 
 
-def installed_timestral(monkeypatch, version="1.0.0", commit=TIMESTRAL_COMMIT, present=True):
+def installed_timestral(monkeypatch, version="1.0.0", commit=TIMESTRAL_COMMIT, present=True, reference=True):
     """The timestral package installed (`installed_distribution`), from a repository at `commit` (None: not from one), or not
-    installed at all (`present=False`), its extra found, and every card's weights resolved: what the pre-flight then says is
-    the runtime's alone."""
+    installed at all (`present=False`), its extra found, and every card's weights resolved, as the card's (`reference`) or
+    as files of the user's own: what the pre-flight then says is the runtime's alone."""
     real = _cards.installed_distribution
 
     def installed(name, seen=None):
@@ -403,7 +407,8 @@ def installed_timestral(monkeypatch, version="1.0.0", commit=TIMESTRAL_COMMIT, p
         lambda n, s=None: (["timestral"] if present else []) if n == "timestral" else providers(n, s),
     )
     monkeypatch.setattr(_cards, "has_extra", lambda name: True)
-    monkeypatch.setattr(_cards, "resolve_model_weights", lambda model, seen=None: None)
+    resolved = SimpleNamespace(ref="the weights", files={}, reference=reference)
+    monkeypatch.setattr(_cards, "resolve_model_weights", lambda model, seen=None: resolved)
     import epftoolbox2.models.timestral as module
 
     monkeypatch.setattr(module, "installed_distribution", installed)
@@ -437,10 +442,77 @@ def test_the_timestral_pre_flight_refuses_another_commit_unless_the_model_says_s
     assert "(not from a repository)" in refused and "runtime_commit=" not in refused
     (refused,) = timestral_problems(TimestralModel(runtime_commit=other[:12]))
     assert f"needs timestral at commit {other[:12]}" in refused
+    installed_timestral(monkeypatch, commit=None, reference=False)
     with pytest.warns(UserWarning, match="isn't the pinned commit a534bdbd244d; it runs because weights= is given"):
         assert timestral_problems(TimestralModel(weights="/mine")) == []
     if not torch_installed:  # the core job: torch is refused as not installed, by its own pin
         assert any("needs torch" in m for m in runtime_problems(TimestralModel()))
+
+
+def test_only_weights_other_than_the_card_s_relax_the_commit(monkeypatch, tmp_path):
+    """`weights=` lets another timestral build run only for weights that aren't the reference ones (the user's own); the card's
+    own files under another path, or a path that doesn't resolve, keep the pinned commit required."""
+    other = "f" * 40
+    installed_timestral(monkeypatch, commit=other, reference=True)
+    (refused,) = timestral_problems(TimestralModel(weights=str(tmp_path)))
+    assert f"needs timestral at commit {TIMESTRAL_COMMIT}" in refused
+    installed_timestral(monkeypatch, commit=other, reference=False)
+    with pytest.warns(UserWarning, match="it runs because weights= is given"):
+        assert timestral_problems(TimestralModel(weights=str(tmp_path))) == []
+    assert TimestralModel(weights=str(tmp_path))._runtime_pins() == ["timestral", "torch"]
+
+    def missing(model, seen=None):
+        raise _weights.MissingWeightsError("no such weights")
+
+    monkeypatch.setattr(_cards, "resolve_model_weights", missing)
+    assert TimestralModel(weights=str(tmp_path))._runtime_pins() == [f"timestral@{TIMESTRAL_COMMIT}", "torch"]
+
+
+def fake_distribution(root, name, version, files, direct_url=None):
+    """A `<name>-<version>.dist-info` in `root` (put first on sys.path) whose RECORD lists `files` ({path: content}), and
+    PEP 610's direct_url.json when given."""
+    import base64
+    import hashlib
+
+    info = root / f"{name}-{version}.dist-info"
+    info.mkdir(parents=True)
+    (info / "METADATA").write_text(f"Metadata-Version: 2.1\nName: {name}\nVersion: {version}\n")
+    lines = []
+    for path, content in files.items():
+        digest = base64.urlsafe_b64encode(hashlib.sha256(content).digest()).rstrip(b"=").decode()
+        lines.append(f"{path},sha256={digest},{len(content)}")
+    lines += [f"{name}/__pycache__/x.cpython-312.pyc,,", f"{info.name}/INSTALLER,sha256=abc,4", f"{info.name}/RECORD,,"]
+    (info / "RECORD").write_text("\n".join(lines) + "\n")
+    if direct_url is not None:
+        (info / "direct_url.json").write_text(json.dumps(direct_url))
+    return info
+
+
+def test_a_build_not_installed_from_a_repository_is_recorded_by_its_files(monkeypatch, tmp_path):
+    """A runtime distribution installed from a local directory or an archive (PEP 610 without `vcs_info`) has a version that
+    doesn't tell two builds apart: `runtime.packages` holds a digest of its installed files (its RECORD's hashed entries outside
+    its .dist-info and __pycache__), which a resume compares; an install from a repository keeps `version@commit`, one from
+    an index its version."""
+    import importlib
+
+    card = TIMESTRAL_CARDS["28m"]
+    versions = {}
+    for label, content, direct in (
+        ("one", b"print(1)", {"url": "file:///src/timestral", "dir_info": {}}),
+        ("two", b"print(2)", {"url": "file:///src/timestral", "dir_info": {}}),
+        ("same", b"print(1)", {"url": "file:///elsewhere/timestral-1.0.0.whl", "archive_info": {}}),
+        ("git", b"print(3)", {"url": "https://github.com/x/y", "vcs_info": {"vcs": "git", "commit_id": "c" * 40}}),
+        ("index", b"print(4)", None),
+    ):
+        root = tmp_path / label
+        fake_distribution(root, "timestral", "1.0.0", {"timestral/__init__.py": content}, direct)
+        with monkeypatch.context() as patch:
+            patch.syspath_prepend(str(root))
+            importlib.invalidate_caches()
+            versions[label] = _cards.runtime_versions(card)["timestral"]
+    assert versions["one"].startswith("1.0.0 (local build ") and versions["one"] != versions["two"]
+    assert versions["same"] == versions["one"]  # the same files, whatever path or archive they came from
+    assert versions["git"] == "1.0.0@" + "c" * 40 and versions["index"] == "1.0.0"
 
 
 def test_with_runtime_commit_a_refusal_names_the_commit_the_run_needs(monkeypatch):

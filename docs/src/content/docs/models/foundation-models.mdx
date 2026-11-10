@@ -263,10 +263,13 @@ The pre-flight compares the timestral package installed with the pinned commit, 
 - **Another commit, or a build not installed from the repository** (a wheel, a local directory): refused before any model fits,
   naming the install command and, for another commit, the setting that runs on it.
 - **`TimestralModel(runtime_commit="<commit>")`** runs on that commit instead (7 to 40 hex digits), and refuses any other.
-- **`weights="/your/directory"`** (weights of your own) runs on whatever build is installed, with a warning.
+- **`weights="/your/directory"`** with weights of your own (files whose hashes aren't the card's) runs on whatever build is
+  installed, with a warning; the card's own files under another path keep the pinned commit required.
 
-The manifest records the version and commit installed (`runtime.packages.timestral`, `1.0.0@a534bdb...`) whichever way, and a
-resume with another one is refused.
+The manifest records the build installed whichever way, and a resume with another one is refused: `1.0.0@a534bdb...` for one
+installed from the repository, and for one installed from a local directory or a wheel file (no commit) `1.0.0 (local build
+<digest>)`, a digest of its installed files (the hashes its RECORD lists), so two local builds of the same version don't pass
+for one. An editable install's RECORD lists its link to the source, not the source, so its edits go unseen.
 
 ## CPU and GPU
 

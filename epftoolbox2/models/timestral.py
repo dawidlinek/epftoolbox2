@@ -25,7 +25,9 @@ from datetime import date
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 from .._extras import TIMESTRAL_COMMIT
+from . import _cards
 from ._cards import ModelCard, WeightsRef, installed_distribution, parse_pin
+from ._weights import MissingWeightsError
 from .foundation import FoundationModel, _Internal
 
 __all__ = ["TimestralModel", "TIMESTRAL_CARDS", "TIMESTRAL_LICENCE", "TIMESTRAL_SIZES"]
@@ -190,15 +192,28 @@ class TimestralModel(FoundationModel):
     def _predict_options(self) -> Dict[str, Any]:
         return {"symmetric_averaging": self.symmetric_averaging, "clip_nonnegative": self.clip_nonnegative}
 
+    def _own_weights(self) -> bool:
+        """Whether `weights=` names weights other than the card's (the user's own, `ResolvedWeights.reference` False): only
+        then may another timestral build run. The card's files under another path, or a path that doesn't resolve (the
+        pre-flight names that), keep the pinned commit required."""
+        if self.weights is None:
+            return False
+        try:
+            resolved = _cards.resolve_model_weights(self)
+        except MissingWeightsError:
+            return False
+        return resolved is not None and resolved.reference is False
+
     def _runtime_pins(self) -> List[str]:
-        """The card's pins, the timestral commit replaced by `runtime_commit` when given, or by any build with `weights=`."""
+        """The card's pins, the timestral commit replaced by `runtime_commit` when given, or by any build with weights of the
+        user's own (`_own_weights`)."""
         pins = []
         for pin in self._card.runtime:
             name, _, commit = parse_pin(pin)
             if name == "timestral" and commit is not None:
                 if self.runtime_commit is not None:
                     pin = f"timestral@{self.runtime_commit}"
-                elif self.weights is not None:
+                elif self._own_weights():
                     pin = "timestral"
             pins.append(pin)
         return pins
@@ -217,7 +232,7 @@ class TimestralModel(FoundationModel):
                     )
             problems.append(problem)
         installed = installed_distribution("timestral", seen)
-        if self.weights is not None and self.runtime_commit is None and installed is not None:
+        if self.runtime_commit is None and installed is not None and self._own_weights():
             if not (installed[1] or "").startswith(TIMESTRAL_COMMIT) and ("timestral build", installed) not in seen:
                 seen[("timestral build", installed)] = True
                 where = f"commit {installed[1]}" if installed[1] else "not from a repository"

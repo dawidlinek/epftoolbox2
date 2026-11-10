@@ -432,8 +432,46 @@ def installed_distribution(name: str, seen: Optional[Dict] = None) -> Optional[T
     return found
 
 
+def local_build(name: str, seen: Optional[Dict] = None) -> Optional[str]:
+    """A digest of the installed files of a distribution installed from a local directory or an archive (PEP 610's
+    `direct_url.json` without `vcs_info`), whose version alone doesn't tell two builds apart: the sha256 of its RECORD's hashed
+    entries outside its `.dist-info` and `__pycache__`, sorted, 16 hex digits (the same files give the same digest whatever path
+    or archive they came from). None for an install from an index (no `direct_url.json`) or a repository (its commit says
+    which), or a distribution not installed. An editable install's RECORD lists its link to the source, not the source."""
+    import csv
+    import hashlib
+
+    key = ("build", name)
+    if seen is not None and key in seen:
+        return seen[key]
+    found = None
+    providers = runtime_providers(name, seen)
+    if providers:
+        distribution = importlib.metadata.distribution(providers[0])
+        try:
+            direct = json.loads(distribution.read_text("direct_url.json") or "null")
+        except (OSError, ValueError):
+            direct = None
+        if isinstance(direct, dict) and "vcs_info" not in direct:
+            rows = csv.reader((distribution.read_text("RECORD") or "").splitlines())
+            entries = sorted(
+                f"{row[0]},{row[1]}"
+                for row in rows
+                if len(row) >= 2
+                and row[1]
+                and ".dist-info/" not in row[0]
+                and "__pycache__/" not in row[0]
+                and not row[0].endswith(".pyc")
+            )
+            found = hashlib.sha256("\n".join(entries).encode()).hexdigest()[:16]
+    if seen is not None:
+        seen[key] = found
+    return found
+
+
 def runtime_versions(card: ModelCard, seen: Optional[Dict] = None) -> Dict[str, Optional[str]]:
-    """Each runtime distribution of the card -> its version, `version@commit` for one installed from a repository, None when it
+    """Each runtime distribution of the card -> its version, `version@commit` for one installed from a repository,
+    `version (local build <digest>)` for one installed from a local directory or an archive (`local_build`), None when it
     isn't installed: what a manifest records and a resume compares. A stand-in build is named after the version, `"3.4.1
     (xgboost-cpu)"` (and builds installed together, which the pre-flight refuses, all of them)."""
     out: Dict[str, Optional[str]] = {}
@@ -444,6 +482,9 @@ def runtime_versions(card: ModelCard, seen: Optional[Dict] = None) -> Dict[str, 
             out[name] = None
             continue
         text = found[0] if found[1] is None else f"{found[0]}@{found[1]}"
+        build = local_build(name, seen) if found[1] is None else None
+        if build is not None:
+            text = f"{found[0]} (local build {build})"
         providers = runtime_providers(name, seen)
         stand_ins = [provider for provider in providers if provider != name]
         out[name] = f"{text} ({' + '.join(providers)})" if stand_ins else text
