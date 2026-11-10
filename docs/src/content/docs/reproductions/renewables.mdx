@@ -1,0 +1,499 @@
+---
+title: Renewables Study
+description: The renewables study's generation and price tables scored exactly from its stored forecasts (tier S) and rebuilt from library components (tier R), each cell next to the published one on identical keys with counts, every DM verdict compared, honest and post-gate apart
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+The renewables study asked two questions about DE-LU and AT, issuing at 11:45 on D for D+1. Can day-ahead solar and wind
+generation forecasts made from weather known at the issue match the TSOs' own (ENTSO-E A69, published at 18:00 on D, after the
+gate)? And how much of the price gain of A69 does such an honest forecast recover when a price model reads it? This page puts
+every table of its two experiments next to what the library computes, in two tiers:
+
+- **Tier S (scoring).** The study's stored forecasts, turned into result records, scored by `EvaluationReport`. Every cell is
+  the study's to rounding.
+- **Tier R (re-estimation).** The study rebuilt from library components: the generation models as `RidgeModel` and pooled
+  `HistGBModel` (`target_transform="none"`) with `normalise_by`, `bounds` and `zero_when`, the price models reading them through
+  `ForecastSource`. Its
+  estimators are not the study's in every detail (listed [below](#what-differs-from-the-study)), so the bar is the plan's: every
+  significance verdict the study states holds on identical keys, and every MAE cell is within 5 % of the study's or explained.
+
+The test period is 2025-07-01 to 2026-10-10 (467 target days), the validation period 2025-H1. Data: day-ahead prices (A44), the
+TSOs' load forecasts (A65) and day-ahead wind and solar forecasts (A69) from the ENTSO-E Transparency Platform; actual net
+generation from Energy-Charts.info (Fraunhofer ISE, CC BY 4.0); weather from Open-Meteo's archive of ICON runs (CC BY 4.0).
+
+## The Study in Brief
+
+- **Generation (experiment 1).** Hourly solar and wind (onshore plus offshore) of D+1 from weather sites (eight in DE, five in
+  AT) of the ICON runs up to 00:00 UTC on D, out at about 04:30 UTC. Every model fits the capacity factor: the target divided by
+  a capacity proxy, the largest hourly actual of the 365 days to D-1. Forecasts are clipped to 0..105 % of the proxy, and solar
+  is 0 where the sine of the sun's elevation is below -0.05. Three models: **ridge** (a model per hour, 365-day window, refit
+  weekly), **hgb** (one gradient-boosted tree model over all hours, expanding window, refit every 28 days) and **hgb_anchor**
+  (hgb plus two honest anchors, A69 of D and the actual of D-1, both divided by the proxy). One model per series was chosen on
+  2025-H1: hgb_anchor for DE solar, ridge for the other three.
+- **Price (experiment 2).** The hourly mean day-ahead price of D+1, a ridge and a LASSO (BIC) per hour, 364-day window, refit
+  daily, asinh on the price. 37 base inputs (the 24 prices of D, the hour's price of D-1, D-2 and D-6, D's minimum and maximum,
+  the load forecast of D+1 at the hour and its daily mean, D+1's weekday), and the variants of the table below: each
+  generation input is its value at the hour and its mean over D+1. The price models train on the stored out-of-sample
+  generation forecasts, from 2024-07-01.
+- **Scoring.** Identical (target day, hour) keys within each table: the hours where the actual and every candidate of the zone
+  are finite, 11,140 for DE and 10,676 for AT in experiment 2. DM tests are on daily mean absolute errors with a Newey-West
+  variance at lag 6, negative when the first model is better; significant means p < 0.05.
+
+## Tier S: the Stored Forecasts
+
+The study's forecasts (12 generation runs and 28 price runs) become records at horizon 1, issued the day before each target day,
+and the library's report scores them: `summary()` for MAE and RMSE, `NMAEEvaluator`, `ScaledMAEEvaluator("cap")` with the
+study's proxy, `by_column("is_night")` for the daylight MAE, `by_year()` for the sub-periods and `tests(lag=6)` for each DM row.
+Every cell of `gen_table.csv`, `gen_dm.csv`, `price_table.csv` and `price_dm.csv` (ridge and LASSO, both zones) is the study's
+within 1.8e-14 relative (MAE, RMSE, nMAE, MAE/cap, daylight MAE, bias) and 1.1e-14 absolute (DM statistic and p-value), and each
+cell of the report is the library's value rounded. The daylight flag is `SolarGeometryTransformer`'s `is_night` with the
+study's formula and site (`algorithm="spencer"`, `night_below=0.0`), equal to the study's on every one of the 15,550 DE solar
+keys.
+
+The headline cells (MAE, test period; generation in MW, price in EUR/MWh):
+
+| Table | Cell | Keys | Report | Library (= study's CSV) |
+|---|---|---|---|---|
+| Generation, DE solar | ridge | 11,206 | 1105 | 1104.9351 |
+| | hgb | 11,206 | 1027 | 1026.4977 |
+| | hgb_anchor | 11,206 | 984 | 983.5296 |
+| | A69 for D+1 (post-gate) | 11,206 | 760 | 760.4000 |
+| Generation, DE wind | ridge | 11,205 | 2820 | 2820.0002 |
+| | hgb | 11,205 | 2942 | 2941.6267 |
+| | A69 for D+1 (post-gate) | 11,205 | 1390 | 1389.5588 |
+| Price, DE-LU ridge | base | 11,140 | 20.43 | 20.4283 |
+| | own forecast | 11,140 | 17.21 | 17.2098 |
+| | trained on actuals | 11,140 | 17.56 | 17.5621 |
+| | A69 for D+1 (post-gate) | 11,140 | 16.03 | 16.0333 |
+| Price, AT ridge | base | 10,676 | 18.44 | 18.4410 |
+| | own AT + own DE | 10,676 | 16.82 | 16.8158 |
+| | A69 for AT + DE (post-gate) | 10,676 | 16.75 | 16.7517 |
+
+One cell of the report is misprinted: AT's A69 for the second half of 2025 is 13.6357 in `price_table.csv`, printed 13.636 by the
+study's script and 13.63 in the report.
+
+## Tier R: the Study From Library Components
+
+The inputs are the study's own arrays (prices, load forecasts, A69, actuals and the honest weather it fetched, no new download),
+put on a local hourly frame per zone: 23 and 25 hours on the switch days, each row holding the study's value of its wall-clock
+date and hour. The weather columns are laid out as `OpenMeteoSource(horizon=1)` emits them (`wx_ber_shortwave_radiation_d+1` on the
+rows of D is the forecast for D+1) and given its rule, known 4.5 h after 00:00 UTC on D. Everything else is built by library
+pieces: the study's sun by `SolarGeometryTransformer(algorithm="spencer")` (its `SINEL` to the bit), its proxy by
+`RollingStatsTransformer(min_days=60)` (its `cap_proxy` to the bit), its weather arithmetic (cloud cover times the sun, wind
+speed cubed) by `LambdaTransformer`, the price profile and day statistics by `DailyProfileTransformer` and `DailyStatsTransformer`.
+
+### Stage 1: generation
+
+```python
+import numpy as np
+
+from epftoolbox2.data.transformers import RollingStatsTransformer, SolarGeometryTransformer
+from epftoolbox2.models import HistGBModel, RidgeModel
+
+# The study's sun (NOAA's fractional-year series, at mid-hour) and its night threshold, sin(elevation) < -0.05
+sun = SolarGeometryTransformer([(51.0, 10.0)], algorithm="spencer", night_below=-0.05)
+# Its proxy: the largest hour of the 365 days to D-1, from 60 complete days on
+proxy = RollingStatsTransformer("generation_solar", window_days=365, stat="max", lag_days=1, min_days=60)
+
+ridge = RidgeModel(
+    weather,  # per-site radiation, cloud cover times the sun, their mean, the sun and its square, all of D+1
+    training_window=365,
+    alphas=np.logspace(-3, 3, 13).tolist(),  # the study's RidgeCV grid
+    refit="7D",
+    normalise_by="generation_solar_roll365max_d-1",
+    bounds=(0, 1.05),
+    zero_when="is_night_d+{horizon}",
+    name="ridge",
+)
+hgb = HistGBModel(
+    weather + ["period", "sun_sin_elevation_d+1", "doy_sin_d+1", "doy_cos_d+1"],
+    training_window="expanding",
+    refit="28D",
+    periods="pooled",  # one model over all hours, the hour a feature
+    loss="l2",
+    max_iter=400,
+    min_samples_leaf=40,
+    max_features=1.0,
+    name="hgb",
+    target_transform="none",  # the capacity factor as it is, as the study fitted it; "period" keeps the hours apart
+    normalise_by="generation_solar_roll365max_d-1",
+    bounds=(0, 1.05),
+    zero_when="is_night_d+{horizon}",
+)
+```
+
+hgb_anchor adds `solar_a69_cap` and `solar_act_cap`, A69 of D and the actual of D-1 divided by the proxy (`LambdaTransformer`, known
+at 01:00 on D, when the proxy is). Wind takes no `zero_when`. Each series runs its three models over the issue days 2024-06-30 to
+2026-10-09 at `availability="raise"`.
+
+### Stage 2: price
+
+The chosen stage-1 forecasts come back as columns through `ForecastSource`, each with its mean over the target date
+(`agg="mean"`); AT's DE inputs are DE's runs under other names:
+
+```python
+import numpy as np
+
+from epftoolbox2.data.sources import ForecastSource
+from epftoolbox2.information_set import Availability, InformationSet
+from epftoolbox2.models import LEARModel, RidgeModel
+from epftoolbox2.pipelines import ModelPipeline
+
+sources = [
+    ForecastSource("runs/stage1/de_lu_SOL", model="hgb_anchor", column="fc_solar"),
+    ForecastSource("runs/stage1/de_lu_SOL", model="hgb_anchor", column="fc_solar", agg="mean"),
+    ForecastSource("runs/stage1/de_lu_WIND", model="ridge", column="fc_wind"),
+    ForecastSource("runs/stage1/de_lu_WIND", model="ridge", column="fc_wind", agg="mean"),
+]
+rules = {"a69_*": Availability.published("18:00", 1, vintage="latest_revision")}  # A69 under its own name
+price = ModelPipeline(InformationSet("11:45", "Europe/Berlin", rules=rules).with_source_rules(sources), availability="warn")
+vst = {"name": "asinh", "params": {"apply_to": ["price_h*", "price_d-*", "price_day_*"]}}  # the price inputs and the target
+own = ["fc_solar_d+{horizon}", "fc_wind_d+{horizon}", "fc_solar_day_mean_d+{horizon}", "fc_wind_day_mean_d+{horizon}"]
+price.add_model(
+    RidgeModel(base + own, training_window=364, alphas=np.logspace(-3, 4, 15).tolist(), scaler=vst, name="ridge_own")
+)
+price.add_model(LEARModel(base + own, training_window=364, criterion="bic", scaler=vst, name="lear_own"))
+report = price.run(frame, test_start="2025-06-30", test_end="2026-10-09", target="price", horizon=1, save_dir="runs/price")
+```
+
+The honest variants run at `availability="warn"` and their listing is empty: nothing they read is out after 11:45. Not at
+`"raise"`, because DE's hgb_anchor skips four night forecasts the study set to 0 (an anchor missing on the issue row: A69 has a
+gap at 00:00 on both autumn switch days, and the actual of D-1 at 02:00 the day after a spring switch has no row; `zero_when`
+comes after the skips of the inputs), so two training rows of DE's `fc_solar_d+1` have no value, which `"raise"` refuses and
+`"warn"` reports.
+The post-gate variants (A69 for D+1) run at `"warn"` too and list A69's columns as late, 18:00 on D against the 11:45 issue.
+
+**Trained on actuals.** The study's anti-pattern trains on actual generation and serves its own forecast. That isn't one frame: a
+date's value is a training input of later forecasts and the issue input of the forecast the day before it. So each issue day D
+runs on its own frame, the chained columns overwritten by the actuals on every date to D, and the issue days' records are
+merged:
+
+```python
+for day in issue_days:
+    frame = with_actuals_up_to(day)  # yours: fc_solar and fc_wind (and their day means) hold the actuals to D
+    price.run(frame, test_start=day, test_end=day, target="price", horizon=1, save_dir=f"runs/trainact/{day}")
+```
+
+The documented way is the other one: run the upstream over the downstream's training years and read it back through
+`ForecastSource`, as every other variant here does.
+
+## Tier R: Experiment 1, Generation
+
+Identical keys in each table: the study's (`Keys (study's)`, in brackets) less the few the library doesn't forecast, the hour a
+spring switch skips and the repeated autumn hour, which the study's grid fills and a local frame has no single target for. On
+those keys the library's report scores the study's stored forecasts too (`Study, same keys`), so Δ is the estimator's alone.
+`Published` is the study's table on its own keys (`gen_table.csv`, `price_table.csv`; the report rounds them). **!** marks a cell
+more than 5 % off.
+
+**Test, 2025-07-01 to 2026-10-10.** MAE in MW; Δ is the library's MAE against the study's on the same keys.
+
+| Series | Model | Keys (study's) | Published | Study, same keys | Library | Δ | Daylight: study | library | Δ |
+|---|---|---|---|---|---|---|---|---|---|
+| DE-LU solar | ridge | 11,203 (11,206) | 1105 | 1105 | 1106 | +0.1 % | 2103 | 2104 | +0.1 % |
+| DE-LU solar | hgb | 11,203 (11,206) | 1026 | 1027 | 1021 | -0.5 % | 1955 | 1944 | -0.5 % |
+| DE-LU solar | hgb_anchor | 11,203 (11,206) | 984 | 984 | 983 | -0.1 % | 1873 | 1872 | -0.1 % |
+| DE-LU wind | ridge | 11,203 (11,205) | 2820 | 2820 | 2821 | +0.0 % |  |  |  |
+| DE-LU wind | hgb | 11,203 (11,205) | 2942 | 2942 | 2938 | -0.1 % |  |  |  |
+| DE-LU wind | hgb_anchor | 11,203 (11,205) | 2917 | 2917 | 2953 | +1.2 % |  |  |  |
+| AT solar | ridge | 11,205 (11,208) | 111.0 | 111.0 | 111.1 | +0.1 % | 213.1 | 213.3 | +0.1 % |
+| AT solar | hgb | 11,205 (11,208) | 162.7 | 162.7 | 165.8 | +1.9 % | 312.0 | 317.9 | +1.9 % |
+| AT solar | hgb_anchor | 11,205 (11,208) | 120.9 | 121.0 | 121.8 | +0.7 % | 232.6 | 234.2 | +0.7 % |
+| AT wind | ridge | 11,205 (11,207) | 338.6 | 338.6 | 338.9 | +0.1 % |  |  |  |
+| AT wind | hgb | 11,205 (11,207) | 336.4 | 336.4 | 333.5 | -0.8 % |  |  |  |
+| AT wind | hgb_anchor | 11,205 (11,207) | 334.2 | 334.2 | 332.4 | -0.5 % |  |  |  |
+
+**Validation, 2025-H1.** MAE in MW; Δ is the library's MAE against the study's on the same keys.
+
+| Series | Model | Keys (study's) | Published | Study, same keys | Library | Δ | Daylight: study | library | Δ |
+|---|---|---|---|---|---|---|---|---|---|
+| DE-LU solar | ridge | 4,341 (4,344) | 1068 | 1069 | 1067 | -0.2 % | 2021 | 2018 | -0.2 % |
+| DE-LU solar | hgb | 4,341 (4,344) | 1041 | 1042 | 1035 | -0.7 % | 1975 | 1962 | -0.7 % |
+| DE-LU solar | hgb_anchor | 4,341 (4,344) | 992 | 992 | 994 | +0.2 % | 1882 | 1885 | +0.2 % |
+| DE-LU wind | ridge | 4,341 (4,343) | 2683 | 2682 | 2683 | +0.0 % |  |  |  |
+| DE-LU wind | hgb | 4,341 (4,343) | 2811 | 2812 | 2778 | -1.2 % |  |  |  |
+| DE-LU wind | hgb_anchor | 4,341 (4,343) | 2816 | 2817 | 2823 | +0.2 % |  |  |  |
+| AT solar | ridge | 4,341 (4,344) | 140.3 | 140.4 | 140.3 | -0.1 % | 268.9 | 268.6 | -0.1 % |
+| AT solar | hgb | 4,341 (4,344) | 214.4 | 214.6 | 215.2 | +0.3 % | 411.4 | 412.4 | +0.3 % |
+| AT solar | hgb_anchor | 4,341 (4,344) | 170.3 | 170.4 | 173.3 | +1.7 % | 327.0 | 332.5 | +1.7 % |
+| AT wind | ridge | 4,341 (4,343) | 337.7 | 337.7 | 337.5 | -0.0 % |  |  |  |
+| AT wind | hgb | 4,341 (4,343) | 345.2 | 345.1 | 348.7 | +1.0 % |  |  |  |
+| AT wind | hgb_anchor | 4,341 (4,343) | 354.0 | 353.9 | 358.9 | +1.4 % |  |  |  |
+
+Every cell is within 2 % of the study's: the ridge models, each `RidgeModel` with the study's window, grid, scaling and per-row
+target, within 0.2 %, and the trees within 1.9 %, what the refit calendar and the study's early stopping leave (below). The trees
+fit the capacity factor as it is, as the study did: `target_transform="none"`, with `"period"` in the list so that the hours stay
+apart.
+
+<Aside title="A pooled tree on a generation target">
+  `HistGBModel(periods="pooled")` fits each period's own Invariant of the target by default (`target_transform="per_period"`). A
+  capacity factor with many night zeros is better fitted raw: at dawn and dusk an hour's MAD is tiny, so its summer values sit far
+  out in the transformed scale, where `sinh` turns a small error of the tree into a large one. A first run of this reproduction
+  with the default had DE solar's trees 9 to 16 % and AT solar's hgb_anchor 11 to 21 % worse than the study, and two stated
+  verdicts flipped. With `target_transform="none"` list `"period"`, or inputs read on each period's own row, or every hour of a
+  day gets one forecast ([Target transform](/epftoolbox2/models/trees/#target-transform)).
+</Aside>
+
+nMAE, MAE as a share of the proxy and the bias, test period:
+
+| Series | Model | nMAE % published | library | MAE/cap % published | library | Bias published | library |
+|---|---|---|---|---|---|---|---|
+| DE-LU solar | ridge | 11.4 | 11.4 | 2.10 | 2.10 | +66 | +64 |
+| DE-LU solar | hgb | 10.5 | 10.5 | 1.94 | 1.94 | +65 | +80 |
+| DE-LU solar | hgb_anchor | 10.1 | 10.1 | 1.86 | 1.86 | +49 | +48 |
+| DE-LU wind | ridge | 18.3 | 18.3 | 5.44 | 5.44 | -1 | -5 |
+| DE-LU wind | hgb | 19.1 | 19.1 | 5.70 | 5.69 | -1152 | -1132 |
+| DE-LU wind | hgb_anchor | 18.9 | 19.1 | 5.65 | 5.72 | -1054 | -1084 |
+| AT solar | ridge | 14.3 | 14.3 | 2.26 | 2.26 | +30 | +29 |
+| AT solar | hgb | 20.9 | 21.3 | 3.35 | 3.41 | +128 | +131 |
+| AT solar | hgb_anchor | 15.5 | 15.6 | 2.45 | 2.47 | +69 | +70 |
+| AT wind | ridge | 34.8 | 34.9 | 9.07 | 9.07 | +25 | +25 |
+| AT wind | hgb | 34.6 | 34.3 | 9.02 | 8.94 | -37 | -34 |
+| AT wind | hgb_anchor | 34.4 | 34.2 | 8.96 | 8.91 | -35 | -32 |
+
+The benchmarks are data, not models, and score the same on the library's keys:
+
+| Series | Benchmark | Keys (study) | MAE published | MAE on the library's keys |
+|---|---|---|---|---|
+| DE-LU solar | A69 for D+1 | 11,203 (11,206) | 760.4 | 760.6 |
+| DE-LU solar | A69 for D | 11,203 (11,206) | 2039.5 | 2040.1 |
+| DE-LU solar | actual D-1 | 11,203 (11,206) | 2492.1 | 2492.7 |
+| DE-LU wind | A69 for D+1 | 11,203 (11,205) | 1389.6 | 1389.4 |
+| DE-LU wind | A69 for D | 11,203 (11,205) | 8108.8 | 8106.0 |
+| DE-LU wind | actual D-1 | 11,203 (11,205) | 9801.2 | 9800.7 |
+| AT solar | A69 for D+1 | 11,205 (11,208) | 104.7 | 104.7 |
+| AT solar | A69 for D | 11,205 (11,208) | 220.1 | 220.1 |
+| AT solar | actual D-1 | 11,205 (11,208) | 245.5 | 245.6 |
+| AT wind | A69 for D+1 | 11,205 (11,207) | 269.4 | 269.4 |
+| AT wind | A69 for D | 11,205 (11,207) | 750.7 | 750.8 |
+| AT wind | actual D-1 | 11,205 (11,207) | 920.3 | 920.4 |
+
+### Verdicts
+
+Every DM row of `gen_dm.csv` for the test period, which section 3 of the report states (A69 for D+1 better than the study's chosen
+model, the tree better than the honest A69-for-D baseline, the anchors helping solar and not wind, the tree better than ridge for DE
+solar and worse for AT solar, wind a tie), on the same keys:
+
+| Zone | Comparison | Period | Model | Study: DM, p | Library: DM, p | Verdicts |
+|---|---|---|---|---|---|---|
+| DE-LU | solar: hgb_anchor vs A69 for D+1 | test |  | +6.71, 0.000 | +6.77, 0.000 | agree |
+| DE-LU | solar: hgb vs ridge | test |  | -2.71, 0.007 | -2.93, 0.003 | agree |
+| DE-LU | solar: hgb_anchor vs hgb | test |  | -4.17, 0.000 | -3.98, 0.000 | agree |
+| DE-LU | solar: hgb vs A69 for D | test |  | -10.70, 0.000 | -10.70, 0.000 | agree |
+| DE-LU | wind: hgb_anchor vs A69 for D+1 | test |  | +12.33, 0.000 | +12.09, 0.000 | agree |
+| DE-LU | wind: hgb vs ridge | test |  | +1.49, 0.136 | +1.46, 0.143 | agree |
+| DE-LU | wind: hgb_anchor vs hgb | test |  | -0.75, 0.451 | +0.53, 0.597 | agree |
+| DE-LU | wind: hgb vs A69 for D | test |  | -16.69, 0.000 | -16.80, 0.000 | agree |
+| AT | solar: hgb_anchor vs A69 for D+1 | test |  | +2.75, 0.006 | +2.85, 0.004 | agree |
+| AT | solar: hgb vs ridge | test |  | +6.43, 0.000 | +6.40, 0.000 | agree |
+| AT | solar: hgb_anchor vs hgb | test |  | -5.11, 0.000 | -5.32, 0.000 | agree |
+| AT | solar: hgb vs A69 for D | test |  | -3.28, 0.001 | -3.09, 0.002 | agree |
+| AT | wind: hgb_anchor vs A69 for D+1 | test |  | +6.04, 0.000 | +5.92, 0.000 | agree |
+| AT | wind: hgb vs ridge | test |  | -0.34, 0.737 | -0.85, 0.395 | agree |
+| AT | wind: hgb_anchor vs hgb | test |  | -0.89, 0.371 | -0.47, 0.642 | agree |
+| AT | wind: hgb vs A69 for D | test |  | -15.14, 0.000 | -15.32, 0.000 | agree |
+
+All 16 agree. Of the 16 validation rows, which the study computed but didn't state, 15 agree; the other is AT wind's hgb_anchor
+against hgb, p 0.077 in the study and 0.048 here:
+
+| Zone | Comparison | Period | Model | Study: DM, p | Library: DM, p | Verdicts |
+|---|---|---|---|---|---|---|
+| AT | wind: hgb_anchor vs hgb | val |  | +1.77, 0.077 | +1.97, 0.048 | **no difference / B better** |
+
+## Tier R: Experiment 2, Price
+
+The study chose hgb_anchor for DE solar and ridge for the other three series on 2025-H1, and so does this reproduction: the price
+models read those runs. Honest variants first, then the post-gate ones, which read A69 for D+1. Ridge, honest:
+
+| Zone | Variant | Keys (study's) | Published | Study, same keys | Library | Δ |
+|---|---|---|---|---|---|---|
+| DE-LU | base (no renewables) | 11,066 (11,140) | 20.43 | 20.46 | 20.52 | +0.3 % |
+| DE-LU | own forecast | 11,066 (11,140) | 17.21 | 17.19 | 17.06 | -0.8 % |
+| DE-LU | own + residual load | 11,066 (11,140) | 17.21 | 17.20 | 17.07 | -0.7 % |
+| DE-LU | trained on actuals, served own | 11,066 (11,140) | 17.56 | 17.57 | 17.52 | -0.3 % |
+| AT | base (no renewables) | 10,605 (10,676) | 18.44 | 18.37 | 18.26 | -0.6 % |
+| AT | own forecast | 10,605 (10,676) | 17.52 | 17.46 | 17.34 | -0.6 % |
+| AT | own + residual load | 10,605 (10,676) | 17.56 | 17.49 | 17.38 | -0.7 % |
+| AT | trained on actuals, served own | 10,605 (10,676) | 17.59 | 17.52 | 17.43 | -0.5 % |
+| AT | AT: own AT + own DE | 10,605 (10,676) | 16.82 | 16.75 | 16.68 | -0.4 % |
+
+The study's LASSO (`LassoLarsIC(criterion="bic")` of current scikit-learn) has no library twin; `LEARModel(criterion="bic")` stands
+in for it (BIC at the kinks of the LARS path by the old `normalize=True` rule, then Lago's refit at that penalty). Honest:
+
+| Zone | Variant | Keys (study's) | Published | Study, same keys | Library | Δ |
+|---|---|---|---|---|---|---|
+| DE-LU | base (no renewables) | 11,066 (11,140) | 20.91 | 20.93 | 20.50 | -2.0 % |
+| DE-LU | own forecast | 11,066 (11,140) | 17.59 | 17.57 | 17.00 | -3.3 % |
+| DE-LU | own + residual load | 11,066 (11,140) | 17.76 | 17.75 | 17.05 | -3.9 % |
+| DE-LU | trained on actuals, served own | 11,066 (11,140) | 18.00 | 18.01 | 17.52 | -2.7 % |
+| AT | base (no renewables) | 10,605 (10,676) | 19.31 | 19.24 | 18.30 | -4.9 % |
+| AT | own forecast | 10,605 (10,676) | 18.31 | 18.25 | 17.28 | -5.3 % **!** |
+| AT | own + residual load | 10,605 (10,676) | 18.35 | 18.28 | 17.31 | -5.3 % **!** |
+| AT | trained on actuals, served own | 10,605 (10,676) | 18.39 | 18.32 | 17.38 | -5.1 % **!** |
+| AT | AT: own AT + own DE | 10,605 (10,676) | 17.63 | 17.55 | 16.62 | -5.3 % **!** |
+
+Post-gate (`availability="warn"`, A69 for D+1 listed as late on every model that reads it), ridge:
+
+| Zone | Variant | Keys (study's) | Published | Study, same keys | Library | Δ |
+|---|---|---|---|---|---|---|
+| DE-LU | A69 for D+1 | 11,066 (11,140) | 16.03 | 16.02 | 15.98 | -0.2 % |
+| DE-LU | own + A69 | 11,066 (11,140) | 16.03 | 16.01 | 15.97 | -0.2 % |
+| AT | A69 for D+1 | 10,605 (10,676) | 17.72 | 17.66 | 17.60 | -0.3 % |
+| AT | own + A69 | 10,605 (10,676) | 17.46 | 17.40 | 17.30 | -0.5 % |
+| AT | AT: A69 for AT + DE | 10,605 (10,676) | 16.75 | 16.68 | 16.63 | -0.3 % |
+
+Post-gate, LASSO / LEAR:
+
+| Zone | Variant | Keys (study's) | Published | Study, same keys | Library | Δ |
+|---|---|---|---|---|---|---|
+| DE-LU | A69 for D+1 | 11,066 (11,140) | 16.54 | 16.52 | 15.96 | -3.4 % |
+| DE-LU | own + A69 | 11,066 (11,140) | 16.55 | 16.53 | 15.93 | -3.6 % |
+| AT | A69 for D+1 | 10,605 (10,676) | 18.56 | 18.49 | 17.52 | -5.3 % **!** |
+| AT | own + A69 | 10,605 (10,676) | 18.33 | 18.26 | 17.27 | -5.4 % **!** |
+| AT | AT: A69 for AT + DE | 10,605 (10,676) | 17.66 | 17.57 | 16.57 | -5.7 % **!** |
+
+Every ridge cell of the test period is within 0.8 % of the study's, and of the sub-periods within 2.2 % (DE's own + A69 in
+2025-H2):
+
+| Zone | Period | Variant | Keys | Published | Study, same keys | Library | Δ |
+|---|---|---|---|---|---|---|---|
+| DE-LU | 2025-H2 | base (no renewables) | 4,391 | 16.82 | 16.82 | 16.99 | +1.0 % |
+| DE-LU | 2025-H2 | own forecast | 4,391 | 14.02 | 13.96 | 13.76 | -1.4 % |
+| DE-LU | 2025-H2 | A69 for D+1 | 4,391 | 13.50 | 13.45 | 13.28 | -1.2 % |
+| DE-LU | 2026 | base (no renewables) | 6,675 | 22.80 | 22.86 | 22.85 | -0.0 % |
+| DE-LU | 2026 | own forecast | 6,675 | 19.31 | 19.32 | 19.23 | -0.5 % |
+| DE-LU | 2026 | A69 for D+1 | 6,675 | 17.70 | 17.71 | 17.75 | +0.2 % |
+| AT | 2025-H2 | base (no renewables) | 4,091 | 14.00 | 13.93 | 14.04 | +0.8 % |
+| AT | 2025-H2 | own forecast | 4,091 | 13.57 | 13.51 | 13.54 | +0.2 % |
+| AT | 2025-H2 | AT: own AT + own DE | 4,091 | 12.86 | 12.80 | 12.78 | -0.2 % |
+| AT | 2025-H2 | A69 for D+1 | 4,091 | 13.64 | 13.57 | 13.65 | +0.6 % |
+| AT | 2026 | base (no renewables) | 6,514 | 21.22 | 21.16 | 20.90 | -1.2 % |
+| AT | 2026 | own forecast | 6,514 | 20.00 | 19.93 | 19.73 | -1.0 % |
+| AT | 2026 | AT: own AT + own DE | 6,514 | 19.30 | 19.22 | 19.13 | -0.5 % |
+| AT | 2026 | A69 for D+1 | 6,514 | 20.29 | 20.22 | 20.07 | -0.7 % |
+
+LEAR is 2 to 4 % better than the study's LASSO in DE (5.5 % on own + residual load in 2026) and 5 to 6 % better in AT (6 to 8 % in
+AT's 2026), in every variant alike: the selection rule and the refit differ, not the inputs, and the ridge columns on the same
+inputs agree. The share of A69's gain the honest forecast recovers, `(base - own) / (base - A69)`, is the study's within 3 points in
+DE. In AT, with AT's inputs alone, it is a ratio of two small gains and above 100 % in both; with DE's inputs too it is 97 % with
+either model (the study 96 and 102 %):
+
+| Zone | Model | Inputs | Published | Library |
+|---|---|---|---|---|
+| DE-LU | ridge | own vs A69 | 73 % | 76 % |
+| DE-LU | LASSO / LEAR | own vs A69 | 76 % | 77 % |
+| AT | ridge | own vs A69 | 128 % | 138 % |
+| AT | ridge | own AT + DE vs A69 AT + DE | 96 % | 97 % |
+| AT | LASSO / LEAR | own vs A69 | 133 % | 130 % |
+| AT | LASSO / LEAR | own AT + DE vs A69 AT + DE | 102 % | 97 % |
+
+**Trained on actuals.** Training on actual generation and serving the forecast costs 0.46 EUR/MWh in DE (ridge, 17.52 against
+17.06; the study 0.35, and 0.38 on the same keys) and is significant (+3.31, p 0.001; the study +2.50, p 0.012); in AT it costs
+0.09 and isn't (p 0.29; the study p 0.41).
+
+### Verdicts
+
+The rows of `price_dm.csv` the report states: its DM table (ridge, and LASSO where it gives a bracket) and the sub-period bullet
+on own against A69 in DE.
+
+| Zone | Comparison | Period | Model | Study: DM, p | Library: DM, p | Verdicts |
+|---|---|---|---|---|---|---|
+| DE-LU | own vs base | test | ridge | -6.88, 0.000 | -6.74, 0.000 | agree |
+| DE-LU | A69 vs base | test | ridge | -8.38, 0.000 | -7.91, 0.000 | agree |
+| DE-LU | own vs A69 | test | ridge | +5.90, 0.000 | +5.31, 0.000 | agree |
+| DE-LU | own + A69 vs A69 | test | ridge | -0.16, 0.876 | -0.11, 0.916 | agree |
+| DE-LU | own + RL vs own | test | ridge | +0.13, 0.896 | +0.72, 0.472 | agree |
+| DE-LU | trained on actuals vs own | test | ridge | +2.50, 0.012 | +3.31, 0.001 | agree |
+| DE-LU | own vs base | test | LASSO / LEAR | -6.99, 0.000 | -6.82, 0.000 | agree |
+| DE-LU | A69 vs base | test | LASSO / LEAR | -8.15, 0.000 | -7.83, 0.000 | agree |
+| DE-LU | own vs A69 | test | LASSO / LEAR | +5.04, 0.000 | +4.95, 0.000 | agree |
+| DE-LU | own + A69 vs A69 | test | LASSO / LEAR | +0.26, 0.791 | -0.95, 0.340 | agree |
+| DE-LU | own + RL vs own | test | LASSO / LEAR | +3.21, 0.001 | +1.56, 0.118 | **B better / no difference** |
+| DE-LU | trained on actuals vs own | test | LASSO / LEAR | +3.02, 0.003 | +3.84, 0.000 | agree |
+| DE-LU | own vs A69 | 2025-H2 | ridge | +1.78, 0.076 | +1.63, 0.103 | agree |
+| DE-LU | own vs A69 | 2026 | ridge | +6.53, 0.000 | +5.72, 0.000 | agree |
+| AT | own vs base | test | ridge | -4.37, 0.000 | -4.41, 0.000 | agree |
+| AT | A69 vs base | test | ridge | -3.75, 0.000 | -3.62, 0.000 | agree |
+| AT | own vs A69 | test | ridge | -1.35, 0.177 | -1.69, 0.090 | agree |
+| AT | own + A69 vs A69 | test | ridge | -2.34, 0.019 | -2.71, 0.007 | agree |
+| AT | trained on actuals vs own | test | ridge | +0.83, 0.407 | +1.06, 0.291 | agree |
+| AT | own AT + DE vs own | test | ridge | -3.15, 0.002 | -3.07, 0.002 | agree |
+| AT | A69 AT + DE vs A69 | test | ridge | -4.09, 0.000 | -4.21, 0.000 | agree |
+| AT | own AT + DE vs A69 AT + DE | test | ridge | +0.58, 0.561 | +0.47, 0.635 | agree |
+| AT | own vs base | test | LASSO / LEAR | -4.59, 0.000 | -4.39, 0.000 | agree |
+| AT | A69 vs base | test | LASSO / LEAR | -3.79, 0.000 | -3.84, 0.000 | agree |
+| AT | own vs A69 | test | LASSO / LEAR | -1.82, 0.068 | -1.43, 0.152 | agree |
+| AT | own AT + DE vs own | test | LASSO / LEAR | -3.05, 0.002 | -2.84, 0.005 | agree |
+| AT | own AT + DE vs A69 AT + DE | test | LASSO / LEAR | -0.23, 0.817 | +0.45, 0.655 | agree |
+
+26 of 27 agree. The one that doesn't is a LASSO row: own plus residual load against own in DE, where LEAR still finds the residual
+load worse (+1.56) but not significantly (p 0.12). The study computed 75 more rows (the sub-periods of every pair, own + residual
+load against base); 63 agree, and each of the 12 that don't has a p-value between 0.02 and 0.12 on at least one side, a verdict a
+small change of the estimator moves:
+
+| Zone | Comparison | Period | Model | Study: DM, p | Library: DM, p | Verdicts |
+|---|---|---|---|---|---|---|
+| DE-LU | trained on actuals vs own | 2025-H2 | ridge | +1.63, 0.104 | +2.38, 0.018 | **no difference / B better** |
+| DE-LU | trained on actuals vs own | 2026 | ridge | +1.91, 0.056 | +2.36, 0.018 | **no difference / B better** |
+| DE-LU | own + RL vs own | 2026 | LASSO / LEAR | +3.83, 0.000 | +1.60, 0.109 | **B better / no difference** |
+| DE-LU | trained on actuals vs own | 2026 | LASSO / LEAR | +1.92, 0.055 | +3.05, 0.002 | **no difference / B better** |
+| AT | own + RL vs own | 2025-H2 | ridge | +2.26, 0.024 | +1.61, 0.108 | **B better / no difference** |
+| AT | A69 AT + DE vs A69 | 2025-H2 | ridge | -1.86, 0.063 | -2.10, 0.036 | **no difference / A better** |
+| AT | A69 vs base | 2025-H2 | LASSO / LEAR | -1.93, 0.054 | -2.05, 0.040 | **no difference / A better** |
+| AT | own + RL vs own | 2025-H2 | LASSO / LEAR | +1.60, 0.109 | +2.27, 0.023 | **no difference / B better** |
+| AT | A69 AT + DE vs A69 | 2025-H2 | LASSO / LEAR | -2.24, 0.025 | -1.86, 0.063 | **A better / no difference** |
+| AT | own AT + DE vs own | 2026 | ridge | -2.16, 0.031 | -1.92, 0.055 | **A better / no difference** |
+| AT | own vs A69 | 2026 | LASSO / LEAR | -2.10, 0.036 | -1.74, 0.081 | **A better / no difference** |
+| AT | own AT + DE vs own | 2026 | LASSO / LEAR | -1.98, 0.048 | -1.70, 0.090 | **A better / no difference** |
+
+## What Differs From the Study
+
+What makes a cell or a verdict differ, in the order of its effect:
+
+- **LASSO.** `LEARModel(criterion="bic")` against current `LassoLarsIC(criterion="bic")`: up to 8 % lower MAE, the 16 cells
+  outside the band and one stated verdict.
+- **The study's early stopping.** Its trees stopped early once a fit had more than 10,000 rows (scikit-learn's default
+  `early_stopping="auto"`, a random tenth held out); `HistGBModel` never stops early, so every fit runs its 400 iterations.
+- **Refit days.** The library's `refit="7D"` refits on Mondays and `"28D"` on 28-day blocks counted from 1970-01-05; the study
+  refitted on the target days 2024-07-01, then every 7 or 28 days. So a library forecast may train on data up to six days (27 for
+  the trees) older or newer than the study's. With the early stopping, this leaves every tree cell within 2 %.
+- **The price inputs' asinh.** The study put the price inputs through asinh with the target's median and MAD; the library's
+  `AsinhScaler(apply_to=[...])` uses each column's own. It stays inside the ridge columns' 2.2 %.
+- **Clock changes.** A local frame has 23 and 25 hours on the switch days, the study's grid 24: the switch days' keys differ (two
+  to three per table), and the price profile of the spring switch day has no 02:00, so its next day isn't forecast (as the docs
+  of `DailyProfileTransformer` say).
+- **Day means.** The study's daily means of the load forecast and A69 are `np.nanmean`, over the hours a day has (AT's load
+  forecast misses about an hour a day); `DailyStatsTransformer`'s are NaN on a day missing an hour, so the reproduction builds the
+  study's mean with `LambdaTransformer`. The chained forecasts' means are `ForecastSource(agg="mean")`'s, whole days only: two DE
+  days without a night forecast of hgb_anchor (above) are lost from every DE comparison, 48 keys.
+
+Diagnostics, as information (test period, the library's chosen stage-1 forecasts on the same keys): the sun is down in 47.8 % of
+DE solar hours and 48.1 % of AT's (study: 47.9 % and 48.1 %); A69's night error is 11.7 MW in DE and 0.1 MW in AT (study: the same);
+the proxy is 43.9, 49.7 and 58.1 GW for DE solar on 2024-07-01, 2025-07-01 and 2026-10-10 and 52.2, 48.8 and 54.1 GW for DE
+wind, to the MW the study's; on the 5.9 % of DE hours with a negative price every forecast is too high, the library's DE solar
+hgb_anchor by 1.15 GW (study 1.24) and wind ridge by 3.13 GW (study 3.13), A69 by 1.48 and 1.80 GW.
+
+## Counts and Compute
+
+- Stage 1: 4 series × 3 models × 832 issue days (2024-06-30 to 2026-10-09) × 24 hours, 19,964 forecasts planned per model; ridge
+  and hgb produce all of them, hgb_anchor all but 4 in DE and 2 in AT, solar and wind alike (the anchors' gaps above).
+- Stage 2: 467 issue days (2025-06-30 to 2026-10-09), 11,206 planned per model; DE produces 11,066 to 11,114 per variant and AT
+  10,606 to 10,651 (the hours whose load forecast is missing, the spring switch's next day, DE's two days above), and the tables
+  use the keys every model of the table and the study share: 11,066 in DE and 10,605 in AT.
+- On S02, 5 or 6 processes a run: under 1 minute for each series' stage 1, 2 to 7 minutes for each zone's honest and post-gate
+  price runs (ridge and LEAR), about 2 minutes for each zone's 467 trained-on-actuals runs at 12 workers. The trees were rerun
+  with `target_transform="none"`, and with them the price variants that read DE solar (DE's own, own + residual load, own + A69
+  and trained on actuals, AT's own AT + own DE); the other variants read inputs that didn't change and are the first run's. The
+  rerun's ridge stage 1 is the first run's to the bit. Ridge runs are the same to the bit on S02 and on a workstation; the trees
+  differ in the last bits (up to 7e-13 relative) between the two machines and are the same at any process count on one.
+
+The scripts and logs are outside the repository (`epftoolbox2-research/library_check_step7/reproduction/renewables/`):
+`convert.py` (the study's arrays as local frames), `stage1.py`, `stage2.py`, `trainact.py`, `score.py`.
+
+## See Also
+
+- [Generation Targets](/epftoolbox2/model-pipeline/generation/): `normalise_by`, `bounds`, `zero_when`, the proxy and the night flag
+- [Chaining Pipelines](/epftoolbox2/model-pipeline/chaining/): `ForecastSource`, coverage of the training rows, late upstreams
+- [Gradient-Boosted Trees](/epftoolbox2/models/trees/) and [Residual Model](/epftoolbox2/models/residual/): `HistGBModel`
+- [`examples/chained_solar_price.py`](https://github.com/dawidlinek/epftoolbox2/blob/main/examples/chained_solar_price.py): the
+  chain in small, keyless, on Energy-Charts and Open-Meteo data
