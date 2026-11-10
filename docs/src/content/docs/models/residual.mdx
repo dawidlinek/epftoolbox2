@@ -188,8 +188,8 @@ scikit-learn's version in the manifest's `runtime`, compared on resume: the algo
 With `periods="pooled"` the rows of a fit are the (date, period) rows of every period, each predictor read on its period's own
 row, stacked by date then period, and a period with no training row skips its forecasts (`no_finite_training_rows`). Their
 targets go through each period's Invariant by default, one over every row with `target_transform="pooled"`, or as they are with
-`"none"` (a capacity factor from `normalise_by` is better fitted raw: see [Target transform](/epftoolbox2/models/trees/#target-transform),
-which holds for `HistGBModel` as for the boosted trees). See
+`"none"` (a capacity factor from `normalise_by` can be better fitted raw, and the inputs must then tell the periods apart: see
+[Target transform](/epftoolbox2/models/trees/#target-transform), measured on `HistGBModel`). See
 [Day and pooled units](/epftoolbox2/reference/extending/#day-and-pooled-units) for the unit kinds.
 
 ## Reproducing the research's hybrid

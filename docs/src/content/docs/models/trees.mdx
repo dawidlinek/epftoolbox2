@@ -135,10 +135,19 @@ A pooled fit stacks the rows of every period and fits one tree model on them; `t
   `asinh((y - median) / (MAD / 0.6745))` of that period's training targets, and each forecast mapped back with its period's.
 - **`"pooled"`**: one Invariant over the targets of every row.
 - **`"none"`**: the raw targets. The estimator fits the stacked targets as they are (no centring, no scale, no asinh) and its
-  prediction of a row is the forecast. A target the transform distorts is better fitted raw: on a solar capacity factor
-  (`normalise_by`, between 0 and about 1, with many night zeros), a reproduction of a solar and wind study found pooled
-  `HistGBModel`s up to 21 % worse in MAE through the per-period Invariant than the study's fits of the raw target, and every tree
-  within 2 % of the study with the raw target.
+  prediction of a row is the forecast. A target the transform distorts can be better fitted raw: on a solar capacity factor
+  (`normalise_by`, between 0 and about 1, with many night zeros), a reproduction of a solar and wind study found its pooled
+  `HistGBModel`s up to 21 % worse in MAE through the per-period Invariant than the study's fits of the raw target, and each of
+  them within 2 % of the study with the raw target. Only `HistGBModel` was measured there; LightGBM, XGBoost and CatBoost
+  weren't.
+
+What `"none"` costs a pooled fit: with the per-period Invariant each period's median is put back into its forecast, so the
+periods differ even where the inputs don't; without it only the inputs tell the periods apart. List `"period"`, or predictors
+read on each period's own row (`price_d-1`, a lag of the target), or every period of a day gets the same forecast: with
+`is_weekend_d+{horizon}` alone, a pooled `HistGBModel` on synthetic prices gave one forecast for all 24 hours of a day (MAE 11.88
+against 8.24 per-period), and 17 distinct ones once `"period"` was listed (8.47 against 8.19). The loss also weighs the periods by
+their spread on the raw scale: periods with wider swings (midday solar, evening peaks) pull the fit more than the quiet ones,
+where the Invariant gives each period's targets one scale.
 
 The transform is the pooled fit's own: the inputs still go through `scaler`'s input part, the per-row target (`normalise_by`,
 `bounds`, `zero_when`) still divides each row's target and multiplies the forecast, and the forecasts a run makes (its keys) don't

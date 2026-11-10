@@ -214,9 +214,10 @@ an issue day it didn't sample.
 - **`target_transform="none"`: a pooled tree fits the raw target.** `HistGBModel`, `LightGBMModel`, `XGBoostModel` and
   `CatBoostModel` take a keyword-only `target_transform`: `"per_period"` (each period's own Invariant, the default and the only
   behaviour before), `"pooled"` (one Invariant over every row) or `"none"`, with which the estimator fits the stacked targets as
-  they are and its prediction is the forecast (`scalers.target.RawTarget`). A solar capacity factor (`normalise_by`) is better fitted
-  raw: a reproduction of a solar and wind study found the per-period Invariant up to 21 % worse in MAE than the study's raw fits, and
-  the raw target within 2 % of them. `periods="each"` transforms its targets with `scaler=` and refuses another value. The default
+  they are and its prediction is the forecast (`scalers.target.RawTarget`). A solar capacity factor (`normalise_by`) can be better
+  fitted raw: a reproduction of a solar and wind study found its pooled `HistGBModel`s up to 21 % worse in MAE through the
+  per-period Invariant than the study's raw fits, and within 2 % of them with the raw target (the boosted trees weren't measured).
+  Without each period's median put back, only the inputs tell the periods apart: list `"period"` or per-period predictors. `periods="each"` transforms its targets with `scaler=` and refuses another value. The default
   moves nothing: it is written to YAML only when set and kept out of `model_params`, and the manifest's `target_transform` field,
   compared on resume, records `"none"`. A `ResidualModel`'s pooled learner applies its own to the residuals. A day or pooled unit
   of your own takes `target_transform = "none"` too (a day unit `"per_period"` or `"none"`: `"pooled"` on a day unit, which it
