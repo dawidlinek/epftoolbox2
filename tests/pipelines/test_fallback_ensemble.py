@@ -591,6 +591,40 @@ def test_allow_missing_passes_over_a_rung_without_results_and_keeps_the_ladder(t
     assert counts(report, "live") == (5 * 24, 4 * 24, 0, 24)
 
 
+def test_after_the_spring_switch_a_rung_reading_yesterdays_price_gives_up_the_day(tmp_path):
+    """The reviewer's two scenarios (decision 10's choice, pinned). Issued on Monday 27 March 2023, the 02:00 key reads
+    `price_d-1` at 02:00 of the switch day, which the clock skips, so a model reading it lacks that key and, per day, the whole
+    day: a rung below that doesn't read it serves the day; one that reads it too leaves the day missing; per key only the
+    02:00 is missing."""
+    data = make_market_data(days=150, horizon=1, noise=1.0)
+    lagged = [*PREDICTORS, "price_d-1"]
+    pipe = (
+        ModelPipeline()
+        .add_model(OLSModel(lagged, training_window=28, name="main"))
+        .add_model(OLSModel(PREDICTORS, training_window=28, name="base"))
+        .add_model(OLSModel(lagged, training_window=56, name="main56"))
+        .add_ensemble(FallbackEnsemble(["main", "base"], name="unlagged_below"))
+        .add_ensemble(FallbackEnsemble(["main", "main56"], name="lagged_below"))
+        .add_ensemble(FallbackEnsemble(["main", "main56"], per="key", name="per_key"))
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        report = pipe.run(data, test_start="2023-03-22", test_end="2023-04-02", horizon=1, save_dir=str(tmp_path))
+    table = report.forecast_counts().set_index("model")
+    assert table.loc["main", "missing_test_predictors"] == table.loc["main56", "missing_test_predictors"] == 1
+    planned = table.loc["main", "planned"]
+    by_day = {
+        name: pd.DataFrame(stored(tmp_path / f"{name}.jsonl")) for name in ("unlagged_below", "lagged_below", "per_key")
+    }
+    monday = by_day["unlagged_below"][by_day["unlagged_below"]["run_date"] == "2023-03-27"]
+    assert len(monday) == 24 and set(monday["member"]) == {"base"}
+    assert set(by_day["unlagged_below"].loc[by_day["unlagged_below"]["run_date"] != "2023-03-27", "member"]) == {"main"}
+    assert table.loc["unlagged_below", "produced"] == planned
+    assert "2023-03-27" not in set(by_day["lagged_below"]["run_date"])
+    assert (table.loc["lagged_below", "produced"], table.loc["lagged_below", "member_missing"]) == (planned - 24, 24)
+    assert (table.loc["per_key", "produced"], table.loc["per_key", "member_missing"]) == (planned - 1, 1)
+
+
 # ---------------------------------------------------------------------------------------------------------------------
 # frozen()
 # ---------------------------------------------------------------------------------------------------------------------
