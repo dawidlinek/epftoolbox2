@@ -370,9 +370,9 @@ library's forecasts within 1.4 x 10⁻⁴ of 0.3.12's), so its 1e-3 check is a G
 `wcss/gpu_b1.sbatch`, with TimesFM-3's GPU time).
 
 **Time** on that CPU at 8 torch threads, a machine loaded with other users' work (load 29 to 96 on 128 threads): a market-year
-of Timestral-209M with the load forecast took 1,881 to 2,211 s; one call of 64 items took 256 s (4.0 s an item; 1,456 s for the
-research's 364 items, against its 1,053 s on the same machine at load 11 to 24, and 1,792 s for the 448 items the zero-shot
-calendar's seven blocks of 64 days hold over a year). TimesFM-3 took 775 to 991 s (364 days of context, load forecast), 423 to
+of Timestral-209M with the load forecast took 1,881 to 2,211 s; one call of 64 items, the backend alone, took 256 to 259 s at a
+steady load of 26 (4.0 s an item: 1,467 s for the research's 364 items, against its 1,053 s on the same machine at load 11 to 24
+with torch 2.14.1, and 1,806 s for the 448 items the zero-shot calendar's seven blocks of 64 days hold over a year). TimesFM-3 took 775 to 991 s (364 days of context, load forecast), 423 to
 488 s (univariate) and 222 to 243 s (91 days).
 
 `verify` with the real weights on that CPU (five issue days with a spring switch among them, a 28-day context, one thread) is ok
