@@ -161,6 +161,74 @@ never reused and is rebuilt on every run, because what it holds was settled only
 The single-file cache uses the same temporary-file-and-rename writes and a lock (`<file>.lock`), so parallel
 processes pointed at the same file download the data once.
 
+## Refresh with a budget
+
+A live run has to finish its downloads before its deadline, also on a morning when a source is down. `budget` (seconds from
+now) and `deadline` (an instant) bound the whole refresh, the earlier of the two counting:
+
+```python
+from epftoolbox2.data.sources import EntsoeSource, OpenMeteoSource
+from epftoolbox2.pipelines import DataPipeline
+
+pipeline = DataPipeline(
+    sources=[
+        EntsoeSource(country_code="PL", api_key="...", type=["load", "price"]),
+        OpenMeteoSource(latitude=52.23, longitude=21.01),
+    ],
+    timezone="Europe/Warsaw",
+)
+df = pipeline.run("today_d-30", "today_d+1", cache=True, budget=300, timeout=30, retries=3, on_failure="cache")
+```
+
+- The sources are asked one after another, each within what is left. A request is sent only while time is left, with its
+  timeout cut to what is left, and a wait that would end at or after the deadline is never started: a retry's backoff, a
+  server's Retry-After, Energy-Charts' rate limit. The source raises `SourceTimeout` (`epftoolbox2.data.refresh`) instead,
+  with its last error. A source whose turn comes after the deadline is not asked at all (`skipped`). So a source that answers
+  503 forever costs the budget and at most one request's timeout more.
+- `timeout` and `retries` replace each source's own for every HTTP request (ENTSO-E and PSE: 60 s and 5 retries,
+  Energy-Charts 60 s and 6, Open-Meteo 60 s and 4, OpenHolidays 30 s and 2). They are arguments of the run, not of the sources, so a saved pipeline
+  and its cache keys don't change. `retries=0` asks once.
+- A naive `deadline` is a time of the pipeline's `timezone`, as a naive `start` is (UTC without one).
+- Budgets and deadlines are read on the clock (`epftoolbox2.clock`), so a test or a simulated week runs them on a
+  `FakeClock` without waiting. A Retry-After given as an HTTP date is an instant of real time and is read against the
+  machine's clock, and Energy-Charts' rate limit counts real seconds, so a replay on a fake clock against a real server keeps
+  the server's limits.
+- Without the new arguments a run is what it was: the same requests, waits and frame.
+
+### Failure modes
+
+| `on_failure` | A source that failed, ran out of time or got no time |
+|--------------|-------------------------------------------------------|
+| `"raise"` (default) | Its error is raised, a `SourceTimeout` included, and `last_refresh` ends at it |
+| `"cache"` (needs `cache=True`) | It gives only what its source cache holds, and the run goes on |
+
+What the source cache holds is settled data only: never the last two days before now, nor a tail the source declared
+unsettled (see [What is recorded as cached](#what-is-recorded-as-cached)). So with `on_failure="cache"` a failed source's
+recent cells are missing, and the models decide what that means (a model skips a forecast whose predictor is NaN, a
+`FallbackEnsemble` takes the next rung). Nothing is filled with an older value. A source without a cache of its own
+(`CsvSource`, `ForecastSource`) gives no rows and no columns. A part a failed fetch had already written to the cache counts:
+the cache is read after the fetch let go of its lock.
+
+The lock of a source's cache is held around its fetch and the write, and a fetch that raises (a `SourceTimeout` too) lets go
+of it as it leaves. A full hit fetches nothing and takes the lock only inside each of its reads.
+
+### What the refresh did
+
+`pipeline.last_refresh` is a `RefreshRecord`, also after a run that raised:
+
+```python
+record = pipeline.last_refresh
+print(record.ok, record.failed)  # every source ok; the names of those that aren't
+entry = record["EntsoeSource #1"]  # "<class> #<position>"
+print(entry.status)  # "ok", "failed", "timeout" or "skipped"
+print(entry.seconds, entry.requests, entry.retries)  # on the clock; HTTP requests; how many asked again
+print(entry.error)  # "EntsoeApiError: ...", every key of the pipeline's sources replaced by ***
+print(entry.rows, entry.last_valid)  # rows given in [start, end); the last timestamp with a value per column
+summary = record.to_dict()  # JSON-safe
+```
+
+A hit of the single-file cache asks no source: each is `ok`, with `rows` and `last_valid` unknown (`None`).
+
 ## Supported Sources
 
 | Source | Source cache |
