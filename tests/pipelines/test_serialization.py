@@ -25,6 +25,8 @@ from epftoolbox2.models import (
     ShapeModel,
     T0Model,
     ChronosModel,
+    TabICLModel,
+    TabPFNModel,
     TorchModel,
     XGBoostModel,
 )
@@ -911,6 +913,21 @@ class TestModelPipelineParameterFidelity:
                     name="T0",
                 ),
                 ChronosModel(context=182, known_ahead=["load_forecast"], batch_size=32, device="cuda:1", name="C2"),
+                # The in-context families build, save and load without their packages or weights (step 6e).
+                TabPFNModel(
+                    ["price_h05_d-1", "load_d+{horizon}"],
+                    training_window=364,
+                    refit="1MS",
+                    n_estimators=8,
+                    random_state=4,
+                    device="cuda:1",
+                    weights="/weights/tabpfn-v2-regressor.ckpt",
+                    block_predict=False,
+                    name="PFN",
+                    newest_target="published",
+                    binary_mask="fit",
+                ),
+                TabICLModel(["price_d-1"], training_window=56, refit="1D", n_estimators=2, device="cpu", name="ICL"),
             ],
             "ensembles": [
                 AverageEnsemble(["O", "L"], top=1, by="validation", name="best"),

@@ -265,6 +265,14 @@ an issue day it didn't sample.
   no forecast issued on or before the last day its choice read, counted as `chosen_in_sample`, and neither does any ensemble made of
   it, so a frozen pipeline run over the study's days is never scored in sample. Nothing else moves: without a fallback or `chosen_through` every
   record, manifest, YAML file and table is bit for bit as before. See [Fallbacks](/epftoolbox2/model-pipeline/fallback/).
+- **`TabPFNModel` and `TabICLModel`: in-context tabular regressors, one extra each.** `pip install 'epftoolbox2[tabpfn]'` (or
+  `[tabicl]`), then `epf weights fetch TabPFNModel` (TabPFN v2's regression weights, Prior Labs License 1.1 with its "Built with
+  PriorLabs-TabPFN" attribution; only the v2 weights are ever used) or `TabICLModel` (TabICLv2, BSD-3-Clause). Each fits one model
+  per period, horizon and refit day (728 days of context, weekly, the target as the Invariant, raw inputs) and predicts a refit
+  block's issue days in one call; the forecast is the median. Their packages are imported by a worker's first fit, never by
+  `import epftoolbox2`, a data pipeline or building, saving and loading the classes. The manifest compares the package's and torch's
+  versions, the weights' sha256 and the device type; a package's error stops the run. `MitraModel` is not shipped (its 1,000-bin head
+  needs patches of AutoGluon's internals). See [In-Context Models](/epftoolbox2/models/in-context/).
 - **`target_transform="none"`: a pooled tree fits the raw target.** `HistGBModel`, `LightGBMModel`, `XGBoostModel` and
   `CatBoostModel` take a keyword-only `target_transform`: `"per_period"` (each period's own Invariant, the default and the only
   behaviour before), `"pooled"` (one Invariant over every row) or `"none"`, with which the estimator fits the stacked targets as

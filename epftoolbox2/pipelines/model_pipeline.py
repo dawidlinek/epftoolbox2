@@ -206,6 +206,9 @@ COMPONENT_REGISTRY = {
         "ShapeModel": "epftoolbox2.models.shape",
         "T0Model": "epftoolbox2.models.foundation",
         "ChronosModel": "epftoolbox2.models.foundation",
+        # The in-context families (step 6e).
+        "TabPFNModel": "epftoolbox2.models.tabpfn",
+        "TabICLModel": "epftoolbox2.models.tabicl",
     },
     "ensembles": {
         "AverageEnsemble": "epftoolbox2.ensembles.average",

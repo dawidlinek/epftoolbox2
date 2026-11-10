@@ -21,9 +21,10 @@ until when, the runtime packages its numbers depend on, and the weight files wit
 - **Every report** says what each model is under: `report.provenance()`, a "Model provenance" block in the terminal exporter,
   `<stem>.provenance.csv` next to the `CsvExporter` file and a "Provenance" sheet in the `ExcelExporter` workbook.
 
-A core model has no card, and none of this changes anything of its runs, files or reports. The [neural networks](/epftoolbox2/models/neural-networks/) and the
-[foundation models](/epftoolbox2/models/foundation-models/) (`T0Model`, `ChronosModel`, with weights) have cards, and a family of
-your own can declare one ([below](#declaring-a-card)).
+A core model has no card, and none of this changes anything of its runs, files or reports. The trees, the
+[neural networks](/epftoolbox2/models/neural-networks/), the [in-context models](/epftoolbox2/models/in-context/) (`TabPFNModel`,
+`TabICLModel`) and the [foundation models](/epftoolbox2/models/foundation-models/) (`T0Model`, `ChronosModel`) have cards, the last
+four with weights to fetch, and a family of your own can declare one ([below](#declaring-a-card)).
 
 ## Fetching weights
 

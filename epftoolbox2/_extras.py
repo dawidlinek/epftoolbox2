@@ -18,6 +18,9 @@ EXTRAS: Dict[str, Tuple[str, ...]] = {
     "tune": ("optuna",),
     "t0": ("t0", "torch", "safetensors"),
     "chronos": ("chronos", "torch", "transformers"),
+    # The in-context families (step 6e), each with torch, which its package imports.
+    "tabpfn": ("tabpfn", "torch"),
+    "tabicl": ("tabicl", "torch"),
 }
 
 
