@@ -448,9 +448,10 @@ def test_the_writer_writes_the_hand_made_files(tmp_path, save_format):
     ours = [json.loads(line) for line in (tmp_path / "store" / "issues.jsonl").read_text().splitlines()]
     theirs = [json.loads(line) for line in (tmp_path / "hand" / "issues.jsonl").read_text().splitlines()]
     assert [line for line in ours if line["committed"]] == [line for line in theirs if line["committed"]]
-    assert [(line["status"], line["revision"], line["committed"]) for line in ours if not line["committed"]] == [
-        ("late", None, False)
-    ]
+    others = [line for line in ours if not line["committed"] and line["status"] != "begun"]
+    assert [(line["status"], line["revision"], line["committed"]) for line in others] == [("late", None, False)]
+    begun = [(line["issue"], line["revision"]) for line in ours if line["status"] == "begun"]
+    assert begun == WRITTEN  # each revision's number taken by a line before any of its records
     for policy, cutoff in POLICY_CELLS:
         assert read(stored, policy, cutoff) == expected(policy, cutoff)
     record = next(iter(iter_any(stored)))
@@ -539,15 +540,14 @@ def test_a_crash_before_the_commit_is_invisible_and_its_number_is_never_reused(t
         assert store.next_revision(DAYS[1]) == 4
     # The next call cuts the torn line off and takes 4; readers see 4 and never 3.
     with store.hold():
-        with pytest.warns(UserWarning):
+        with pytest.warns(UserWarning, match="cut off"):  # its "begun" line is the first appended after the torn one
             rev = store.begin(DAYS[1], issued_at="2026-10-22T09:35:00+00:00", snapshot="y")
         assert rev.revision == 4
         out = rev.open("ols")
         for hour in HOURS:
             for horizon in HORIZONS:
                 out.save(base_record(DAYS[1], hour, horizon, -4.0))
-        with pytest.warns(UserWarning, match="cut off"):
-            rev.commit(finished="2026-10-22T09:36:00+00:00")
+        rev.commit(finished="2026-10-22T09:36:00+00:00")
     assert {v[:2] for k, v in read(path).items() if k[2] == DAYS[1]} == {(4, -4.0)}
     assert sorted(store.committed(DAYS[1])[DAYS[1]]) == [1, 2, 4]
 
@@ -1152,3 +1152,146 @@ def test_forecast_source_warns_when_its_cutoff_leaves_out_a_newer_commit(tmp_pat
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         fetched(ForecastSource(directory, "up", "fc", available="12:00"))
+
+
+# --- review round 2: reused numbers, pending reads, silent fail-closed readers, the warning's range -------------------------
+
+
+@pytest.mark.parametrize("save_format", ["jsonl", "parquet"])
+def test_a_crashed_revision_s_number_stays_taken_when_its_folder_is_removed(tmp_path, save_format):
+    """r2 saves a and b, then its call raises (hold() abandons it): records on file, no commit. Its folder is removed by hand.
+    The next call takes 3, never 2 again, so the crashed records stay invisible: b reads r1, never r2's crashed values."""
+    import shutil
+
+    directory = tmp_path / "live"
+    store = LiveStore(directory)
+    store.init(issue_timezone=ZONE, deadline="11:55")
+    with store.hold():
+        with store.begin(DAYS[0], issued_at="2026-10-21T07:00:00+00:00") as rev:
+            a, b = rev.open("a", save_format), rev.open("b", save_format)
+            for hour in HOURS:
+                a.save(base_record(DAYS[0], hour, 1, 100.0 + hour))
+                b.save(base_record(DAYS[0], hour, 1, 200.0 + hour))
+            rev.commit(finished="2026-10-21T07:10:00+00:00")
+    with pytest.raises(RuntimeError, match="crash"):
+        with store.hold():
+            rev = store.begin(DAYS[0], issued_at="2026-10-21T08:00:00+00:00")
+            a, b = rev.open("a", save_format), rev.open("b", save_format)
+            for hour in HOURS:
+                a.save(base_record(DAYS[0], hour, 1, 900.0 + hour))
+                b.save(base_record(DAYS[0], hour, 1, 990.0 + hour))
+            raise RuntimeError("crash after writing")
+    shutil.rmtree(directory / "issues" / DAYS[0] / "r2")
+    with store.hold():
+        with store.begin(DAYS[0], issued_at="2026-10-21T09:00:00+00:00") as rev:
+            assert rev.revision == 3
+            a = rev.open("a", save_format)
+            a.save(base_record(DAYS[0], 0, 1, 500.0))
+            a.save_skip(base_record(DAYS[0], 1, 1, None, "missing_test_row"))
+            rev.commit(finished="2026-10-21T09:10:00+00:00")
+    committed = store.visible("latest")
+    got_a = {
+        (r["hour"], r["revision"], r["prediction"])
+        for r in read_records(directory / f"a.{save_format}", committed=committed, statuses=None)
+    }
+    assert got_a == {(0, 3, 500.0), (1, 3, None)}
+    got_b = {
+        (r["hour"], r["revision"], r["prediction"])
+        for r in read_records(directory / f"b.{save_format}", committed=committed)
+    }
+    assert got_b == {(h, 1, 200.0 + h) for h in HOURS}
+
+
+@pytest.mark.parametrize("save_format", ["jsonl", "parquet"])
+def test_a_record_that_is_not_its_commit_s_raises_on_read(tmp_path, save_format):
+    """A visible record whose issued_at or snapshot isn't what its commit line says (a number reused after its folder and log
+    lines were removed, or a hand edit) raises rather than pass for the committed revision's."""
+    directory = tmp_path / "live"
+    path = write_live(directory)
+    lines_ = path.read_text().splitlines()
+    for i, line in enumerate(lines_):
+        record = json.loads(line)
+        if (record["run_date"], record["revision"], record["hour"], record["horizon"]) == (DAYS[1], 2, 3, 2):
+            lines_[i] = json.dumps({**record, "issued_at": "2026-10-22T08:59:00+00:00"})
+    path.write_text("\n".join(lines_) + "\n")
+    if save_format == "parquet":
+        convert(directory, "parquet")
+        path = directory / "ols.parquet"
+    with pytest.raises(LiveDirectoryError, match="another call"):
+        read(path)
+    ref = ModelResultRef("ols", path, 0, DAYS[0], DAYS[-1], 2)
+    with pytest.raises(LiveDirectoryError, match="another call"):
+        list(ref.iter_records())
+    if save_format == "parquet":
+        with pytest.raises(LiveDirectoryError, match="another call"):
+            ref.frame(["hour", "prediction"])
+    assert read(path, "first") == expected("first", "deadline")  # r1 of that day is untouched
+    snap = write_live(tmp_path / "snap")
+    text = snap.read_text().replace(f'"snapshot": "{snapshot_of(DAYS[0], 2)}"', '"snapshot": "edited"', 1)
+    snap.write_text(text)
+    with pytest.raises(LiveDirectoryError, match="snapshot"):
+        read(snap)
+
+
+def test_pending_shows_the_call_s_revision_alone_on_its_day(tmp_path):
+    """An ensemble of r2 reads its members with pending=r2: a member not flushed yet has nothing that day, never r1's."""
+    directory = tmp_path / "live"
+    store = LiveStore(directory)
+    store.init(issue_timezone=ZONE, deadline="11:55")
+    with store.hold():
+        with store.begin(DAYS[0], issued_at="2026-10-21T07:00:00+00:00") as rev:
+            a, b = rev.open("a", "parquet"), rev.open("b", "parquet")
+            for hour in HOURS:
+                a.save(base_record(DAYS[0], hour, 1, 1.0))
+                b.save(base_record(DAYS[0], hour, 1, 2.0))
+            rev.commit(finished="2026-10-21T07:10:00+00:00")
+        with store.begin(DAYS[0], issued_at="2026-10-21T08:00:00+00:00") as rev:
+            a, b = rev.open("a", "parquet"), rev.open("b", "parquet")
+            for hour in HOURS:
+                a.save(base_record(DAYS[0], hour, 1, 11.0))
+                b.save(base_record(DAYS[0], hour, 1, 22.0))
+            a.flush()
+            mine = store.visible("latest", None, pending=rev)
+            assert list(mine[DAYS[0]]) == [2]
+            assert {r["revision"] for r in read_records(directory / "a.parquet", committed=mine)} == {2}
+            assert list(read_records(directory / "b.parquet", committed=mine)) == []
+            b.flush()
+            assert {r["prediction"] for r in read_records(directory / "b.parquet", committed=mine)} == {22.0}
+
+
+def test_a_cutoff_that_leaves_out_committed_revisions_warns(tmp_path):
+    path = write_live(tmp_path / "live")
+    (path.parent / "live.json").write_text(json.dumps({"mode": "live", "issue_timezone": ZONE}))  # no deadline on file
+    ref = ModelResultRef("ols", path, 0, DAYS[0], DAYS[-1], 2)
+    with pytest.warns(
+        UserWarning,
+        match=r"leaves out 6 committed revisions of 3 issue days.*3 of those days read nothing.*no deadline",
+    ):
+        assert list(ref.iter_records()) == []
+    (path.parent / "live.json").write_text(json.dumps({"mode": "live", "issue_timezone": ZONE, "deadline": "11:55"}))
+    named = ModelResultRef(
+        "ols", path, 0, DAYS[0], DAYS[-1], 2, policy="latest", cutoff={DAYS[0]: "2026-10-21T12:00:00+00:00"}
+    )
+    with pytest.warns(
+        UserWarning, match=r"leaves out 4 committed revisions of 2 issue days \(e.g. 2026-10-22\), and 2 of those"
+    ):
+        assert {r["run_date"] for r in named.iter_records()} == {DAYS[0]}
+    import warnings
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        list(ModelResultRef("ols", path, 0, DAYS[0], DAYS[-1], 2, cutoff=None).iter_records())
+        list(ModelResultRef("ols", path, 0, DAYS[0], DAYS[1], 2).iter_records())  # deadline: days 1, 2 read in full
+
+
+def test_forecast_source_warns_about_commits_of_the_fetched_issue_days_alone(tmp_path):
+    import warnings
+
+    directory = tmp_path / "up"
+    write_upstream(directory)  # day 1 (10-19) has a commit after 11:45; it is the issue day of targets on 10-20
+    source = ForecastSource(directory, "up", "fc")
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        source.fetch(pd.Timestamp("2026-10-21T22:00", tz="UTC"), pd.Timestamp("2026-10-23", tz="UTC"))  # 10-22 targets
+    with pytest.warns(UserWarning, match=r"on 1 issue days \(e.g. 2026-10-19\)"):
+        source.fetch(pd.Timestamp("2026-10-19T22:00", tz="UTC"), pd.Timestamp("2026-10-20T22:00", tz="UTC"))  # 10-20
