@@ -519,11 +519,22 @@ def class_path(cls: type) -> str:
 
 
 def card_variant(model_or_cls: Any) -> Optional[str]:
-    """The size (key of the class's `_card_variants`) whose card the model has, or None for a class with one card."""
+    """The size (key of the class's `_card_variants`) whose card the model has, or None for a class with one card. Matched by
+    the card's weights (repository and revision), not by identity: a deep copy or a pickle of the model (a run's copy, a
+    worker's, the GPU host's) holds an equal card, not the same object."""
     cls = model_or_cls if isinstance(model_or_cls, type) else type(model_or_cls)
     variants = getattr(cls, "_card_variants", None) or {}
     card = getattr(model_or_cls, "_card", None)
-    return next((size for size, candidate in variants.items() if candidate is card), None)
+    if card is None:
+        return None
+
+    def key(candidate: Any) -> Any:
+        weights = getattr(candidate, "weights", None)
+        return (weights.repo, weights.revision) if weights is not None else candidate
+
+    return next(
+        (size for size, candidate in variants.items() if candidate is card or key(candidate) == key(card)), None
+    )
 
 
 def fetch_command(model: Any) -> str:

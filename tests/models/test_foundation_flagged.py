@@ -249,6 +249,21 @@ def test_patchtst_fm_takes_no_covariates():
         model.fine_tune_every = "12MS"
 
 
+def test_a_copied_or_pickled_timestral_keeps_its_size_in_the_fetch_command():
+    """A deep copy (a pipeline's run, a ResidualModel's base) or a pickle (a worker, the GPU host) holds an equal card, not the
+    same object: the size is found by the card's weights (repository and revision), so `fetch_command` keeps `--size`."""
+    import copy
+    import pickle
+
+    for size in TIMESTRAL_CARDS:
+        model = TimestralModel(size=size)
+        for again in (copy.deepcopy(model), pickle.loads(pickle.dumps(model))):
+            assert again._card is not TIMESTRAL_CARDS[size] or again is model
+            assert card_variant(again) == size
+            assert fetch_command(again) == f"epf weights fetch TimestralModel --size {size}"
+    assert card_variant(PatchTSTFMModel()) is None and card_variant(TimestralModel) == "209m"
+
+
 def test_patchtst_fm_records_the_package_s_autocast_on_a_gpu(monkeypatch):
     """On a CUDA device granite-tsfm runs PatchTST-FM's backbone under bfloat16 autocast: the runtime records it (compared on
     resume), on the CPU it doesn't."""
