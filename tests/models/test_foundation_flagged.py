@@ -457,7 +457,10 @@ def test_the_extras_and_their_install_lines():
     assert str(MissingExtraError("TimestralModel", "timestral")) == f"TimestralModel needs: {line}"
     pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text())
     extras = pyproject["project"]["optional-dependencies"]
-    assert extras["patchtst-fm"] == ["granite-tsfm>=0.3.10,<0.4; python_version < '3.14'"]
+    assert extras["patchtst-fm"] == [
+        "granite-tsfm>=0.3.10,<0.4; python_version < '3.14'",
+        "scikit-learn>=1.8; python_version >= '3.14'",
+    ]
     assert extras["timesfm"] == ["timesfm[torch]==3.0.2"]
     assert not any("timestral" in requirement.split(";")[0] for requirement in extras["timestral"])  # from git, by hand
     # Flagged licences are in no extra of everything; granite-tsfm's pins are resolved apart (uv conflicts).
@@ -465,6 +468,63 @@ def test_the_extras_and_their_install_lines():
         if name not in ("timesfm", "timestral"):
             assert not any("[timesfm" in r or "timestral]" in r or "timesfm[" in r for r in requirements), name
     assert [{"extra": "patchtst-fm"}, {"extra": "torch"}] in pyproject["tool"]["uv"]["conflicts"]
+    assert "all" not in extras or "patchtst-fm" not in str(extras["all"])  # 6q's [all] leaves it out
+
+
+def locked_versions(lock, extra, python):
+    """{direct dependency: the versions `uv.lock` installs for it} for an install of the project with `extra` (None: no extra)
+    on CPython `python` on Linux, from the project's dependency entries and their markers (uv writes a version on an entry
+    only where the lock holds several)."""
+    from packaging.markers import Marker, default_environment
+
+    project = next(package for package in lock["package"] if package["name"] == "epftoolbox2")
+    versions = {}
+    for package in lock["package"]:
+        versions.setdefault(package["name"], []).append(package["version"])
+    environment = {
+        **default_environment(),
+        "python_full_version": python,
+        "python_version": ".".join(python.split(".")[:2]),
+        "sys_platform": "linux",
+        "platform_system": "Linux",
+        "platform_machine": "x86_64",
+        "extra": f"extra-11-epftoolbox2-{extra}" if extra else "",
+    }
+    entries = list(project.get("dependencies", []))
+    if extra:
+        entries += project.get("optional-dependencies", {}).get(extra, [])
+    out = {}
+    for entry in entries:
+        if "marker" in entry and not Marker(entry["marker"]).evaluate(environment):
+            continue
+        out.setdefault(entry["name"], set()).add(entry.get("version") or versions[entry["name"]][0])
+    return out
+
+
+def test_the_patchtst_fm_extra_is_resolved_apart_and_moves_nothing_on_python_3_14_and_later():
+    """granite-tsfm (Python < 3.14) pins torch < 2.12 and scikit-learn < 1.8. The lock resolves `[patchtst-fm]` apart from every
+    extra that holds torch (declared conflicting, so a PatchTST-FM environment is its own and its torch 2.11 never runs another
+    family), and on 3.14 and later, where it installs nothing, an install with it gets the core's versions (scikit-learn 1.7.2
+    has no 3.14t wheel; torch 2.11.0+cpu none for 3.15)."""
+    lock = tomllib.loads((ROOT / "uv.lock").read_text())
+    pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text())
+    extras = pyproject["project"]["optional-dependencies"]
+    with_torch = {
+        name
+        for name, requirements in extras.items()
+        if any(r.split(";")[0].strip().startswith("torch") or "[torch]" in r for r in requirements)
+    }
+    assert {"torch", "t0", "chronos", "tabpfn", "tabicl", "timesfm", "timestral"} <= with_torch
+    declared = {frozenset(item["extra"] for item in pair) for pair in pyproject["tool"]["uv"]["conflicts"]}
+    locked = {frozenset(item["extra"] for item in pair) for pair in lock.get("conflicts", [])}
+    for name in sorted(with_torch - {"patchtst-fm"}):
+        assert frozenset({"patchtst-fm", name}) in declared, f"[patchtst-fm] isn't declared conflicting with [{name}]"
+        assert frozenset({"patchtst-fm", name}) in locked, f"uv.lock doesn't hold the conflict with [{name}]: uv lock"
+    for python in ("3.14.0", "3.15.0"):
+        core, flagged = locked_versions(lock, None, python), locked_versions(lock, "patchtst-fm", python)
+        assert flagged == core, (python, {k: (core.get(k), v) for k, v in flagged.items() if core.get(k) != v})
+    below = locked_versions(lock, "patchtst-fm", "3.12.0")
+    assert "granite-tsfm" in below and below["scikit-learn"] != locked_versions(lock, None, "3.12.0")["scikit-learn"]
 
 
 def test_importing_or_building_the_families_imports_no_model_package(tmp_path):

@@ -49,9 +49,11 @@ pip install 'epftoolbox2[timestral]' \
   the package itself comes from the commit the research ran, `a534bdbd244d64f3d9d743f46c7bf6fc330ed4ff`, as above. The
   pre-flight reads the commit pip recorded (PEP 610's `direct_url.json`) and refuses another one, or a build not installed from
   the repository, naming this command; see [Timestral's runtime](#timestrals-runtime).
-- **granite-tsfm pins torch below 2.12 and scikit-learn below 1.8.** The lock resolves `[patchtst-fm]` apart (`uv sync` refuses
-  it together with `[torch]`; it brings its own torch), so no other extra and no core install moves; an environment with it
-  runs scikit-learn 1.7.
+- **granite-tsfm pins torch below 2.12 and scikit-learn below 1.8.** The lock resolves `[patchtst-fm]` apart from every extra
+  that holds torch (`[torch]`, `[t0]`, `[chronos]`, `[tabpfn]`, `[tabicl]`, `[timesfm]`, `[timestral]`: `uv sync` refuses it
+  together with any of them), so an environment with PatchTST-FM is its own, with torch 2.11 and scikit-learn 1.7, and no
+  other extra and no core install moves. On Python 3.14 and later the extra installs nothing and changes nothing. An extra of
+  several families (6q's planned `[all]`) must leave `[patchtst-fm]` out, as it leaves the two flagged ones out.
 - **torch.** The lock and `uv sync` take the CPU build. For a GPU, install a CUDA build first (for example
   `pip install torch --index-url https://download.pytorch.org/whl/cu126`), then the extra.
 

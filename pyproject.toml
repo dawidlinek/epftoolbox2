@@ -112,12 +112,16 @@ tabicl = [
 ]
 # 6j's foundation families (epftoolbox2/models/patchtst_fm.py, timestral.py, timesfm.py), one extra each, imported by the first
 # forecast. PatchTST-FM's granite-tsfm needs Python < 3.14 and pins torch < 2.12 and scikit-learn < 1.8, so it is resolved apart
-# from the other extras ([tool.uv] conflicts below) and moves no other extra's or the core's lock. TimesFM-3's and Timestral's
-# weights carry flagged licences (non-commercial; a revenue cap) and neither extra is in any extra of everything. The timestral
+# from every extra that holds torch ([tool.uv] conflicts below) and moves no other extra's or the core's lock; it can't join an
+# extra of several families (6q's [all] leaves it out). TimesFM-3's and Timestral's weights carry flagged licences
+# (non-commercial; a revenue cap), so [all] leaves them out too. The timestral
 # package is not on PyPI: this extra holds its PyPI dependencies, and the package itself is installed from its pinned commit
 # (docs, models/foundation-models).
 patchtst-fm = [
     "granite-tsfm>=0.3.10,<0.4; python_version < '3.14'",
+    # On 3.14 and later the extra installs nothing; this keeps its resolution there the core's (else uv's fork for the extra
+    # would take granite-tsfm's scikit-learn < 1.8 for every Python, and 1.7.2 has no 3.14t wheel).
+    "scikit-learn>=1.8; python_version >= '3.14'",
 ]
 timesfm = [
     "timesfm[torch]==3.0.2",
@@ -147,11 +151,19 @@ explicit = true
 torch = [{ index = "pytorch-cpu" }]
 
 [tool.uv]
-# granite-tsfm (the patchtst-fm extra) pins torch < 2.12 and scikit-learn < 1.8: resolved with every other extra, it would move
-# the core's scikit-learn and every torch family's torch for everyone. Declared as conflicting with the other extras that hold
-# torch, it gets a resolution of its own, and every install without it keeps today's lock.
+# granite-tsfm (the patchtst-fm extra) pins torch < 2.12 and scikit-learn < 1.8. Resolved with the other extras, it would move the
+# core's scikit-learn and every torch family's torch for everyone; declared as conflicting with every extra that holds torch, it
+# gets a resolution of its own (an environment with PatchTST-FM is its own: its torch 2.11 never runs another family), and every
+# install without it keeps the lock it had. The extra holds nothing on Python 3.14 and later (see it), where its resolution is the
+# core's.
 conflicts = [
     [{ extra = "patchtst-fm" }, { extra = "torch" }],
+    [{ extra = "patchtst-fm" }, { extra = "t0" }],
+    [{ extra = "patchtst-fm" }, { extra = "chronos" }],
+    [{ extra = "patchtst-fm" }, { extra = "tabpfn" }],
+    [{ extra = "patchtst-fm" }, { extra = "tabicl" }],
+    [{ extra = "patchtst-fm" }, { extra = "timesfm" }],
+    [{ extra = "patchtst-fm" }, { extra = "timestral" }],
 ]
 
 [tool.hatch.build.targets.wheel]
