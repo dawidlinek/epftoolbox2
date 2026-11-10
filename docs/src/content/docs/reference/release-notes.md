@@ -211,6 +211,9 @@ an issue day it didn't sample.
 
 ### New
 
+- **The licence is stated as `AGPL-3.0-or-later`.** The package metadata names the SPDX expression (`License-Expression`, with
+  `LICENSE` shipped in the wheel) instead of the version-neutral `AGPL-3.0`: the GNU Affero General Public License v3 or, at your
+  option, any later version. The licence text is unchanged.
 - **`target_transform="none"`: a pooled tree fits the raw target.** `HistGBModel`, `LightGBMModel`, `XGBoostModel` and
   `CatBoostModel` take a keyword-only `target_transform`: `"per_period"` (each period's own Invariant, the default and the only
   behaviour before), `"pooled"` (one Invariant over every row) or `"none"`, with which the estimator fits the stacked targets as
