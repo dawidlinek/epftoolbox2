@@ -127,11 +127,14 @@ def lines(records) -> str:
     return "".join(json.dumps(r) + "\n" for r in records)
 
 
-def write_live(directory: Path, save_format: str = "jsonl", name: str = "ols") -> Path:
-    """The hand-made live directory of the module docstring; returns the model's results path."""
+def write_live(directory: Path, save_format: str = "jsonl", name: str = "ols", drop=()) -> Path:
+    """The hand-made live directory of the module docstring, without the lines of `drop` ((day, revision, hour, horizon): a
+    committed revision without a key, as an ensemble leaves a key no member serves); returns the model's results path."""
     directory.mkdir(parents=True, exist_ok=True)
     (directory / "live.json").write_text(json.dumps({"mode": "live", "issue_timezone": ZONE, "deadline": "11:55"}))
-    records = [live_record(d, r, h, k) for d, r in WRITTEN for h in HOURS for k in HORIZONS]
+    records = [
+        live_record(d, r, h, k) for d, r in WRITTEN for h in HOURS for k in HORIZONS if (d, r, h, k) not in set(drop)
+    ]
     (directory / f"{name}.jsonl").write_text(lines(records))
     calls = [commit_line(d, r, REVISIONS[(d, r)]) for d, r in WRITTEN if REVISIONS[(d, r)] is not None]
     # A late call commits nothing, and day 1's r3 crashed before its line.
@@ -160,9 +163,10 @@ def write_live(directory: Path, save_format: str = "jsonl", name: str = "ols") -
     return directory / f"{name}.jsonl"
 
 
-def expected(policy: str, cutoff, statuses=("ok",)) -> dict:
-    """key -> (revision, prediction, status) by the spec: per key the highest revision among its day's committed ones that the
-    policy and cut-off let through ("first": the lowest committed alone; "delivered": up to the newest delivery)."""
+def expected(policy: str, cutoff, statuses=("ok",), drop=()) -> dict:
+    """key -> (revision, prediction, status) by the spec: each issue day is read from one revision, the highest of its committed
+    ones that the policy and cut-off let through ("first": the lowest committed alone; "delivered": up to the newest delivery)
+    and that has a record of the day in the file; a key that revision has no record of has none."""
     deadline = {day: pd.Timestamp(f"{day}T11:55", tz=ZONE).tz_convert("UTC") for day in DAYS}
     limit = {
         None: {day: None for day in DAYS},
@@ -185,11 +189,14 @@ def expected(policy: str, cutoff, statuses=("ok",)) -> dict:
                 if d == day and r in seen and (limit[day] is None or pd.Timestamp(at) <= limit[day])
             ]
             seen = [r for r in seen if heads and r <= heads[-1]]
-        if not seen:
+        present = [r for r in seen if any((day, r, h, k) not in set(drop) for h in HOURS for k in HORIZONS)]
+        if not present:
             continue
-        revision = max(seen)
+        revision = max(present)
         for hour in HOURS:
             for horizon in HORIZONS:
+                if (day, revision, hour, horizon) in set(drop):
+                    continue
                 record = live_record(day, revision, hour, horizon)
                 if statuses is None or record["status"] in statuses:
                     out[(hour, horizon, day)] = (revision, record["prediction"], record["status"])
@@ -224,6 +231,23 @@ def test_hand_made_revisions_read_per_policy_and_cutoff(tmp_path, save_format, p
     path = write_live(tmp_path / "live", save_format)
     assert read(path, policy, cutoff) == expected(policy, cutoff)
     assert read(path, policy, cutoff, statuses=None) == expected(policy, cutoff, statuses=None)
+
+
+@pytest.mark.parametrize("save_format", ["jsonl", "parquet"])
+def test_a_key_a_revision_lacks_has_no_record_never_an_older_revision_s(tmp_path, save_format):
+    """Day 1's r2 (latest and delivered) has no line for one key, as an ensemble writes none for a key no member serves: the key
+    has no record, never r1's, so the day's curve is r2's alone. Day 2's r2 has no line at all: day 2 is read from r1."""
+    drop = [(DAYS[0], 2, 0, 2), *((DAYS[1], 2, h, k) for h in HOURS for k in HORIZONS)]
+    path = write_live(tmp_path / "live", save_format, drop=drop)
+    for policy, cutoff in POLICY_CELLS:
+        assert read(path, policy, cutoff, statuses=None) == expected(policy, cutoff, statuses=None, drop=drop)
+    for policy in ("latest", "delivered"):
+        got = read(path, policy, statuses=None)
+        assert (0, 2, DAYS[0]) not in got
+        assert {v[0] for k, v in got.items() if k[2] == DAYS[0]} == {2}
+    assert {v[0] for k, v in read(path).items() if k[2] == DAYS[1]} == {1}
+    ref = ModelResultRef("ols", path, 0, DAYS[0], DAYS[-1], 2, policy="delivered")
+    assert (0, 2, DAYS[0]) not in {(r["hour"], r["horizon"], r["run_date"]) for r in ref.iter_records()}
 
 
 def test_the_policies_differ_where_the_files_say(tmp_path):
@@ -329,9 +353,9 @@ def test_read_records_issued_by_cuts_off_per_issue_day(tmp_path):
     path = write_live(tmp_path / "live")
     committed = LiveStore(path.parent).visible("latest", None)
     assert visible_revisions(committed, pd.Timestamp("2026-10-21T09:00:00+00:00")) == frozenset({(DAYS[0], 1)})
-    by_day = {DAYS[0]: "2026-10-21T09:10:00+00:00", DAYS[1]: None}  # days 2 and 3: no cut-off
+    by_day = {DAYS[0]: "2026-10-21T09:10:00+00:00", DAYS[1]: None}  # day 2: no cut-off; day 3 not named: nothing
     found = {(r["run_date"], r["revision"]) for r in read_records(path, committed=committed, issued_by=by_day)}
-    assert found == {(DAYS[0], 1), (DAYS[1], 2), (DAYS[2], 2)}
+    assert found == {(DAYS[0], 1), (DAYS[1], 2)}
     found = {
         (r["run_date"], r["revision"])
         for r in read_records(path, committed=committed, issued_by=lambda d: f"{d}T08:12:00+00:00")
@@ -341,18 +365,46 @@ def test_read_records_issued_by_cuts_off_per_issue_day(tmp_path):
         list(read_records(path, issued_by="2026-10-21T09:00:00+00:00"))
 
 
-def test_a_commit_after_its_own_deadline_is_out_under_the_deadline_cutoff(tmp_path):
+def test_without_a_deadline_on_file_the_deadline_cutoff_fails_closed(tmp_path):
+    """No `deadline` in live.json: the default cut-off admits only commits that carry a deadline of their own and were made by
+    it, never every commit (a re-issue days later would pass for the forecast)."""
     path = write_live(tmp_path / "live")
     (path.parent / "live.json").write_text(json.dumps({"mode": "live", "issue_timezone": ZONE}))  # no deadline on file
+    assert read(path, "latest", "deadline") == {}
+    assert list(ModelResultRef("ols", path, 0, DAYS[0], DAYS[-1], 2).iter_records()) == []
     log = path.parent / "issues.jsonl"
     calls = [json.loads(line) for line in log.read_text().splitlines()]
+    own = {
+        (DAYS[1], 1): "2026-10-22T09:55:00+00:00",
+        (DAYS[1], 2): "2026-10-22T08:30:00+00:00",
+    }  # r2 made after its own
     for line in calls:
-        if line.get("committed") and line["issue"] == DAYS[1] and line["revision"] == 2:
-            line["deadline"] = "2026-10-22T08:30:00+00:00"  # committed 09:00 UTC, after it
+        if line.get("committed") and (line["issue"], line["revision"]) in own:
+            line["deadline"] = own[(line["issue"], line["revision"])]
     log.write_text(lines(calls))
-    assert {v[0] for k, v in read(path, "latest", "deadline").items() if k[2] == DAYS[1]} == {1}
+    assert {(k[2], v[0]) for k, v in read(path, "latest", "deadline").items()} == {(DAYS[1], 1)}
     assert {v[0] for k, v in read(path, "latest", None).items() if k[2] == DAYS[1]} == {2}
-    assert {v[0] for k, v in read(path, "latest", "deadline").items() if k[2] == DAYS[2]} == {2}  # no deadline anywhere
+
+
+@pytest.mark.parametrize(
+    "key",
+    [DAYS[0], datetime.date(2026, 10, 21), pd.Timestamp("2026-10-21"), pd.Timestamp("2026-10-21T23:30", tz="UTC")],
+    ids=["text", "date", "timestamp", "instant"],
+)
+def test_a_mapping_cutoff_reads_its_keys_as_issue_days_and_a_day_it_lacks_sees_nothing(tmp_path, key):
+    """Keys are issue days however written (an instant read in live.json's issue zone: 23:30 UTC on 10-21 is 10-22 in
+    Berlin); a day the mapping doesn't name sees nothing."""
+    path = write_live(tmp_path / "live")
+    day = DAYS[1] if getattr(key, "tzinfo", None) is not None else DAYS[0]
+    cutoff = {key: f"{day}T08:30:00+00:00"}  # r1 of that day alone (committed 08:15 / 08:10); the other days: nothing
+    ref = ModelResultRef("ols", path, 0, DAYS[0], DAYS[-1], 2, policy="latest", cutoff=cutoff)
+    assert {(r["run_date"], r["revision"]) for r in ref.iter_records()} == {(day, 1)}
+    committed = LiveStore(path.parent).visible("latest", None)
+    if day == DAYS[0]:
+        assert visible_revisions(committed, cutoff) == frozenset({(DAYS[0], 1)})
+    else:  # no zone to read an instant in
+        with pytest.raises(ValueError, match="instant"):
+            visible_revisions(committed, cutoff)
 
 
 # --- the writer -------------------------------------------------------------------------------------------------------------
@@ -462,8 +514,10 @@ def test_a_crash_before_the_commit_is_invisible_and_its_number_is_never_reused(t
     before = read(path)
     # Day 1's r3 was abandoned: the next revision of day 1 is 4, whatever folder or line is gone.
     assert store.next_revision(DAYS[0]) == 4
-    (directory / "issues" / DAYS[0] / "r3").rmdir()
-    assert store.next_revision(DAYS[0]) == 4  # r3's records still say so
+    import shutil
+
+    shutil.rmtree(directory / "issues" / DAYS[0])  # no folder of the day at all: its records say r3 was taken
+    assert store.next_revision(DAYS[0]) == 4
     with store.hold():  # a number a call line alone carries
         store.record_call("2026-10-24", "error", 1, revision=1)
     assert store.next_revision("2026-10-24") == 2
@@ -507,8 +561,7 @@ def test_a_crash_while_writing_the_first_record_still_takes_the_number(tmp_path)
         rev = store.begin(DAYS[2], issued_at="2026-10-23T09:00:00+00:00", snapshot="z")
     with open(path, "ab") as f:  # half of r3's first line, then the process died
         f.write(json.dumps(with_live(base_record(DAYS[2], 0, 1, 1.0), 3, rev.issued_at, "z")).encode()[:30])
-    with pytest.warns(UserWarning):
-        assert store.next_revision(DAYS[2]) == 4  # the folder took 3 before any record
+    assert store.next_revision(DAYS[2]) == 4  # the folder took 3 before any record (and no record is read for it)
     with pytest.warns(UserWarning):
         assert read(path, "latest", None) == expected("latest", None)
 
@@ -881,3 +934,219 @@ def test_forecast_source_refuses_live_and_backtest_mixed_and_sees_a_new_commit(t
     (directory / "up.manifest.json").write_text(json.dumps(manifest))
     with pytest.raises(UpstreamError, match="mixed"):
         fetched(source)
+
+
+# --- review fixes: issue days of instants, the writer after flush, failed commits, lock leaks, identities -----------------------
+
+
+def test_an_instant_is_an_issue_day_in_the_issue_zone_and_raises_without_one(tmp_path):
+    from epftoolbox2.results.store import issue_day
+
+    late = pd.Timestamp("2026-10-21T23:30", tz="UTC")  # 01:30 on 10-22 in Berlin
+    assert issue_day(late, ZONE) == "2026-10-22"
+    assert issue_day(pd.Timestamp("2026-10-21T23:30")) == "2026-10-21"  # a naive stamp is its wall date
+    with pytest.raises(ValueError, match="instant"):
+        issue_day(late)
+    directory = tmp_path / "live"
+    write_live(directory)
+    receipt = tmp_path / "r.json"
+    receipt.write_text("{}")
+    line = ModelPipeline().mark_delivered(directory, late, 2, receipt)
+    assert line["issue"] == DAYS[1]
+    assert LiveStore(directory).deliveries(late)[-1] == line
+    (directory / "live.json").write_text(json.dumps({"mode": "live"}))  # no issue zone: an instant can't be read
+    with pytest.raises(ValueError, match="instant"):
+        ModelPipeline().mark_delivered(directory, late, 2, receipt, dry_run=True)
+
+
+@pytest.mark.parametrize("save_format", ["jsonl", "parquet"])
+def test_records_saved_after_a_flush_are_written_and_a_closed_store_refuses_more(tmp_path, save_format):
+    """A revision flushes to read its own records (`pending=`, as an ensemble of it must), then saves more: all of them are in
+    the committed revision, never r1's in their place."""
+    directory = tmp_path / "live"
+    write_through_the_store(directory, save_format)
+    store = LiveStore(directory)
+    path = directory / f"ols.{save_format}"
+    with store.hold():
+        rev = store.begin(DAYS[1], issued_at="2026-10-22T09:30:00+00:00", snapshot="f")
+        out = rev.open("ols", save_format)
+        keys = [(h, k) for h in HOURS for k in HORIZONS]
+        for hour, horizon in keys[:3]:
+            out.save(base_record(DAYS[1], hour, horizon, -5.0))
+        out.flush()
+        assert (
+            len(
+                [
+                    r
+                    for r in read_records(path, committed=store.visible("latest", None, pending=rev))
+                    if r["revision"] == 3
+                ]
+            )
+            == 3
+        )
+        for hour, horizon in keys[3:]:
+            out.save(base_record(DAYS[1], hour, horizon, -5.0))
+        rev.commit(finished="2026-10-22T09:31:00+00:00")
+        with pytest.raises(ValueError, match="closed"):
+            out.save(base_record(DAYS[1], 0, 1, -6.0))
+    got = {k: v for k, v in read(path, "latest", None).items() if k[2] == DAYS[1]}
+    assert {v[:2] for v in got.values()} == {(3, -5.0)} and len(got) == len(keys)
+
+
+def test_a_backtest_store_writes_what_is_saved_after_a_flush(tmp_path):
+    store = ResultStore(str(tmp_path / "bt" / "ols.jsonl"), lock=True)
+    store.save(base_record(DAYS[0], 0, 1, 1.0))
+    store.flush()
+    store.save(base_record(DAYS[0], 1, 1, 2.0))
+    store.close()
+    assert [r["prediction"] for r in read_records(tmp_path / "bt" / "ols.jsonl")] == [1.0, 2.0]
+    with pytest.raises(ValueError, match="closed"):
+        store.save(base_record(DAYS[0], 2, 1, 3.0))
+
+
+def test_a_failed_commit_leaves_the_revision_to_fail_or_abandon(tmp_path):
+    directory = tmp_path / "live"
+    write_through_the_store(directory)
+    store = LiveStore(directory)
+    with store.hold():
+        rev = store.begin(DAYS[2], issued_at="2026-10-23T09:00:00+00:00", snapshot="x")
+        good, bad = rev.open("ols"), rev.open("other")
+        for hour in HOURS:
+            good.save(base_record(DAYS[2], hour, 1, 8.0))
+            bad.save(base_record(DAYS[2], hour, 1, 9.0))
+
+        def full_disk():
+            raise OSError(28, "No space left on device")
+
+        bad.close = full_disk
+        with pytest.raises(OSError):
+            rev.commit(finished="2026-10-23T09:05:00+00:00")
+        with pytest.raises(RuntimeError, match="failed"):
+            rev.commit(finished="2026-10-23T09:06:00+00:00")  # a retry would commit `ols` without `other`
+        with pytest.raises(RuntimeError, match="failed"):
+            rev.open("third")
+        line = rev.fail()
+        assert line["committed"] is False
+        late = store.begin(DAYS[2], issued_at="2026-10-23T09:50:00+00:00", snapshot="late")
+        late.open("ols").save(base_record(DAYS[2], 0, 1, 7.0))
+        with pytest.raises(LiveLateError):
+            late.commit(finished="2026-10-23T09:56:00+00:00", deadline="2026-10-23T09:55:00+00:00")
+        with pytest.raises(RuntimeError, match="failed"):
+            late.commit(finished="2026-10-23T09:56:00+00:00")  # the same, without the deadline
+        late.abandon()
+    assert sorted(store.committed(DAYS[2])[DAYS[2]]) == [1, 2]
+
+
+def test_a_block_that_raises_leaves_no_store_open_and_no_lock_held(tmp_path):
+    directory = tmp_path / "live"
+    store = LiveStore(directory)
+    store.init(issue_timezone=ZONE)
+    with pytest.raises(RuntimeError, match="a fit failed"):
+        with store.hold():
+            rev = store.begin(DAYS[0], issued_at="2026-10-21T07:00:00+00:00")
+            rev.open("ols").save(base_record(DAYS[0], 0, 1, 1.0))
+            raise RuntimeError("a fit failed")
+    with pytest.raises(RuntimeError, match="a fit failed"):
+        with store.hold():
+            with store.begin(DAYS[0], issued_at="2026-10-21T08:00:00+00:00") as rev:
+                rev.open("ols").save(base_record(DAYS[0], 0, 1, 2.0))
+                raise RuntimeError("a fit failed")
+            assert rev._done
+    with store.hold():
+        with store.begin(DAYS[0], issued_at="2026-10-21T09:00:00+00:00") as rev:
+            rev.open("ols").save(base_record(DAYS[0], 0, 1, 3.0))  # the model's lock is free again
+            rev.commit(finished="2026-10-21T09:01:00+00:00")
+    assert [r["revision"] for r in read_records(directory / "ols.jsonl", committed=store.visible("latest", None))] == [
+        3
+    ]
+    assert store.next_revision(DAYS[0]) == 4
+
+
+@pytest.mark.parametrize(
+    "value",
+    [("ols", "lear"), pd.Timestamp("2026-10-01", tz="UTC"), {1: "main", 2: ["base", "naive"]}],
+    ids=["tuple", "timestamp", "int-keyed"],
+)
+def test_init_compares_values_as_live_json_holds_them(tmp_path, value):
+    store = LiveStore(tmp_path / "live")
+    store.init(issue_timezone=ZONE, frozen=value)
+    assert store.init(issue_timezone=ZONE, frozen=value)["frozen"] == json.loads(json.dumps(value, default=str))
+    with pytest.raises(LiveDirectoryError, match="another live pipeline"):
+        store.init(frozen="other")
+
+
+@pytest.mark.parametrize("name", ["ols", "live"])
+def test_a_model_opened_twice_in_one_revision_raises(tmp_path, name):
+    store = LiveStore(tmp_path / "live")
+    store.init(issue_timezone=ZONE)
+    with store.hold():
+        with store.begin(DAYS[0], issued_at="2026-10-21T07:00:00+00:00") as rev:
+            rev.open(name)
+            with pytest.raises(ValueError, match="open in revision"):
+                rev.open(name)
+
+
+def test_a_live_manifest_compares_save_coefficients(tmp_path):
+    directory = tmp_path / "live"
+    LiveStore(directory).init(issue_timezone=ZONE)
+    path = directory / "ols.manifest.json"
+    check_and_write_live(path, manifest(), save_coefficients=False, save_format="parquet")
+    stored = json.loads(path.read_text())
+    assert stored["save_coefficients"] is False and stored["save_format"] == "parquet"
+    with pytest.raises(ManifestMismatchError, match="save_coefficients"):
+        check_and_write_live(path, manifest(), save_format="parquet")
+
+
+def test_backtest_parts_have_the_columns_they_had_before_and_live_parts_the_live_ones(tmp_path):
+    from epftoolbox2.results import parquet_schema as schema
+
+    backtest = schema.to_table([base_record(DAYS[0], h, 1, float(h)) for h in HOURS])
+    assert backtest.schema.equals(schema.arrow_schema(live=False))
+    assert not schema.LIVE_NAMES & set(backtest.column_names)
+    live = schema.to_table([live_record(DAYS[0], 1, h, 1) for h in HOURS])
+    assert schema.LIVE_NAMES <= set(live.column_names)
+    # A directory of both reads, compacts and converts, record for record.
+    directory = tmp_path / "bt"
+    store = open_store(directory / "ols.parquet", lock=True)
+    store.save(base_record(DAYS[0], 0, 1, 1.0))
+    store.close()
+    store = open_store(directory / "ols.parquet", lock=True)
+    store.save(base_record(DAYS[1], 0, 1, 2.0))
+    store.close()
+    from epftoolbox2.results.parquet_store import compact, read_catalog
+
+    compact(directory)
+    (entry,) = read_catalog(directory / "ols.parquet").live()
+    import pyarrow.parquet as pq
+
+    assert not schema.LIVE_NAMES & set(pq.read_schema(directory / "ols.parquet" / entry["file"]).names)
+    assert [r["prediction"] for r in read_records(directory / "ols.parquet")] == [1.0, 2.0]
+
+
+def test_next_revision_reads_no_record_where_the_day_has_folders(tmp_path, monkeypatch):
+    directory = tmp_path / "live"
+    write_through_the_store(directory)
+    import epftoolbox2.results.live as live
+
+    def unread(*args):
+        raise AssertionError("a record was read")
+
+    monkeypatch.setattr(live, "max_revision", unread)
+    assert LiveStore(directory).next_revision(DAYS[0]) == 4
+    import shutil
+
+    shutil.rmtree(directory / "issues")
+    with pytest.raises(AssertionError, match="a record was read"):
+        LiveStore(directory).next_revision(DAYS[0])
+
+
+def test_forecast_source_warns_when_its_cutoff_leaves_out_a_newer_commit(tmp_path):
+    directory = tmp_path / "up"
+    write_upstream(directory)
+    with pytest.warns(UserWarning, match=r"on 1 issue days \(e.g. 2026-10-19\).*available="):
+        fetched(ForecastSource(directory, "up", "fc"))
+    import warnings
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        fetched(ForecastSource(directory, "up", "fc", available="12:00"))
