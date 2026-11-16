@@ -63,9 +63,14 @@ from .information_set import (
 from .models._calendar import every_horizon, horizon_arguments, resolve_horizons, resolve_issue_days
 from .models._cards import preflight
 from .models._engine import ENGINE_OFF, EngineAlone, check_engine
+from .models._fits import ServedAlone
 from .models._contract import wall_clock
 from .models._row_target import zero_columns
 from .results.availability import LATE
+
+# What `verify_model(through=...)` makes the probes' forecasts by: the model's run, or the live serve path.
+THROUGH_SERVE = "serve"
+THROUGH = ("run", THROUGH_SERVE)
 
 LEAK = "leak"
 INCONCLUSIVE = "inconclusive"
@@ -517,8 +522,13 @@ def verify_model(
     device: Optional[str] = None,
     co_batch: Optional[bool] = None,
     rerun: Optional[bool] = None,
+    through: str = "run",
 ) -> List[IssueDayCheck]:
     """Probe (and control) one model on each of `run_days`. The model itself is never run, only copies of it.
+
+    `through="serve"` makes every forecast of the probes through the live serve path (`models._fits.ServedAlone`: each issue day
+    planned and fitted as `forecast()` fits it without a stored fit, by the backtest's own lines), so the probe and its control
+    cover what a live call runs; "run" (the default) through the model's run.
 
     `test_period` is the period `run_days` were sampled from. A fixed list reads the same columns on every day, but a
     predictor function may use a column on a few days only, and an input that no sampled day reads is a blind spot.
@@ -556,6 +566,8 @@ def verify_model(
     horizon, horizons = resolve_horizons(horizon, horizons, 1)
     weekdays = resolve_issue_days(issue_days)
     check_engine(engine)
+    if through not in THROUGH:
+        raise ValueError(f"through must be one of {list(THROUGH)}, got {through!r}")
     # Its extra, runtime packages and weights before any probe (`ModelPipeline.verify` checked every model verified already).
     preflight([model])
     run_rerun = checked_by_default(model) if rerun is None else bool(rerun)
@@ -577,6 +589,8 @@ def verify_model(
         # Only a model the engine can take is wrapped: any other runs as with "off", and stays the model its checks see
         # (`isinstance`, its own attributes), whatever the pipeline's engine, now on by default.
         copied = make_model()
+        if through == THROUGH_SERVE:
+            return ServedAlone(copied, {target: information_set, label: label_rules}, engine != ENGINE_OFF)
         return copied if engine == ENGINE_OFF or not copied._engine_capable() else EngineAlone(copied)
 
     # A rebuild that edits its argument must not reach the caller's frame.

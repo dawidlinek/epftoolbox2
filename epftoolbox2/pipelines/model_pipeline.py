@@ -1937,6 +1937,7 @@ class ModelPipeline:
         device: Optional[str] = None,
         co_batch: Optional[bool] = None,
         rerun: Optional[bool] = None,
+        through: str = "run",
     ) -> VerifyReport:
         """Check on a sample of issue days that no forecast depends on anything unknown when it is issued.
 
@@ -2001,6 +2002,10 @@ class ModelPipeline:
                 card (`verification.checked_by_default`).
             rerun: Run the issue day twice first, from other seeds of the global generators; any difference makes the model
                 `inconclusive`. None: as `co_batch`.
+            through: "run" (the default) makes the probes' forecasts by each model's run, as a backtest makes them; "serve"
+                by the live serve path of `forecast()` (each issue day planned and fitted inline as a live call fits it without
+                a stored fit), so the check covers what a live call runs. A model whose fits aren't stored runs through its run
+                either way, as `forecast()` runs it. Not for a run over zones.
 
         Raises:
             InformationSetError: The pipeline has no information set, or a checked column has no rule and the
@@ -2020,6 +2025,8 @@ class ModelPipeline:
         chosen = self._select_models(models)
         preflight(_carded(chosen))  # the extras, runtime packages and weights of the models verified, first
         if isinstance(data, Mapping):
+            if through != "run":
+                raise ValueError("verify(through='serve') checks the live path of one frame: forecast() takes one")
             return self._verify_zones(
                 data,
                 chosen,
@@ -2064,6 +2071,7 @@ class ModelPipeline:
                         device=device,
                         co_batch=co_batch,
                         rerun=rerun,
+                        **({} if through == "run" else {"through": through}),
                     )
                 )
         if device is not None and not report.devices:
