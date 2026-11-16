@@ -73,6 +73,7 @@ export default defineConfig({
                         { label: 'Validation and Test', link: '/model-pipeline/validation-and-test/' },
                         { label: 'Ensembles', link: '/model-pipeline/ensembles/' },
                         { label: 'Fallbacks', link: '/model-pipeline/fallback/' },
+                        { label: 'Stored Fits', link: '/model-pipeline/stored-fits/' },
                         { label: 'Hyper-parameter Search', link: '/model-pipeline/hyperparameter-search/' },
                         { label: 'Several Zones', link: '/model-pipeline/zones/' },
                         { label: 'Generation Targets', link: '/model-pipeline/generation/' },
