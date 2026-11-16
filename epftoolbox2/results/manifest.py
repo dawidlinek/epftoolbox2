@@ -306,6 +306,18 @@ def _session_module_note(theirs: Any, mine: Any) -> str:
     )
 
 
+def _mlp_daily_scaler_note(model_class: Any, theirs: Any, mine: Any) -> str:
+    """Why an `MLPDailyModel` of the default scaler refuses results written with standardised inputs, the default up to 2.3,
+    or ""."""
+    scalers = [params.get("scaler") if isinstance(params, dict) else None for params in (theirs, mine)]
+    if model_class != "MLPDailyModel" or scalers[0] != "standard" or scalers[1] in (None, "standard"):
+        return ""
+    return (
+        ". MLPDailyModel's inputs go through Lago's Invariant by default now; up to 2.3 they were standardised, as these "
+        "results are. Pass scaler='standard' to resume them as they were written, or use a new save_dir"
+    )
+
+
 # Entries of a carded family's `runtime` recorded but never compared: a resume where one differs warns. The device's model
 # (`models._torch.runtime.device_name`): bits are not known to hold across GPU models, nor known to differ across CPUs whose
 # kernels (`cpu_capability`, compared) are the same.
@@ -513,7 +525,7 @@ class Manifest:
                 if name == "save_coefficients":
                     note = " (None: records with their coefficients; False: written with save_coefficients=False)"
                 if name == "model_params":
-                    note = _session_module_note(theirs, mine)
+                    note = _session_module_note(theirs, mine) or _mlp_daily_scaler_note(self.model_class, theirs, mine)
                 if name == "fit_path":
                     note = (
                         " (None: the model path, engine off or a model the engine fits on it; 'engine-2': fits from shared "

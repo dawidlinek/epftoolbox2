@@ -35,6 +35,7 @@ from epftoolbox2.models import torch_model as tm  # noqa: E402
 from epftoolbox2.models._calendar import FitUnit, unit_seed  # noqa: E402
 from epftoolbox2.models._torch import runtime, trainer  # noqa: E402
 from epftoolbox2.models._worker import _worker_init  # noqa: E402
+from epftoolbox2.models.mlp import INVARIANT_INPUTS  # noqa: E402
 from epftoolbox2.pipelines import ModelPipeline  # noqa: E402
 from epftoolbox2.results.manifest import ManifestMismatchError, manifest_path  # noqa: E402
 from tests.models import adapter_suite as suite  # noqa: E402
@@ -732,14 +733,53 @@ def test_vmap_refuses_torch_dropout_before_any_fit_and_a_loss_by_import_path_is_
 # --- the presets, blocks, predictor functions, seeds --------------------------------------------------------------------
 
 
+def test_mlp_daily_inputs_go_through_the_invariant_by_default_and_old_results_resume_with_standard(market, tmp_path):
+    """`MLPDailyModel`'s inputs default to Lago's Invariant (asinh of median and MAD), the research's scaling; `MLPHourlyModel`
+    and `TorchModel` keep standardised inputs. The default's records are `scaler=INVARIANT_INPUTS`'s and differ from
+    `"standard"`'s. YAML always writes the scaler, so a file saved with standardised inputs keeps them. Results written with
+    `"standard"` (the default up to 2.3, recorded in `model_params`) refuse the default with a message naming the way back, and
+    resume with `scaler="standard"`."""
+    from epftoolbox2.scalers.registry import scaler_spec
+
+    invariant = {
+        "name": "asinh",
+        "params": {"standardise": False},
+    }  # Lago's Invariant: no standardisation after the asinh
+    assert daily().scaler == scaler_spec(INVARIANT_INPUTS) == scaler_spec(invariant) != "standard"
+    assert hourly().scaler == "standard" and flat().scaler == "standard"
+    test = ("2023-03-20", "2023-03-21")
+    default = records_by_key(run(daily(), market, test=test)._results)
+    assert default == records_by_key(run(daily(scaler=INVARIANT_INPUTS), market, test=test)._results)
+    standard = records_by_key(run(daily(scaler="standard"), market, test=test)._results)
+    assert default.keys() == standard.keys() and all(default[k] != standard[k] for k in default)
+
+    saved = tmp_path / "pipeline.yaml"
+    ModelPipeline().add_model(daily(scaler="standard")).add_model(daily(name="new")).save(saved)
+    assert [m.scaler for m in ModelPipeline.load(saved).models] == ["standard", scaler_spec(INVARIANT_INPUTS)]
+
+    path = tmp_path / "old" / "m.jsonl"
+    run(daily(scaler="standard"), market, test=test, save_to=str(path))
+    with pytest.raises(ManifestMismatchError, match="model_params") as refused:
+        run(daily(), market, test=test, save_to=str(path))
+    assert "Pass scaler='standard' to resume them as they were written" in str(refused.value)
+    stored = lines(path)
+    run(daily(scaler="standard"), market, test=test, save_to=str(path))
+    assert lines(path) == stored
+
+
 @pytest.mark.parametrize("refit", ["7D", None])
 def test_the_presets_are_torch_model_with_nets_mlp_to_the_bit(market, refit):
-    """`MLPDailyModel(...)` gives `TorchModel(module=MLP, output="day", ...)`'s forecasts and `MLPHourlyModel(...)`
-    `TorchModel(module=MLP, output="period", ...)`'s, record for record."""
+    """`MLPDailyModel(...)` gives `TorchModel(module=MLP, output="day", scaler=INVARIANT_INPUTS, ...)`'s forecasts and
+    `MLPHourlyModel(...)` `TorchModel(module=MLP, output="period", ...)`'s, record for record."""
     if refit is not None:
         preset = run(daily(dropout=0.1), market, horizon=2)._results
         generic = TorchModel(
-            module=nets.MLP, predictors=DAY, module_params={"hidden": [8], "dropout": 0.1}, output="day", **FAST
+            module=nets.MLP,
+            predictors=DAY,
+            module_params={"hidden": [8], "dropout": 0.1},
+            output="day",
+            scaler=INVARIANT_INPUTS,
+            **FAST,
         )
         assert records_by_key(preset) == records_by_key(run(generic, market, horizon=2)._results)
     test = ("2023-03-20", "2023-03-21")
