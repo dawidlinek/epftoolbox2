@@ -75,50 +75,21 @@ def test_cv_keeps_both_rows_of_a_doubled_autumn_hour_in_one_block(monkeypatch):
 @pytest.mark.xfail(
     strict=True,
     raises=AssertionError,
-    reason="binary_mask=None reads a fixed list's binary columns on the test's first day, so a forecast depends on test_start",
+    reason="a first_day run resumed over an earlier test start mixes masks read on two first days in one file, without an error",
 )
-def test_a_forecast_is_the_same_whatever_day_the_test_starts_on(monkeypatch):
-    """Night-time solar: `solar` is 0 at 06:00 and 18:00 all winter and has values from 12 March. The default reads which columns
-    are binary (and stay unscaled) on the test's first day and keeps that for every forecast of the test: from 1 March `solar` at
-    06:00 is all 0 in the rows (binary), from 18 March it has values (scaled). So the forecasts at 06:00 and 18:00 issued from 18
-    March differ between the test starts 1 and 18 March (all 56 such keys of a test to 31 March, by up to 6.1).
-    `binary_mask="fit"` reads each fit's mask from its own rows and is independent of the start (`tests/models/test_binary_mask.py`);
-    making it the default flips this test, and moves the forecasts whose own rows disagree with the first day's (decision 13 of the
-    step 5 spec)."""
-    from epftoolbox2.models import OLSModel
-    from tests.models.test_binary_mask import SOLAR, SOLAR_PREDICTORS, InProcessPool, fits, solar_frame
-
-    monkeypatch.setenv("MAX_PROCESSES", "1")
-    monkeypatch.setenv("THREADS_PER_PROCESS", "1")
-    monkeypatch.setattr("epftoolbox2.models.base.ProcessPoolExecutor", InProcessPool)
-    data = solar_frame()
-
-    def run(start):
-        return fits(OLSModel(SOLAR_PREDICTORS, training_window=21).run(data, start, SOLAR[1], horizon=2)._results)
-
-    early, late = run(SOLAR[0]), run("2023-03-18")
-    assert late.keys() <= early.keys()
-    assert {key: early[key] for key in late} == late
-
-
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="a plain run resumed over an earlier test start mixes masks read on two first days in one file, without an error",
-)
-def test_a_plain_run_resumed_over_an_earlier_start_equals_the_fresh_run(monkeypatch, tmp_path):
-    """Default `binary_mask=None`, fixed list, no validation or predictor function: a run over [S+5, E] and then one over [S, E]
-    into the same `save_to` resumes without a word. The stored records read their mask on S+5, the new ones on S, so with
-    `turning` 0/1 on S and continuous from S+3 (`OLSModel(MASKED, 21)`, spring frame) 286 of 812 records over [S, E] differ from
-    a fresh [S, E] run. Correct is the fresh run's records or a refusal. `binary_mask="fit"` gives 0 differences
-    (`tests/models/test_binary_mask.py`)."""
+def test_a_first_day_run_resumed_over_an_earlier_start_equals_the_fresh_run(monkeypatch, tmp_path):
+    """`binary_mask="first_day"` (the default up to 2.3), fixed list, no validation or predictor function: a run over [S+5, E]
+    and then one over [S, E] into the same `save_to` resumes without a word. The stored records read their mask on S+5, the new
+    ones on S, so with `turning` 0/1 on S and continuous from S+3 (`OLSModel(MASKED, 21)`, spring frame) 286 of 812 records over
+    [S, E] differ from a fresh [S, E] run. Correct is the fresh run's records or a refusal. The default, `"fit"`, gives 0
+    differences (`tests/models/test_binary_mask.py`)."""
     from tests.models.test_binary_mask import InProcessPool, resumed_and_fresh
 
     monkeypatch.setenv("MAX_PROCESSES", "1")
     monkeypatch.setenv("THREADS_PER_PROCESS", "1")
     monkeypatch.setattr("epftoolbox2.models.base.ProcessPoolExecutor", InProcessPool)
 
-    resumed, fresh = resumed_and_fresh(None, tmp_path)
+    resumed, fresh = resumed_and_fresh("first_day", tmp_path)
 
     assert len(fresh) > 0
     assert resumed == fresh, f"{len(set(resumed) ^ set(fresh)) // 2} of {len(fresh)} records differ from the fresh run"

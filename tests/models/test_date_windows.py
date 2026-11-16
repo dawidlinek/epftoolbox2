@@ -886,7 +886,7 @@ def test_a_window_of_few_rows_still_trains():
 
 def write_old_manifest(path):
     stored = json.loads(path.read_text())
-    assert stored.pop("training_cut") == {"rows": "dates"}
+    assert stored.pop("training_cut") == {"rows": "dates", "binary_mask": "fit"}
     path.write_text(json.dumps(stored))
 
 
@@ -908,7 +908,7 @@ def test_a_manifest_without_the_field_is_refused_on_resume_and_the_override_goes
     with pytest.warns(UserWarning, match="may hold records written before training rows were chosen by date"):
         report = pipeline.run(data, test=period, horizon=1, save_dir=tmp_path, allow_manifest_mismatch=True)
     assert report.refs["m"].count == 47
-    unverified = {"rows": "dates", "stored": "unverified"}
+    unverified = {"rows": "dates", "binary_mask": "fit", "stored": "unverified"}
     assert json.loads(manifest_path(tmp_path / "m.jsonl").read_text())["training_cut"] == unverified
     pipeline.run(data, test=period, horizon=1, save_dir=tmp_path)  # resumes without the override, and keeps saying so
     assert json.loads(manifest_path(tmp_path / "m.jsonl").read_text())["training_cut"] == unverified
@@ -1001,7 +1001,11 @@ def test_results_staged_by_the_row_cut_and_accepted_are_warned_about_every_time_
         manifest.unlink()
         with pytest.warns(UserWarning, match="they have no manifest"):
             pipeline.run(data, save_dir=tmp_path, **run)
-    assert json.loads(manifest.read_text())["training_cut"] == {"rows": "dates", "stored": "unverified"}
+    assert json.loads(manifest.read_text())["training_cut"] == {
+        "rows": "dates",
+        "binary_mask": "fit",
+        "stored": "unverified",
+    }
     pipeline.run(data, save_dir=tmp_path, **run)  # later resumes go on, and keep saying so
 
     fresh = ModelPipeline().add_model(OLSModel(PREDICTORS, training_window=WINDOW, name="m")).run(data, **run)

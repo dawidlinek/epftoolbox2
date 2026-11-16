@@ -7,6 +7,9 @@ whose rows have one, for fixed lists and functions alike, however often the list
 decides how it is scaled, so these tests change everything after D and hold D's forecasts bit for bit; a run of Fridays reads
 the column where a run of every day does; an answer on a key the clock skips moves no mask; and a fixed list's column that starts
 inside the test is scaled from the day it has a value, by hand.
+
+This is the rule of `binary_mask="first_day"`, the default up to 2.3, which every model here names (`first_day_ols`); the
+default now reads each fit's mask from its own rows (`tests/models/test_binary_mask.py`).
 """
 
 import datetime
@@ -23,6 +26,12 @@ from epftoolbox2.models._worker import _worker_init
 from epftoolbox2.models.base import BaseModel
 from epftoolbox2.results.manifest import ManifestMismatchError, manifest_path
 from tests.synthetic import PREDICTORS, make_market_data
+
+
+def first_day_ols(*args, **kwargs):
+    """An `OLSModel` whose masks are read on a window's first day: the rule these tests hold."""
+    return OLSModel(*args, binary_mask="first_day", **kwargs)
+
 
 FRIDAY = 4
 DRIVERS = ["load_d+{horizon}", "wind_d+{horizon}"]
@@ -110,7 +119,9 @@ def test_a_later_end_of_the_test_moves_no_forecast_through_a_mask_column_with_no
         return drivers + ["late"] if ctx.issue_day < datetime.date(2023, 4, 10) else drivers
 
     def forecasts_of_5_april(test_end):
-        records = OLSModel(before_10_april, training_window=40).run(data, "2023-03-01", test_end, horizon=1)._results
+        records = (
+            first_day_ols(before_10_april, training_window=40).run(data, "2023-03-01", test_end, horizon=1)._results
+        )
         return {r["hour"]: r["prediction"] for r in records if r["run_date"] == "2023-04-05"}
 
     shorter = forecasts_of_5_april("2023-04-07")
@@ -182,7 +193,7 @@ def test_nothing_after_the_issue_day_moves_its_forecasts(late_market, lists, iss
     days = {} if issue_days is None else {"issue_days": issue_days}
 
     def run(frame, end=END):
-        model = OLSModel(fn, training_window=30, newest_target=newest)
+        model = first_day_ols(fn, training_window=30, newest_target=newest)
         return fits(model.run(frame, START, end, horizon=horizon, information_set=INFO, **days)._results)
 
     base = run(late_market)
@@ -239,7 +250,7 @@ def test_a_friday_run_reads_a_column_with_no_value_where_a_run_of_every_day_does
     fn = DRIVERS + ["late"] if lists == "fixed" else late_while_aux
 
     def run(start=START, **days):
-        model = OLSModel(fn, training_window=30)
+        model = first_day_ols(fn, training_window=30)
         return by_key(model.run(turning_market, start, END, horizon=3, information_set=INFO, **days)._results)
 
     every_day = run()
@@ -315,7 +326,9 @@ def test_an_answer_on_a_key_the_clock_skips_moves_no_mask(skip_market, tmp_path,
 
     def run(fn, name):
         save_to = tmp_path / f"{name}.jsonl"
-        records = OLSModel(fn, training_window=30).run(skip_market, start, end, horizon=horizon, save_to=str(save_to))
+        records = first_day_ols(fn, training_window=30).run(
+            skip_market, start, end, horizon=horizon, save_to=str(save_to)
+        )
         lists = json.loads(manifest_path(save_to).read_text())["predictor_lists"]
         masks = {entry["hash"]: entry["binary_masks"] for entry in lists if entry["forecasts"]}
         return by_key(records.iter_records()), masks
@@ -324,7 +337,7 @@ def test_an_answer_on_a_key_the_clock_skips_moves_no_mask(skip_market, tmp_path,
     skipped, other_masks = run(other, "other")
     assert skipped == everywhere
     assert other_masks == masks
-    fixed = OLSModel(DRIVERS + column, training_window=30).run(skip_market, start, end, horizon=horizon)._results
+    fixed = first_day_ols(DRIVERS + column, training_window=30).run(skip_market, start, end, horizon=horizon)._results
     assert by_key(fixed) == {
         key: json.dumps({k: v for k, v in json.loads(r).items() if k != "predictor_list"}, sort_keys=True)
         for key, r in everywhere.items()
@@ -377,7 +390,7 @@ def test_a_fixed_list_s_column_that_starts_on_the_third_day_is_scaled_from_there
     data = third_day_market()
     names = ["load_d+1", "wind_d+1", "late"]
 
-    ref = OLSModel(names, training_window=WINDOW).run(data, *THIRD, horizon=1)
+    ref = first_day_ols(names, training_window=WINDOW).run(data, *THIRD, horizon=1)
     records = by_key(ref._results)
     assert {key[0] for key in records} == {f"2023-03-{day:02d}" for day in range(3, 13)}
     assert ref.skipped == {"no_finite_training_rows": 48}
@@ -424,7 +437,7 @@ def test_plain_results_of_a_fixed_list_scaled_by_the_old_rule_are_refused_on_res
         return original(self, horizons, offset, offset)
 
     def run(path, **kwargs):
-        return OLSModel(names, training_window=WINDOW).run(data, *THIRD, horizon=1, save_to=str(path), **kwargs)
+        return first_day_ols(names, training_window=WINDOW).run(data, *THIRD, horizon=1, save_to=str(path), **kwargs)
 
     old = tmp_path / "old" / "m.jsonl"
     with monkeypatch.context() as patch:
@@ -432,7 +445,7 @@ def test_plain_results_of_a_fixed_list_scaled_by_the_old_rule_are_refused_on_res
         run(old)
     assert "binary_masks" not in json.loads(manifest_path(old).read_text())
     assert cut_short(old) > 0
-    fresh = by_key(OLSModel(names, training_window=WINDOW).run(data, *THIRD, horizon=1)._results)
+    fresh = by_key(first_day_ols(names, training_window=WINDOW).run(data, *THIRD, horizon=1)._results)
 
     # This code's own run, cut short, resumes whatever the columns.
     new = tmp_path / "new" / "m.jsonl"

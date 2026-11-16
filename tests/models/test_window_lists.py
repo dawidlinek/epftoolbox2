@@ -268,7 +268,7 @@ def test_a_reordered_list_resumes_and_another_list_refuses(tmp_path):
     )
     manifest = json.loads(manifest_path(path).read_text())
     assert manifest["training_window"] == [14, 28, "expanding"]
-    assert manifest["training_cut"] == {"rows": "dates", "expanding_from": "2023-02-09"}
+    assert manifest["training_cut"] == {"rows": "dates", "binary_mask": "fit", "expanding_from": "2023-02-09"}
     fresh = lines(path)
     path.write_text("\n".join(fresh[::3]) + "\n")
     OLSModel(PREDICTORS, training_window=["expanding", 14, 28], name="m").run(
@@ -393,7 +393,8 @@ def weekday_lists(ctx):
 
 def test_a_predictor_function_s_members_are_its_single_window_models(tmp_path):
     """The masks of a function's lists are per member too ((list id, period, horizon, member)), and its manifest keeps each
-    member's digest under the key with `@` and the member, which a resume compares: a changed digest of one member refuses."""
+    member's digest under the key with `@` and the member, which a resume compares: a changed digest of one member refuses.
+    The models name `binary_mask="first_day"`, the rule of these digests and the default up to 2.3."""
     data = with_paused_column(market("spring"), "2023-03-24")
     names = [*PREDICTORS, "aux"]
 
@@ -402,11 +403,13 @@ def test_a_predictor_function_s_members_are_its_single_window_models(tmp_path):
 
     members = [14, 28, "expanding"]
     path = tmp_path / "m.jsonl"
-    listed = OLSModel(function, training_window=members, name="m").run(
+    listed = OLSModel(function, training_window=members, binary_mask="first_day", name="m").run(
         data, "2023-03-24", "2023-03-29", horizon=2, save_to=str(path)
     )
     singles = [
-        OLSModel(function, training_window=member, name="m").run(data, "2023-03-24", "2023-03-29", horizon=2)._results
+        OLSModel(function, training_window=member, binary_mask="first_day", name="m")
+        .run(data, "2023-03-24", "2023-03-29", horizon=2)
+        ._results
         for member in members
     ]
     check_members(
@@ -420,29 +423,30 @@ def test_a_predictor_function_s_members_are_its_single_window_models(tmp_path):
     entry = manifest["predictor_lists"][0]["binary_masks"]
     assert entry["0-1@14"] != entry["0-1@28"] == entry["0-1@expanding"]
 
-    OLSModel(function, training_window=members, name="m").run(
+    OLSModel(function, training_window=members, binary_mask="first_day", name="m").run(
         data, "2023-03-24", "2023-03-29", horizon=2, save_to=str(path)
     )
     manifest["predictor_lists"][0]["binary_masks"]["0-1@28"] = "00000000"
     manifest_path(path).write_text(json.dumps(manifest))
     with pytest.raises(ManifestMismatchError, match="other binary columns"):
-        OLSModel(function, training_window=members, name="m").run(
+        OLSModel(function, training_window=members, binary_mask="first_day", name="m").run(
             data, "2023-03-24", "2023-03-29", horizon=2, save_to=str(path)
         )
 
 
 def test_a_fixed_list_with_windows_keeps_a_digest_per_member(tmp_path):
+    """The digests are those of `binary_mask="first_day"`, the default up to 2.3."""
     data = with_paused_column(market("spring"), "2023-03-17")
     path = tmp_path / "m.jsonl"
     windows = RunWindows.fixed(("2023-03-17", "2023-03-18"), ("2023-03-24", "2023-03-27"))
-    model = OLSModel([*PREDICTORS, "aux"], training_window=[14, "expanding"], name="m")
+    model = OLSModel([*PREDICTORS, "aux"], training_window=[14, "expanding"], binary_mask="first_day", name="m")
     model.run(data, windows=windows, horizon=1, save_to=str(path))
     manifest = json.loads(manifest_path(path).read_text())
     assert {"validation/0-1@14", "validation/0-1@expanding", "0-1@14", "0-1@expanding"} <= set(manifest["binary_masks"])
     manifest["binary_masks"]["0-1@expanding"] = "00000000"
     manifest_path(path).write_text(json.dumps(manifest))
     with pytest.raises(ManifestMismatchError, match="other binary columns"):
-        OLSModel([*PREDICTORS, "aux"], training_window=[14, "expanding"], name="m").run(
+        OLSModel([*PREDICTORS, "aux"], training_window=[14, "expanding"], binary_mask="first_day", name="m").run(
             data, windows=windows, horizon=1, save_to=str(path)
         )
 

@@ -315,7 +315,8 @@ def test_the_frame_contract_is_checked_once_per_read_days(frames, monkeypatch, e
 
 def test_a_group_reads_each_column_s_mask_and_the_missing_rows_once(frames, monkeypatch, tmp_path):
     """In an engine group each column's binary-mask verdict is read once per (period, training rows), whatever lists hold it,
-    and the missing rows of the test days once; the masks (their digests, and the forecasts they scale) are each model's own."""
+    and the missing rows of the test days once; the masks (their digests, and the forecasts they scale) are each model's own.
+    The models name `binary_mask="first_day"`, the default up to 2.3: the default now reads each fit's own mask and shares nothing."""
     data = frames[("1h", "spring")]
     sizes, missing = [], []
     real_mask, real_missing = StandardScaler.get_scalable_mask, _contract.missing_test_rows
@@ -328,7 +329,7 @@ def test_a_group_reads_each_column_s_mask_and_the_missing_rows_once(frames, monk
         sharing(monkeypatch, on)
         sizes.clear(), missing.clear()
         pipeline = ModelPipeline(engine="on")
-        for model in variants(12):
+        for model in variants(12, binary_mask="first_day"):
             pipeline.add_model(model)
         pipeline.run(data, test=("2023-03-27", "2023-03-28"), horizon=2, save_dir=str(tmp_path / str(on)))
         out[on] = files(tmp_path / str(on))
@@ -340,13 +341,17 @@ def test_a_group_reads_each_column_s_mask_and_the_missing_rows_once(frames, monk
 def test_a_chunk_keeps_only_the_mask_verdicts_more_than_one_model_reads(frames, monkeypatch, tmp_path):
     """A chunk keeps a column's mask verdicts only where more than one of its models reads the column with the same window and
     newest-target rule (`_engine.mask_readers`): one model per training window keeps none, so the chunk holds no more than its
-    models do; three models of one window share the columns two of them read. The files are those of sharing off."""
+    models do; three models of one window share the columns two of them read. The files are those of sharing off. The models
+    name `binary_mask="first_day"`, the default up to 2.3: the default now reads each fit's own mask and shares nothing."""
     data = frames[("1h", "spring")]
     lists = [["load_d+1", "aux"], ["aux", "wind_d+1"], ["wind_d+1", "settle_d-1"]]
 
     def models():
-        sweep = [OLSModel(["load_d+1", "price_d-1"], window, name=f"w{window}") for window in (21, 28, 35, 42)]
-        return sweep + [OLSModel(names, 56, name=f"a{i}") for i, names in enumerate(lists)]
+        sweep = [
+            OLSModel(["load_d+1", "price_d-1"], window, binary_mask="first_day", name=f"w{window}")
+            for window in (21, 28, 35, 42)
+        ]
+        return sweep + [OLSModel(names, 56, binary_mask="first_day", name=f"a{i}") for i, names in enumerate(lists)]
 
     held = []
     real = _engine._run_chunk

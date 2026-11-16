@@ -1,14 +1,15 @@
 """`binary_mask=`: which training rows decide the columns a fit leaves unscaled because they are binary 0/1.
 
-None, the default, is today's rule: without `refit` a list's mask is read on the first calendar day of its window
-(`BaseModel._scalable_mask`, `tests/models/test_masks.py`), with `refit` from each unit's rows (`_worker._fit_unit`).
-`"first_day"` names the first and raises with `refit`. `"fit"` reads each fit's mask from the rows of its own span, before the
-matching and finite filters (`_worker._fit_member`), member by member, so that no forecast depends on where its test starts.
+None, the default, is `"fit"`: each fit's mask is read from the rows of its own span, before the matching and finite filters
+(`_worker._fit_member`), member by member, so that no forecast depends on where its test starts; with `refit` from each unit's
+rows (`_worker._fit_unit`), as always. `"first_day"`, the default up to 2.3, reads a list's mask on the first calendar day of its
+window (`BaseModel._scalable_mask`, `tests/models/test_masks.py`) and raises with `refit`.
 
 These tests hold `"fit"` to `refit="1D"` record for record (a unit of one day is a fit with its own mask), to runs starting 1, 3
-and 17 days later on every common key, to everything after the issue day, to a hand OLS, and count by hand the keys where it differs
-from the default on a frame with night-time solar. That the default depends on `test_start` is pinned as a strict xfail in
-`tests/test_known_issues.py`. Records compare as JSON text, so a NaN `actual` equals itself.
+and 17 days later on every common key, to everything after the issue day, to a hand OLS, and count by hand the keys where it
+differs from `"first_day"` on a frame with night-time solar. Results written under the old default (no `binary_mask` in their
+`training_cut`) refuse to resume under the new one, with a message naming `"first_day"`. Records compare as JSON text, so a NaN
+`actual` equals itself.
 """
 
 import datetime
@@ -220,7 +221,7 @@ def test_yaml_writes_it_only_when_set_and_loads_it_back(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# The default stays what it was, and so does refit
+# The default is "fit", "first_day" is the old default, and refit stays what it was
 # ---------------------------------------------------------------------------
 
 S, E = "2023-03-20", "2023-04-05"  # over the spring switch of 26 March 2023 in Europe/Warsaw
@@ -228,12 +229,15 @@ S, E = "2023-03-20", "2023-04-05"  # over the spring switch of 26 March 2023 in 
 
 @pytest.fixture(scope="module")
 def spring():
-    """`turning` is 0/1 in the rows of the first day and continuous from 24 March: the default leaves it unscaled for the whole
-    run, `"fit"` scales it in every fit whose rows reach 24 March."""
+    """`turning` is 0/1 in the rows of the first day and continuous from 24 March: `"first_day"` leaves it unscaled for the whole
+    run, `"fit"` (the default) scales it in every fit whose rows reach 24 March."""
     return market("1h", "2023-01-20", 85, "2023-03-24")
 
 
-def test_first_day_is_the_default_byte_for_byte_and_fit_with_refit_is_refit(spring, tmp_path):
+def test_fit_is_the_default_byte_for_byte_and_fit_with_refit_is_refit(spring, tmp_path):
+    """None is `"fit"` in every record and in the manifest, whose `training_cut` names the rule; `"first_day"` writes none, as the
+    old default did, and differs. With `refit` None and `"fit"` are the refit's own rule and write nothing."""
+
     def stored(name, predictors=MASKED, **kwargs):
         path = tmp_path / name / "m.jsonl"
         ols(predictors, **kwargs).run(spring, S, E, horizon=2, save_to=str(path))
@@ -241,20 +245,21 @@ def test_first_day_is_the_default_byte_for_byte_and_fit_with_refit_is_refit(spri
 
     for predictors, kind in ((MASKED, "fixed"), (weekday_lists, "function")):
         plain = stored(f"plain-{kind}", predictors)
-        assert stored(f"first-{kind}", predictors, binary_mask="first_day") == plain
-        assert plain[1]["training_cut"] == {"rows": "dates"}
+        own = stored(f"fit-{kind}", predictors, binary_mask="fit")
+        assert own == plain
+        assert own[1]["training_cut"] == {"rows": "dates", "binary_mask": "fit"}
         weekly = stored(f"weekly-{kind}", predictors, refit="7D")
         assert stored(f"weekly-fit-{kind}", predictors, refit="7D", binary_mask="fit") == weekly
         assert "binary_mask" not in weekly[1]["training_cut"]
-        own = stored(f"fit-{kind}", predictors, binary_mask="fit")
-        assert own[1]["training_cut"] == {"rows": "dates", "binary_mask": "fit"}
-        assert own[1]["model_params"] == plain[1]["model_params"]  # the worker's model is rebuilt without it
-        assert own[0] != plain[0]
+        first = stored(f"first-{kind}", predictors, binary_mask="first_day")
+        assert first[1]["training_cut"] == {"rows": "dates"}
+        assert own[1]["model_params"] == first[1]["model_params"]  # the worker's model is rebuilt without it
+        assert own[0] != first[0]
         # A fit's mask is a function of its rows, which the data hash covers: no digest anywhere.
         assert own[1].get("binary_masks") is None
         assert all(not entry.get("binary_masks") for entry in own[1].get("predictor_lists") or [])
         if kind == "function":
-            assert any(entry["binary_masks"] for entry in plain[1]["predictor_lists"])
+            assert any(entry["binary_masks"] for entry in first[1]["predictor_lists"])
 
 
 # ---------------------------------------------------------------------------
@@ -284,8 +289,8 @@ def model_of(kind, predictors, window, **kwargs):
 @pytest.mark.parametrize("cell", list(ONE_DAY_CELLS))
 def test_fit_is_refit_1d_record_for_record(cell):
     """A `"1D"` unit is the forecast of its issue day, fitted on its rows with the mask read from them before any filter: what
-    `"fit"` gives a forecast without refit. So every record is the same, `refit_anchor` (the run date either way) included, and the
-    default differs where its first-day mask does."""
+    `"fit"` gives a forecast without refit, and the default. So every record is the same, `refit_anchor` (the run date either way)
+    included, and `"first_day"` differs where its first-day mask does."""
     kind, predictors, newest, issue_days, freq, window, horizon = ONE_DAY_CELLS[cell]
     data = market(freq, "2023-01-20", 85, "2023-03-24").assign(aux=1.0)
     start, end = ("2023-03-24", "2023-03-28") if freq == "15min" else (S, E)
@@ -296,9 +301,9 @@ def test_fit_is_refit_1d_record_for_record(cell):
         return keyed(model.run(data, start, end, horizon=horizon, freq=freq, information_set=INFO, **days)._results)
 
     own = run(binary_mask="fit")
-    assert own and own == run(refit="1D")
-    plain = run()
-    assert plain.keys() == own.keys() and plain != own
+    assert own and own == run(refit="1D") == run()
+    first = run(binary_mask="first_day")
+    assert first.keys() == own.keys() and first != own
 
 
 def with_solar(data, seed=6):
@@ -348,11 +353,11 @@ def span(issue, horizon, window=WINDOW):
 
 
 def test_fit_moves_exactly_the_keys_whose_own_rows_disagree_with_the_first_day_s(solar):
-    """The default reads every mask on 1 March, where `solar` is 0 at 06:00 and 18:00 in the rows (binary: unscaled for the whole
+    """`"first_day"` reads every mask on 1 March, where `solar` is 0 at 06:00 and 18:00 in the rows (binary: unscaled for the whole
     run). A fit's own rows have values at those hours once they reach 12 March, from D = 12 March + 1 + h: there `"fit"` scales it
     and the forecasts differ, everywhere else they are the same to the bit. Counted by hand: 18 issue days at h=1 and 17 at h=2,
     at each of the two hours, 70 keys."""
-    default = fits(ols(SOLAR_PREDICTORS).run(solar, *SOLAR, horizon=2)._results)
+    default = fits(ols(SOLAR_PREDICTORS, binary_mask="first_day").run(solar, *SOLAR, horizon=2)._results)
     own = fits(ols(SOLAR_PREDICTORS, binary_mask="fit").run(solar, *SOLAR, horizon=2)._results)
     assert own.keys() == default.keys()
     moved = {key for key in own if own[key] != default[key]}
@@ -376,6 +381,28 @@ def test_fit_moves_exactly_the_keys_whose_own_rows_disagree_with_the_first_day_s
         for issue in pd.date_range(first_values[period] + datetime.timedelta(days=1 + horizon), SOLAR[1]).date
     }
     assert moved == by_hand and len(moved) == 70
+
+
+def test_a_forecast_is_the_same_whatever_day_the_test_starts_on():
+    """Night-time solar: `solar` is 0 at 06:00 and 18:00 all winter and has values from 12 March. Up to 2.3 the default read which
+    columns are binary (and stay unscaled) on the test's first day and kept that for every forecast of the test: from 1 March
+    `solar` at 06:00 is all 0 in the rows (binary), from 18 March it has values (scaled), so the forecasts at 06:00 and 18:00
+    issued from 18 March differed between the test starts 1 and 18 March (all 56 such keys of a test to 31 March, by up to 6.1).
+    The default now reads each fit's mask from its own rows (`"fit"`), so they are the same; `"first_day"` keeps the old rule
+    (a strict xfail in `tests/test_known_issues.py` until this flip)."""
+    data = solar_frame()
+
+    def run(start, **kwargs):
+        return fits(
+            OLSModel(SOLAR_PREDICTORS, training_window=21, **kwargs).run(data, start, SOLAR[1], horizon=2)._results
+        )
+
+    early, late = run(SOLAR[0]), run("2023-03-18")
+    assert late and late.keys() <= early.keys()
+    assert {key: early[key] for key in late} == late
+    first_early, first_late = run(SOLAR[0], binary_mask="first_day"), run("2023-03-18", binary_mask="first_day")
+    moved = {key for key in first_late if first_early[key] != first_late[key]}
+    assert len(moved) == 56 and {key[1] for key in moved} == {6, 18}
 
 
 def hand_fit(data, names, period, issue, horizon, window=WINDOW):
@@ -504,8 +531,9 @@ START_CELLS = {
 
 @pytest.mark.parametrize("cell", list(START_CELLS))
 def test_a_later_start_moves_no_forecast(cell):
-    """Runs over [S, E] and [S + k, E + 2]: with `"fit"` every forecast they share is the same, bit for bit, `actual` included. The
-    default differs on some of them (the case is exercised), except with `refit`, whose units always read their own rows."""
+    """Runs over [S, E] and [S + k, E + 2]: with `"fit"` every forecast they share is the same, bit for bit, `actual` included.
+    `"first_day"` differs on some of them (the case is exercised); with `refit`, whose units always read their own rows, the
+    default is checked instead (`"first_day"` raises there)."""
     freq, first, k, predictors, newest, issue_days, window, refit, horizon = START_CELLS[cell]
     later = shift(first, k)
     end = shift(later, 6 if issue_days else 3)
@@ -517,17 +545,17 @@ def test_a_later_start_moves_no_forecast(cell):
         result = model.run(data, start, stop, horizon=horizon, freq=freq, information_set=INFO, **days)
         return keyed(result._results, "day_in_test")
 
-    for rule in ("fit", None):
+    for rule in ("fit", "first_day" if refit is None else None):
         whole, part = run(first, end, rule), run(later, shift(end, 2), rule)
         shared = whole.keys() & part.keys()
         assert {key[0] for key in shared} == {key[0] for key in part if key[0] <= end}
         same = all(whole[key] == part[key] for key in shared)
-        assert same == (rule == "fit" or refit is not None), rule
+        assert same == (rule != "first_day"), rule
 
 
 def test_validation_and_test_are_one_plain_run_over_both():
     """With `"fit"` a run with validation gives each window's forecasts what one plain run from the validation's first day to the
-    test's last gives them, and the test's what a plain run of the test gives. The default reads each window's masks on its own
+    test's last gives them, and the test's what a plain run of the test gives. `"first_day"` reads each window's masks on its own
     first day, which here differ from the validation's."""
     validation, test = ("2023-03-20", "2023-03-26"), ("2023-03-29", "2023-04-06")
     data = market("1h", "2023-01-20", 85, shift(test[0], -2))
@@ -544,7 +572,7 @@ def test_validation_and_test_are_one_plain_run_over_both():
     def plain(start, stop, rule):
         return keyed(ols(binary_mask=rule).run(data, start, stop, horizon=2)._results, "day_in_test")
 
-    for rule in ("fit", None):
+    for rule in ("fit", "first_day"):
         windows, whole = windowed(rule), plain(validation[0], test[1], rule)
         assert windows["test"] == plain(*test, rule)
         for name, (start, stop) in (("validation", validation), ("test", test)):
@@ -623,14 +651,23 @@ def test_verify_is_ok_with_its_positive_control(spring):
 
 
 def test_another_rule_refuses_a_resume_and_the_same_rule_by_another_name_doesn_t(spring, tmp_path):
-    for first, then in ((None, "fit"), ("fit", None), ("fit", "first_day"), ("first_day", "fit")):
+    """First-day results (the old default's, or `"first_day"`'s) refuse the default with a message that names the way back, and
+    the default's results refuse `"first_day"`; None and `"fit"` are one rule, with or without `refit`."""
+    back = "Pass binary_mask='first_day' to resume them as they were written"
+    for first, then, note in (
+        ("first_day", None, back),
+        ("first_day", "fit", back),
+        (None, "first_day", "Leave binary_mask None to resume them"),
+        ("fit", "first_day", "Leave binary_mask None to resume them"),
+    ):
         path = tmp_path / f"{first}-{then}" / "m.jsonl"
         ols(binary_mask=first).run(spring, "2023-03-27", "2023-04-02", horizon=1, save_to=str(path))
-        with pytest.raises(ManifestMismatchError, match="training_cut"):
+        with pytest.raises(ManifestMismatchError, match="training_cut") as raised:
             ols(binary_mask=then).run(spring, "2023-03-27", "2023-04-02", horizon=1, save_to=str(path))
+        assert note in str(raised.value)
     for first, then, refit in (
-        (None, "first_day", None),
-        ("first_day", None, None),
+        (None, "fit", None),
+        ("fit", None, None),
         (None, "fit", "7D"),
         ("fit", None, "7D"),
     ):
@@ -644,15 +681,15 @@ def test_another_rule_refuses_a_resume_and_the_same_rule_by_another_name_doesn_t
 def test_a_fit_run_resumes_over_another_test_start_to_a_fresh_one(spring, tmp_path):
     """Stored forecasts of a function's lists are compared with what a fresh run would give them, mask digests included. With
     `"fit"` there are none, and none is needed: the forecasts of [S + 5, E] are those of a run over [S, E], so the resume runs the
-    first five days and the file is a fresh run's. The default refuses, since the first day moved the lists' masks."""
+    first five days and the file is a fresh run's. `"first_day"` refuses, since the first day moved the lists' masks."""
     later = shift(S, 5)
     data = with_turning(spring, shift(later, -2))
     fresh = tmp_path / "fresh" / "m.jsonl"
     ols(weekday_lists, binary_mask="fit").run(data, S, E, horizon=2, save_to=str(fresh))
-    for rule in ("fit", None):
+    for rule in ("fit", "first_day"):
         path = tmp_path / str(rule) / "m.jsonl"
         ols(weekday_lists, binary_mask=rule).run(data, later, E, horizon=2, save_to=str(path))
-        if rule is None:
+        if rule == "first_day":
             with pytest.raises(ManifestMismatchError, match="other binary columns"):
                 ols(weekday_lists, binary_mask=rule).run(data, S, E, horizon=2, save_to=str(path))
             continue
@@ -662,7 +699,7 @@ def test_a_fit_run_resumes_over_another_test_start_to_a_fresh_one(spring, tmp_pa
 
 def test_a_run_with_validation_resumes_plain_fit_results_whose_test_started_earlier(spring, tmp_path):
     """A plain manifest of fixed lists holds no mask digests, only its first day, so a run with windows whose test starts on another
-    day can't tell its masks from the stored ones and the default refuses. A `"fit"` mask is a function of its fit's rows: the stored
+    day can't tell its masks from the stored ones and `"first_day"` refuses. A `"fit"` mask is a function of its fit's rows: the stored
     forecasts are what the run with windows gives them, so it resumes, and its test forecasts are a fresh run's with the windows."""
     validation, test = ("2023-03-15", "2023-03-20"), ("2023-03-29", "2023-04-05")
     data = with_turning(spring, "2023-03-25")
@@ -673,10 +710,10 @@ def test_a_run_with_validation_resumes_plain_fit_results_whose_test_started_earl
         pipeline.run(data, horizon=1, save_dir=str(path), **days)
 
     run("fit", tmp_path / "fresh", validation=validation, test=test)
-    for rule in ("fit", None):
+    for rule in ("fit", "first_day"):
         path = tmp_path / str(rule)
         run(rule, path, test_start="2023-03-27", test_end=test[1])
-        if rule is None:
+        if rule == "first_day":
             with pytest.raises(ManifestMismatchError, match="other binary columns"):
                 run(rule, path, validation=validation, test=test)
             continue
@@ -692,7 +729,7 @@ def friday_list(ctx):
 
 
 def test_a_friday_run_of_a_function_is_the_run_of_every_day_s_fridays():
-    """The default reads the Friday list's mask on the first Friday in a run of every day and on the window's first day, a Monday,
+    """`"first_day"` reads the Friday list's mask on the first Friday in a run of every day and on the window's first day, a Monday,
     in a run of Fridays, so the two differ (`tests/models/test_issue_days.py`). With `"fit"` there is no mask day: every Friday's
     record is the run of every day's."""
     data = market("1h", "2023-01-20", 85, "2023-03-22")
@@ -701,7 +738,7 @@ def test_a_friday_run_of_a_function_is_the_run_of_every_day_s_fridays():
         records = ols(friday_list, binary_mask=rule).run(data, S, E, horizon=2, **days)._results
         return keyed([r for r in records if r["run_weekday"] == 4])
 
-    for rule in ("fit", None):
+    for rule in ("fit", "first_day"):
         assert (run(rule, issue_days=["friday"]) == run(rule)) == (rule == "fit"), rule
 
 
@@ -711,8 +748,8 @@ def every_day_masked(ctx):
 
 def test_a_fit_resume_still_compares_each_stored_forecast_s_list(spring, tmp_path):
     """No mask digest to compare is no reason to compare nothing: a stored forecast whose list a fresh run wouldn't give it is
-    refused, as for the default."""
-    for rule in ("fit", None):
+    refused, as under `"first_day"`."""
+    for rule in ("fit", "first_day"):
         path = tmp_path / str(rule) / "m.jsonl"
         ols(weekday_lists, binary_mask=rule).run(spring, "2023-03-27", "2023-04-02", horizon=1, save_to=str(path))
         with pytest.raises(ManifestMismatchError, match="another predictor list"):
@@ -722,30 +759,30 @@ def test_a_fit_resume_still_compares_each_stored_forecast_s_list(spring, tmp_pat
 
 
 def test_a_column_that_starts_inside_the_test_needs_no_re_read(spring, tmp_path):
-    """`late` has no value before 23 March. The default reads it again on the first day whose rows have one (`test_masks.py`) and
+    """`late` has no value before 23 March. `"first_day"` reads it again on the first day whose rows have one (`test_masks.py`) and
     records the digests that changed; under `"fit"` a fit whose rows have no value of it has no finite row and is skipped, and every
     other fit reads its own rows. Both scale the continuous column from then on, so every forecast and every skip is the same, and
-    only the default's manifest has digests."""
+    only `"first_day"`'s manifest has digests."""
     late = np.where(
         local_dates(spring) >= np.datetime64("2023-03-23"), np.random.default_rng(9).normal(size=len(spring)), np.nan
     )
     data = spring.assign(late=late)
     stored = {}
-    for rule in (None, "fit"):
+    for rule in ("first_day", "fit"):
         path = tmp_path / str(rule) / "m.jsonl"
         ols(NO_LEVEL + ["late"], binary_mask=rule).run(data, S, E, horizon=2, save_to=str(path))
         stored[rule] = (lines(path), manifest_of(path))
-    assert stored["fit"][0] == stored[None][0]
+    assert stored["fit"][0] == stored["first_day"][0]
     assert any('"no_finite_training_rows"' in line for line in stored["fit"][0])
-    assert stored[None][1]["binary_masks"] and "binary_masks" not in stored["fit"][1]
+    assert stored["first_day"][1]["binary_masks"] and "binary_masks" not in stored["fit"][1]
 
 
 def test_scale_binary_ignores_the_rule():
-    """`StandardScaler(scale_binary=True)` scales every column whatever the mask, so `"fit"` is the default to the bit."""
+    """`StandardScaler(scale_binary=True)` scales every column whatever the mask, so `"fit"` is `"first_day"` to the bit."""
     data = market("1h", "2023-01-20", 85, "2023-03-24")
     scaler = {"name": "standard", "params": {"scale_binary": True}}
     own, plain = (
-        keyed(ols(scaler=scaler, binary_mask=rule).run(data, S, E, horizon=2)._results) for rule in ("fit", None)
+        keyed(ols(scaler=scaler, binary_mask=rule).run(data, S, E, horizon=2)._results) for rule in ("fit", "first_day")
     )
     assert own == plain
 
@@ -762,8 +799,10 @@ def resumed_and_fresh(binary_mask, tmp_path):
     return lines(resumed, "day_in_test"), lines(fresh, "day_in_test")
 
 
-def test_fit_resumed_over_an_earlier_start_equals_the_fresh_run(tmp_path):
-    """The specific half of the xfail in `tests/test_known_issues.py`: with `binary_mask="fit"` no mask depends on the start."""
-    resumed, fresh = resumed_and_fresh("fit", tmp_path)
+@pytest.mark.parametrize("rule", ["fit", None])
+def test_fit_resumed_over_an_earlier_start_equals_the_fresh_run(rule, tmp_path):
+    """The default's half of the xfail in `tests/test_known_issues.py` (which keeps `"first_day"`): with `"fit"`, the default, no
+    mask depends on the start."""
+    resumed, fresh = resumed_and_fresh(rule, tmp_path)
     assert len(fresh) > 0
     assert resumed == fresh

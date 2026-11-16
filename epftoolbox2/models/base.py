@@ -60,6 +60,7 @@ from ._calendar import (
     EXPANDING,
     FREQ_STEPS,
     IssueCalendar,
+    MASK_FIRST_DAY,
     MASK_FIT,
     NewestTargets,
     REFIT_AUTO,
@@ -596,12 +597,12 @@ class BaseModel(ABC):
         is `W` in everything (`_calendar.resolve_training_window`).
 
         `binary_mask` says which training rows decide that a column is binary 0/1, which the scaler leaves as it is: None (the
-        default) reads it, without `refit`, on the first calendar day of the test (or of each window of a run with validation;
-        a predictor function's list on its first planned issue day)
-        and keeps it for every forecast of the window, so a forecast can depend on where the test starts; with `refit` each unit
-        reads it from its own rows. `"first_day"` is the first rule by name (it raises with `refit`). `"fit"` reads it from the
-        rows of each fit's own span, before any filter, as a refit unit does, so no forecast depends on `test_start`; it moves
-        the forecasts whose own rows say otherwise than the first day's. See the docs page Time and Calendars.
+        default) and `"fit"` read it from the rows of each fit's own span, before any filter, as a refit unit does, so no
+        forecast depends on `test_start`. `"first_day"`, the default up to 2.3, reads it without `refit` on the first calendar
+        day of the test (or of each window of a run with validation; a predictor function's list on its first planned issue
+        day) and keeps it for every forecast of the window, so a forecast can depend on where the test starts; it raises with
+        `refit`. Results written with first-day masks refuse to resume under the default: pass `binary_mask="first_day"` to
+        resume them. See the docs page Time and Calendars.
 
         `normalise_by`, `bounds` and `zero_when` are a per-row target (`models._row_target`, the docs page Common Parameters):
         `normalise_by="<column>"` divides each training row's target by that row's value of the column and multiplies the forecast
@@ -758,11 +759,20 @@ class BaseModel(ABC):
         return tuple(self if name in vars(self) else self._owner_of(name) for name in _FRAME_READERS)
 
     @property
+    def _mask_rule(self) -> str:
+        """Which rows decide a fit's binary columns: `"fit"` its own (None, the default, and `"fit"`), or `"first_day"` the
+        window's first day (by name only). A model that fits nothing scales nothing and keeps `"first_day"`, so its run and its
+        manifest stay as they were."""
+        if self.binary_mask is None:
+            return MASK_FIRST_DAY if self._fits_nothing else MASK_FIT
+        return self.binary_mask
+
+    @property
     def _masks_from_fits(self) -> bool:
         """Whether each fit reads its binary-column mask from its own span's rows, in the worker (`_worker._fit_member`, and
         `_fit_unit` for a refit unit), so the parent computes none and no mask depends on a window's first day: with `refit`, or
-        `binary_mask="fit"`."""
-        return self.refit is not None or self.binary_mask == MASK_FIT
+        the `"fit"` rule (`_mask_rule`, the default)."""
+        return self.refit is not None or self._mask_rule == MASK_FIT
 
     @property
     def _refit_rules(self) -> Tuple[Optional[str], ...]:
@@ -1434,8 +1444,9 @@ class BaseModel(ABC):
     def _training_cut(self, rules: Optional["InformationSet"], target: str, freq: str) -> Dict[str, Any]:
         """What a manifest's `training_cut` says of this run: rows by date, with an `"expanding"` training window the frame's
         first local date its rows start on (`expanding_from`; read after `_load_periods`), with `refit` the rule and its epoch (and
-        with `"auto"` each member's resolved rule, `refit_rules`), with `binary_mask="fit"` and no `refit` that rule
-        (`binary_mask`: with `refit` it is the refit's own, and `"first_day"` is the default's, so neither is written), and with
+        with `"auto"` each member's resolved rule, `refit_rules`), with the `"fit"` rule (`_mask_rule`: None, the default, or
+        `"fit"`) and no `refit` that rule (`binary_mask`: with `refit` it is the refit's own, and `"first_day"`, the default up to
+        2.3, is what results without it were written with, so neither is written), and with
         `newest_target="published"` what the newest target is read from. The information set isn't compared on resume, but these
         decide numbers."""
         cut = dict(TRAINING_CUT_BY_DATE)
@@ -1448,7 +1459,7 @@ class BaseModel(ABC):
             if self.refit == REFIT_AUTO:
                 # The rule each member resolved to, in member order: what the code made of "auto", which decides numbers.
                 cut["refit_rules"] = list(self._refit_rules)
-        elif self.binary_mask == MASK_FIT:
+        elif self._mask_rule == MASK_FIT:
             # Which rows decide a fit's binary columns: its own, not the window's first day's.
             cut["binary_mask"] = MASK_FIT
         if self._known_only and rules is not None:
@@ -1641,7 +1652,7 @@ class BaseModel(ABC):
         none (they stay with each list). A plain run of fixed lists records its digests, under the test window's key, only where
         a column with no value on the first day was read again on a later day and that changed a mask: results scaled before
         that re-read existed have none, and `check_and_write` refuses to resume them (`unrecorded_masks`). Every other plain
-        manifest is as it was. A model with `refit` or `binary_mask="fit"` has none: a fit's mask is a function of its rows, which
+        manifest is as it was. A model with `refit` or the "fit" rule has none: a fit's mask is a function of its rows, which
         the data hash covers (and a refit's records carry their anchors)."""
         if plan is not None or self._masks_from_fits:
             return None
@@ -1772,7 +1783,7 @@ class BaseModel(ABC):
         if units is not None:
             # Day or pooled units (`_worker._run_unit`): their kind, the periods of a day and the target transform.
             config["units"] = units
-        if self.binary_mask == MASK_FIT and self.refit is None:
+        if self._mask_rule == MASK_FIT and self.refit is None:
             # Each fit reads its mask from its own span's rows (`_worker._fit_member`); `scalable_masks` is empty. A refit unit
             # always does (`_worker._fit_unit`).
             config["binary_mask"] = MASK_FIT
@@ -3135,7 +3146,7 @@ class BaseModel(ABC):
     ) -> Callable[[int, int, str], Optional[PlannedForecast]]:
         """What a fresh run would give a stored forecast's key, or None if it isn't planned, as on a weekday `weekdays` doesn't
         list. `masks` are per window in a run with windows. With `refit` that is its anchor and no mask digest: a unit reads its
-        mask from its own rows, as each fit does with `binary_mask="fit"`, which has neither. A model with a list of training
+        mask from its own rows, as each fit does under the "fit" rule, which has neither. A model with a list of training
         windows has a digest per member (`member_masks`)."""
         by_window = {TEST: masks} if windows is None else masks
         digests = {

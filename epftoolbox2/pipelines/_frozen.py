@@ -7,7 +7,7 @@ what the model would record, in the fields a resume compares that the model alon
 its predictors (the layout per period and horizon of a fixed list, the import path of a predictor function), its training window,
 its parameters (`model_params`: the scaler, `_model_kwargs`, `block_predict`, a per-row target), the kind and target transform of
 day and pooled units, and of `training_cut` the parts the model sets (`refit`, its epoch and the rules `"auto"` resolves to,
-`binary_mask="fit"` without a refit, `newest_target`). A predictor function's `fingerprint` (its source and the information set
+the `"fit"` mask rule without a refit, `newest_target`). A predictor function's `fingerprint` (its source and the information set
 it answers through) is compared too, and only warns: a comment edited in it, or an information set built otherwise, changes it as
 well. What depends on the data, the information set or the run's dates (data hashes, test period, the rules a `training_cut`
 reads, an expanding window's first day) is the study's, not the model's, and isn't compared.
@@ -27,7 +27,13 @@ from ..models._row_target import manifest_params as row_target_params
 from ..models._units import manifest_fields as unit_fields
 from ..models.base import BaseModel
 from ..models.context import function_fingerprint, function_path
-from ..results.manifest import PREDICTOR_FUNCTION_LAYOUT, _block_params, hash_predictor_layout, horizons_of
+from ..results.manifest import (
+    PREDICTOR_FUNCTION_LAYOUT,
+    _block_params,
+    hash_predictor_layout,
+    horizons_of,
+    mask_rule_note,
+)
 
 # The text of an object without a stable one (a function's repr holds its address): no two processes write it alike.
 _UNSTABLE = re.compile(r" at 0x[0-9a-fA-F]+")
@@ -68,7 +74,7 @@ def _model_cut(model: BaseModel) -> Dict[str, Any]:
         cut.update(refit=model.refit, refit_epoch=REFIT_EPOCH)
         if model.refit == REFIT_AUTO:
             cut["refit_rules"] = list(model._refit_rules)
-    elif model.binary_mask == MASK_FIT:
+    elif model._mask_rule == MASK_FIT:
         cut["binary_mask"] = MASK_FIT
     if model.newest_target != "d-1":
         cut["newest_target"] = model.newest_target
@@ -163,7 +169,9 @@ def model_differences(model: Any, manifest: Mapping[str, Any], information_set: 
         theirs = {key: value for key, value in manifest["training_cut"].items() if key in _MODEL_CUT}
         mine = _plain(_model_cut(model))
         if mine != theirs:
-            differences.append(f"training_cut: {theirs!r} in the results vs {mine!r} in this pipeline")
+            differences.append(
+                f"training_cut: {theirs!r} in the results vs {mine!r} in this pipeline{mask_rule_note(theirs, mine)}"
+            )
     return Comparison(differences, lacking, notes)
 
 

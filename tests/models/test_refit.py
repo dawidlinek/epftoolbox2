@@ -292,10 +292,14 @@ def market():
 def test_refit_1d_is_refit_none_where_the_masks_agree(market):
     """With `"1D"` every forecast is its own unit, on the rows `refit=None` gives it, so it is the same forecast wherever the
     mask agrees: `refit=None` reads a list's mask on the window's first day, a unit on its own rows. `flag` is 0/1 in the rows of
-    the first day and in those of a forecast until its rows reach 29 March; from there `"1D"` scales it and `None` doesn't."""
+    the first day and in those of a forecast until its rows reach 29 March; from there `"1D"` scales it and `None` doesn't. This
+    is the `binary_mask="first_day"` rule of `refit=None`, the default up to 2.3; the default now reads a mask from each fit's
+    own rows, as `"1D"` does."""
     start, end = "2023-03-20", "2023-04-12"
     predictors = PREDICTORS + ["flag"]
-    plain = keyed(ols(None, predictors).run(market, start, end, horizon=2)._results, "refit_anchor")
+    plain = keyed(
+        ols(None, predictors, binary_mask="first_day").run(market, start, end, horizon=2)._results, "refit_anchor"
+    )
     daily = ols("1D", predictors).run(market, start, end, horizon=2)._results
     assert {r["refit_anchor"] for r in daily} == {r["run_date"] for r in daily}
     daily = keyed(daily, "refit_anchor")
@@ -386,7 +390,7 @@ def test_records_carry_the_anchor_and_the_manifest_the_rule(market, tmp_path):
         for name in PROVENANCE:
             manifest.pop(name)
     assert manifests[0] == manifests[1]
-    assert manifests[0]["training_cut"] == {"rows": "dates"}
+    assert manifests[0]["training_cut"] == {"rows": "dates", "binary_mask": "fit"}
 
 
 def test_another_refit_refuses_a_resume(market, tmp_path):

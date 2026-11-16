@@ -489,6 +489,7 @@ def test_a_level_change_resumes_and_moves_nothing(tmp_path):
     cut = json.loads(manifest_path(tmp_path / "a" / "m.jsonl").read_text())["training_cut"]
     assert cut == {
         "rows": "dates",
+        "binary_mask": "fit",
         "newest_target": "published",
         "target_rule": {"kind": "realised", "delay": "1h"},
         "issue_time": "11:45",
@@ -550,7 +551,10 @@ def test_an_explicit_d_1_is_byte_identical_to_leaving_it_out(tmp_path, info):
     assert without_provenance(manifest_path(tmp_path / "omitted" / "m.jsonl")) == without_provenance(
         manifest_path(tmp_path / "explicit" / "m.jsonl")
     )
-    assert json.loads(manifest_path(tmp_path / "omitted" / "m.jsonl").read_text())["training_cut"] == {"rows": "dates"}
+    assert json.loads(manifest_path(tmp_path / "omitted" / "m.jsonl").read_text())["training_cut"] == {
+        "rows": "dates",
+        "binary_mask": "fit",
+    }
     pd.testing.assert_frame_equal(reports["omitted"].summary(), reports["explicit"].summary())
     pd.testing.assert_frame_equal(reports["omitted"].forecast_counts(), reports["explicit"].forecast_counts())
     assert (tmp_path / "omitted.yaml").read_bytes() == (tmp_path / "explicit.yaml").read_bytes()

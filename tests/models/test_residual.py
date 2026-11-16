@@ -634,10 +634,11 @@ def test_an_expanding_base_needs_a_warmup(market):
 
 
 def test_base_prediction_is_the_pipeline_s_own_base_records_where_no_mask_reads_a_first_day(market):
-    """The base copy starts at the warm-up, so a base that reads its binary-column masks on its run's first day (refit=None,
-    binary_mask=None) can give other forecasts than the same model run beside it: such a base warns. A refit base and one with
-    `binary_mask="fit"` give `base_prediction` equal to the pipeline's own base records on every shared key."""
-    for settings in ({"refit": "7D"}, {"binary_mask": "fit"}):
+    """The base copy starts at the warm-up, so a base that reads its binary-column masks on its run's first day
+    (`binary_mask="first_day"`, the default up to 2.3) can give other forecasts than the same model run beside it: such a base
+    warns. A refit base, one with `binary_mask="fit"` and one with the default give `base_prediction` equal to the pipeline's own
+    base records on every shared key."""
+    for settings in ({"refit": "7D"}, {"binary_mask": "fit"}, {}):
         pipeline = (
             ModelPipeline().add_model(base(**settings)).add_model(ResidualModel("ols", PooledLS(), training_window=28))
         )
@@ -647,8 +648,8 @@ def test_base_prediction_is_the_pipeline_s_own_base_records_where_no_mask_reads_
         own = keyed(report.refs["ols"]._results)
         corrected = keyed(report.refs["residual"]._results)
         assert corrected and all(r["base_prediction"] == own[key]["prediction"] for key, r in corrected.items())
-    with pytest.warns(UserWarning, match="binary_mask='fit'"):
-        run(residual(), market)
+    with pytest.warns(UserWarning, match="has binary_mask='first_day'"):
+        run(residual(base_model=base(binary_mask="first_day")), market)
 
 
 def test_base_forecasts_of_a_spring_switch_s_skipped_hour_take_two_issue_days_per_horizon(market):

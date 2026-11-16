@@ -1330,8 +1330,8 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
         {
             "name": "binary_mask",
             "description": (
-                "Which rows decide the binary 0/1 columns left unscaled: empty for the default (the test's first day, a "
-                "refit's own rows), fit for each fit's own rows (no forecast then depends on the test start)"
+                "Which rows decide the binary 0/1 columns left unscaled: empty for the default, each fit's own rows (no "
+                "forecast depends on the test start); first_day for the test's first day, the default up to 2.3"
             ),
             "required": False,
             "default": None,
@@ -1399,8 +1399,8 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
         {
             "name": "binary_mask",
             "description": (
-                "Which rows decide the binary 0/1 columns left unscaled: empty for the default (the test's first day, a "
-                "refit's own rows), fit for each fit's own rows (no forecast then depends on the test start)"
+                "Which rows decide the binary 0/1 columns left unscaled: empty for the default, each fit's own rows (no "
+                "forecast depends on the test start); first_day for the test's first day, the default up to 2.3"
             ),
             "required": False,
             "default": None,
@@ -1467,8 +1467,8 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
         {
             "name": "binary_mask",
             "description": (
-                "Which rows decide the binary 0/1 columns left unscaled: empty for the default (the test's first day, a "
-                "refit's own rows), fit for each fit's own rows (no forecast then depends on the test start)"
+                "Which rows decide the binary 0/1 columns left unscaled: empty for the default, each fit's own rows (no "
+                "forecast depends on the test start); first_day for the test's first day, the default up to 2.3"
             ),
             "required": False,
             "default": None,
@@ -1537,8 +1537,8 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
         {
             "name": "binary_mask",
             "description": (
-                "Which rows decide the binary 0/1 columns left unscaled: empty for the default (the test's first day, a "
-                "refit's own rows), fit for each fit's own rows (no forecast then depends on the test start)"
+                "Which rows decide the binary 0/1 columns left unscaled: empty for the default, each fit's own rows (no "
+                "forecast depends on the test start); first_day for the test's first day, the default up to 2.3"
             ),
             "required": False,
             "default": None,

@@ -849,20 +849,16 @@ class ResidualModel(BaseModel):
             )
 
     def _warn_about_the_base_s_masks(self, base: BaseModel) -> None:
-        """A warning where the base reads its binary-column masks on its run's first day (`refit=None`, `binary_mask=None`):
+        """A warning where the base reads its binary-column masks on its run's first day (`binary_mask="first_day"`):
         that day is the warm-up start, not a run of the base's own, so `base_prediction` can differ from the records of the
         same model run beside this one (`tests/test_known_issues.py`, a forecast depends on the day its test starts)."""
-        if (
-            base._fits_nothing
-            or getattr(base, "refit", None) is not None
-            or getattr(base, "binary_mask", None) is not None
-        ):
+        if base._fits_nothing or base._masks_from_fits:
             return
         warnings.warn(
-            f"{self.name}: its base {type(base).__name__} has refit=None and binary_mask=None, so each base forecast's "
+            f"{self.name}: its base {type(base).__name__} has binary_mask='first_day', so each base forecast's "
             "binary-column mask is read on the base run's first day, the warm-up start: base_prediction can then differ from "
-            "the records of the same model run on its own over other days. Give the base binary_mask='fit' (or refit) for "
-            "forecasts that don't depend on where a run starts.",
+            "the records of the same model run on its own over other days. Leave the base's binary_mask None (the default, "
+            "each fit's own rows) for forecasts that don't depend on where a run starts.",
             UserWarning,
             stacklevel=outside_stacklevel(),
         )

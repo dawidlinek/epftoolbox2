@@ -1,6 +1,7 @@
 """`issue_days=`: a run that issues forecasts on the weekdays it lists, each what a run of every day gives it.
 
-Training is untouched and masks are read on a window's first calendar day, so a Friday run's records are held key by key against
+Training is untouched and masks are read on a window's first calendar day (the `binary_mask="first_day"` rule, the default
+up to 2.3, which the models of the mask tests name; the default now reads each fit's mask from its own rows), so a Friday run's records are held key by key against
 the Fridays of a run of every day, which plans other days and shares none of the weekday filtering. Counts are written down from
 the calendar and the clock by hand. A column that turns from 0/1 to continuous on the first day of the test makes the day a mask
 is read on visible in the forecasts, and the probes are held against a column published weekly, which is late on a Monday and
@@ -328,7 +329,9 @@ def test_a_mask_is_read_on_the_first_calendar_day_of_its_window(windows):
 
     def run(lists, **kwargs):
         return by_key(
-            OLSModel(lists, training_window=WINDOW).run(data, horizon=3, **{**TESTS[windows], **kwargs})._results
+            OLSModel(lists, training_window=WINDOW, binary_mask="first_day")
+            .run(data, horizon=3, **{**TESTS[windows], **kwargs})
+            ._results
         )
 
     every_day = run(MASKED)
@@ -507,8 +510,14 @@ def test_where_a_friday_record_and_a_run_of_every_day_s_differ(case):
     base = market("spring")
 
     def both(data):
-        every = fridays(by_key(OLSModel(fn, training_window=WINDOW).run(data, **test)._results))
-        friday = by_key(OLSModel(fn, training_window=WINDOW).run(data, issue_days=["friday"], **test)._results)
+        every = fridays(
+            by_key(OLSModel(fn, training_window=WINDOW, binary_mask="first_day").run(data, **test)._results)
+        )
+        friday = by_key(
+            OLSModel(fn, training_window=WINDOW, binary_mask="first_day")
+            .run(data, issue_days=["friday"], **test)
+            ._results
+        )
         assert set(every) == set(friday)
         return {key for key in friday if json.loads(friday[key])["prediction"] != json.loads(every[key])["prediction"]}
 
