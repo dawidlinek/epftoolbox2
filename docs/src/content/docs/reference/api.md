@@ -196,6 +196,7 @@ class ModelPipeline:
         backtest: Any = None,             # An EvaluationReport (or member -> forecasts frame) of the same pipeline, for live/backtest skill
         alerts: Any = None,               # A list of rules, or a YAML file of one
         target: str = "price",            # The column the actuals are read from
+        issue_days: Optional[Sequence[str]] = None,  # Weekdays the pipeline issues on, as for run; None: live.json's, else every day
     ) -> MonitorReport: ...               # LiveDirectoryError for a directory that isn't live
 
     def frozen(self, save_dir: Union[str, Path]) -> "ModelPipeline": ...  # Each top= ensemble as a plain average of its newest segment's choice
@@ -230,8 +231,8 @@ class MonitorReport:
 
     def tables(self) -> pd.DataFrame: ...                  # One row per (window, member), skill first, every count beside its number
     def by_window(self) -> Dict[int, pd.DataFrame]: ...    # tables() cut by window
-    def daily(self) -> pd.DataFrame: ...                   # One row per (member, issue day, horizon): forecasts, mae, rmse, bias, skill_<b>
-    def rungs(self) -> pd.DataFrame: ...                   # Each FallbackEnsemble's rungs per policy and window: days, forecasts, share, mae
+    def daily(self) -> pd.DataFrame: ...                   # One row per (member, issue day, horizon) curve: forecasts, mae, rmse, bias, skill_<b>
+    def rungs(self) -> pd.DataFrame: ...                   # Each FallbackEnsemble's rungs (and skipped days) per policy and window: days, forecasts, share, mae
     def quality(self) -> pd.DataFrame: ...                 # One row per issue day: the missing and imputed cells and failed sources of its quality.json
 
 

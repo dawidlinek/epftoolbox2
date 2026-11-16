@@ -42,6 +42,7 @@ and each revision's `quality.json`) and the clock.
 | `backtest` | `None` | An `EvaluationReport` (or a mapping of member to frame of forecasts) of the same pipeline over the same days, for the live/backtest skill ratio |
 | `alerts` | `None` | A list of rules, or the path of a YAML file holding one (see [Alerts](#alerts)) |
 | `target` | `"price"` | The column the actuals are read from |
+| `issue_days` | `None` | The weekdays the pipeline issues on, as for `run` (`["friday"]`); `None` takes `live.json`'s, else every day. Only those are due |
 
 Every model and ensemble of the pipeline that has results in the directory is a member; the others are listed in
 `monitored.missing`.
@@ -56,9 +57,10 @@ Every model and ensemble of the pipeline that has results in the directory is a 
   price: out at 13:00 on the day before it) is read on the clock (`epftoolbox2.clock`), whatever the frame holds. A forecast issued
   at 11:45 for tomorrow is scored from 13:00 today; the keys of horizon 2 wait for tomorrow's 13:00. Forecasts not yet scored are
   counted in `unscored`.
-- **A day** is one issue day at one horizon: the delivered curve of one target date. The error of a key is `prediction - actual`.
+- **Two kinds of day**, as `LossPanel` has them. An *issue day* is a run date: `days_<b>`, `wins_<b>`, `participation` and every alert's `for_days` count those, and a day's loss is the mean over its horizons of their MAEs. A *curve* is one issue day at one horizon, the delivered forecasts of one target date: `rmse_daily`, `level`, `shape` and `partial_days` are over curves. The error of a key is `prediction - actual`.
+- **The data's zone.** A record's date and period are in the zone of the data it was made on (the members' manifests' `data_timezone`). `data` is converted to it (the same instants), so a frame in UTC or London time gives the same report; a naive frame, or manifests that name different zones, raise.
 - **Windows** are the last `n` calendar issue days up to the newest *due* one. An issue day is due once its deadline has passed
-  on the clock (the day before today when `live.json` records no deadline), and no day before the directory's first call counts.
+  on the clock (once the day has ended when `live.json` records no deadline: today never counts), only on the weekdays the pipeline issues on, and no day before the directory's first call counts.
   A window longer than the directory is as long as the directory.
 
 ## The tables
@@ -68,15 +70,16 @@ Every model and ensemble of the pipeline that has results in the directory is a 
 | Columns | Meaning |
 |---|---|
 | `window`, `member` | The window in issue days, and the member |
-| `skill_<b>`, `common_<b>`, `days_<b>`, `wins_<b>` | Per benchmark `b`: the member's MAE over the benchmark's on the keys both have (below 1 beats it), how many keys, how many days, and the days on which the member's MAE is lower |
-| `backtest_skill_<b>`, `live_vs_backtest_<b>`, `matched_days_<b>` | With `backtest=`: see [Against the backtest](#against-the-backtest) |
+| `skill_<b>`, `common_<b>`, `days_<b>`, `wins_<b>` | Per benchmark `b`: the member's MAE over the benchmark's on the keys both have (below 1 beats it), how many keys, how many issue days, and those on which the member's loss is lower |
+| `backtest_skill_<b>`, `live_vs_backtest_<b>`, `matched_days_<b>`, `matched_keys_<b>` | With `backtest=`: see [Against the backtest](#against-the-backtest) |
 | `forecasts`, `unscored` | Forecasts scored, and forecasts of the window whose actual isn't known yet (or doesn't exist) |
+| `check_failed`, `check_failed_days` | Keys and issue days the member's checks before export turned into `check_failed` skip records: out of its keys and of the common keys. See below |
 | `mae`, `rmse`, `rmse_daily`, `bias` | On the member's own scored keys: MAE, RMSE pooled, the mean of the days' RMSEs (the arena's convention), and the mean error |
-| `level`, `shape` | See below |
+| `level`, `shape`, `partial_days` | See below; and the curves with only part of their periods scored |
 | `issue_days`, `committed_days`, `participation` | Due issue days in the window; those with a revision committed before the deadline; their share |
 | `delivered_days`, `delivered` | Due issue days with a delivery recorded (`mark_delivered`), and their share |
 | `member_days` | Issue days the member has a forecast on |
-| `fallback_days`, `fallback_mae` | For a `FallbackEnsemble`: days a rung above 0 served, and the MAE of those keys |
+| `fallback_days`, `skipped_days`, `fallback_mae` | For a `FallbackEnsemble`: issue days a rung above 0 served, issue days no rung served, and the MAE of the keys a rung above 0 served |
 | `quality_records`, `quality_days` | Days with a `quality.json`, and of them days that record a missing or imputed cell or a source that didn't refresh |
 
 **Skill is on common keys.** `skill_naive` of a member is its MAE over naive's on the keys where both have a forecast and an
@@ -89,6 +92,8 @@ whole curve, such as a load or weather input shared by every model. `shape` is t
 it got wrong inside the day. A constant error of 5 a day has level 5 and shape 0; an error of +4, -4, +4, ... has level 0 and shape
 4. Per day, mean|e| is at most |mean e| plus the mean of |e - mean e|, so with days of equal size `mae <= level + shape`.
 
+**Checks before export.** A member's day that failed its checks has no forecasts, so it leaves the member's own score and every common key it would have been in: a model's worst days can drop out of its own skill. `check_failed` and `check_failed_days` count them per window, and `tables()` warns and sets `attrs["check_failed"]` to the keys per member. To judge what was delivered, read the `FallbackEnsemble`'s row and `rungs()`.
+
 **Participation does not depend on the policy.** `participation` counts the days with any revision committed before the deadline,
 and `delivered` the days with a delivery before it, whichever `policy` reads the forecasts: a day the pipeline failed to deliver
 is a missing day in the window, not a day left out of it.
@@ -100,15 +105,15 @@ Each issue day has revisions (every call that changed anything commits one, see 
 
 - `"latest"`: the newest committed by the deadline: what a reader of the directory sees by default.
 - `"first"`: the first committed by it: how the forecast did before any revision improved it.
-- `"delivered"`: up to the newest revision recorded as delivered; a day with no delivery has no forecasts.
+- `"delivered"`: up to the newest revision recorded as delivered; a day with no delivery has no forecasts. The revision must have been committed by the cut-off, but **when its delivery was recorded does not matter** here (deliveries happen between the forecast deadline and the market's gate, or are marked later from a receipt), and so for `delivered` and `delivered_below`. `ModelResultRef(policy="delivered")` and `LiveStore.visible`, which live readers need, keep asking for a delivery recorded by the cut-off.
 
 An uncommitted revision, or one committed after the cut-off, is never read.
 
 ## Fallback rungs
 
 `monitored.rungs()` reads each `FallbackEnsemble` under all three policies and gives, per window: the `rung`, the ladder's member at
-it (`rung_member`), the `days` and `forecasts` it served, its `share` of the member's days, and the `scored` forecasts and their
-`mae`. A fallback is known the day it is issued; its MAE waits for the actuals. `fallback_mae` in the table scores the days a
+it (`rung_member`), the `days` (issue days with a key it served) and `forecasts` it served, its `share` of the planned days, and the `scored` forecasts and their
+`mae`. A row with `rung` -1 and `rung_member` `"skipped"` counts the days no rung served: a committed day on which a planned horizon has no forecast from any rung. A fallback is known the day it is issued; its MAE waits for the actuals. `fallback_mae` in the table scores the days a
 rung above 0 served, so a late input shows as days on a lower rung with a worse MAE, never as a better-looking average.
 
 ## Input quality
@@ -127,9 +132,7 @@ monitored = pipeline.monitor(data, "live/de_price", windows=(30,), benchmarks=["
 print(monitored.tables()[["member", "skill_naive", "backtest_skill_naive", "live_vs_backtest_naive", "matched_days_naive"]])
 ```
 
-`backtest_skill_<b>` is its skill in the backtest, `live_vs_backtest_<b>` the live skill over it, both on the **target days** where
-the live window and the backtest both have the member and the benchmark (`matched_days_<b>` of them); where there are none the
-columns are NaN. A ratio near 1 says the live pipeline performs as its backtest did; much above 1 says something in production
+`backtest_skill_<b>` is its skill in the backtest, `live_vs_backtest_<b>` the live skill over it, both on the **forecast keys** (run date, target date, hour, horizon) where the live window and the backtest both have the member and the benchmark (`matched_keys_<b>` of them, on `matched_days_<b>` issue days): one sample on both sides, however far the backtest reaches beyond the window. A backtest equal to the live forecasts gives exactly 1. Where there are no matching keys the columns are NaN. A ratio near 1 says the live pipeline performs as its backtest did; much above 1 says something in production
 differs. Absolute errors are not compared: the periods differ.
 
 ## Alerts
@@ -146,23 +149,23 @@ for alert in monitored.alerts:
 ```
 
 ```yaml
-- skill_above: 0.8            # member MAE / benchmark MAE above 0.8 on each of the last for_days days
-  for_days: 3                 # default 1; a day is one issue day at one horizon
+- skill_above: 0.8            # member MAE / benchmark MAE above 0.8 on each of the last for_days issue days
+  for_days: 3                 # default 1: consecutive due issue days; a day without a score breaks the run
   member: OLS                 # optional: every member but the benchmarks
   benchmark: naive            # optional: every benchmark
 - participation_below: 0.9    # the share of the window's issue days with a revision committed before the deadline
   window: 30                  # default: the first window
 - delivered_below: 0.9        # likewise with a recorded delivery
-- rung_at_least: 1            # a fallback ensemble's day served by rung 1 or lower on each of the last for_days days
+- rung_at_least: 1            # a fallback ensemble's day served by rung 1 or worse on each of the last for_days days (a skipped day is worse than any)
   member: live
 - stale_input: load_forecast  # the column's last valid timestamp is more than age days before the issue day's midnight
-  age: 1                      # default 1
+  age: 1                      # a finite number from 0; default 1
   for_days: 1                 # on each of the last for_days issue days with a quality record
 ```
 
 Each alert that fires is an `Alert` in `monitored.alerts` with its `rule`, `message`, `member`, `benchmark`, observed `value`,
 `threshold` and `through` (the last issue day it looked at); no alert is an empty list. The rules read the report as it is:
-`skill_above` the daily skill of `monitored.daily()`, `rung_at_least` every key of the days up to the newest due one, scored or not,
+`skill_above` the skill of each issue day, `rung_at_least` every key of the days up to the newest due one, scored or not,
 and `stale_input` the quality records (a record that doesn't name the column says nothing about it). A key the rule doesn't know
 raises, so a typo never silently disables an alert. `epf monitor` will exit 3 on an alert (step 8i).
 

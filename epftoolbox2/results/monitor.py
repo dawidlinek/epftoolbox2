@@ -7,45 +7,62 @@ on forecast keys they share, with counts. Raw error is not the headline: a month
 RMSE and the benchmark's more (the live DE price RMSE rose 41 % from August to September while skill improved), so the tables lead
 with skill, the ratio of a member's MAE to a benchmark's on the keys both hold.
 
-**Definitions.** A *day* is one issue day at one horizon (what `LossPanel.day_ids` numbers): the delivered curve of one target
-date, of 23, 24 or 25 hourly forecasts (92 to 100 quarter-hours) on a switch day, since the clock's periods are the records'. The
-error of a key is `prediction - actual`. Per member and window, on the keys the member has a forecast and a known actual for:
+**Definitions.** The error of a key is `prediction - actual`. Two kinds of day, as `LossPanel` has them: an *issue day* is a run
+date, and `days_b`, `wins_b`, `participation` and every alert's `for_days` count those (a day's loss is the mean over its horizons
+of each horizon's MAE, `LossPanel.daily`); a *curve* is one issue day at one horizon (what `LossPanel.day_ids` numbers), the
+delivered forecasts of one target date, of 23, 24 or 25 hourly values (92 to 100 quarter-hours) on a switch day since the clock's
+periods are the records', and `rmse_daily`, `level`, `shape` and `partial_days` are over curves. Per member and window, on the keys
+the member has a forecast and a known actual for:
 
-- `forecasts`, `mae`, `rmse` (pooled), `rmse_daily` (the mean of the days' RMSEs, the arena's convention), `bias` (the mean
-  error);
-- `level`, the mean over days of |the day's mean error|, and `shape`, the MAE after removing each day's mean error. Per day
-  `mean|e| <= |mean e| + mean|e - mean e|`, so `mae <= level + shape` when the days weigh the same; a day's level is what the
-  forecast got wrong about the whole curve (a shared input or weather problem), its shape what it got wrong inside the day;
+- `forecasts`, `mae`, `rmse` (pooled), `rmse_daily` (the mean of the curves' RMSEs, the arena's convention), `bias` (the mean
+  error), `partial_days` (curves with only part of their periods scored, flagged with a warning and `attrs["partial_days"]`);
+- `level`, the mean over curves of |the curve's mean error|, and `shape`, the MAE after removing each curve's mean error. Per
+  curve `mean|e| <= |mean e| + mean|e - mean e|`, so `mae <= level + shape` when the curves weigh the same; level is what the
+  forecast got wrong about the whole curve (a shared input or weather problem), shape what it got wrong inside it;
 - per benchmark `b`: `skill_b` = member MAE / benchmark MAE on the keys both have (below 1: better than the benchmark),
-  `common_b` (how many keys), `days_b` and `wins_b` (the days among them where the member's MAE is the lower);
+  `common_b` (how many keys), `days_b` (issue days among them) and `wins_b` (those where the member's loss is the lower);
+- `check_failed`, `check_failed_days`: the member's keys and issue days that checks before export turned into `check_failed` skip
+  records. They are out of the member's keys and of the common keys, so every score is conditional on passing the checks; that
+  is warned about and in `tables().attrs["check_failed"]`;
 - `participation`: the share of the window's issue days with a revision committed before the deadline (the cut-off), whatever
   the policy; `delivered`: the share with a delivery recorded; `member_days`: the issue days the member has a forecast on;
-- for a `FallbackEnsemble`: `fallback_days`, the days a rung above 0 served, and `fallback_mae` on them;
+- for a `FallbackEnsemble`: `fallback_days`, the issue days a rung above 0 served, `skipped_days`, those no rung served (a planned
+  horizon of a committed day with no forecast: worse than any rung, a row of `rungs()` and read so by `rung_at_least`), and
+  `fallback_mae` on the keys a rung above 0 served;
 - `quality_days`: the issue days whose `quality.json` (step 8f) records a missing cell, an imputed cell or a source that didn't
   refresh, of `quality_records` days that have one;
 - with `backtest=`: per benchmark `backtest_skill_b`, and `live_vs_backtest_b`, the live skill over the backtest's skill, both on
-  the target days of the window where the live and the backtest forecasts and the benchmark's all exist (`matched_days_b`).
+  the forecast keys (run date, target date, hour, horizon) of the window where the live and the backtest forecasts of the member
+  and the benchmark all exist (`matched_keys_b` of them, on `matched_days_b` issue days): one sample on both sides.
+
+**Policies.** `"latest"` and `"first"` read what `LiveStore.visible` gives. `"delivered"` reads, of each issue day's revisions
+committed by the cut-off, those up to the newest one recorded as delivered, **whenever its delivery was recorded**: deliveries
+happen between the forecast deadline and the market's gate, or are marked later from a receipt. (`LiveStore.visible("delivered",
+cutoff)`, which live readers such as `ForecastSource` need, also asks the delivery to be recorded by the cut-off.)
 
 **Windows** are the last `n` calendar issue days up to the newest *due* one: an issue day is due once its deadline has passed on the
-clock (the day before today without a deadline), and none before the directory's first call counts. A key is scored once its
-target's rule says the actual is known by now on the clock (`InformationSet`), whatever `data` holds, and its actual is the
-data's value at the same wall-clock period `horizon` local days after the issue day (the one a run's `actual` is), so a
-repeated autumn hour that no run could score isn't scored here either.
+clock (once the day has ended without a deadline, so today never counts), only on the weekdays the pipeline issues on
+(`issue_days=`, or `live.json`'s), and none before the directory's first call counts. A key is scored once its target's rule says
+the actual is known by now on the clock (`InformationSet`), whatever `data` holds, and its actual is the data's value at the same
+wall-clock period `horizon` local days after the issue day (the one a run's `actual` is), so a repeated autumn hour that no run
+could score isn't scored here either. `data` is read in the time zone the members' manifests record (`data_in_results_zone`): the
+same instants are converted, a naive frame or manifests of different zones raise.
 
-**Alerts** (`MonitorReport.alerts`, an empty list when nothing fires) come from a list of mappings, each with one rule key:
+**Alerts** (`MonitorReport.alerts`, an empty list when nothing fires) come from a list of mappings, each with one rule key.
+`for_days` is a run of consecutive due issue days: a day the pipeline missed, or without a score or record, breaks it.
 
-    - skill_above: 0.8            # member MAE / benchmark MAE above 0.8 on each of the last for_days scored days
+    - skill_above: 0.8            # member MAE / benchmark MAE above 0.8 on each of the last for_days issue days
       for_days: 3                 # default 1
       member: lear                # optional: all members but the benchmarks
       benchmark: naive            # optional: every benchmark
     - participation_below: 0.9    # share of the issue days of `window` with a committed revision
       window: 30                  # default: the first window
     - delivered_below: 0.9        # likewise, with a recorded delivery
-    - rung_at_least: 1            # a fallback ensemble's day served by this rung or lower, on each of the last for_days days
+    - rung_at_least: 1            # a fallback ensemble's day served by this rung or worse (a skipped day is worse than any)
       for_days: 1
       member: best                # optional: every fallback ensemble
     - stale_input: load_forecast  # the column's last valid timestamp, in each of the last for_days quality records, is
-      age: 1                      # more than `age` days (default 1) before the issue day's midnight (or none)
+      age: 1                      # more than `age` days (a finite number from 0, default 1) before the issue day's midnight
       for_days: 1
 
 A key the rule doesn't know raises, so a typo never silently disables an alert.
@@ -607,11 +624,12 @@ class MonitorReport:
 
     def tables(self) -> pd.DataFrame:
         """One row per (window, member): `window` (the number of issue days), `member`, then per benchmark `skill_<b>` (the
-        member's MAE over the benchmark's on the keys both hold: below 1 beats it), `common_<b>`, `days_<b>`, `wins_<b>` (days
-        the member's MAE is the lower), and with a backtest `backtest_skill_<b>`, `live_vs_backtest_<b>`, `matched_days_<b>`; then
-        `forecasts`, `unscored` (forecasts whose actual isn't known yet), `mae`, `rmse`, `rmse_daily`, `bias`, `level`, `shape`,
+        member's MAE over the benchmark's on the keys both hold: below 1 beats it), `common_<b>`, `days_<b>`, `wins_<b>` (issue
+        days the member's loss is the lower), and with a backtest `backtest_skill_<b>`, `live_vs_backtest_<b>`, `matched_days_<b>`,
+        `matched_keys_<b>`; then `forecasts`, `unscored` (forecasts whose actual isn't known yet), `check_failed`,
+        `check_failed_days`, `mae`, `rmse`, `rmse_daily`, `bias`, `level`, `shape`, `partial_days`,
         `issue_days` (due in the window), `committed_days`, `participation`, `delivered_days`, `delivered`, `member_days`,
-        `fallback_days`, `fallback_mae`, `quality_records` and `quality_days`."""
+        `fallback_days`, `skipped_days`, `fallback_mae`, `quality_records` and `quality_days`."""
         return self._tables.copy()
 
     def by_window(self) -> Dict[int, pd.DataFrame]:
@@ -622,14 +640,16 @@ class MonitorReport:
         }
 
     def daily(self) -> pd.DataFrame:
-        """One row per (member, issue day, horizon) with a scored forecast, in calendar order: `member`, `run_date`, `horizon`,
+        """One row per (member, issue day, horizon) with a scored forecast, in calendar order (the curves; empty with these columns
+        when there is none): `member`, `run_date`, `horizon`,
         `target_date`, `forecasts`, `mae`, `rmse`, `bias` and `skill_<b>` per benchmark."""
         return self._daily.copy()
 
     def rungs(self) -> pd.DataFrame:
         """What each rung of each `FallbackEnsemble` served, per policy and window: `policy`, `window`, `member`, `rung`,
-        `rung_member` (the ladder's member at it), `days` and `forecasts` it served, `share` of the member's days, `scored` (of
-        those forecasts, with a known actual) and `mae` on them. Empty without a fallback ensemble."""
+        `rung_member` (the ladder's member at it), `days` (issue days with a key it served) and `forecasts` it served, `share` of the
+        planned days, `scored` (of those forecasts, with a known actual) and `mae` on them; and a row with `rung` -1 and
+        `rung_member` "skipped" for the days no rung served. Empty without a fallback ensemble."""
         return self._rungs.copy()
 
     def quality(self) -> pd.DataFrame:
