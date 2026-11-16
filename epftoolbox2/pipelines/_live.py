@@ -474,6 +474,7 @@ def serve_models(
 
         sub = ModelPipeline(information_set=pipeline.information_set, engine=pipeline._engine)
         sub._availability = pipeline._availability
+        sub._bases_from_the_whole_list = True  # a ResidualModel's named base is bound already, to the pipeline's model
         for model in run_models:
             sub.add_model(model)
         with tempfile.TemporaryDirectory(prefix="epf-forecast-") as scratch, empty_runs_kept():
@@ -702,6 +703,16 @@ def forecast(
                 f"{ensemble.name} chooses its members on validation (top=...): a live call can't. Freeze its choice first: "
                 "pipeline.frozen(save_dir_of_the_study).forecast(...)"
             )
+    from ..models.residual import ResidualModel
+
+    for model in pipeline.models:
+        if isinstance(model, ResidualModel) and not isinstance(model.warmup, str):
+            raise ValueError(
+                f"{model.name}: a ResidualModel with warmup={model.warmup!r} starts its base's forecasts where its run starts, "
+                "so each forecast depends on the backtest's first issue day and no live forecast can equal one. Give it a "
+                "dated warm-up, warmup='YYYY-MM-DD', the day its base's forecasts start on, before it runs live."
+            )
+    pipeline._resolve_bases()  # a named base (`base="a"`) is the pipeline's model of that name
     pipeline._ordered_ensembles()  # members that exist, no cycle
     delivered = deliver if deliver is not None else names[-1]
     if delivered not in names:

@@ -9,6 +9,7 @@ a crash between models, the live `published` of decision 7, missing inputs, fall
 grids, `run(forecast_only=True, save_dir=...)`, a late `ctx.value()` at "raise", and `verify(through="serve")`.
 """
 
+import datetime
 import hashlib
 import json
 import os
@@ -25,6 +26,7 @@ from epftoolbox2.information_set import Availability, InformationSet, Informatio
 from epftoolbox2.models import HistGBModel, LEARModel, NaiveModel, OLSModel
 from epftoolbox2.models import _engine_worker
 from epftoolbox2.models.context import Use
+from epftoolbox2.models.residual import ResidualModel
 from epftoolbox2.models._worker import _worker_init
 from epftoolbox2.pipelines import ModelPipeline, _live
 from epftoolbox2.data.sources import CsvSource
@@ -751,3 +753,36 @@ def test_a_first_rung_with_no_forecast_at_all_falls_back_whatever_its_family(fam
     assert result.rungs == {"2023-03-08": 1, "2023-03-09": 1}
     assert sum(result.models["first"]["skipped"].values()) == 48 and result.models["first"]["forecasts"] == 0
     assert len(lines(tmp_path / "live" / "first.jsonl")) == 48  # its skip records are the revision's
+
+
+def residual(base, warmup):
+    learner = OLSModel(PREDICTORS[:2], training_window=14, name="l")
+    return ResidualModel(base, learner, training_window=14, refit="7D", warmup=warmup, name="res")
+
+
+@pytest.mark.parametrize("warmup", [7, None])
+def test_a_residual_model_whose_forecasts_depend_on_the_backtest_s_start_is_refused(warmup, tmp_path):
+    p = pipeline(ols("a"), residual(ols("a"), warmup))
+    with pytest.raises(ValueError, match="dated warm-up"):
+        p.forecast(DATA, ISSUE, tmp_path / "live", horizon=2)
+    assert not (tmp_path / "live").exists()
+
+
+@pytest.mark.parametrize("named", [True, False], ids=["named-base", "base-object"])
+def test_a_residual_model_with_a_dated_warmup_is_its_backtest_s_record_live(named, tmp_path):
+    raw = market(days=200, start="2022-10-01")
+    data = csv_pipeline(raw, tmp_path)
+    whole = data.run("2022-10-01", "2023-04-15")
+
+    def make():
+        # The base's forecasts from 15 January: with its 21-day window it reads rows from late December, which the range
+        # of a refresh must hold although the residual model's own window is 14 days.
+        return pipeline(ols("a"), residual("a" if named else ols("a"), "2023-01-15"))
+
+    folder = tmp_path / "backtest"
+    make().run(whole, "2023-03-01", "2023-03-09", horizon=2, save_dir=str(folder))
+    result = make().forecast(data, ISSUE, tmp_path / "live", horizon=2, cache=False)
+    assert result.status == "ok"
+    assert keyed(result.records["res"]) == keyed(lines(folder / "res.jsonl"), ISSUE)
+    start, _ = _live.data_span(make().models, datetime.date(2023, 3, 7), [1, 2])
+    assert start <= "2022-12-23"  # 15 January less the base's window and horizon
