@@ -850,6 +850,7 @@ def test_the_adapter_suite(family, market, tmp_path, monkeypatch):
     suite.check_resume(named, market, tmp_path / "resume", TEST, horizon=1)
     suite.check_engine(named, market, TEST, horizon=1)
     suite.check_provenance(named, market, tmp_path / "provenance", TEST)
+    suite.check_repeated_predict(named, market, TEST, 1, monkeypatch)
     # More trees than the other checks, so that the control's noise moves every forecast out of its leaf.
     more = {
         "lightgbm": {"n_estimators": 60},

@@ -19,6 +19,9 @@ the `check_*` functions it needs. The module sets one process and one thread for
   one, the repeated hour's actual NaN, nothing missing.
 - `check_quarter_hours`: on a 15-minute frame, 96 forecasts a day and nothing missing (for a family that supports it).
 - `check_provenance`: the card is in `report.provenance()`, with the verdict of the test window, in memory and from the files.
+- `check_repeated_predict`: for a family that predicts a block in one call, a fit predicts the same rows to the bit before and
+  after it predicted other rows: under `refit="once"` one fit predicts each 7-day stretch in turn, so its predict must hold no
+  state (a cache, a random generator it draws from).
 
 A family's card is its `_card` (`models._cards.ModelCard`; None for a family with none, whose pre-flight and provenance checks
 have nothing to check).
@@ -324,3 +327,46 @@ def check_provenance(
         for field in ("family", "licence", "commercial_use", "attribution"):
             assert shown[field] == getattr(card, field), (field, shown)
         assert shown["test_verdict"] == contamination_verdict(card, test[0]), shown
+
+
+def _bits(predicted: Any) -> bytes:
+    """A block call's result as bytes: `_predict_block`'s (predictions, coefficients per row) or `_predict_days`' array."""
+    if isinstance(predicted, tuple):
+        predictions, coefficients = predicted
+        parts = [np.asarray(predictions, dtype=np.float64).tobytes()]
+        parts.extend(np.asarray(row, dtype=np.float64).tobytes() + b"|" for row in coefficients)
+        return b"".join(parts)
+    return np.asarray(predicted, dtype=np.float64).tobytes()
+
+
+def check_repeated_predict(
+    make: Factory, frame: pd.DataFrame, test: Tuple[str, str], horizon: int, monkeypatch: pytest.MonkeyPatch, **params
+) -> None:
+    """A family that predicts a block in one call (`_predict_block`, or a day unit's `_predict_days`) has no state in its
+    predict. Under `refit="once"` one fit predicts each 7-day stretch from `refit_from` in turn, where a `"7D"` fit predicted
+    one block, so a cache or a random generator a predict draws from would make a forecast depend on the stretches before it.
+    Every block call of a run of the model (the class a worker rebuilds, `_worker_model`) is made three times on its fit: its
+    rows, the same rows reversed, its rows again; the first and the last must agree to the bit. The model must make block
+    calls (the check fails on one that makes none)."""
+    model = make(NAME, **params)
+    cls, _ = model._worker_model()
+    method = "_predict_days" if getattr(model, "_unit_kind", "period") == "day" else "_predict_block"
+    # Patched where it is defined, so that the class's fit methods keep one owner (`BaseModel._can_refit`).
+    owner = next(klass for klass in cls.__mro__ if method in vars(klass))
+    real = vars(owner)[method]
+    agreed: List[bool] = []
+
+    def three_times(self, fitted, rows):
+        first = real(self, fitted, rows)
+        real(self, fitted, np.ascontiguousarray(np.asarray(rows)[::-1]))
+        again = real(self, fitted, rows)
+        agreed.append(_bits(first) == _bits(again))
+        return first
+
+    with monkeypatch.context() as patch:
+        patch.setattr(owner, method, three_times)
+        _run(_pipeline([model]), frame, test, horizon)
+    assert agreed, f"{cls.__name__} made no block call ({method}) in the run"
+    assert all(agreed), (
+        f"{cls.__name__}.{method} gave {agreed.count(False)} of {len(agreed)} calls other bits the second time"
+    )

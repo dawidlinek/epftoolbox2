@@ -1237,6 +1237,7 @@ def test_the_adapter_suite(market, tmp_path, monkeypatch, registered, kind):
     suite.check_engine(make, market, SUITE_TEST, horizon=2)
     suite.check_preflight_without_extra(make, monkeypatch, market, SUITE_TEST)
     suite.check_provenance(make, market, tmp_path / "provenance", SUITE_TEST)
+    suite.check_repeated_predict(make, market, SUITE_TEST, 2, monkeypatch)
 
 
 @pytest.mark.parametrize("kind", KINDS)

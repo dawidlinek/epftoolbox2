@@ -149,6 +149,25 @@ class KernelModel(BaseModel):
         return predictions, [[float(value) for value in row[:2]] for row in rows]
 
 
+class DrawingKernel(KernelModel):
+    """The kernel with a predict that keeps state: each call adds a tiny amount that grows with the calls it made before, as a
+    backend drawing from a random generator would. All four fit methods are its own, so it refits and calls its blocks."""
+
+    def _fit_predict(self, train_x, train_y, test_x):
+        return super()._fit_predict(train_x, train_y, test_x)
+
+    def _fit_model(self, train_x, train_y):
+        return super()._fit_model(train_x, train_y)
+
+    def _predict_fitted(self, fitted, test_x):
+        return super()._predict_fitted(fitted, test_x)
+
+    def _predict_block(self, fitted, rows):
+        self._drawn = getattr(self, "_drawn", 0) + 1
+        predictions, coefficients = super()._predict_block(fitted, rows)
+        return predictions + 1e-9 * self._drawn, coefficients
+
+
 def kernel(refit="7D", **kwargs):
     return KernelModel(refit=refit, **kwargs)
 
@@ -781,3 +800,11 @@ def test_coefficients_are_a_flat_list_of_numbers_or_refused_by_name(market, tmp_
         RuntimeError, match=rf"Arrays\.{method} returned coefficients as a 2-D float64 array of shape \(1, 2\)"
     ):
         Arrays(refit="7D", block_predict=block_predict, two_d=True).run(market, *WEEK, horizon=1)
+
+
+def test_the_adapter_suite_s_repeated_predict_passes_the_kernel_and_fails_a_predict_with_state(market, monkeypatch):
+    """`adapter_suite.check_repeated_predict`: the kernel predicts the same bits after predicting other rows; one whose predict
+    keeps a counter doesn't, which would make a `refit="once"` forecast depend on the stretches predicted before it."""
+    suite.check_repeated_predict(lambda name: kernel(name=name), market, WEEK, 1, monkeypatch)
+    with pytest.raises(AssertionError, match="other bits the second time"):
+        suite.check_repeated_predict(lambda name: DrawingKernel(refit="7D", name=name), market, WEEK, 1, monkeypatch)
