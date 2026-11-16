@@ -303,7 +303,7 @@ def test_a_run_s_warnings_point_at_its_caller(market, tmp_path):
         f.write(b'{"run_date": "2023-03-2')
 
     runs = {
-        "not known": lambda: OLSModel(PREDICTORS, 28, name="m").run(
+        "have no rule": lambda: OLSModel(PREDICTORS, 28, name="m").run(
             market, *TEST, horizon=2, information_set=info, availability="warn"
         ),
         "no forecasts in the validation window": lambda: OLSModel(PREDICTORS, 3, name="m").run(
