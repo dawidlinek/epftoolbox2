@@ -2303,6 +2303,8 @@ class ModelPipeline:
         is measured against (the pipeline's `NaiveModel`s by default); `backtest` is an `EvaluationReport` (or a mapping of
         member -> frame of forecasts) of the same pipeline over the same days, for the live/backtest skill ratio; `alerts` a
         list of rules (or a YAML file of one). Needs the pipeline's information set (`issue_time=`) for the target's rule."""
+        if not isinstance(data, pd.DataFrame):
+            raise TypeError(f"monitor takes the data as a DataFrame, got {type(data).__name__}")
         store = LiveStore(save_dir)
         if not store.is_live():
             raise LiveDirectoryError(f"{save_dir} is no live directory (no {LIVE_FILE}): nothing there to monitor")

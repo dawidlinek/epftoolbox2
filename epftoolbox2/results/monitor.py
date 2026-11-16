@@ -110,7 +110,13 @@ def load_alerts(alerts: Any) -> List[Dict[str, Any]]:
     if isinstance(alerts, (str, Path)):
         import yaml
 
-        text = Path(alerts).read_text(encoding="utf-8") if Path(alerts).is_file() else str(alerts)
+        text = str(alerts)
+        if isinstance(alerts, Path) or "\n" not in text:  # a name; a list of rules is YAML text of several lines
+            try:
+                if Path(alerts).is_file():
+                    text = Path(alerts).read_text(encoding="utf-8")
+            except OSError:  # a flow-style list on one line can be longer than a file name may be
+                pass
         alerts = yaml.safe_load(text)
         if alerts is None:
             return []

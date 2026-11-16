@@ -1059,3 +1059,14 @@ def test_the_default_rule_of_the_price_serves_when_no_rule_is_given(live):
     with use_clock(FakeClock(NOW)):
         plain = pipe.monitor(DATA, live, benchmarks=["naive"], windows=(10,))
     pd.testing.assert_frame_equal(plain.tables(), run_monitor(live, windows=(10,)).tables())
+
+
+def test_a_long_one_line_list_of_rules_is_yaml_not_a_file_name():
+    text = "[" + ", ".join('{"participation_below": 0.%d}' % (i % 9 + 1) for i in range(40)) + "]"
+    assert len(text) > 300 and "\n" not in text
+    assert len(load_alerts(text)) == 40
+
+
+def test_monitor_takes_one_frame(live):
+    with pytest.raises(TypeError, match="DataFrame"):
+        pipeline().monitor({"DE": DATA}, live)
