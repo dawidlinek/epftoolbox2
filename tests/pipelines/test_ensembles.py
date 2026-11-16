@@ -2779,3 +2779,173 @@ def test_keys_align_over_a_switch_in_validation_and_in_test(freq, per_hour):
     assert choice_of(report, "top")["validation_forecasts"] == finite
     chosen = keyed(records_of(report, choice_of(report, "top")["chosen"][0]))
     assert all(r["prediction"] == chosen[key_of(r)]["prediction"] for r in records_of(report, "top"))
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# A report reads each member's records once
+# ---------------------------------------------------------------------------------------------------------------------
+
+
+def averaged_over_shared_members():
+    """Four ensembles over three members, one of them a member of another: a, b and c are each averaged by several."""
+    return [
+        AverageEnsemble(["a", "b"], name="ab"),
+        AverageEnsemble(["b", "c"], name="bc"),
+        AverageEnsemble(["a", "b", "c"], name="abc"),
+        AverageEnsemble(["ab", "c"], name="ab_c"),
+    ]
+
+
+def test_a_report_reads_each_member_once_however_many_ensembles_average_it(tmp_path, monkeypatch):
+    """Members a, b, c and the file of ab are read once each (4 reads), not once per ensemble that has them (9)."""
+    from epftoolbox2.ensembles import _compute
+
+    write_members(tmp_path, a=0.0, b=2.0, c=-3.0)
+    read = []
+    original = _compute._read_member
+    monkeypatch.setattr(
+        _compute, "_read_member", lambda ensemble, name, *rest: read.append(name) or original(ensemble, name, *rest)
+    )
+    report_of(tmp_path, *averaged_over_shared_members(), validation=HV, test=HT)
+    assert sorted(read) == ["a", "ab", "b", "c"]
+
+
+def test_the_cached_reads_give_the_ensembles_files_and_tables_of_reads_made_each_time(tmp_path, monkeypatch):
+    """Bit for bit: the files (their manifests without timestamps) and every table of a report whose members are read from their
+    records once are those of one whose members are read once per ensemble."""
+    from epftoolbox2.ensembles import _compute
+
+    outputs = {}
+    for label, cached in (("cached", True), ("each time", False)):
+        directory = tmp_path / label.replace(" ", "_")
+        write_members(directory, a=0.0, b=2.0, c=-3.0, d=lambda run, target, hour, horizon: hour % 3 - 1.0)
+        with monkeypatch.context() as patch:
+            if not cached:
+                patch.setattr(
+                    _compute.MemberReads,
+                    "member",
+                    lambda self, ensemble, name, ref, stored: _compute._read_member(ensemble, name, ref, stored),
+                )
+            report = report_of(
+                directory,
+                *averaged_over_shared_members(),
+                AverageEnsemble(["a", "b", "c", "d"], top=2, name="top"),
+                members=("a", "b", "c", "d"),
+                validation=HV,
+                test=HT,
+            )
+        outputs[label] = (
+            {
+                p.name: p.read_bytes()
+                for p in sorted(directory.glob("*.jsonl"))
+                if p.stem in ("ab", "bc", "abc", "ab_c", "top")
+            },
+            {
+                p.name: without_timestamps(p)
+                for p in sorted(directory.glob("*.manifest.json"))
+                if p.name[:-14] in ("ab", "bc", "abc", "ab_c", "top")
+            },
+            report.summary().to_csv(),
+            report.validation.summary().to_csv(),
+            report.choices().to_csv(),
+            report.forecast_counts().to_csv(),
+        )
+    assert len(outputs["cached"][0]) == 5 and outputs["cached"] == outputs["each time"]
+
+
+def test_a_member_whose_file_changed_is_read_again(tmp_path):
+    """The cache is of what is on file now: an ensemble's own file, rewritten, is a different read from the earlier one."""
+    from epftoolbox2.ensembles import _compute
+
+    write_members(tmp_path, a=0.0, b=2.0)
+    report = report_of(tmp_path, AverageEnsemble(["a", "b"], name="ab"), members=("a", "b"), validation=HV, test=HT)
+    ref = report.refs["a"]
+    reads = _compute.MemberReads()
+    ensemble = AverageEnsemble(["a", "b"], name="ab")
+    first = reads.member(ensemble, "a", ref, report.windows)
+    assert reads.member(ensemble, "a", ref, report.windows) is first and reads.reads == 1
+    with open(ref.path, "a") as file:
+        file.write("\n")
+    again = reads.member(ensemble, "a", ref, report.windows)
+    assert again is not first and reads.reads == 2
+    assert np.array_equal(again.codes, first.codes) and np.array_equal(again.prediction, first.prediction)
+
+
+def test_what_is_handed_out_cannot_be_written_into(tmp_path):
+    """Ensembles share a member's arrays, so none may change them."""
+    from epftoolbox2.ensembles import _compute
+
+    write_members(tmp_path, a=0.0)
+    report = report_of(tmp_path, AverageEnsemble(["a"], name="e"), members=("a",), validation=HV, test=HT)
+    member = _compute.MemberReads().member(AverageEnsemble(["a"], name="e"), "a", report.refs["a"], report.windows)
+    for values in (member.codes, member.day_in_test, member.prediction, member.actual):
+        with pytest.raises(ValueError, match="read-only"):
+            values[0] = values[0]
+
+
+def _read_each_time(patch):
+    """Make `MemberReads` read every member from its records, as every ensemble did before there was a cache."""
+    from epftoolbox2.ensembles import _compute
+
+    patch.setattr(
+        _compute.MemberReads,
+        "member",
+        lambda self, ensemble, name, ref, stored: _compute._read_member(ensemble, name, ref, stored),
+    )
+
+
+def _counting_reads(patch):
+    from epftoolbox2.ensembles import _compute
+
+    read = []
+    original = _compute._read_member
+    patch.setattr(
+        _compute, "_read_member", lambda ensemble, name, *rest: read.append(name) or original(ensemble, name, *rest)
+    )
+    return read
+
+
+def test_members_in_a_parquet_directory_are_read_once_and_give_the_same_files(tmp_path, monkeypatch):
+    """A Parquet member is a directory of parts: its key is theirs, and the report is that of reading it each time."""
+    from epftoolbox2.results.parquet_store import convert
+
+    outputs = {}
+    for label, cached in (("cached", True), ("each time", False)):
+        directory = tmp_path / label.replace(" ", "_")
+        write_members(directory, a=0.0, b=2.0, c=-3.0)
+        convert(directory, "parquet")
+        assert all((directory / f"{name}.parquet").is_dir() for name in "abc")
+        with monkeypatch.context() as patch:
+            read = _counting_reads(patch)
+            if not cached:
+                _read_each_time(patch)
+            report = report_of(directory, *averaged_over_shared_members(), validation=HV, test=HT)
+        if cached:
+            assert sorted(read) == ["a", "ab", "b", "c"]
+        outputs[label] = (
+            {n: (directory / f"{n}.jsonl").read_bytes() for n in ("ab", "bc", "abc", "ab_c")},
+            report.summary().to_csv(),
+            report.choices().to_csv(),
+        )
+    assert outputs["cached"] == outputs["each time"]
+
+
+def test_results_held_in_memory_are_read_once_and_give_the_same_forecasts(df, monkeypatch):
+    """A run without a `save_dir` holds its results (and its ensembles') in memory: the key is the records' identity."""
+    outputs = {}
+    for label, cached in (("cached", True), ("each time", False)):
+        with monkeypatch.context() as patch:
+            read = _counting_reads(patch)
+            if not cached:
+                _read_each_time(patch)
+            report = built(
+                ols("a"),
+                ols("small", SMALL),
+                AverageEnsemble(["a", "small"], name="e1"),
+                AverageEnsemble(["small", "a"], name="e2"),
+                AverageEnsemble(["e1", "a"], name="e3"),
+            ).run(df, test=T, horizon=1)
+        if cached:
+            assert sorted(read) == ["a", "e1", "small"]
+        outputs[label] = {name: forecast_lines(records_of(report, name)) for name in ("e1", "e2", "e3")}
+    assert outputs["cached"] == outputs["each time"] and len(outputs["cached"]["e3"]) == 3 * DAY
