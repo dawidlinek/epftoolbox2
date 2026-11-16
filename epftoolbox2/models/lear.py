@@ -7,6 +7,7 @@ import numpy as np
 
 from . import _lars
 from ._cv_stats import cv_stats_of
+from ._fits import lear_fit_from_state, lear_fit_state
 from ._lars import CRITERIA, CV_SOLVER_ERROR, SOLVERS, CvStats, GramStats, LearFit, cv_stats, gram_stats
 from ._stats import ScaledStats
 from .base import BaseModel
@@ -195,6 +196,13 @@ class LEARModel(BaseModel):
         if row.shape != fitted.w.shape:
             raise ValueError(f"LEARModel forecasts one row of {fitted.w.size} values, got {np.shape(test_x)}")
         return float(fitted.ybar + (row - fitted.xbar) @ fitted.w), fitted.w.tolist()
+
+    def _fit_state(self, fitted: LearFit):
+        """The `LearFit` of `_fit_model` or of the engine's `_fit_stats` as arrays (`models._fits`)."""
+        return lear_fit_state(fitted)
+
+    def _from_state(self, state) -> LearFit:
+        return lear_fit_from_state(state)
 
 
 __all__ = ["LEARModel", "LAGO_WINDOWS", "LAGO_SCALER"]

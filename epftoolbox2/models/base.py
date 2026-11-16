@@ -9,6 +9,7 @@ from typing import (
     Dict,
     Callable,
     Iterable,
+    Mapping,
     NamedTuple,
     Protocol,
     Sequence,
@@ -3275,6 +3276,19 @@ class BaseModel(ABC):
         them. Called once per forecast, never on several rows at once: a product of a block of rows can differ from that of one
         row in the last bits, and a forecast must not depend on which others share its fit."""
         raise NotImplementedError(f"{type(self).__name__} has no _predict_fitted: it runs with refit=None only")
+
+    # -- stored fits (`models._fits`, step 8d) ---------------------------------------------------------------------------
+
+    def _fit_state(self, fitted: Any) -> Dict[str, np.ndarray]:
+        """A fit of `_fit_model` (or of `_fit_stats`, in an engine group) as arrays, which `numpy.savez` writes and reads back
+        without pickle, so that `_predict_fitted(_from_state(state), row)` is `_predict_fitted(fitted, row)` to the bit. A class
+        stores fits only if the class that defines `_fit_model` and `_predict_fitted` defines this and `_from_state` too
+        (`models._fits.stores_fits`); a family that brings no format of its own fits at serve time."""
+        raise NotImplementedError(f"{type(self).__name__} has no _fit_state: its fits aren't stored")
+
+    def _from_state(self, state: Mapping[str, np.ndarray]) -> Any:
+        """The fit `_fit_state` stored, built back (see `_fit_state`)."""
+        raise NotImplementedError(f"{type(self).__name__} has no _from_state: its fits aren't stored")
 
     def _fit_days(self, x: np.ndarray, y: np.ndarray, y_mask: np.ndarray) -> Any:
         """The fit of a day unit (`_unit_kind = "day"`, `models._units`): `x` (dates, inputs) the scaled day-level inputs of its

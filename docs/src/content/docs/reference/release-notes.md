@@ -219,6 +219,15 @@ an issue day it didn't sample.
 
 ### New
 
+- **Stored fits: `ModelPipeline.refit(data, save_dir, issue="today", if_due=True)`.** Fits each model's units for an issue day
+  ahead of time, on the backtest's rows and cut, and stores them in the live directory as `fits/<model>/<anchor>/units.npz` (arrays
+  only, read without pickle) and `fit.json` (the configuration digest, the units, the hash of the rows read, the sha256 of
+  `units.npz`, the hash of the rows read). A second call is a no-op; another configuration, kernel backend or file format refits, as do
+  rows that moved since (`stale`). A fit is refused (`FitTooEarlyError`) while a training target, or an input of the newest
+  training row, isn't out by its rule at the clock's now; a frame missing a newest target stores the fit marked `incomplete`. A forecast served from a stored fit is the backtest's record
+  to the bit, with the engine on or off. OLS, Ridge, LassoCV and LEAR store fits (`_fit_state`/`_from_state`); every scaler has
+  `state()`, `BaseScaler.from_state()` and `transform()`. The other families fit at serve time. See
+  [Stored Fits](/epftoolbox2/model-pipeline/stored-fits/).
 - **The licence is stated as `AGPL-3.0-or-later`.** The package metadata names the SPDX expression (`License-Expression`, with
   `LICENSE` shipped in the wheel) instead of the version-neutral `AGPL-3.0`: the GNU Affero General Public License v3 or, at your
   option, any later version. The licence text is unchanged.

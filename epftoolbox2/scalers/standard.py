@@ -1,5 +1,5 @@
 import numpy as np
-from typing import Any, Dict, Optional, Sequence, Tuple
+from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 
 from .base import BaseScaler, mean_std, scale_training_column
 
@@ -22,6 +22,10 @@ class StandardScaler(BaseScaler):
         self.scale_binary = scale_binary
         self._target_mean = 0.0
         self._target_std = 1.0
+        # The last fit's columns (`transform`, `state`): which it scaled, with what centre and divisor; None before a fit.
+        self._x_scaled: Optional[np.ndarray] = None
+        self._x_mean: Optional[np.ndarray] = None
+        self._x_std: Optional[np.ndarray] = None
 
     def get_params(self) -> Dict[str, Any]:
         # The default is left out, so the spec of `StandardScaler()` stays "standard" and no manifest or YAML file moves.
@@ -50,6 +54,9 @@ class StandardScaler(BaseScaler):
         elif scalable_mask is None:
             scalable_mask = self.get_scalable_mask(train_x)
 
+        self._x_scaled = np.zeros(train_x.shape[1], dtype=bool)
+        self._x_mean = np.zeros(train_x.shape[1])
+        self._x_std = np.ones(train_x.shape[1])
         for i in range(train_x.shape[1]):
             if not scalable_mask[i]:
                 continue
@@ -57,6 +64,7 @@ class StandardScaler(BaseScaler):
             mean, std, constant = mean_std(col)
             train_x[:, i] = scale_training_column(col, col, mean, std, constant)
             test_x[:, i] = (test_x[:, i] - mean) / std
+            self._x_scaled[i], self._x_mean[i], self._x_std[i] = True, mean, std
 
         self._target_mean, self._target_std, _ = mean_std(train_y)
         train_y_scaled = (train_y - self._target_mean) / self._target_std
@@ -65,3 +73,30 @@ class StandardScaler(BaseScaler):
 
     def inverse(self, value: float) -> float:
         return value * self._target_std + self._target_mean
+
+    def transform(self, test_x: np.ndarray) -> np.ndarray:
+        test_x = self._check_columns(test_x, None if self._x_scaled is None else self._x_scaled.size)
+        for i in np.flatnonzero(self._x_scaled).tolist():
+            test_x[:, i] = (test_x[:, i] - self._x_mean[i]) / self._x_std[i]
+        return test_x
+
+    def state(self) -> Dict[str, np.ndarray]:
+        if self._x_scaled is None:
+            raise ValueError("StandardScaler wasn't fitted: it has no state")
+        return {
+            **self._spec_state(),
+            "x_scaled": self._x_scaled.copy(),
+            "x_mean": self._x_mean.copy(),
+            "x_std": self._x_std.copy(),
+            "y_mean": np.array(self._target_mean, dtype=np.float64),
+            "y_std": np.array(self._target_std, dtype=np.float64),
+        }
+
+    def _load_state(self, state: Mapping[str, np.ndarray]) -> None:
+        self._x_scaled = np.array(state["x_scaled"], dtype=bool)
+        self._x_mean = np.array(state["x_mean"], dtype=np.float64)
+        self._x_std = np.array(state["x_std"], dtype=np.float64)
+        if not self._x_scaled.shape == self._x_mean.shape == self._x_std.shape or self._x_scaled.ndim != 1:
+            raise ValueError("a StandardScaler state's columns disagree in length")
+        self._target_mean = np.float64(state["y_mean"])
+        self._target_std = np.float64(state["y_std"])

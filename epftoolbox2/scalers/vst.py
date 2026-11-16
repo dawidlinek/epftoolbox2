@@ -11,7 +11,7 @@ import functools
 import warnings
 from abc import abstractmethod
 from statistics import NormalDist
-from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
 import numpy as np
 
@@ -179,6 +179,82 @@ class _VSTScaler(BaseScaler):
         z = np.asarray(value, dtype=np.float64) * self._target_std + self._target_mean
         restored = self._backward(self._target_params, z)
         return float(restored) if np.ndim(restored) == 0 else restored
+
+    def transform(self, test_x: np.ndarray) -> np.ndarray:
+        test_x = self._check_columns(test_x, None if self._target_params is None else len(self._column_params))
+        for i, column in enumerate(self._column_params):
+            if column is None:
+                continue
+            params, mean, std = column
+            test_col = test_x[:, i] if params is None else self._forward(params, test_x[:, i])
+            test_x[:, i] = (test_col - mean) / std
+        return test_x
+
+    def state(self) -> Dict[str, np.ndarray]:
+        if self._target_params is None:
+            raise ValueError(f"{type(self).__name__} wasn't fitted: it has no state")
+        columns = self._column_params
+        scaled = np.array([column is not None for column in columns], dtype=bool)
+        vst = np.array([column is not None and column[0] is not None for column in columns], dtype=bool)
+        out = {
+            **self._spec_state(),
+            "x_scaled": scaled,
+            "x_vst": vst,
+            "x_mean": np.array([0.0 if column is None else column[1] for column in columns], dtype=np.float64),
+            "x_std": np.array([1.0 if column is None else column[2] for column in columns], dtype=np.float64),
+            "y_mean": np.array(self._target_mean, dtype=np.float64),
+            "y_std": np.array(self._target_std, dtype=np.float64),
+        }
+        out.update(_packed("x_params", [column[0] for column, is_vst in zip(columns, vst) if is_vst]))
+        out.update(_packed("y_params", [self._target_params]))
+        return out
+
+    def _load_state(self, state: Mapping[str, np.ndarray]) -> None:
+        scaled = np.array(state["x_scaled"], dtype=bool)
+        vst = np.array(state["x_vst"], dtype=bool)
+        mean = np.array(state["x_mean"], dtype=np.float64)
+        std = np.array(state["x_std"], dtype=np.float64)
+        if not scaled.shape == vst.shape == mean.shape == std.shape or scaled.ndim != 1 or (vst & ~scaled).any():
+            raise ValueError(f"a {type(self).__name__} state's columns disagree")
+        params = iter(_unpacked(state, "x_params", int(vst.sum())))
+        self._column_params = [
+            (next(params) if vst[i] else None, np.float64(mean[i]), np.float64(std[i])) if scaled[i] else None
+            for i in range(scaled.size)
+        ]
+        (self._target_params,) = _unpacked(state, "y_params", 1)
+        self._target_mean = np.float64(state["y_mean"])
+        self._target_std = np.float64(state["y_std"])
+
+
+def _packed(prefix: str, params: List[Tuple[Any, ...]]) -> Dict[str, np.ndarray]:
+    """VST parameters of several columns, each a tuple of numbers or 1-D arrays (`_fit`'s), as flat arrays: part j of every
+    column one after another (`{prefix}_{j}`), each column's length (`{prefix}_{j}_n`) and whether the part is a number
+    (`{prefix}_{j}_scalar`). `_unpacked` gives back the same tuples, numbers as Python floats and arrays as float64 copies."""
+    parts = len(params[0]) if params else 0
+    out: Dict[str, np.ndarray] = {f"{prefix}_parts": np.array(parts, dtype=np.int64)}
+    for j in range(parts):
+        pieces = [np.atleast_1d(np.asarray(column[j], dtype=np.float64)).reshape(-1) for column in params]
+        out[f"{prefix}_{j}"] = np.concatenate(pieces) if pieces else np.zeros(0)
+        out[f"{prefix}_{j}_n"] = np.array([piece.size for piece in pieces], dtype=np.int64)
+        out[f"{prefix}_{j}_scalar"] = np.array([np.ndim(column[j]) == 0 for column in params], dtype=bool)
+    return out
+
+
+def _unpacked(state: Mapping[str, np.ndarray], prefix: str, count: int) -> List[Tuple[Any, ...]]:
+    parts = int(state[f"{prefix}_parts"]) if count else 0
+    columns: List[List[Any]] = [[] for _ in range(count)]
+    for j in range(parts):
+        values = np.array(state[f"{prefix}_{j}"], dtype=np.float64)
+        sizes = np.array(state[f"{prefix}_{j}_n"], dtype=np.int64)
+        scalar = np.array(state[f"{prefix}_{j}_scalar"], dtype=bool)
+        if sizes.size != count or scalar.size != count or int(sizes.sum()) != values.size:
+            raise ValueError(f"a VST state's {prefix} doesn't hold {count} columns")
+        start = 0
+        for i in range(count):
+            piece = values[start : start + sizes[i]].copy()
+            start += int(sizes[i])
+            columns[i].append(float(piece[0]) if scalar[i] else piece)
+    return [tuple(column) for column in columns]
 
 
 def _median_mad(values: np.ndarray) -> Tuple[float, float]:

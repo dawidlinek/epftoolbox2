@@ -78,6 +78,7 @@ from ..results.manifest import (
     rows_unverified,
 )
 from ..results.live import LiveStore, refuse_live_directory
+from ..models._fits import RefitResult, Served, refit_models, serve
 from ..results.matching import rows_of_refs, warn_about_thin
 from ..results.panel import PanelReport
 from ..results.report import EvaluationReport
@@ -2206,6 +2207,122 @@ class ModelPipeline:
             )
         with store.hold(create=not dry_run):
             return store.mark_delivered(issue, revision, receipt, dry_run=dry_run)
+
+    # -- stored fits (step 8d, `models._fits`) -----------------------------------------------------------------------------
+
+    def refit(
+        self,
+        data: pd.DataFrame,
+        save_dir: Union[str, Path],
+        *,
+        issue: Any = "today",
+        if_due: bool = True,
+        models: Optional[Sequence[str]] = None,
+        target: str = "price",
+        horizon: Optional[int] = None,
+        horizons: Optional[Sequence[int]] = None,
+        freq: str = "1h",
+        issue_days: Optional[Sequence[str]] = None,
+    ) -> RefitResult:
+        """Fit every unit (period, horizon, window member) of each model's anchor for the issue day `issue` and store it in the
+        live directory `save_dir`, as `fits/<model>/<anchor>/units.npz` and `fit.json` (see the docs page Stored Fits).
+
+        The rows and cut are the backtest's for that day: a unit of a model with `refit` is fitted on the rows of a forecast
+        issued on its anchor, a `refit=None` model's on its issue day's (so a fit for tomorrow can be made tonight), by the
+        backtest's own functions, so a forecast served from it is the backtest's record to the bit. With `engine="on"` a unit
+        keeps its fit from shared statistics too. `issue` is "today" in the issue zone on the clock, or a date. `models` names the
+        models (all by default); `target`, `horizon`/`horizons`, `freq` and `issue_days` are the run's, as for `run`.
+
+        `if_due=True` fits an anchor only where no stored fit of it with the current configuration digest holds every unit the
+        day needs: a second call is a no-op, a changed configuration refits. False refits it anyway. A fit is refused
+        (`FitTooEarlyError`) while a training target it reads is not yet known by the target's rule at the clock's now, which
+        the message names; nothing is written then. A model whose fits aren't stored (a family that brings no format yet, a
+        model that fits nothing) is listed in `RefitResult.not_stored` and fits at serve time. Holds the live directory's
+        `live.lock` (`LiveBusyError` when another call holds it) and makes `save_dir` a live directory if it isn't one; a
+        backtest's directory is refused."""
+        if isinstance(data, Mapping):
+            raise ValueError("refit takes one frame: stored fits of a run over zones aren't supported")
+        self._refuse_pooled("refit")
+        if not isinstance(data, pd.DataFrame):
+            raise TypeError(f"refit takes the data as a DataFrame, got {type(data).__name__}")
+        selected = self._select_models(models)
+        self._check_model_names()
+        self._check_availability()
+        _, horizons = resolve_horizons(horizon, horizons, 7)
+        info = self._information_set_for(data)
+        day = self._issue_day(issue, info, data)
+        store = LiveStore(save_dir)
+        zone = today_zone(info, data.index)
+        with store.hold():
+            with pool_native_threads():
+                return refit_models(
+                    selected,
+                    data,
+                    store.save_dir,
+                    day,
+                    if_due=if_due,
+                    target=target,
+                    horizons=horizons,
+                    freq=freq,
+                    information_set=info,
+                    availability=self.availability,
+                    issue_days=issue_days,
+                    engine=self.engine != ENGINE_OFF,
+                    # After every check passed, before the first fit is written: a refused call leaves no live.json behind.
+                    before_write=lambda: store.init(**({} if zone is None else {"issue_timezone": zone})),
+                )
+
+    def _serve_stored(
+        self,
+        data: pd.DataFrame,
+        save_dir: Optional[Union[str, Path]],
+        *,
+        issue: Any = "today",
+        fit_missing: str = "previous",
+        models: Optional[Sequence[str]] = None,
+        target: str = "price",
+        horizon: Optional[int] = None,
+        horizons: Optional[Sequence[int]] = None,
+        freq: str = "1h",
+        issue_days: Optional[Sequence[str]] = None,
+    ) -> Dict[str, Served]:
+        """Each model's forecasts of `issue` served from its stored fits in `save_dir` (`models._fits.serve`), by name: the serve
+        path `forecast()` (step 8e) builds on. `fit_missing` is "previous", "fit" or "skip" (`models._fits.serve`). A model whose
+        fits aren't stored comes back with `status` "not_stored" and no records, for `forecast()` to run through its own run."""
+        _, horizons = resolve_horizons(horizon, horizons, 7)
+        info = self._information_set_for(data)
+        day = self._issue_day(issue, info, data)
+        out = {}
+        with pool_native_threads():
+            for model in self._select_models(models):
+                out[model.name] = serve(
+                    model,
+                    data,
+                    day,
+                    save_dir,
+                    target=target,
+                    horizons=horizons,
+                    freq=freq,
+                    information_set=info,
+                    availability=self.availability,
+                    issue_days=issue_days,
+                    engine=self.engine != ENGINE_OFF,
+                    fit_missing=fit_missing,
+                )
+        return out
+
+    @staticmethod
+    def _issue_day(issue: Any, info: Optional[InformationSet], data: pd.DataFrame) -> datetime.date:
+        """`issue` as a date: "today" (or a `today_d±k` keyword) in the issue zone on the clock, a date or its ISO text."""
+        if isinstance(issue, datetime.datetime):
+            raise TypeError(f"issue is a day, a date or 'today', got the instant {issue!r}")
+        if isinstance(issue, datetime.date):
+            return issue
+        resolved = resolve_date(issue, today_zone(info, data.index))
+        try:
+            return datetime.date.fromisoformat(str(resolved)[:10])
+        except ValueError:
+            raise ValueError(f"issue must be a date or 'today', got {issue!r}") from None
 
     def _select_models(self, names: Optional[Sequence[str]]) -> List[BaseModel]:
         if names is None:
