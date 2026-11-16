@@ -118,6 +118,10 @@ def availability_warnings(captured):
     return [str(w.message) for w in captured if str(w.message).startswith("Availability:")]
 
 
+def no_rule_warnings(captured):
+    return [str(w.message) for w in captured if str(w.message).startswith("Information set:")]
+
+
 def no_warnings_of_ours(captured):
     return [str(w.message) for w in captured if "availability" in str(w.message).lower()]
 
@@ -334,10 +338,49 @@ def test_one_warning_covers_every_model_and_says_what_to_do(df, recwarn):
     )
     messages = availability_warnings(recwarn)
     assert len(messages) == 1
-    assert "2 input(s) of 2 model(s)" in messages[0]
+    assert "1 input(s) of 1 model(s)" in messages[0]
     assert "a: observed is late (periods 10-23, horizons 1; known D+1 01:00, issued D 11:45)" in messages[0]
-    assert "b: mystery has no rule (periods 0-23, horizons 1)" in messages[0]
+    assert "mystery" not in messages[0]  # a column without a rule has a warning of its own
     assert 'availability="raise"' in messages[0]
+
+
+def test_columns_without_a_rule_are_named_in_one_warning_that_points_to_the_source_rules(df, recwarn):
+    df = df.assign(also_unruled=1.0)
+    pipeline(ols(PREDICTORS + ["mystery"], name="a"), ols(PREDICTORS + ["mystery", "also_unruled"], name="b")).run(
+        df, *TEST, horizon=1
+    )
+    messages = no_rule_warnings(recwarn)
+    assert len(messages) == 1  # once for the run, not per model or per task
+    assert "2 column(s)" in messages[0]
+    assert "also_unruled (b)" in messages[0] and "mystery (a, b)" in messages[0]
+    assert "InformationSet.with_source_rules" in messages[0]
+    assert "observed" not in messages[0]
+
+
+def test_a_run_with_a_rule_for_every_column_has_no_warning_about_rules(df, recwarn):
+    pipeline(ols(PREDICTORS + ["observed"])).run(df, *TEST, horizon=1)
+    assert no_rule_warnings(recwarn) == []
+
+
+def test_a_prefixed_default_name_is_named_as_without_a_rule(df, recwarn):
+    """The built-in rules match exact names, so `gas_price` is no `price`: it is named, not given the day-ahead rule."""
+    frame = df.assign(gas_price=1.0)
+    pipeline(ols(PREDICTORS + ["gas_price"]), info=InformationSet("11:45", "Europe/Warsaw")).run(
+        frame, *TEST, horizon=1
+    )
+    assert len(no_rule_warnings(recwarn)) == 1 and "gas_price" in no_rule_warnings(recwarn)[0]
+
+
+def test_raise_still_refuses_a_column_without_a_rule_and_warns_of_nothing_at_none(df, recwarn):
+    with pytest.raises(InformationSetError, match="mystery"):
+        pipeline(ols(PREDICTORS + ["mystery"]), level="raise").run(df, *TEST, horizon=1)
+    pipeline(ols(PREDICTORS + ["mystery"]), level="none").run(df, *TEST, horizon=1)
+    assert no_rule_warnings(recwarn) == []
+
+
+def test_a_model_run_directly_warns_once_of_its_columns_without_a_rule(df, recwarn):
+    ols(PREDICTORS + ["mystery"]).run(df, *TEST, horizon=1, information_set=INFO, availability="warn")
+    assert len(no_rule_warnings(recwarn)) == 1
 
 
 def test_the_warning_comes_before_any_fit(df, monkeypatch):
@@ -1121,3 +1164,37 @@ def test_epf_model_offers_the_levels_there_are():
         action.dest: action for sub in parser._subparsers._group_actions for action in sub.choices["model"]._actions
     }
     assert tuple(actions["availability"].choices) == AVAILABILITY_LEVELS
+
+
+def test_a_target_without_a_rule_is_no_column_to_declare_and_a_predictor_without_one_still_warns(df, recwarn):
+    """`tgt` has no rule (no built-in one is its name): at newest_target="d-1" it ends at D-1 by construction, so the warning names
+    `mystery` alone; the listing still has its row. At "published" a target without a rule is refused, as it was."""
+    frame = df.assign(tgt=df["price"])
+    model = ols(PREDICTORS + ["mystery"], name="t")
+    report = pipeline(model).run(frame, *TEST, horizon=1, target="tgt")
+    messages = no_rule_warnings(recwarn)
+    assert len(messages) == 1 and "mystery" in messages[0] and "tgt" not in messages[0]
+    assert "tgt" in set(report.availability()["predictor"])
+    recwarn.clear()
+    pipeline(ols(PREDICTORS, name="t")).run(frame, *TEST, horizon=1, target="tgt")
+    assert no_rule_warnings(recwarn) == []
+    published = OLSModel(PREDICTORS, training_window=45, name="p", newest_target="published")
+    with pytest.raises(InformationSetError, match="tgt"):
+        pipeline(published).run(frame, *TEST, horizon=1, target="tgt")
+
+
+def test_the_no_rule_warning_is_capped_by_readers_and_by_columns():
+    """12 models reading 40 ruleless columns: three readers then `and 9 more models`, thirty columns then `and 10 more columns`."""
+    from epftoolbox2.results.availability import _no_rule_message
+
+    def rows(columns):
+        return [{"predictor": column, "status": "no rule", "role": "predictor"} for column in columns]
+
+    columns = [f"c{i:02d}" for i in range(40)]
+    message = _no_rule_message({f"m{i:02d}": rows(columns) for i in range(12)})
+    assert "40 column(s)" in message
+    assert "c00 (m00, m01, m02, and 9 more models)" in message
+    assert "c29 (" in message and "c30" not in message and "; and 10 more columns" in message
+    assert "m03" not in message
+    short = _no_rule_message({"a": rows(["x"]), "b": rows(["x"])})
+    assert "x (a, b)" in short and "more" not in short

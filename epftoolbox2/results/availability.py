@@ -65,6 +65,8 @@ _ROLE_ORDER = {
     ROLE_PAST: 5,
     ROLE_KNOWN_AHEAD: 6,
 }
+_SHOWN_READERS = 3  # how many models a no-rule warning names per column
+_SHOWN_COLUMNS = 30  # and how many columns it names
 _SHOWN_PER_MODEL = 5  # how many rows of a model a warning spells out
 
 _Key = Tuple[str, str, str, str]  # (predictor, role, status, list)
@@ -289,28 +291,62 @@ def listing_frame(listings: Mapping[str, Optional[Iterable[Mapping[str, Any]]]])
 
 
 def warn_about(listings: Mapping[str, Optional[Iterable[Mapping[str, Any]]]], stacklevel: int = 2) -> None:
-    """One warning for all models, if any of them has something late or without a rule listed (a sequence model's series read
-    in time is listed too, and isn't warned about)."""
+    """The warnings of a run's listing, once for all models: one for what is late (a sequence model's series read in time is
+    listed too, and isn't warned about) and one for the columns without a rule, which the run reads as known."""
     flagged = {model: [row for row in listing or [] if is_flagged(row)] for model, listing in listings.items()}
     by_model = {model: rows for model, rows in flagged.items() if rows}
-    if not by_model:
-        return
-    lines = [
-        f"Availability: {sum(len(rows) for rows in by_model.values())} input(s) of {len(by_model)} model(s) are not known "
-        "to be out at the issue time. The forecasts use them anyway; report.availability() lists them all."
-    ]
-    for model, rows in by_model.items():
-        shown = "; ".join(_describe(row) for row in rows[:_SHOWN_PER_MODEL])
-        more = f"; and {len(rows) - _SHOWN_PER_MODEL} more" if len(rows) > _SHOWN_PER_MODEL else ""
-        lines.append(f"  {model}: {shown}{more}")
-    lines.append('availability="raise" refuses them before any fit; availability="none" turns the listing off.')
-    warnings.warn("\n".join(lines), UserWarning, stacklevel=stacklevel)
+    # A training target without a rule is no input to declare: at newest_target="d-1" it ends at D-1 by construction, and at
+    # "published" the run refuses it before it gets here. It stays in the listing, which report.availability() shows.
+    ruleless = {
+        model: [row for row in rows if row["status"] == NO_RULE and row["role"] != ROLE_TARGET]
+        for model, rows in by_model.items()
+    }
+    ruleless = {model: rows for model, rows in ruleless.items() if rows}
+    late = {model: [row for row in rows if row["status"] != NO_RULE] for model, rows in by_model.items()}
+    late = {model: rows for model, rows in late.items() if rows}
+    if late:
+        lines = [
+            f"Availability: {sum(len(rows) for rows in late.values())} input(s) of {len(late)} model(s) are not known "
+            "to be out at the issue time. The forecasts use them anyway; report.availability() lists them all."
+        ]
+        for model, rows in late.items():
+            shown = "; ".join(_describe(row) for row in rows[:_SHOWN_PER_MODEL])
+            more = f"; and {len(rows) - _SHOWN_PER_MODEL} more" if len(rows) > _SHOWN_PER_MODEL else ""
+            lines.append(f"  {model}: {shown}{more}")
+        lines.append('availability="raise" refuses them before any fit; availability="none" turns the listing off.')
+        warnings.warn("\n".join(lines), UserWarning, stacklevel=stacklevel)
+    if ruleless:
+        warnings.warn(_no_rule_message(ruleless), UserWarning, stacklevel=stacklevel)
+
+
+def _no_rule_message(ruleless: Mapping[str, List[Mapping[str, Any]]]) -> str:
+    """The warning for columns no rule covers: each column once, with the models that read it."""
+    readers: Dict[str, List[str]] = {}
+    for model, rows in ruleless.items():
+        for row in rows:
+            if model not in readers.setdefault(row["predictor"], []):
+                readers[row["predictor"]].append(model)
+    columns = sorted(readers.items())
+
+    def readers_of(models: List[str]) -> str:
+        more = f", and {len(models) - _SHOWN_READERS} more models" if len(models) > _SHOWN_READERS else ""
+        return ", ".join(models[:_SHOWN_READERS]) + more
+
+    shown = "; ".join(f"{column} ({readers_of(models)})" for column, models in columns[:_SHOWN_COLUMNS])
+    if len(columns) > _SHOWN_COLUMNS:
+        shown += f"; and {len(columns) - _SHOWN_COLUMNS} more columns"
+    return (
+        f"Information set: {len(readers)} column(s) have no rule, so every forecast reads them as known at the issue "
+        f"time: {shown}. The built-in rules match exact names only, so a prefixed column such as de_price has none unless "
+        "its source gave one: InformationSet.with_source_rules(data_pipeline.sources) adds each source's rules with its "
+        "prefix (a Workflow applies it). Any other column needs a rule in InformationSet(rules={...}), e.g. "
+        "Availability.realised('1h') or Availability.static(). "
+        'availability="raise" refuses such a column before any fit; report.availability() lists where each is read.'
+    )
 
 
 def _describe(row: Mapping[str, Any]) -> str:
     where = f"periods {row['periods']}, horizons {row['horizons']}"
-    if row["status"] == NO_RULE:
-        return f"{row['predictor']} has no rule ({where})"
     if row["status"] == LATE_UPSTREAM:
         return f"{row['predictor']} is a forecast whose upstream is late ({where}; {row['note']})"
     return f"{row['predictor']} is late ({where}; known {row['known']}, issued {row['issued']})"

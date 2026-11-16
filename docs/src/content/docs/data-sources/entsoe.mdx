@@ -158,7 +158,7 @@ A `Workflow` gives the Swiss `price` its 12:00 Zurich rule from the source, and 
 `ModelPipeline(issue_time=...)` has only the built-in rules. `price_exaa` and any `<prefix>_price_exaa` (`de_price_exaa`) are built in (11:15).
 An unprefixed Swiss `price` gets the generic `price` rule there, 13:00 Brussels (13:00 Zurich), an hour later than the legal bound and so safe,
 but it refuses a 12:00 issue. A prefixed `ch_price` has **no built-in rule**, and a column without a rule counts as known at the default
-`availability="warn"`. So with a bare set use `Workflow` or declare `Availability.published("12:00", 1, timezone="Europe/Zurich")` for it, and
+`availability="warn"`, with a warning at the start of the run that names it. So with a bare set use `Workflow` or declare `Availability.published("12:00", 1, timezone="Europe/Zurich")` for it, and
 pass `availability="raise"` to have a column without a rule refused.
 
 `price_exaa` is requested with `classificationSequence_AttributeInstanceComponent.position=2` in a second A44 request

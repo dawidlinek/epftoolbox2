@@ -53,7 +53,7 @@ ModelPipeline(information_set=InformationSet("11:45"), availability="raise")    
 | `availability` | Default | A predictor (or the newest training target) known after the issue time | A column without a rule |
 |---|---|---|---|
 | `"none"` | without an issue time | Nothing is checked or listed | Nothing |
-| `"warn"` | with an issue time or an information set | Listed, and the run goes on | Listed as `no rule`, whatever `unknown` says |
+| `"warn"` | with an issue time or an information set | Listed, and the run goes on | Listed as `no rule`, whatever `unknown` says, and named in a warning at run start |
 | `"raise"` | | `InformationSetError` before any fit | Follows `unknown` |
 
 `"raise"` suits published results and CI. `"none"` with an issue time is allowed: nothing is listed, and the information set
@@ -440,7 +440,12 @@ information_set:
 error (`unknown="raise"`): a check that silently skipped columns it knows nothing about would report a pass it
 cannot vouch for. Pass `unknown="warn"` to log instead, or `"ignore"` to skip silently once you've reviewed
 which columns that affects. With `availability="warn"` such a column is listed as `no rule` and is no error, whatever
-`unknown` says. `leakage_probe` and `verify` follow `unknown` at every level, because they can't perturb such a column.
+`unknown` says, and one warning at the start of the run names every such column once, with the models that read it, and points to
+`InformationSet.with_source_rules(data_pipeline.sources)` (a `Workflow` applies it) and to `rules=`: the forecasts read the column as
+known at the issue time, and nothing can tell whether it is. The built-in rules match exact names only, with no name pattern, so
+a prefixed `ch_price` or a gas price named `*_price` never gets the day-ahead price's rule by its name. The warning names at most 30 columns, and three models per column; `report.availability()` lists all of them. The training
+target isn't named: at `newest_target="d-1"` it ends at D-1 by construction, and a target without a rule is refused at `"published"`. A
+`report()` of stored results warns again, as it does for late inputs. `leakage_probe` and `verify` follow `unknown` at every level, because they can't perturb such a column.
 
 ---
 
