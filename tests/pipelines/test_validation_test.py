@@ -1153,7 +1153,6 @@ def test_a_plain_run_on_another_period_may_not_replace_the_test_window_on_file(d
     for kwargs in (
         dict(test=("2023-04-20", "2023-04-20")),
         dict(test=("2023-04-03", "2023-04-04")),
-        dict(test_start="2023-04-20", test_end="2023-04-20", forecast_only=True),
     ):
         with pytest.raises(ManifestMismatchError, match="would change them"):
             pipeline(ols()).run(df, horizon=1, save_dir=str(tmp_path), **kwargs)
@@ -1214,8 +1213,11 @@ def test_validation_and_test_then_plain_test_then_validation_alone_equals_fresh(
 
 def test_forecast_only_may_not_add_a_test_window_to_validation_on_file(df, tmp_path):
     pipeline(ols()).run(df, validation=V, horizon=1, save_dir=str(tmp_path))
-    with pytest.raises(ManifestMismatchError, match="would change them"):
+    # A forecast-only run into a save_dir is refused before anything (decision 12 of step 8), so it adds nothing either.
+    before = (tmp_path / "m.jsonl").read_bytes()
+    with pytest.raises(ValueError, match="forecast_only=True"):
         pipeline(ols()).run(df, test=T, horizon=1, save_dir=str(tmp_path), forecast_only=True)
+    assert (tmp_path / "m.jsonl").read_bytes() == before
 
 
 @pytest.mark.parametrize(

@@ -222,9 +222,9 @@ def pipeline(*models, information_set=INFO, **settings):
 
 
 def run(model, frame, test, horizon=1, information_set=INFO, **kwargs):
-    return pipeline(model, information_set=information_set).run(
-        frame, *test, horizon=horizon, forecast_only=True, **kwargs
-    )
+    # Into a save_dir a backtest of the window: `run(forecast_only=True)` refuses one (decision 12 of step 8).
+    only = {} if kwargs.get("save_dir") else {"forecast_only": True}
+    return pipeline(model, information_set=information_set).run(frame, *test, horizon=horizon, **only, **kwargs)
 
 
 def by_key(report, name="FakeFM"):
@@ -549,9 +549,7 @@ def test_a_changed_fine_tune_refuses_the_resume(hourly, tmp_path):
     # Let in anyway, another fine-tune's checkpoint is not this one's: it fine-tunes again, into a file of its own.
     other = tuned("FakeFM", fine_tune={**QUICK, "lr": 1e-4})
     with pytest.warns(UserWarning, match="is stored under another key"):
-        pipeline(other).run(
-            hourly, *test, horizon=1, save_dir=tmp_path, forecast_only=True, allow_manifest_mismatch=True
-        )
+        pipeline(other).run(hourly, *test, horizon=1, save_dir=tmp_path, allow_manifest_mismatch=True)
     assert other._fine_tunes == 1 and len(list((tmp_path / "fakefm.fits").glob("*.ckpt"))) == 2
 
 
@@ -687,10 +685,12 @@ class CapturePool:
 def an_ols_run(frame, save_dir=None):
     from epftoolbox2.models import OLSModel
 
+    # The model path's pool (`models.base`), which the tests capture: a backtest into save_dir would run in the engine (on by
+    # default), and `run(forecast_only=True)`, which never does, refuses a save_dir (decision 12 of step 8).
     return (
-        ModelPipeline()
+        ModelPipeline(engine="off")
         .add_model(OLSModel(["load_forecast"], 28, name="OLS"))
-        .run(frame, "2023-06-12", "2023-06-12", horizon=1, forecast_only=True, save_dir=save_dir)
+        .run(frame, "2023-06-12", "2023-06-12", horizon=1, save_dir=save_dir)
     )
 
 
@@ -805,9 +805,7 @@ def test_prune_keeps_the_last_run_s_checkpoints_and_removes_the_rest(hourly, tmp
     path.write_text("".join(f"{line}\n" for line in suite.lines(path)[::2]))  # half gone: the second run has work
     second = tuned("FakeFM", fine_tune={**QUICK, "lr": 1e-4})
     with pytest.warns(UserWarning, match="is stored under another key"):
-        pipeline(second).run(
-            hourly, *test, horizon=1, save_dir=tmp_path, forecast_only=True, allow_manifest_mismatch=True
-        )
+        pipeline(second).run(hourly, *test, horizon=1, save_dir=tmp_path, allow_manifest_mismatch=True)
     fits = tmp_path / "fakefm.fits"
     assert len(list(fits.glob("*.ckpt"))) == 2
     (fits / "orphan.0123456789abcdef.ckpt").write_text("{}")

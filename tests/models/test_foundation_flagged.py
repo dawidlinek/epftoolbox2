@@ -897,6 +897,6 @@ def test_a_changed_setting_refuses_the_resume(hourly, tmp_path, family, change):
     from epftoolbox2.results.manifest import ManifestMismatchError
 
     test = ("2023-06-12", "2023-06-13")
-    pipeline(MAKERS[family]("M")).run(hourly, *test, horizon=1, forecast_only=True, save_dir=tmp_path)
+    pipeline(MAKERS[family]("M")).run(hourly, *test, horizon=1, save_dir=tmp_path)
     with pytest.raises(ManifestMismatchError):
-        pipeline(MAKERS[family]("M", **change)).run(hourly, *test, horizon=1, forecast_only=True, save_dir=tmp_path)
+        pipeline(MAKERS[family]("M", **change)).run(hourly, *test, horizon=1, save_dir=tmp_path)

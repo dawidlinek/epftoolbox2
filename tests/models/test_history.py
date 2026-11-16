@@ -946,7 +946,7 @@ def test_alone_in_a_batch_of_64_and_resumed_are_the_same_bits(tmp_path):
     test = ("2023-03-20", "2023-11-05")
     full = tmp_path / "full"
     model = make("FM", refit="3MS")
-    pipeline(model).run(frame, *test, horizon=1, save_dir=full, forecast_only=True)
+    pipeline(model).run(frame, *test, horizon=1, save_dir=full)
     assert (48, 64) in model._calls and {47, 49} <= {s for s, _ in model._calls}, model._calls
     lines = records_of(suite.results(full, "FM"))
     by_key = {}
@@ -961,17 +961,15 @@ def test_alone_in_a_batch_of_64_and_resumed_are_the_same_bits(tmp_path):
         for record in produced:
             assert record["prediction"] == by_key[(day, record["hour"])]
     resumed = tmp_path / "resumed"
-    pipeline(make("FM", refit="3MS")).run(frame, *test, horizon=1, save_dir=resumed, forecast_only=True)
+    pipeline(make("FM", refit="3MS")).run(frame, *test, horizon=1, save_dir=resumed)
     path = suite.results(resumed, "FM")
     kept = [line for i, line in enumerate(records_of(path)) if i % 5 not in (1, 3)]
     path.write_text("".join(f"{line}\n" for line in kept))
-    pipeline(make("FM", refit="3MS")).run(frame, *test, horizon=1, save_dir=resumed, forecast_only=True)
+    pipeline(make("FM", refit="3MS")).run(frame, *test, horizon=1, save_dir=resumed)
     assert records_of(path) == lines
     # The batch size is the model's: a resume with another refuses, as one with any other parameter would.
     with pytest.raises(ManifestMismatchError, match="batch_size"):
-        pipeline(make("FM", refit="3MS", batch_size=7)).run(
-            frame, *test, horizon=1, save_dir=resumed, forecast_only=True
-        )
+        pipeline(make("FM", refit="3MS", batch_size=7)).run(frame, *test, horizon=1, save_dir=resumed)
 
 
 def test_the_adapter_suite(hourly, quarter, tmp_path, monkeypatch, registered):
@@ -1010,7 +1008,7 @@ def test_availability_has_one_row_per_series_with_its_newest_step_and_class(hour
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         report = pipeline(model(), information_set=INFO_AHEAD).run(
-            hourly, "2023-06-12", "2023-06-14", horizon=2, save_dir=tmp_path, forecast_only=True
+            hourly, "2023-06-12", "2023-06-14", horizon=2, save_dir=tmp_path
         )
     listed = [w for w in caught if "Availability:" in str(w.message)]
     assert len(listed) == 1 and "generation_wind_forecast is late" in str(listed[0].message)
@@ -1237,9 +1235,7 @@ def test_a_resume_with_another_rule_of_a_series_refuses(hourly, tmp_path, newest
 
     def run(info, **settings):
         model = ReadsPast(name="FM", past=["load_actual"], newest_target=newest)
-        return pipeline(model, information_set=info, **settings).run(
-            hourly, *test, horizon=1, save_dir=tmp_path, forecast_only=True
-        )
+        return pipeline(model, information_set=info, **settings).run(hourly, *test, horizon=1, save_dir=tmp_path)
 
     run(INFO)
     path = suite.results(tmp_path, "FM")
@@ -1259,7 +1255,7 @@ def test_a_resume_over_other_known_ahead_values_of_the_last_target_day_refuses(h
     """The last issue day's forecasts read the load forecast of the day after `test_end`: the manifest hashes the known-ahead
     series through `test_end` plus the largest horizon, so a frame with other values there refuses to resume."""
     test = ("2023-06-05", "2023-06-18")
-    pipeline(make("FM")).run(hourly, *test, horizon=1, save_dir=tmp_path, forecast_only=True)
+    pipeline(make("FM")).run(hourly, *test, horizon=1, save_dir=tmp_path)
     path = suite.results(tmp_path, "FM")
     (ahead,) = json.loads(manifest_path(path).read_text())["history_ahead"]
     assert ahead["through"] == "2023-06-19" and ahead["columns"] == ["load_forecast"]
@@ -1268,10 +1264,10 @@ def test_a_resume_over_other_known_ahead_values_of_the_last_target_day_refuses(h
     changed = hourly.copy()
     changed.loc["2023-06-19", "load_forecast"] += 500.0
     with pytest.raises(ManifestMismatchError, match="history_ahead"):
-        pipeline(make("FM")).run(changed, *test, horizon=1, save_dir=tmp_path, forecast_only=True)
+        pipeline(make("FM")).run(changed, *test, horizon=1, save_dir=tmp_path)
     later = hourly.copy()
     later.loc["2023-06-20", "load_forecast"] += 500.0  # after what any forecast reads: resumes
-    pipeline(make("FM")).run(later, *test, horizon=1, save_dir=tmp_path, forecast_only=True)
+    pipeline(make("FM")).run(later, *test, horizon=1, save_dir=tmp_path)
     assert records_of(path) == lines
 
 
@@ -1359,7 +1355,7 @@ def test_the_manifest_hashes_a_late_issue_target_after_test_end(hourly, tmp_path
     through it, so a resume over another price there refuses; at 11:45 nothing is read after `test_end`."""
     test = ("2023-06-05", "2023-06-18")
     model = make("FM", newest_target="published", known_ahead=())
-    pipeline(model, information_set=LATE_ISSUE).run(hourly, *test, horizon=2, save_dir=tmp_path, forecast_only=True)
+    pipeline(model, information_set=LATE_ISSUE).run(hourly, *test, horizon=2, save_dir=tmp_path)
     path = suite.results(tmp_path, "FM")
     assert [(a["through"], a["columns"]) for a in json.loads(manifest_path(path).read_text())["history_ahead"]] == [
         ("2023-06-19", ["price"])
@@ -1370,13 +1366,9 @@ def test_the_manifest_hashes_a_late_issue_target_after_test_end(hourly, tmp_path
     changed.loc["2023-06-19", "price"] += 50.0
     with pytest.raises(ManifestMismatchError, match="history_ahead"):
         model = make("FM", newest_target="published", known_ahead=())
-        pipeline(model, information_set=LATE_ISSUE).run(
-            changed, *test, horizon=2, save_dir=tmp_path, forecast_only=True
-        )
+        pipeline(model, information_set=LATE_ISSUE).run(changed, *test, horizon=2, save_dir=tmp_path)
     early = tmp_path / "early"
-    pipeline(make("FM", newest_target="published", known_ahead=())).run(
-        hourly, *test, horizon=2, save_dir=early, forecast_only=True
-    )
+    pipeline(make("FM", newest_target="published", known_ahead=())).run(hourly, *test, horizon=2, save_dir=early)
     assert "history_ahead" not in json.loads(manifest_path(suite.results(early, "FM")).read_text())
 
 

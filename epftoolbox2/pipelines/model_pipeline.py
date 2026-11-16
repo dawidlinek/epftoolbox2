@@ -590,6 +590,13 @@ class ModelPipeline:
         Several Zones.
         """
         check_stack_settings()  # TORCH_STACKS and TORCH_STACK_MEMBERS, before any model writes
+        if forecast_only and save_dir:
+            # Decision 12 of step 8: a rerun into the same save_dir resumed the earlier forecast and returned it as today's.
+            raise ValueError(
+                "run(forecast_only=True) with save_dir resumes what the directory holds, so a rerun returns the earlier forecast "
+                "as if it were new. Issue live forecasts with forecast() into a live directory (revisions, stored fits, "
+                "deadlines), run forecast_only=True without save_dir, or run a backtest (no forecast_only) into save_dir."
+            )
         refuse_live_directory(save_dir, "run()")  # a live directory's revisions are written by the live calls (step 8)
         if isinstance(data, Mapping):
             return self._run_zones(

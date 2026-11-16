@@ -134,7 +134,7 @@ def test_the_fine_tune_runs_through_the_trainer_and_is_stored_and_reused(hourly,
     before = pipeline(make("t0", tiny)).run(hourly, *test, horizon=1, forecast_only=True)
     fresh = tmp_path / "fresh"
     first = tuned("t0")
-    pipeline(first).run(hourly, *test, horizon=1, save_dir=fresh, forecast_only=True)
+    pipeline(first).run(hourly, *test, horizon=1, save_dir=fresh)
     assert first._fine_tunes == 2
     stored = sorted((fresh / "t0.fits").glob("*.ckpt"))
     assert len(stored) == 2
@@ -144,7 +144,7 @@ def test_the_fine_tune_runs_through_the_trainer_and_is_stored_and_reused(hourly,
     lines = suite.lines(path)
     path.write_text("".join(f"{line}\n" for line in lines[::3]))
     again = tuned("t0")
-    pipeline(again).run(hourly, *test, horizon=1, save_dir=fresh, forecast_only=True)
+    pipeline(again).run(hourly, *test, horizon=1, save_dir=fresh)
     assert again._fine_tunes == 0 and again._checkpoints_loaded == 2 and suite.lines(path) == lines
     zero = pipeline(make("t0", tiny)).run(hourly, *test, horizon=1, forecast_only=True)
     assert {r["prediction"] for r in zero.refs["t0"]._results} != {json.loads(line)["prediction"] for line in lines}

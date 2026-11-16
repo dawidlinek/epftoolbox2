@@ -76,7 +76,9 @@ def _pipeline(
 
 
 def _run(pipeline: ModelPipeline, frame: pd.DataFrame, test: Tuple[str, str], horizon: int, **kwargs) -> Any:
-    return pipeline.run(frame, *test, horizon=horizon, forecast_only=True, **kwargs)
+    # Into a save_dir a backtest of the window: `run(forecast_only=True)` refuses one (decision 12 of step 8).
+    only = {} if kwargs.get("save_dir") else {"forecast_only": True}
+    return pipeline.run(frame, *test, horizon=horizon, **only, **kwargs)
 
 
 def check_yaml_round_trip(

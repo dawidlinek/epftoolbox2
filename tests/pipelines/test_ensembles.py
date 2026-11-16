@@ -1749,7 +1749,7 @@ def test_a_run_that_names_fewer_windows_keeps_a_plain_average_on_all_of_them(df,
 def test_forecast_only_averages(tmp_path, df):
     day = "2023-05-20"
     report = built(ols("a"), ols("b", SMALL), AverageEnsemble(["a", "b"], name="e")).run(
-        df, test_start=day, test_end=day, horizon=1, forecast_only=True, save_dir=str(tmp_path)
+        df, test_start=day, test_end=day, horizon=1, forecast_only=True
     )
     a, b = keyed(records_of(report, "a")), keyed(records_of(report, "b"))
     for key, record in keyed(records_of(report, "e")).items():

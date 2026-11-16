@@ -3054,7 +3054,9 @@ def build_model_pipeline_interactive() -> None:
             target=target,
             horizon=horizon,
             freq=freq,
-            save_dir=save_dir,
+            # A forecast-only run keeps its forecasts in memory: into a save_dir it would resume earlier ones (forecast() is
+            # the live call that writes revisions).
+            save_dir=None if forecast_only else save_dir,
             forecast_only=forecast_only,
         )
 
