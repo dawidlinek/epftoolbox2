@@ -1097,3 +1097,36 @@ def test_what_actual_ramps_refuse(ramp_frame, build, match):
         return
     with pytest.raises(ValueError, match=match):
         quiet_run(model, ramp_frame, "2023-04-10", "2023-04-10", horizon=1)
+
+
+@pytest.mark.parametrize("mode", ["forecast", "actual"])
+def test_a_training_row_keeps_only_the_hours_its_actual_ramp_reads_when_the_targets_rule_changes(ramp_frame, mode):
+    """The price is out 2 days after its period until 2023-04-10 and 1 hour after from 04-11 (`newest_target="published"`): a
+    row's twin of the hour before reads an hour of its own whose newest known target can be older than the row's own. Moving
+    every price that isn't known at the 11:45 issue on 2023-04-12 changes no forecast, in either mode, and `availability="raise"`
+    passes (it doesn't judge the twin: `_newest_targets` caps each period at the hours its twins read)."""
+    issue = "2023-04-12"
+    rule = [
+        Availability.realised("2 days").during(valid_until="2023-04-10"),
+        Availability.realised("1h").during(valid_from="2023-04-11"),
+    ]
+    info = InformationSet("11:45", ZONE, rules={**RULES, "price": rule, "base_fc": Availability.published("10:00", 1)})
+    cut = pd.Timestamp(f"{issue} 11:45").tz_localize(ZONE).value
+    wall_day = ramp_frame.index.tz_localize(None).normalize()
+    delay = np.where(wall_day <= pd.Timestamp("2023-04-10"), pd.Timedelta("2D").value, pd.Timedelta("1h").value)
+    unknown = ((ramp_frame.index + pd.Timedelta("15min")).asi8 + delay) > cut
+    changed = ramp_frame.copy()
+    changed.loc[unknown, "price"] += 500.0
+    assert unknown.sum() > 100
+    found = []
+    for data in (ramp_frame, changed):
+        model = ShapeModel(
+            BASE,
+            OLSModel(RAMP, 21, newest_target="published", fit_intercept=True),
+            native=SWITCH,
+            train_ramps=mode,
+        )
+        ref = quiet_run(model, data, issue, issue, horizon=1, information_set=info, availability="raise")
+        found.append({r["hour"]: r["prediction"] for r in ref._results})
+    assert len(found[0]) > 90
+    assert [hour for hour in found[0] if found[0][hour] != found[1].get(hour)] == []

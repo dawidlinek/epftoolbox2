@@ -666,7 +666,29 @@ class ShapeModel(BaseModel):
         for group in np.unique(groups):
             on = groups == group
             k[on] = found.k[on].min(axis=0)
+        for lag in sorted({lag for twins in self._ramp_twins(horizon).values() for _, lag in twins.values() if lag}):
+            k = self._capped_by_lag(k, lag)
         return NewestTargets(found.days, k)
+
+    def _capped_by_lag(self, k: np.ndarray, lag: pd.Timedelta) -> np.ndarray:
+        """`k` with each period also capped at what its lagged twin reads (`train_ramps="actual"`): the twin of a training row at
+        period p, lagged by `lag`, is the actual hour mean of the hour(s) `lag` before p, whose periods may have another newest
+        known target than p's when the target's rule changes over time (a 2-day delay until one date, 1 hour after). A row is
+        kept only if every period the twin reads is known by the issue time, so each period takes the oldest `k` of the periods
+        of the hours its twin reaches. A twin that reaches back across midnight reads the day before, whose target is one day
+        older: that period's `k` counts one day later (`k + 1`)."""
+        periods = k.shape[0]
+        step = 1440 // periods
+        minutes = int(lag / pd.Timedelta(minutes=1))
+        out = k.copy()
+        for p in range(periods):
+            for edge in (p * step, p * step + step - 1):  # the first and the last minute the period's row holds
+                reached = edge - minutes
+                days_back, in_day = divmod(reached, 1440)
+                hour_first = (in_day // 60) * 60 // step
+                for q in range(hour_first, hour_first + 60 // step):
+                    out[p] = np.minimum(out[p], k[q] - days_back)
+        return out
 
     # -- the checks ----------------------------------------------------------------------------------------------------------
 
