@@ -80,6 +80,8 @@ from ..results.manifest import (
     rows_unverified,
 )
 from ..results.live import LiveStore, refuse_live_directory
+from ..results.monitor import MonitorMember, MonitorReport
+from ..results.monitor import monitor as run_monitor
 from ..models._fits import RefitResult, Served, refit_models, serve
 from ..models._engine_worker import fit_path_of
 from ..results.matching import rows_of_refs, warn_about_thin
@@ -2277,6 +2279,67 @@ class ModelPipeline:
             )
         with store.hold(create=not dry_run):
             return store.mark_delivered(issue, revision, receipt, dry_run=dry_run)
+
+    def monitor(
+        self,
+        data: pd.DataFrame,
+        save_dir: Union[str, Path],
+        *,
+        windows: Sequence[int] = (7, 30, 90),
+        benchmarks: Optional[Sequence[str]] = None,
+        policy: str = "latest",
+        cutoff: Any = "deadline",
+        backtest: Any = None,
+        alerts: Any = None,
+        target: str = "price",
+    ) -> MonitorReport:
+        """How the forecasts of the live directory `save_dir` did against what happened, with skill first: a `MonitorReport`
+        (`tables()`, `by_window()`, `daily()`, `rungs()`, `quality()`, `alerts`; see the docs page Monitoring).
+
+        Every model and ensemble of the pipeline with results there is a member. Each key is read from the revision `policy`
+        names of the revisions committed by `cutoff` (`"latest"`, `"first"` or `"delivered"`; see `ModelResultRef`), its actual
+        is the `target` of `data` once the target's rule says it is known by now on the clock, and every metric is scored
+        through `LossPanel`. `windows` are numbers of issue days ending at the newest due one. `benchmarks` name members the skill
+        is measured against (the pipeline's `NaiveModel`s by default); `backtest` is an `EvaluationReport` (or a mapping of
+        member -> frame of forecasts) of the same pipeline over the same days, for the live/backtest skill ratio; `alerts` a
+        list of rules (or a YAML file of one). Needs the pipeline's information set (`issue_time=`) for the target's rule."""
+        store = LiveStore(save_dir)
+        if not store.is_live():
+            raise LiveDirectoryError(f"{save_dir} is no live directory (no {LIVE_FILE}): nothing there to monitor")
+        self._check_model_names()
+        found, missing = [], []
+        for part in [*self.models, *self.ensembles]:
+            stem = part.name.lower().replace(" ", "_")
+            paths = [store.save_dir / f"{stem}{SAVE_FORMATS[kind]}" for kind in ("jsonl", "parquet")]
+            path = next((p for p in paths if p.exists()), None)
+            if path is None:
+                missing.append(part.name)
+                continue
+            ladder = None
+            if isinstance(part, FallbackEnsemble):
+                ladder = tuple([part.members] if isinstance(part.members, str) else part.members)
+            found.append(MonitorMember(part.name, path, ladder))
+        if benchmarks is None:
+            from ..models.naive import NaiveModel
+
+            present = {member.name for member in found}
+            benchmarks = [m.name for m in self.models if isinstance(m, NaiveModel) and m.name in present]
+        elif isinstance(benchmarks, str):
+            benchmarks = [benchmarks]
+        return run_monitor(
+            found,
+            list(benchmarks),
+            store,
+            data,
+            self._information_set_for(data),
+            windows=windows,
+            policy=policy,
+            cutoff=cutoff,
+            backtest=backtest,
+            alerts=alerts,
+            target=target,
+            missing=missing,
+        )
 
     # -- stored fits (step 8d, `models._fits`) -----------------------------------------------------------------------------
 
