@@ -99,8 +99,9 @@ returns them with the status `not_stored` and no forecasts, and `forecast()` run
 A served forecast is the backtest of its issue day alone to the bit. Two things can make it differ from a backtest over a longer
 test, and both are recorded in `fit.json` and in the served result's `notes`:
 
-- a `refit=None` model's binary-column mask is read on its issue day, as `run(forecast_only=True)` reads it; a backtest over a
-  longer test reads it on its first day (`binary_mask="fit"` reads each fit's own, the same in both: see Training Windows);
+- a `refit=None` model with `binary_mask="first_day"` reads its binary-column mask on its issue day, as
+  `run(forecast_only=True)` reads it; a backtest over a longer test reads it on its first day (the default reads each fit's own,
+  the same in both: see Time and Calendars);
 - with `engine="on"`, a unit whose fit from shared statistics serves its rows but whose model-path fit fails: an issue row too far
   out for the engine needs the model path, and its `fit_error` is every forecast of the call's, which is one day when serving and
   a whole block in a backtest.

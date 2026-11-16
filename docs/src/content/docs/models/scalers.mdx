@@ -96,23 +96,21 @@ are `"standard"`, in a manifest and in YAML.
 ## Binary columns
 
 A predictor whose values are all 0 or 1 is left as it is by every scaler, unless `StandardScaler(scale_binary=True)` is asked to
-standardise it too. Which predictors those are is decided once per list,
-period and horizon, and per window in a run with [validation](/epftoolbox2/model-pipeline/validation-and-test/), not per forecast:
-from the training rows of the window's first day or, for a [predictor function](/epftoolbox2/model-pipeline/predictor-functions/)'s
-list first used later, of the first day it is used. A column with no value in those rows, such as one that starts inside the test,
-can't tell, so it is decided on the first later day whose rows have a value of it; a forecast of the list before that day has no
-training row with that column and is skipped. Nothing after a forecast's issue day decides how it is scaled.
+standardise it too. Which predictors those are is decided on each fit's own training rows: those of its span (its period, horizon,
+issue day or [refit](/epftoolbox2/model-pipeline/time-and-calendars/#refitting-on-a-calendar) day, and list), before those with a
+missing value (or, for a [`train_on="matching"`](/epftoolbox2/model-pipeline/predictor-functions/) list, on other days) are
+dropped, and per window of a [list of windows](/epftoolbox2/model-pipeline/training-windows/). So no forecast depends on where the
+test starts, and nothing after a forecast's issue day decides how it is scaled.
 
-A model with [`refit`](/epftoolbox2/model-pipeline/time-and-calendars/#refitting-on-a-calendar) finds them on each fit's own training
-rows (those of its period, horizon, refit day and list), not on the first test day, so a forecast doesn't depend on where the run starts.
-
-`binary_mask` on any model that fits chooses the rule, and the default, `None`, keeps the two above. Read on the first day, a
-forecast can depend on where the test starts: night-time solar at 06:00 is 0 in every row of a test that starts in winter, so it
-stays unscaled for the whole test, while a test that starts after it had values scales it, and the forecasts the two share
-differ. `binary_mask="fit"` finds the binary columns on each fit's own training rows without `refit` too, as a refit does: the
-rows of its span, before those with a missing value (or, for a [`train_on="matching"`](/epftoolbox2/model-pipeline/predictor-functions/)
-list, on other days) are dropped, and per window of a [list of windows](/epftoolbox2/model-pipeline/training-windows/). No
-forecast then depends on `test_start`. `"first_day"` is the default's rule by name, and raises with `refit`. See
+`binary_mask` on any model that fits chooses the rule: None, the default, and `"fit"` are the one above. `"first_day"`, the
+default up to 2.3, decides once per list, period and horizon, and per window in a run with
+[validation](/epftoolbox2/model-pipeline/validation-and-test/), not per forecast: from the training rows of the window's first day
+or, for a [predictor function](/epftoolbox2/model-pipeline/predictor-functions/)'s list first used later, of the first day it is
+used. A column with no value in those rows, such as one that starts inside the test, can't tell, so it is decided on the first
+later day whose rows have a value of it; a forecast of the list before that day has no training row with that column and is
+skipped. Read on the first day, a forecast can depend on where the test starts: night-time solar at 06:00 is 0 in every row of a
+test that starts in winter, so it stays unscaled for the whole test, while a test that starts after it had values scales it, and
+the forecasts the two share differ. It raises with `refit`, and is kept for results written with it. See
 [Time and Calendars](/epftoolbox2/model-pipeline/time-and-calendars/#binary-columns-and-test_start).
 
 ## Constant columns

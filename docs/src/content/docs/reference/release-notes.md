@@ -118,6 +118,29 @@ Unchanged: `BaseModel.run(information_set=...)`, without a pipeline, and `leakag
 `pipeline.verify()` still reports a late predictor as a `leak` at every level, and now also what a predictor function uses late on
 an issue day it didn't sample.
 
+### Changed defaults
+
+- **`binary_mask=None` reads each fit's binary columns from its own rows.** Which predictors are binary 0/1, and so left
+  unscaled, was read without `refit` on the training rows of the test's first day (of each window with validation) and kept for
+  the whole test, so a forecast depended on the day its test started: night-time solar that is all 0 in a winter start's rows
+  stayed unscaled all spring. The default now reads each fit's mask from the rows of its own span, as `binary_mask="fit"` did
+  (and a refit unit always did), so no forecast depends on `test_start`, a resume over another start gives the fresh run, and
+  validation days move no test forecast. See
+  [Binary columns and `test_start`](/epftoolbox2/model-pipeline/time-and-calendars/#binary-columns-and-test_start).
+  - **What moves.** Only forecasts of a model without `refit` whose own rows say otherwise about a column than the first day's:
+    a column that turns from 0/1 to other values inside the test, or back (night-time solar, cooling degree days, a regime flag).
+    On Lago's DE data OLS, LassoCV and LEAR move none of 2,928 forecasts; the week-ahead Lasso at W = 91 moved 78 and 101 of 301
+    (min and max load, up to 297 MW); the resolution study's post-gate REN+ runs, up to 16 % MAE15 above the study's under the old
+    default, come within 5 % of it. Refit models, day and
+    pooled units, `NaiveModel` and the networks (all refit) don't move. The golden metrics don't move.
+  - **Resuming.** A manifest of the default now holds `"binary_mask": "fit"` in `training_cut` (without `refit`), and one written
+    up to 2.3 holds nothing, so resuming old results of a model without `refit` raises `ManifestMismatchError` on `training_cut`,
+    with a note that says how: nothing is mixed. Refit results resume as before.
+  - **The old behaviour.** `binary_mask="first_day"` is the old default's rule, record for record and manifest for manifest: pass
+    it (in Python, or `binary_mask: first_day` in YAML) to resume results written before or to reproduce their numbers. A YAML
+    file without `binary_mask` runs the new default. A `ResidualModel` warns about a base with `"first_day"` instead of one with
+    None.
+
 ### Fixed
 
 - **A refit unit's forecasts no longer depend on how many days its block call holds.** The issue rows of a

@@ -65,9 +65,9 @@ nothing of this page.
 So a model's forecasts don't depend on what it is grouped with: drop a model, add a thousand, cut the list into array tasks, and
 every other model's records stay the same bytes. Nothing a model stores names its group, chunk, task or the union of columns.
 
-`binary_mask="fit"` (see [Time and Calendars](/epftoolbox2/model-pipeline/time-and-calendars/#binary-columns-and-test_start)) reads
-each fit's binary-column mask from its own rows, so with it a forecast is also bitwise the same whatever the test window's start;
-the default mask is read on the window's first day, so moving the start can move forecasts, engine on or off.
+The default `binary_mask` (see [Time and Calendars](/epftoolbox2/model-pipeline/time-and-calendars/#binary-columns-and-test_start))
+reads each fit's binary-column mask from its own rows, so a forecast is also bitwise the same whatever the test window's start;
+`binary_mask="first_day"` reads it on the window's first day, so moving the start can move forecasts, engine on or off.
 
 ## Tolerances
 
@@ -248,4 +248,4 @@ provenance) and every `epf report` table were the same bytes in all of them.
 
 - [Incremental Training](/epftoolbox2/model-pipeline/caching/): results files, skip records, Parquet results and the manifest
 - [Workflow](/epftoolbox2/workflow/overview/): array tasks, `models_per_task` and `epf report`
-- [Time and Calendars](/epftoolbox2/model-pipeline/time-and-calendars/#binary-columns-and-test_start): `binary_mask="fit"`
+- [Time and Calendars](/epftoolbox2/model-pipeline/time-and-calendars/#binary-columns-and-test_start): `binary_mask`

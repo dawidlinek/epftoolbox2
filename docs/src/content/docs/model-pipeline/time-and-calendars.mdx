@@ -159,8 +159,8 @@ A forecast issued on D uses the fit of its **anchor** a, the refit day on or bef
   `"7D"` gives each Friday its own anchor, the Monday of its week, so no fit is shared and only the rows move.
 - **The scaler comes from the unit's rows.** It is fitted on the unit's training rows, and the binary columns it leaves alone are
   found on those same rows (see [Binary columns](/epftoolbox2/models/scalers/#binary-columns)), not on the first test day. So a
-  forecast doesn't depend on where the run starts, as a plain model's binary columns do, unless that model has
-  [`binary_mask="fit"`](#binary-columns-and-test_start).
+  forecast doesn't depend on where the run starts, as a plain model's doesn't with the default
+  [`binary_mask`](#binary-columns-and-test_start) either.
 - **The frame must go back from the anchor.** The rows a run reads, and so the days the [data checks](/epftoolbox2/model-pipeline/overview/#data-checks)
   look at, reach W+h days back from the anchor of the first issue day, which can be before `test_start`: by up to 6 days under `"7D"`,
   and by almost a year under `"12MS"`. A frame that starts after the earliest row a fit of the run trains on raises `ValueError`
@@ -242,46 +242,51 @@ list's predictors those are is read on some training rows, and `binary_mask`, on
 ```python
 from epftoolbox2.models import OLSModel
 
-model = OLSModel(["load_forecast_d+{horizon}", "solar_forecast_d+{horizon}", "is_weekend_d+{horizon}"], binary_mask="fit")
+predictors = ["load_forecast_d+{horizon}", "solar_forecast_d+{horizon}", "is_weekend_d+{horizon}"]
+model = OLSModel(predictors)  # each fit's own rows, the default
+old = OLSModel(predictors, binary_mask="first_day")  # the test's first day, the default up to 2.3
 ```
 
 | `binary_mask` | Without `refit` | With `refit` |
 |---|---|---|
-| `None`, the default | the rows of the window's first calendar day (a predictor function's list: its first planned issue day), for every forecast of the window | each unit's own rows |
-| `"first_day"` | the same as `None` | raises `ValueError` |
+| `None`, the default | each forecast's own rows, the same as `"fit"` | each unit's own rows |
 | `"fit"` | each forecast's own rows | each unit's own rows, the same as `None` |
+| `"first_day"`, the default up to 2.3 | the rows of the window's first calendar day (a predictor function's list: its first planned issue day), for every forecast of the window | raises `ValueError` |
 
-- **The default depends on where the test starts.** Read on the first day, a list's mask holds for every forecast of the test, or of
-  the window in a run with [validation](/epftoolbox2/model-pipeline/validation-and-test/). A column that is 0/1 in the first day's
-  rows and not in later ones stays unscaled: night-time solar at 06:00 is 0 in every training row of a test that starts on 1 March,
-  so it stays unscaled until the test ends, while a test that starts on 18 March, whose rows have values, scales it. The forecasts
-  at 06:00 (and 18:00) from 18 March then differ between the two runs, by up to 6 EUR/MWh on the frame of
-  `tests/test_known_issues.py`, which pins it.
-- **`"fit"` reads each fit's own rows.** Those of the forecast's span, D-W-h to D-1-h (or as [`newest_target`](#the-newest-target)
+- **The default reads each fit's own rows.** Those of the forecast's span, D-W-h to D-1-h (or as [`newest_target`](#the-newest-target)
   cuts it), in its list's columns, before the rows with a missing value and, for a `train_on="matching"` list, those of other days
   are dropped: what a `refit="1D"` unit reads, so a record of `"fit"` is the record of `refit="1D"`. Each window of a
   [list of windows](/epftoolbox2/model-pipeline/training-windows/) reads its own. A forecast then depends on its key and the data
   alone: runs that start or end on other days, run with a validation window, or issue on Fridays only give every forecast they share
   the same numbers, bit for bit.
-- **What moves.** Only forecasts whose own rows say otherwise about a column than the first day's: a column that turns from 0/1
+- **`"first_day"` depends on where the test starts.** Read on the first day, a list's mask holds for every forecast of the test, or
+  of the window in a run with [validation](/epftoolbox2/model-pipeline/validation-and-test/). A column that is 0/1 in the first
+  day's rows and not in later ones stays unscaled: night-time solar at 06:00 is 0 in every training row of a test that starts on 1
+  March, so it stays unscaled until the test ends, while a test that starts on 18 March, whose rows have values, scales it. The
+  forecasts at 06:00 (and 18:00) from 18 March then differ between the two runs, 56 keys by up to 6 EUR/MWh on the frame of
+  `tests/models/test_binary_mask.py`. This was the default up to 2.3; it stays for results written with it.
+- **What moved with the default.** Only forecasts whose own rows say otherwise about a column than the first day's: a column that turns from 0/1
   to other values inside the test or back, which a short window over the seasons can give (night-time solar, cooling degree days).
   On Lago's DE data (`lear_predictors`, W = 364, h = 1 and 2, the 61 days from 30 October 2016) OLS, LassoCV and LEAR move none
   of their 2,928 forecasts: every input there is continuous, or 0/1, in every window. On the Polish week-ahead study's Fridays of
   2024 (h = 3 to 9) its models at W = 1092 move none either. With a 91-day window a LassoCV moves 78 and 101 of the 301 forecasts of
   the daily minimum and maximum load, from June on, by up to 213 and 297 MW: cooling degree days are 0 in every row of a window that
-  starts in January, so the default feeds them to the Lasso raw all summer.
+  starts in January, so `"first_day"` feeds them to the Lasso raw all summer.
 - **At scale, through the engine.** Variants of OLS, Ridge, LassoCV and LEAR with a column that is 0/1 before the first test day
   and continuous from it (10,000, 1,000, 200 and 1,000 of them, hourly, run over 27 March to 2 April 2025 and again over 30
-  March to 5 April): with `"fit"` every key the two runs share is the same bits (950,000, 95,000, 19,000 and 95,000 keys); with the default,
-  55 to 67 % of the shared keys of 200 sampled variants per class differ, since the later start reads that column's mask on
+  March to 5 April): with `"fit"` every key the two runs share is the same bits (950,000, 95,000, 19,000 and 95,000 keys); with
+  `"first_day"`, 55 to 67 % of the shared keys of 200 sampled variants per class differ, since the later start reads that column's mask on
   a window that holds its continuous values.
-- **Resuming and YAML.** The manifest's `training_cut` gains `"binary_mask": "fit"` without `refit`, so resuming results made with
-  the other rule refuses with `ManifestMismatchError`. `"first_day"` is the default's rule and resumes it, and with `refit` `"fit"`
-  is the refit's own rule and writes nothing. Such a manifest has no `binary_masks`, as a fit's mask follows from its rows, which the
-  data hash covers, so results of `"fit"` resume across test starts and stay what a fresh run gives. The default refuses that
-  only for predictor functions and runs with validation: plain fixed-list results resume across test starts without an error and
-  then hold masks read on two different first days (a known gap; in one check 286 of 812 records differed from a fresh run).
-  YAML writes `binary_mask` only when it is set.
+- **Resuming and YAML.** Without `refit` the manifest's `training_cut` holds `"binary_mask": "fit"` under the default (and
+  `"fit"`), and nothing under `"first_day"`, as every manifest written up to 2.3 holds nothing. So results written with the old
+  default refuse to resume under the new one with `ManifestMismatchError`, whose message says to pass `binary_mask="first_day"`
+  to resume them as they were written (or to use a new `save_dir`); results of the default refuse `"first_day"` the same way, and
+  never mix. With `refit` the rule is the refit's own and nothing is written, so refit results resume as before. A manifest of the
+  default has no `binary_masks`, as a fit's mask follows from its rows, which the data hash covers, so its results resume across
+  test starts and stay what a fresh run gives. `"first_day"` refuses that only for predictor functions and runs with validation:
+  plain fixed-list results resume across test starts without an error and then hold masks read on two different first days (a
+  known gap, `tests/test_known_issues.py`; in one check 286 of 812 records differed from a fresh run). YAML writes `binary_mask`
+  only when it is set, so a YAML without it runs the default, and one saved with `binary_mask: first_day` keeps the old rule.
 
 ## What a clock change does
 
@@ -397,8 +402,10 @@ report = pipeline.report("fridays", test=("2023-01-01", "2024-12-31"), horizons=
 - **Only the issue days change.** Training is untouched: every date's row trains, chosen by date as [above](#which-rows-a-forecast-reads),
   so a Friday's forecast trains on the rows it trains on in a run of every day. `day_in_test` still counts calendar days from the start
   of the window.
-- **A Friday's record is the record of a run of every day, for a fixed list.** That holds bit for bit, with the mask of the list's
-  binary columns, which a model leaves unscaled: it is read on the window's first calendar day, whatever its weekday. A predictor
+- **A Friday's record is the record of a run of every day, for a fixed list.** That holds bit for bit. With the default
+  [`binary_mask`](#binary-columns-and-test_start) every list's binary columns, which a model leaves unscaled, are read on each
+  fit's own rows, so it holds for predictor functions too; the rest of this item and the next are `binary_mask="first_day"`'s.
+  There the mask is read on the window's first calendar day, whatever its weekday. A predictor
   function's list reads its mask there too if it is the list of the window's first planned issue day of that period and horizon,
   else on the first planned issue day that uses it; a key the clock skips has no say, and which day it is never depends on later
   issue days, their data or the end of the test. A column with no value on that day is read on the first calendar day after it
@@ -419,7 +426,7 @@ report = pipeline.report("fridays", test=("2023-01-01", "2024-12-31"), horizons=
 
   They differ only where a column is 0 or 1 in the rows one of those days reads and not in the other's. Both days are the forecast's
   issue day or earlier, so neither run reads a row dated after D-1-h. Fixed lists and lists used on every day don't differ, and
-  with [`binary_mask="fit"`](#binary-columns-and-test_start), which reads no mask day, no list does.
+  with the default [`binary_mask`](#binary-columns-and-test_start), which reads no mask day, no list does.
 - **Only listed days are planned.** Another weekday is no issue day: its keys are neither planned, nor missing, nor skipped.
   `planned` in `forecast_counts()` counts the listed days alone, with the clock's rule above.
 - **The information set sees the listed days alone.** The check before any fit, the `availability="warn"` listing and

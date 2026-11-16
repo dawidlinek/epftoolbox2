@@ -21,7 +21,7 @@ from epftoolbox2.models import HistGBModel, LEARModel, ResidualModel
 from epftoolbox2.pipelines import ModelPipeline
 from epftoolbox2.presets import lear_predictors, tree_predictors
 
-lear = LEARModel(lear_predictors(["load_forecast"]), training_window=728, binary_mask="fit", name="lear")
+lear = LEARModel(lear_predictors(["load_forecast"]), training_window=728, name="lear")
 base_forecasts = [f"base_fc_h{h:02d}_d+{{horizon}}" for h in range(24)] + ["base_fc_d+{horizon}"]
 learner = HistGBModel(tree_predictors(["load_forecast"]) + base_forecasts)
 
@@ -36,8 +36,8 @@ report = pipeline.run(df, test=("2025-10-01", "2026-09-30"), horizon=1, save_dir
 `base="lear"` runs a copy of the model `lear` added before it (and saves as the name); `base=LEARModel(...)` nests the base in
 the residual model instead. Either way the residual model runs **its own** base: `lear` above is fitted twice, once as itself and
 once as the base. `warmup="2024-10-01"` starts the base's forecasts on that date, whatever days a run forecasts (see
-[Warm-up](#warm-up)), and `binary_mask="fit"` makes each of them its own fit's, so the base's forecasts are the pipeline's `lear`
-records to the bit (see [The base's forecasts](#the-bases-forecasts-and-the-base-models-own)).
+[Warm-up](#warm-up)), and the default `binary_mask` reads each of their binary columns from its own fit's rows, so the base's
+forecasts are the pipeline's `lear` records to the bit (see [The base's forecasts](#the-bases-forecasts-and-the-base-models-own)).
 
 ## Parameters
 
@@ -132,11 +132,11 @@ The learner's first fit needs base forecasts of its training rows, so the base s
 
 ### The base's forecasts and the base model's own
 
-The base starts at the warm-up, not where the pipeline's own copy of it starts. A base with `refit=None` and `binary_mask=None`
-reads each forecast's binary-column mask on its run's first day (a known issue: a forecast depends on the day its test starts), so
-its forecasts, and `base_prediction`, can differ from the records of the same model run beside the residual model, and a run warns.
-With `binary_mask="fit"` or `refit` they are those records to the bit, and comparing the two models compares what the learner
-adds.
+The base starts at the warm-up, not where the pipeline's own copy of it starts. With the default `binary_mask` (or `"fit"`, or
+`refit`) each base forecast reads its binary columns from its own fit's rows, so its forecasts are the records of the same model run
+beside the residual model to the bit, and comparing the two models compares what the learner adds. A base with
+`binary_mask="first_day"` (the default up to 2.3) reads each forecast's mask on its run's first day, the warm-up start, so its
+forecasts, and `base_prediction`, can differ from those records, and a run warns.
 
 ## Leakage and verification
 

@@ -37,8 +37,8 @@ their tables in two tiers.
   stand apart from the honest ones below.
 - **Training.** The newest training target is D − 1 (`newest_target="d-1"`), the window W target days: R1 182 days of the
   15-minute era, R2 91, 182, 364 and 728, R4 364; the shape models 91.
-- **Binary columns.** Every fitted model has `binary_mask="fit"`: the columns left unscaled as 0/1 are read from each fit's own
-  rows, as the study scaled each fit. With the default (`None`) they are read once, from the first test day's window, and kept
+- **Binary columns.** Every fitted model has `binary_mask="fit"`, now the default: the columns left unscaled as 0/1 are read
+  from each fit's own rows, as the study scaled each fit. With `"first_day"` (the default up to 2.3) they are read once, from the first test day's window, and kept
   through the test period, so the A69 solar forecast of the early and late hours, all 0 in a winter window, stays unscaled when spring
   makes it positive: the post-gate runs then lose up to 16 % MAE15 against the study (AT A96_FULL; AT A96_QLOC +7.6 %), the
   honest ones nothing (see [What differs](#what-differs-from-the-study)).
@@ -753,16 +753,16 @@ the issue row read the same column. Most of B24_dyn's published lead over B24_st
   penalties: R1 MAE15 within 2.2 %.
 - **The shape regression.** Actual against forecast ramps (above), and a tiny ridge (10⁻³ · n on standardised regressors)
   against OLS.
-- **Binary columns.** `binary_mask="fit"` (see Setup). With the default, R1 MAE15 (EUR/MWh):
+- **Binary columns.** `binary_mask="fit"` (see Setup). With `"first_day"`, the default up to 2.3, R1 MAE15 (EUR/MWh):
 
   | | DE-LU REN+ A96_QLOC | A96_FULL | B24_dyn | AT REN+ A96_QLOC | A96_FULL | B24_dyn |
   |---|---|---|---|---|---|---|
   | the study | 21.58 | 21.67 | 21.55 | 23.25 | 23.48 | 23.14 |
-  | `binary_mask=None` (default) | 21.66 | 24.22 | 23.24 | 25.03 | 27.28 | 25.68 |
+  | `binary_mask="first_day"` (default up to 2.3) | 21.66 | 24.22 | 23.24 | 25.03 | 27.28 | 25.68 |
   | `binary_mask="fit"` | 21.60 | 22.56 | 21.58 | 23.06 | 24.41 | 23.09 |
 
-  The honest runs are the same either way. The default's dependence on the first test day is a known issue, pinned as a strict
-  xfail in `tests/test_known_issues.py` (`test_a_forecast_is_the_same_whatever_day_the_test_starts_on`).
+  The honest runs are the same either way. `"first_day"`'s dependence on the first test day is why the default changed
+  (`tests/models/test_binary_mask.py::test_a_forecast_is_the_same_whatever_day_the_test_starts_on`).
 - **Days and keys.** The library's identical days are the study's in R1 (191 and 192), R2 (281 and 282) and R4 (334 and 279); R3's
   load rows have 332 and 238 against 334 and 242 (a daily aggregate drops the switch days, see tier S). The day after the spring
   switch has 92 forecasts in every library model, since there is no 02:00 row on the switch day to issue from; the study had 96.
