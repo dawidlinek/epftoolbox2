@@ -72,10 +72,15 @@ EXIT_WARNING = 4
 NO_ROWS = "no rows: a replay reads every day of its range as missing"
 REDACTED = "***"
 # Attribute and environment-variable names whose values are secrets: never written, and refused if a frame or line holds them.
-_SECRET_ATTRIBUTE = re.compile(r"(api_?key|token|secret|password|passwd|auth|credential|(^|_)key$)", re.IGNORECASE)
+# The words of a name (snake_case, kebab-case or camelCase) that make its value a secret, and the pairs of words.
+_SECRET_WORDS = frozenset(
+    {"auth", "authorization", "token", "tokens", "password", "passwd", "secret", "secrets", "credential", "credentials",
+     "apikey", "passphrase"}
+)  # fmt: skip
+_SECRET_PAIRS = frozenset({("api", "key"), ("access", "key"), ("secret", "key"), ("private", "key")})
 _SECRET_ENVIRONMENT = re.compile(r"(API_?KEY|TOKEN|SECRET|PASSWORD|PASSWD)$", re.IGNORECASE)
-# Shorter strings aren't searched for: a one-letter test key would refuse every file.
-_SECRET_MIN_LENGTH = 6
+# Shorter strings aren't searched for: a short word would refuse frames that merely contain it.
+_SECRET_MIN_LENGTH = 8
 _PROXY_USER = re.compile(r"^[a-z][a-z0-9+.-]*://([^@/]+)@", re.IGNORECASE)
 _FILE_STAMP = "%Y%m%dT%H%M%S%fZ"
 # Step 8b's refresh budget (`DataPipeline.run(budget=, deadline=, timeout=, retries=)`): `record` takes the same arguments.
@@ -138,10 +143,23 @@ def _plain(value: Any) -> Any:
     return repr(value)
 
 
+def _words(name: Any) -> List[str]:
+    """The words of a name: `api_key`, `api-key` and `apiKey` are ["api", "key"]."""
+    spaced = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", str(name))
+    return [word for word in re.split(r"[^a-z0-9]+", spaced.lower()) if word]
+
+
+def is_secret_name(name: Any) -> bool:
+    """Whether a name says its value is a secret: a whole word such as token, password, secret, auth or credentials, or a pair
+    such as api key or access key. `author`, `sort_key` and `tokenizer` aren't."""
+    words = _words(name)
+    return any(word in _SECRET_WORDS for word in words) or any(pair in _SECRET_PAIRS for pair in zip(words, words[1:]))
+
+
 def _collect_secrets(name: Any, value: Any, found: set, named: bool) -> None:
     """The strings of `value` that are secrets: every string under a name like a key, token, password, auth or credentials
     (at any depth of dicts, lists and tuples), and the user info of a URL under a name ending in "url"."""
-    named = named or bool(_SECRET_ATTRIBUTE.search(str(name)))
+    named = named or is_secret_name(name)
     if isinstance(value, str):
         if named and value:
             found.add(value)
@@ -182,7 +200,7 @@ def _redact(text: str, secrets: Sequence[str]) -> str:
 def _scrub(value: Any, secrets: Sequence[str]) -> Any:
     """`value` without the entries named like a secret and with every secret string redacted."""
     if isinstance(value, dict):
-        return {k: _scrub(v, secrets) for k, v in value.items() if not _SECRET_ATTRIBUTE.search(k)}
+        return {k: _scrub(v, secrets) for k, v in value.items() if not is_secret_name(k)}
     if isinstance(value, list):
         return [_scrub(v, secrets) for v in value]
     if isinstance(value, str):
@@ -508,9 +526,9 @@ class SnapshotArchive:
             frame = _uncached(source).fetch(start, end)
             line["fetched_at"] = _iso(clock.now())  # the instant the answer was in hand
             frame, settled_until = _as_returned(frame)
+            # The frame's data (values and labels), not the Parquet bytes, whose metadata holds words like "datetime" and "UTC".
             _refuse_secrets_in_frame(frame, secrets, f"The frame {key} returned")
             data = _parquet_bytes(frame)
-            _refuse_secrets(data, secrets, f"The frame {key} returned")
             warnings = []
             if not len(frame):
                 warnings.append(NO_ROWS)
@@ -557,18 +575,27 @@ class SnapshotArchive:
 
     def _append(self, line: Dict[str, Any], data: Optional[bytes], secrets: Sequence[str]) -> None:
         """Write the frame (when there is one) under a name of its own, then its catalog line, under the archive's lock. A line
-        that can't be written (not JSON, a secret, an OSError) becomes a failed line, so the later sources still run."""
+        that can't be written (not JSON, a secret, an OSError) becomes a failed line, so the later sources still run; one that
+        reached the catalog whole before the error (an fsync that failed) stays the only line, with the error as a warning."""
         self.path.mkdir(parents=True, exist_ok=True)
         with self._locked():
-            self._cut_torn_tail()
+            self._end_last_line()
             try:
                 self._write(line, data, secrets)
                 return
             except Exception as exc:  # noqa: BLE001 - recorded as a failed line, as a failed fetch is
-                failed = self._as_failed(line, exc, secrets)
+                error = exc
+            self._end_last_line()  # a write that failed half-way left a torn line
+            if self._is_last_line(line):
+                line.setdefault("warnings", []).append(
+                    _redact(f"the catalog line was written, but {type(error).__name__}: {error}", secrets)
+                )
+                return
+            failed = self._as_failed(line, error, secrets)
             try:
                 self._write(failed, None, secrets)
             except Exception as exc:  # noqa: BLE001 - nothing more can be written for this source; the result says so
+                self._end_last_line()
                 failed["error"] += f"; the line couldn't be written either ({type(exc).__name__})"
                 failed["written"] = False
             line.clear()
@@ -612,32 +639,63 @@ class SnapshotArchive:
         failed["epftoolbox2"] = line.get("epftoolbox2")
         return failed
 
-    def _cut_torn_tail(self) -> None:
-        """Cut a torn last line (a crash while appending) off the catalog, so the next line starts on a line of its own."""
+    def _last_line(self, handle) -> Tuple[int, bytes, bool]:
+        """(offset, bytes, ended) of the catalog's last line: where it starts, its bytes without the newline, and whether it
+        ends in one. (0, b"", True) for an empty file."""
+        size = handle.seek(0, os.SEEK_END)
+        if size == 0:
+            return 0, b"", True
+        handle.seek(size - 1)
+        ended = handle.read(1) == b"\n"
+        stop = size - 1 if ended else size
+        begin = stop
+        while begin > 0:  # back to the newline before it, a block at a time
+            lo = max(0, begin - 65536)
+            handle.seek(lo)
+            found = handle.read(begin - lo).rfind(b"\n")
+            if found >= 0:
+                begin = lo + found + 1
+                break
+            begin = lo
+        handle.seek(begin)
+        return begin, handle.read(stop - begin), ended
+
+    def _end_last_line(self) -> None:
+        """The catalog ending in a newline, so the next line starts on a line of its own: a whole last line without its newline
+        (it reads as JSON, as the readers take it) gets one; a torn one (a crash or a failed write while appending) is cut off."""
         try:
             handle = open(self.catalog_path, "rb+")
         except FileNotFoundError:
             return
         with handle:
-            size = handle.seek(0, os.SEEK_END)
-            if size == 0:
+            begin, last, ended = self._last_line(handle)
+            if ended:
                 return
-            handle.seek(size - 1)
-            if handle.read(1) == b"\n":
-                return
-            end = size
-            while end > 0:  # back to the last newline, a block at a time
-                begin = max(0, end - 65536)
-                handle.seek(begin)
-                found = handle.read(end - begin).rfind(b"\n")
-                if found >= 0:
-                    end = begin + found + 1
-                    break
-                end = begin
-            logger.warning(f"Archive: cut a torn last line ({size - end} bytes) off {self.catalog_path}")
-            handle.truncate(end)
+            try:
+                whole = isinstance(json.loads(last), dict)
+            except ValueError:
+                whole = False
+            if whole:
+                handle.seek(0, os.SEEK_END)
+                handle.write(b"\n")
+            else:
+                logger.warning(f"Archive: cut a torn last line ({len(last)} bytes) off {self.catalog_path}")
+                handle.truncate(begin)
             handle.flush()
             os.fsync(handle.fileno())
+
+    def _is_last_line(self, line: Dict[str, Any]) -> bool:
+        """Whether the catalog's last line is `line` (it reached the file whole before an error)."""
+        try:
+            handle = open(self.catalog_path, "rb")
+        except FileNotFoundError:
+            return False
+        with handle:
+            _, last, _ = self._last_line(handle)
+        try:
+            return bool(last) and json.loads(last) == json.loads(json.dumps(line, allow_nan=False))
+        except (ValueError, TypeError):
+            return False
 
     # -- reading ----------------------------------------------------------------------------------------------------------
 

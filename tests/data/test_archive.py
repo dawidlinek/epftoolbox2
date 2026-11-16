@@ -1085,14 +1085,14 @@ def test_nested_and_otherwise_named_secrets_and_their_url_encoded_forms(monkeypa
             monkeypatch.delenv(name)
     source = Plain(
         settings={"auth": {"user": "me", "token": "nested-tok-1"}, "headers": [{"Authorization": "Bearer xyz-123456"}]},
-        key="plain-key-12",
+        access_key="plain-key-12",
         credentials="cred-value-9",
-        auth=("someone", "auth-pass-7"),  # everything under an auth name, the user too
+        auth=("someone", "auth-pass-7"),  # everything under an auth name (a user of 8 characters too)
     )
     found = source_secrets(source)
     for secret in ("nested-tok-1", "Bearer xyz-123456", "plain-key-12", "cred-value-9", "auth-pass-7"):
         assert secret in found, secret
-    assert "someone" in found and "me" not in found  # too short to search for
+    assert "someone" not in found and "me" not in found  # too short to search for
     odd = Plain(api_key="a b/c+d=e&f")
     with pytest.raises(SecretInArchiveError):
         _refuse_secrets(b"...api_key=a%20b%2Fc%2Bd%3De%26f...", source_secrets(odd), "f")
@@ -1117,3 +1117,98 @@ def test_a_pattern_of_yours_that_matches_an_archive_column_warns():
     source = ArchiveSource("unused", "EntsoeSource", columns=["load_forecast"], prefix="")
     with pytest.warns(UserWarning, match="load_\\*.*load_forecast"):
         InformationSet("11:45", ZONE, rules={"load_*": Availability.static()}).with_source_rules([source])
+
+
+# --- review round 2 --------------------------------------------------------------------------------------------------------
+
+
+def test_a_whole_last_line_without_its_newline_is_kept_and_ended(tmp_path):
+    clock = FakeClock(local("2026-10-24 09:00"))
+    pipeline = DataPipeline(sources=[Plain()], timezone=ZONE)
+    archive = SnapshotArchive(tmp_path)
+    with use_clock(clock):
+        archive.record(pipeline)
+        archive.catalog_path.write_bytes(archive.catalog_path.read_bytes().rstrip(b"\n"))  # whole, but not ended
+        assert len(archive.catalog()) == 1  # the reader takes it
+        clock.advance(60)
+        archive.record(pipeline)
+    assert list(archive.catalog()["status"]) == ["ok", "ok"] and archive.catalog_path.read_bytes().endswith(b"\n")
+
+
+def test_a_line_torn_by_a_failed_write_is_cut_before_the_failed_line(tmp_path, monkeypatch):
+    from epftoolbox2.data import archive as module
+
+    class Torn:
+        """The catalog opened for appending: its first write writes half the line, then the disk is full."""
+
+        def __init__(self, handle):
+            self.handle = handle
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            self.handle.close()
+
+        def write(self, text):
+            self.handle.write(text[: len(text) // 2])
+            self.handle.flush()
+            raise OSError("No space left on device")
+
+    calls = {"n": 0}
+
+    def opener(path, mode="r", *args, **kwargs):
+        handle = open(path, mode, *args, **kwargs)
+        if str(path).endswith("catalog.jsonl") and mode == "a":
+            calls["n"] += 1
+            if calls["n"] == 2:  # the second recording's ok line
+                return Torn(handle)
+        return handle
+
+    monkeypatch.setattr(module, "open", opener, raising=False)
+    clock = FakeClock(local("2026-10-24 09:00"))
+    pipeline = DataPipeline(sources=[Plain()], timezone=ZONE)
+    with use_clock(clock):
+        SnapshotArchive(tmp_path).record(pipeline)
+        clock.advance(60)
+        result = SnapshotArchive(tmp_path).record(pipeline)
+    assert [line["status"] for line in result.lines] == ["failed"] and "No space" in result.lines[0]["error"]
+    assert list(SnapshotArchive(tmp_path).catalog()["status"]) == ["ok", "failed"]
+    assert all(json.loads(text) for text in SnapshotArchive(tmp_path).catalog_path.read_text().splitlines())
+
+
+def test_an_fsync_that_fails_after_the_whole_line_is_written_leaves_one_line(tmp_path, monkeypatch):
+    real, calls = os.fsync, {"n": 0}
+
+    def fsync(fd):
+        calls["n"] += 1
+        if calls["n"] == 2:  # the Parquet file's first, then the catalog's
+            raise OSError("I/O error")
+        return real(fd)
+
+    monkeypatch.setattr(os, "fsync", fsync)
+    with use_clock(FakeClock(local("2026-10-24 09:00"))):
+        result = SnapshotArchive(tmp_path).record(DataPipeline(sources=[Plain()], timezone=ZONE))
+    monkeypatch.setattr(os, "fsync", real)
+    assert [line["status"] for line in result.lines] == ["ok"] and result.exit_code == EXIT_WARNING
+    assert "I/O error" in result.warned[0]["warnings"][-1]
+    assert list(SnapshotArchive(tmp_path).catalog()["status"]) == ["ok"]
+
+
+def test_names_that_only_look_like_secrets_and_pandas_words_refuse_nothing(tmp_path, monkeypatch):
+    for name in list(os.environ):
+        if name.upper().endswith(("API_KEY", "TOKEN", "SECRET", "PASSWORD", "PASSWD", "APIKEY")):
+            monkeypatch.delenv(name)
+    source = Plain(sort_key="datetime", author="Jane Austen Smith", monkey="index-of-things", tokenizer="whitespace")
+    assert source_secrets(source) == []
+    assert source_secrets(Plain(apiKey="abcdefgh-1", access_key="ijklmnop-2", credentials="qrstuvwx-3")) == [
+        "abcdefgh-1",
+        "ijklmnop-2",
+        "qrstuvwx-3",
+    ]
+    assert source_secrets(Plain(password="short7!")) == []  # under 8 characters: not searched for
+    # Words of the Parquet metadata (`datetime`, `UTC`, `index`) as a secret's value refuse no frame: only the data is searched.
+    monkeypatch.setenv("SOME_SERVICE_TOKEN", "datetime")
+    with use_clock(FakeClock(local("2026-10-24 09:00"))):
+        result = SnapshotArchive(tmp_path).record(DataPipeline(sources=[Plain(columns=["x"])], timezone=ZONE))
+    assert result.exit_code == 0
