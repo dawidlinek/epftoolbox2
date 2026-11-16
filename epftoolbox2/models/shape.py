@@ -21,6 +21,10 @@ ShapeModel in a 15-minute run then:
   study trained B24_dyn on actual hourly ramps and served forecast ones; regressors built from a chained base are out-of-sample
   forecasts on the training rows and on the issue row alike.
 
+- trains, as an opt-in (`train_ramps="actual"`), on the actual ramps: where a training row's regressor is the base (or the base lagged
+  by hours or minutes), it holds the target's actual hour mean in its place, as the study's B24_dyn was fitted, while the issue row
+  keeps the base's own forecast. The default, `"forecast"`, reads one column on both, so train equals serve.
+
 The learner is any model that fits, of period or pooled units, with a list of predictor names (the shape regressors: the hourly
 ramp from the chained base by hour lags, within-hour deviations of 15-minute forecasts from `PeriodStatsTransformer`). Its
 `training_window`, `refit`, `refit_from`, `scaler`, `newest_target` and `binary_mask` are the ShapeModel's: properties that read the learner. A
@@ -59,7 +63,7 @@ from ._calendar import (
     training_span,
 )
 from ._history import reads_history
-from ._units import DAY, PER_PERIOD, unit_kind
+from ._units import DAY, PER_PERIOD, PERIOD, unit_kind
 from .base import BaseModel, _without_repeats, hour_arrays_of
 
 # `native`: a target date is native when some hour of it has quarter-hours that aren't all equal.
@@ -71,6 +75,11 @@ _PERIODS = {pd.Timedelta(hours=1): "1h"}
 # fit (`ShapeModel._execute`).
 SKIP_TOO_FEW_NATIVE_DAYS = "too_few_native_days"
 _EPOCH_ORDINAL = datetime.date(1970, 1, 1).toordinal()
+# `train_ramps`: a training row's regressors are the base's forecasts (train equals serve), or the actual hourly values in their place.
+TRAIN_RAMPS = ("forecast", "actual")
+_RAMP_SHIFTS = re.compile(r"(?:_(?:h|min|s)[+-]\d+)+")
+_RAMP_SHIFT = re.compile(r"_(h|min|s)([+-])(\d+)")
+_SHIFT_UNITS = {"h": pd.Timedelta(hours=1), "min": pd.Timedelta(minutes=1), "s": pd.Timedelta(seconds=1)}
 
 
 def hour_mean_column(target: str, horizon: int) -> str:
@@ -78,6 +87,34 @@ def hour_mean_column(target: str, horizon: int) -> str:
     of `{target}_d+{horizon}`, on its target date). Internal: no transformer makes such a name, and the run refuses a frame
     column of it."""
     return f"{target}_d+{horizon}~hour_mean"
+
+
+def actual_column(predictor: str, horizon: int) -> str:
+    """The period frames' auxiliary column a training row's regressor `predictor` (a name expanded for `horizon`) is read from
+    under `train_ramps="actual"`: the target's actual hour mean at the same lag. Internal, as `hour_mean_column`."""
+    return f"{predictor}~actual{horizon}"
+
+
+def ramp_lag(predictor: str, base: str) -> Optional[pd.Timedelta]:
+    """How far back in elapsed time the regressor `predictor` reads the base column `base` (both expanded for a horizon): zero
+    for the base itself, the sum of the lags of `base_h-1` and the like, None for a column that isn't the base or a lag of it.
+    A lead (`base_h+1`) raises: its actual twin would be a value after the row's own target hour, which may not be known yet."""
+    if not predictor.startswith(base):
+        return None
+    rest = predictor[len(base) :]
+    if not rest:
+        return pd.Timedelta(0)
+    if not _RAMP_SHIFTS.fullmatch(rest):
+        return None
+    total = pd.Timedelta(0)
+    for unit, sign, n in _RAMP_SHIFT.findall(rest):
+        if sign == "+":
+            raise ValueError(
+                f"{predictor!r} reads the base {base!r} ahead, so its actual twin would read an hour after the training "
+                "row's target: train_ramps='actual' takes the base and its lags (`_h-1`) only"
+            )
+        total += int(n) * _SHIFT_UNITS[unit]
+    return total
 
 
 def native_column(target: str, horizon: int) -> str:
@@ -151,6 +188,15 @@ def _checked_min_native_days(value: Any, where: str) -> Optional[int]:
     return int(value)
 
 
+def _checked_train_ramps(value: Any, where: str) -> str:
+    if value not in TRAIN_RAMPS:
+        raise ValueError(
+            f"{where}: train_ramps is 'forecast' (a training row reads the base's forecast, as the issue row does) or 'actual' "
+            f"(its regressors that read the base hold the actual hourly values instead), got {value!r}"
+        )
+    return value
+
+
 def _checked_base(value: Any, where: str) -> str:
     if value is None:
         raise ValueError(f"{where}: base names the column of the hourly forecast, such as 'price_1h_fc_d+{{horizon}}'")
@@ -173,6 +219,13 @@ class ShapeModel(BaseModel):
         min_native_days: The fewest native target dates a fit may train on, counted in its window from the first native date
             on: a forecast whose fit (any window's, with a list) has fewer is skipped as `too_few_native_days`. None, the
             default, is each window's own length (an `"expanding"` one has no minimum); 0 skips nothing.
+        train_ramps: What a training row's regressors that read the base (`base` itself, or lagged by hours or minutes, such as the
+            hourly ramp `price_1h_fc_d+{horizon}_h-1`) hold. "forecast", the default, the base's own forecast, so train equals
+            serve. "actual" the target's actual hour mean at the same target hour and lag, as the resolution study fitted its
+            B24_dyn: the learner then weighs the ramps that were real, and serves the issue row's forecast ones. A training row's
+            hour mean is a target of its own fit, known by its cut, and so is the lagged one (a lag reads an older hour), so
+            nothing unknown at the issue time is read; the issue row never reads one. Not for a pooled learner, and a regressor
+            that leads the base (`_h+1`) is refused. The regressors that don't read the base are the same either way.
         name: The model's name, which names its results.
     """
 
@@ -181,7 +234,7 @@ class ShapeModel(BaseModel):
     _pooled_ok = False
     # Read by `ModelPipeline._load_component`: the parameter that holds a model, saved as {class, params}.
     _NESTED_MODELS = ("learner",)
-    _WRITTEN_WHEN_SET = {**BaseModel._WRITTEN_WHEN_SET, "min_native_days": None}
+    _WRITTEN_WHEN_SET = {**BaseModel._WRITTEN_WHEN_SET, "min_native_days": None, "train_ramps": "forecast"}
     # `verify`'s probe runs pass their information set as `cut_rules` (`information_set._issue_day_forecasts`): the base's check
     # tells a chained column by it, and nothing numeric reads it.
     _cut_rules_in_probes = True
@@ -194,6 +247,7 @@ class ShapeModel(BaseModel):
         period: str = "1h",
         native: Union[str, datetime.date] = NATIVE_DISTINCT,
         min_native_days: Optional[int] = None,
+        train_ramps: str = "forecast",
         name: str = "Shape",
     ):
         self.name = name  # first: the checks below name the model
@@ -202,6 +256,7 @@ class ShapeModel(BaseModel):
         self.period = period
         self.native = native
         self.min_native_days = min_native_days
+        self.train_ramps = train_ramps
         self._first_native: Optional[int] = None  # the first native date's ordinal in the run's frame (`_preprocess`)
         self._check_target: Optional[str] = None  # the target of the last `_check_inputs`
         super().__init__(
@@ -231,6 +286,8 @@ class ShapeModel(BaseModel):
             value = _checked_native(value, where)
         elif key == "min_native_days":
             value = _checked_min_native_days(value, where)
+        elif key == "train_ramps":
+            value = _checked_train_ramps(value, where)
         elif key in _row_target.PARAMETERS and value is not None:
             raise ValueError(
                 f"{where}: {key} (a per-row target) isn't supported on a ShapeModel in this step: its learner's target is "
@@ -415,13 +472,16 @@ class ShapeModel(BaseModel):
         """What the manifest's `model_params` records besides the scaler: the base, the period, the native rule, the native
         minimum and the learner (its class and its own keyword arguments; its list, window, refit, newest target and mask rule
         are recorded as this model's)."""
-        return {
+        out = {
             "base": self.base,
             "period": self.period,
             "native": self.native,
             "min_native_days": self.min_native_days,
             "learner": {"class": type(self.learner).__name__, "params": dict(self.learner._model_kwargs)},
         }
+        if self.train_ramps != "forecast":  # a key only when set, so a folder written before it still resumes
+            out["train_ramps"] = self.train_ramps
+        return out
 
     # -- the frame -----------------------------------------------------------------------------------------------------------
 
@@ -478,7 +538,28 @@ class ShapeModel(BaseModel):
                 aligned = series.reindex(future)
                 aligned.index = index
                 columns[name] = aligned
+        for h, twins in self._ramp_twins(horizon).items():
+            actual = columns[hour_mean_column(target, h)]
+            for twin, lag in twins.values():
+                # The actual hour mean of the target hour, as `LagTransformer` lags the base: by elapsed time.
+                shifted = actual if not lag else actual.reindex(index - lag)
+                shifted.index = index
+                columns[twin] = shifted
         return pd.concat([out, pd.DataFrame(columns)], axis=1)
+
+    def _ramp_twins(self, horizon: int) -> Dict[int, Dict[str, Tuple[str, pd.Timedelta]]]:
+        """Horizon -> {the learner's regressor expanded for it -> (its twin's column, the lag it reads the base at)} for every
+        regressor that reads the base, under `train_ramps="actual"`; empty otherwise."""
+        if self.train_ramps != "actual":
+            return {}
+        out: Dict[int, Dict[str, Tuple[str, pd.Timedelta]]] = {}
+        for h in range(1, horizon + 1):
+            base = _row_target.expand(self.base, h)
+            for name in dict.fromkeys(_row_target.expand(p, h) for p in self.learner.predictors):
+                lag = ramp_lag(name, base)
+                if lag is not None:
+                    out.setdefault(h, {})[name] = (actual_column(name, h), lag)
+        return out
 
     # -- the native minimum ----------------------------------------------------------------------------------------------------
 
@@ -547,6 +628,7 @@ class ShapeModel(BaseModel):
             for h in range(1, horizon + 1)
             for name in (hour_mean_column(self._target, h), native_column(self._target, h))
         ]
+        extra += [twin for twins in self._ramp_twins(horizon).values() for twin, _ in twins.values()]
         return hour_arrays_of(
             self._hour_data,
             self._hour_days,
@@ -567,6 +649,9 @@ class ShapeModel(BaseModel):
             {h: _row_target.expand(self.base, h) for h in horizons},
             {h: native_column(target, h) for h in horizons},
         )
+        twins = self._ramp_twins(max(horizons))
+        if twins:  # a training row's regressors that read the base: the actual hourly values (`_worker._training`)
+            config["train_columns"] = {h: {name: twin for name, (twin, _) in twins[h].items()} for h in twins}
         return expanded, config
 
     def _newest_targets(
@@ -591,7 +676,32 @@ class ShapeModel(BaseModel):
         for group in np.unique(groups):
             on = groups == group
             k[on] = found.k[on].min(axis=0)
+        for lag in sorted({lag for twins in self._ramp_twins(horizon).values() for _, lag in twins.values() if lag}):
+            k = self._capped_by_lag(k, lag)
         return NewestTargets(found.days, k)
+
+    def _capped_by_lag(self, k: np.ndarray, lag: pd.Timedelta) -> np.ndarray:
+        """`k` with each period also capped at what its lagged twin reads (`train_ramps="actual"`): the twin of a training row at
+        period p, lagged by `lag`, is the actual hour mean of the hour(s) `lag` before p, whose periods may have another newest
+        known target than p's when the target's rule changes over time (a 2-day delay until one date, 1 hour after). A row is
+        kept only if every period the twin reads is known by the issue time, so each period takes the oldest `k` of the periods
+        of the hours its twin reaches. A twin that reaches back across midnight reads the day before, whose target is one day
+        older: that period's `k` counts one day later (`k + 1`)."""
+        periods = k.shape[0]
+        step = 1440 // periods
+        minutes = int(lag / pd.Timedelta(minutes=1))
+        out = k.copy()
+        for p in range(periods):
+            for edge in (p * step, p * step + step - 1):  # the first and the last minute the period's row holds
+                reached = edge - minutes
+                days_back, in_day = divmod(reached, 1440)
+                hour_first = (in_day // 60) * 60 // step
+                for q in range(hour_first, hour_first + 60 // step):
+                    out[p] = np.minimum(out[p], k[q] - days_back)
+        # The periods are the wall clock's, an elapsed lag on a clock-change day lands an hour off them, and that is covered only
+        # while a later period's `k` is no newer than an earlier one's (every rule today): where it isn't, the oldest of the day.
+        rising = (np.diff(k, axis=0) > 0).any(axis=0)
+        return np.where(rising[None, :], np.minimum(out, k.min(axis=0)[None, :]), out)
 
     # -- the checks ----------------------------------------------------------------------------------------------------------
 
@@ -621,6 +731,7 @@ class ShapeModel(BaseModel):
             raise ValueError(f"{self.name}: the learner's predictors are a list; a ShapeModel takes no plan")
         # Again at the run: a learner changed after this model was built.
         self._check_learner(self.learner, self._where)
+        self._check_train_ramps(horizon)
         self._check_target = target  # for the coverage of chained inputs (`_check_chained`)
         expanded = super()._check_inputs(
             data,
@@ -688,6 +799,21 @@ class ShapeModel(BaseModel):
                 self._window_listings[window] = _without_repeats(self._window_listings.get(window, []), rows)
         self._check_base_chained(data, bases, names, information_set, cut_rules, availability, issued, weekdays)
         return expanded
+
+    def _check_train_ramps(self, horizon: int) -> None:
+        """`train_ramps="actual"` needs a learner of per-period units and at least one regressor that reads the base."""
+        if self.train_ramps != "actual":
+            return
+        if unit_kind(self.learner) != PERIOD:
+            raise ValueError(
+                f"{self.name}: train_ramps='actual' replaces a training row's regressors period by period, which a pooled "
+                "learner's stacked rows don't take in this step: use a per-period learner"
+            )
+        if not self._ramp_twins(horizon):
+            raise ValueError(
+                f"{self.name}: train_ramps='actual' replaces the learner's regressors that read the base "
+                f"({self.base!r}, or lagged by hours or minutes), and none does: list the base or its hour lag as a predictor"
+            )
 
     def _chained_kept(
         self, data: pd.DataFrame, lists: Dict[Tuple[int, int], List[str]]
@@ -767,4 +893,13 @@ class ShapeModel(BaseModel):
         )
 
 
-__all__ = ["ShapeModel", "NATIVE_DISTINCT", "hour_mean_column", "native_column", "hour_means", "distinct_dates"]
+__all__ = [
+    "ShapeModel",
+    "NATIVE_DISTINCT",
+    "TRAIN_RAMPS",
+    "actual_column",
+    "hour_mean_column",
+    "native_column",
+    "hour_means",
+    "distinct_dates",
+]

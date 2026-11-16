@@ -967,3 +967,223 @@ def test_other_models_frames_are_unchanged(frame):
     model._set_freq("15min")
     processed = model._preprocess(frame[["price", "load_hour_dev_d+1"]], 2, "price")
     assert list(processed.columns) == ["price", "load_hour_dev_d+1", "price_d+1", "price_d+2", "day", "hour"]
+
+
+# -- training on actual ramps (`train_ramps="actual"`) ----------------------------------------------------------------------
+
+RAMP = ["base_fc_d+{horizon}", "base_fc_d+{horizon}_h-1"]
+
+
+@pytest.fixture(scope="module")
+def ramp_frame(frame):
+    """`frame` with the hourly forecast's hour lag (the ramp's second regressor) and the actual hour mean's, which a data pipeline's
+    `LagTransformer` makes, so that the hand fit below doesn't use the model's own lag."""
+    out = frame.copy()
+    for h in (1, 2):
+        for name in ("base_fc", "price_hour_mean"):
+            lagged = LagTransformer([f"{name}_d+{h}"], [1], "hour").transform(out[[f"{name}_d+{h}"]])
+            out[f"{name}_d+{h}_h-1"] = lagged[f"{name}_d+{h}_h-1"]
+    return out
+
+
+def ramp_model(**kwargs):
+    kwargs.setdefault("train_ramps", "actual")
+    return ShapeModel(BASE, OLSModel(RAMP, training_window=21, fit_intercept=True), **kwargs)
+
+
+def test_the_default_trains_on_the_base_it_serves_and_a_folder_written_before_resumes(ramp_frame, tmp_path):
+    """`train_ramps="forecast"` is no keyword at all: the same forecasts, the same manifest (no key), and a folder written
+    without it resumes."""
+    save_to = str(tmp_path / "shape.jsonl")
+    quiet_run(ShapeModel(BASE, OLSModel(RAMP, 21, fit_intercept=True)), ramp_frame, *TEST, horizon=1, save_to=save_to)
+    saved = [json.loads(line) for line in (tmp_path / "shape.jsonl").read_text().splitlines()]
+    predictions = {
+        key: r["prediction"] for key, r in by_key([r for r in saved if r.get("status", "ok") == "ok"]).items()
+    }
+    named = quiet_run(ramp_model(train_ramps="forecast"), ramp_frame, *TEST, horizon=1)
+    assert {key: r["prediction"] for key, r in by_key(named._results).items()} == predictions
+    assert len(predictions) > 3 * 90
+    assert "train_ramps" not in json.loads((tmp_path / "shape.manifest.json").read_text())["model_params"]
+    resumed = quiet_run(ramp_model(train_ramps="forecast"), ramp_frame, *TEST, horizon=1, save_to=save_to)
+    assert resumed.produced == len(predictions)
+    actual = quiet_run(ramp_model(), ramp_frame, *TEST, horizon=1)
+    assert {key: r["prediction"] for key, r in by_key(actual._results).items()} != predictions
+
+
+@pytest.mark.parametrize("issue", ["2023-04-10", "2023-04-12"])
+def test_actual_ramps_are_a_hand_fit_on_the_actual_hour_means_served_with_the_forecast(ramp_frame, oracle, issue):
+    """A training row's regressors are the target's actual hour mean at the target hour and an hour before it, which the frame holds
+    as `price_hour_mean_d+h` and its lag; the issue row's are the base's forecast and its lag."""
+    model = ramp_model()
+    found = by_key(quiet_run(model, ramp_frame, issue, issue, horizon=2)._results)
+    day = datetime.date.fromisoformat(issue)
+    ramps = Oracle(ramp_frame)
+    price = ramps.slot("price")
+    checked = 0
+    for horizon in (1, 2):
+        actual = [ramps.slot(f"price_hour_mean_d+{horizon}"), ramps.slot(f"price_hour_mean_d+{horizon}_h-1")]
+        forecast = [ramps.slot(f"base_fc_d+{horizon}"), ramps.slot(f"base_fc_d+{horizon}_h-1")]
+        for period in range(96):
+            if (day, period) not in forecast[0]:
+                continue
+            rows = []
+            for back in range(21):
+                train = day - datetime.timedelta(days=1 + horizon + back)
+                target = train + datetime.timedelta(days=horizon)
+                hour = [price.get((target, 4 * (period // 4) + k), math.nan) for k in range(4)]
+                inputs = [table.get((train, period), math.nan) for table in actual]
+                if target not in oracle.native or not np.isfinite([*hour, *inputs]).all():
+                    continue
+                rows.append((price[(target, period)] - float(np.mean(hour)), *inputs))
+            rows = np.array(rows)
+            beta = np.linalg.lstsq(np.column_stack([np.ones(len(rows)), rows[:, 1:]]), rows[:, 0], rcond=None)[0]
+            issue_row = [table[(day, period)] for table in forecast]
+            expected = issue_row[0] + beta[0] + beta[1] * issue_row[0] + beta[2] * issue_row[1]
+            record = found.get((period, horizon, issue))
+            if record is None:  # a forecast with a missing lag on its issue row
+                assert not np.isfinite(issue_row).all()
+                continue
+            assert record["prediction"] == pytest.approx(expected, abs=1e-6), (period, horizon)
+            checked += 1
+    assert checked > 2 * 90
+
+
+def test_nothing_after_the_issue_day_is_read_with_actual_ramps(ramp_frame):
+    """The twin of a training row is its target's actual hour mean and older hours, which the fit's own targets hold: prices of the
+    issue day and after can't move a forecast, at any horizon (a twin that read a later hour would)."""
+    issue = "2023-04-11"
+    wall = ramp_frame.index.tz_localize(None)
+    after = np.asarray(wall.normalize() >= pd.Timestamp(issue))
+    changed = ramp_frame.copy()
+    changed.loc[after, "price"] = changed.loc[after, "price"] + 500.0
+    first = quiet_run(ramp_model(), ramp_frame, issue, issue, horizon=2)
+    second = quiet_run(ramp_model(), changed, issue, issue, horizon=2)
+    assert first.produced == second.produced > 2 * 90
+    assert by_key(first._results).keys() == by_key(second._results).keys()
+    assert {k: r["prediction"] for k, r in by_key(first._results).items()} == {
+        k: r["prediction"] for k, r in by_key(second._results).items()
+    }
+
+
+def test_a_refit_unit_trains_on_the_actual_ramps_too(ramp_frame):
+    """2023-04-10 is a Monday, the anchor of a 7-day refit: its unit's fit is the same rows as the plain run's fit of that day."""
+    unit = ShapeModel(BASE, OLSModel(RAMP, 21, refit="7D", fit_intercept=True), train_ramps="actual")
+    once = ramp_model()
+    a = by_key(quiet_run(unit, ramp_frame, "2023-04-10", "2023-04-10", horizon=1)._results)
+    b = by_key(quiet_run(once, ramp_frame, "2023-04-10", "2023-04-10", horizon=1)._results)
+    assert a.keys() == b.keys() and len(a) > 90
+    assert all(a[key]["prediction"] == pytest.approx(b[key]["prediction"], abs=1e-9) for key in a)
+    forecast = quiet_run(
+        ShapeModel(BASE, OLSModel(RAMP, 21, refit="7D", fit_intercept=True)),
+        ramp_frame,
+        "2023-04-10",
+        "2023-04-10",
+        horizon=1,
+    )
+    assert by_key(forecast._results)[(40, 1, "2023-04-10")]["prediction"] != a[(40, 1, "2023-04-10")]["prediction"]
+
+
+def test_the_manifest_records_actual_ramps_and_a_resume_with_the_other_refuses(ramp_frame, tmp_path):
+    save_to = str(tmp_path / "shape.jsonl")
+    quiet_run(ramp_model(), ramp_frame, "2023-04-10", "2023-04-10", horizon=1, save_to=save_to)
+    assert json.loads((tmp_path / "shape.manifest.json").read_text())["model_params"]["train_ramps"] == "actual"
+    with pytest.raises(ManifestMismatchError, match="train_ramps"):
+        quiet_run(
+            ramp_model(train_ramps="forecast"), ramp_frame, "2023-04-10", "2023-04-11", horizon=1, save_to=save_to
+        )
+
+
+def test_yaml_writes_train_ramps_only_when_set(tmp_path):
+    learner = OLSModel(RAMP, training_window=21, fit_intercept=True)
+    pipeline = ModelPipeline().add_model(ShapeModel(BASE, learner, train_ramps="actual", name="b24"))
+    path = tmp_path / "pipeline.yaml"
+    pipeline.save(path)
+    loaded = ModelPipeline.load(path)
+    assert loaded.models[0].train_ramps == "actual" and loaded.to_dict() == pipeline.to_dict()
+    assert "train_ramps" not in ModelPipeline().add_model(ShapeModel(BASE, learner)).to_dict()["models"][0]["params"]
+
+
+@pytest.mark.parametrize(
+    ("build", "match"),
+    [
+        (lambda: ShapeModel(BASE, OLSModel(RAMP), train_ramps="both"), "train_ramps"),
+        (lambda: ShapeModel(BASE, OLSModel(REGRESSORS), train_ramps="actual"), "none does"),
+        (lambda: ShapeModel(BASE, OLSModel([*RAMP, "base_fc_d+{horizon}_h+1"]), train_ramps="actual"), "ahead"),
+        (lambda: ShapeModel(BASE, HistGBModel([*RAMP, "period"], 21, max_iter=5), train_ramps="actual"), "pooled"),
+    ],
+)
+def test_what_actual_ramps_refuse(ramp_frame, build, match):
+    try:
+        model = build()
+    except ValueError as error:  # the value itself
+        assert match in str(error)
+        return
+    with pytest.raises(ValueError, match=match):
+        quiet_run(model, ramp_frame, "2023-04-10", "2023-04-10", horizon=1)
+
+
+@pytest.mark.parametrize("mode", ["forecast", "actual"])
+def test_a_training_row_keeps_only_the_hours_its_actual_ramp_reads_when_the_targets_rule_changes(ramp_frame, mode):
+    """The price is out 2 days after its period until 2023-04-10 and 1 hour after from 04-11 (`newest_target="published"`): a
+    row's twin of the hour before reads an hour of its own whose newest known target can be older than the row's own. Moving
+    every price that isn't known at the 11:45 issue on 2023-04-12 changes no forecast, in either mode, and `availability="raise"`
+    passes (it doesn't judge the twin: `_newest_targets` caps each period at the hours its twins read)."""
+    issue = "2023-04-12"
+    rule = [
+        Availability.realised("2 days").during(valid_until="2023-04-10"),
+        Availability.realised("1h").during(valid_from="2023-04-11"),
+    ]
+    info = InformationSet("11:45", ZONE, rules={**RULES, "price": rule, "base_fc": Availability.published("10:00", 1)})
+    cut = pd.Timestamp(f"{issue} 11:45").tz_localize(ZONE).value
+    wall_day = ramp_frame.index.tz_localize(None).normalize()
+    delay = np.where(wall_day <= pd.Timestamp("2023-04-10"), pd.Timedelta("2D").value, pd.Timedelta("1h").value)
+    unknown = ((ramp_frame.index + pd.Timedelta("15min")).asi8 + delay) > cut
+    changed = ramp_frame.copy()
+    changed.loc[unknown, "price"] += 500.0
+    assert unknown.sum() > 100
+    found = []
+    for data in (ramp_frame, changed):
+        model = ShapeModel(
+            BASE,
+            OLSModel(RAMP, 21, newest_target="published", fit_intercept=True),
+            native=SWITCH,
+            train_ramps=mode,
+        )
+        ref = quiet_run(model, data, issue, issue, horizon=1, information_set=info, availability="raise")
+        found.append({r["hour"]: r["prediction"] for r in ref._results})
+    assert len(found[0]) > 90
+    assert [hour for hour in found[0] if found[0][hour] != found[1].get(hour)] == []
+
+
+def test_the_newest_target_of_a_period_is_capped_at_the_hours_its_lagged_twin_reads():
+    """A twin lagged by an hour reads the hour before the period's: all four of its quarter-hours, and across midnight the day
+    before, whose target is a day older (so its `k` counts a day later)."""
+    model = ramp_model()
+    k = np.full((96, 2), -1, dtype=np.int64)
+    k[95, 0] = -4  # the last quarter-hour of 23:00 is known to the day before yesterday's target on the first issue day
+    k[8:, 1] = -3  # from 02:00 on the second day
+    capped = model._capped_by_lag(k, pd.Timedelta(hours=1))
+    assert capped[0:4, 0].tolist() == [-3] * 4  # 00:00-00:59 reads 23:00 of the day before: -4 + 1
+    assert capped[4:92, 0].tolist() == [-1] * 88 and capped[92:96, 0].tolist() == [-1, -1, -1, -4]  # its own
+    assert (
+        capped[0:4, 1].tolist() == [-2] * 4
+        and capped[4:8, 1].tolist() == [-1] * 4
+        and capped[8:, 1].tolist() == [-3] * 88
+    )  # 03:00 reads 02:00: -3, and its own
+    assert (
+        k[95, 0] == -4 and (k[:, 1] == np.where(np.arange(96) >= 8, -3, -1)).all() and (k[:95, 0] == -1).all()
+    )  # untouched
+
+
+def test_a_newest_target_that_rises_with_the_period_falls_back_to_the_stricter_cap():
+    """The cap by wall-clock periods is safe only where `k` doesn't rise with the period within a date (true of every rule today:
+    a later period is known no earlier): an hour that an elapsed lag lands on instead, across a clock change, then has a `k` no newer
+    than the period's own. A `k` that does rise (`k[8:12] > k[4:8]`) takes the oldest of its day for every period."""
+    model = ramp_model()
+    k = np.full((96, 2), -1, dtype=np.int64)
+    k[4:8, 0] = -3
+    k[8:12, 0] = -1  # rises: the guard's case
+    k[:, 1] = np.where(np.arange(96) < 8, -1, -2)  # falls: the usual cap
+    capped = model._capped_by_lag(k, pd.Timedelta(hours=1))
+    assert (capped[:, 0] == -3).all()
+    assert capped[:8, 1].tolist() == [-1] * 8 and capped[8:, 1].tolist() == [-2] * 88

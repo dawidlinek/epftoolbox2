@@ -809,7 +809,7 @@ class ResidualModel(BaseModel):             # a base's out-of-sample forecasts +
 class ShapeModel(BaseModel):                # a chained hourly forecast + a learner of each quarter-hour's deviation (15min)
     def __init__(self, base: str, learner: BaseModel, *, period: str = "1h",
                  native: Union[str, datetime.date] = "distinct", min_native_days: Optional[int] = None,
-                 name: str = "Shape"): ...
+                 train_ramps: str = "forecast", name: str = "Shape"): ...
 
 class TorchModel(BaseModel):                # a torch.nn.Module class of your own on the library's trainer ([torch])
     def __init__(self, module: Union[str, type], predictors: Union[List, Callable, None] = None,
@@ -875,7 +875,7 @@ and the target as epftoolbox's Invariant; `base` is a model or the name of one a
 `ShapeModel` is in [Shape Model](/epftoolbox2/models/shape/): a 15-minute run's chained hourly forecast (`base`, a column read on the
 issue row) plus its learner's forecast of each quarter-hour's deviation from its hour's actual mean, trained on native target
 dates (`native`), a fit with fewer than `min_native_days` of them (its window's length by default) skipped as
-`too_few_native_days`.
+`too_few_native_days`; `train_ramps="actual"` trains on the actual hourly ramps instead of the base's forecast ones.
 
 `TorchModel`, `MLPHourlyModel` and `MLPDailyModel` build, save and load without torch, and need the `[torch]` extra to fit (the
 pre-flight names it). Their seeds are a hash of `random_state` and the fit alone and a forecast is their mean in target units; a

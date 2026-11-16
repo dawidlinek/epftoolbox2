@@ -66,6 +66,7 @@ shows the whole chain with its checks.
 | `period` | str | `"1h"` | Keyword-only. The period whose mean the shape is taken from: the hour |
 | `native` | str or date | `"distinct"` | Keyword-only. Which target dates train: `"distinct"`, a date where some hour has quarter-hours that aren't all equal; or the first natively 15-minute date, such as `"2025-10-01"`, and the dates after it |
 | `min_native_days` | int or None | `None` | Keyword-only. The fewest native target dates a fit may train on, counted in its window from the first native date on: a forecast whose fit has fewer is skipped as `too_few_native_days`. `None` is each window's own length (an `"expanding"` window has no minimum); `0` skips nothing |
+| `train_ramps` | str | `"forecast"` | Keyword-only. What a training row's regressors that read the base hold: `"forecast"`, the base's own forecast, so that train equals serve; `"actual"`, the target's actual hour mean in its place ([below](#training-on-actual-ramps)) |
 | `name` | str | `"Shape"` | Keyword-only. The model's name, which names its results |
 
 The learner's settings are the model's: `shape.training_window`, `shape.refit`, `shape.refit_from` and the others read the learner's, and are set on
@@ -117,6 +118,40 @@ refused at `"raise"`, and the manifest's `chained_inputs` records its upstream. 
 issue row: a base known after the issue time, such as the actual hour mean 24 hours ahead, is refused at `"raise"`; the target's
 actual hour mean of a later date by its name, `{target}_hour_mean_d+k`, is refused whatever the rules, as `{target}_d+k` is as a
 predictor. `explain()` shows the base apart from the learner's inputs (`out["base"]`), judged on the issue row.
+
+## Training on Actual Ramps
+
+`train_ramps="actual"` fits the learner the way the resolution study fitted its B24_dyn: on a training row, a regressor that reads the
+base, the base itself or lagged by hours or minutes (`price_1h_fc_d+{horizon}`, `price_1h_fc_d+{horizon}_h-1`, the hourly ramp),
+holds the target's **actual** hour mean at that target hour and lag, and the issue row keeps the base's **forecast**. The learner
+then weighs the ramps that were real and is served the forecast ones. The default, `"forecast"`, reads one column on both, so train
+equals serve. The study's own table of the two is on the [Resolution Study](/epftoolbox2/reproductions/resolution/#b24_dyn-against-b24_static)
+page: the actual ramps gave the lower MAE there (DE-LU honest, 27.41 against 27.57 EUR/MWh) and most of B24_dyn's published lead over
+B24_static, so cite a result with the setting it was fitted with.
+
+```python
+from epftoolbox2.models import OLSModel, ShapeModel
+
+ShapeModel(
+    base="price_1h_fc_d+{horizon}",
+    learner=OLSModel(["price_1h_fc_d+{horizon}", "price_1h_fc_d+{horizon}_h-1", "load_forecast_hour_dev_d+{horizon}"],
+                     training_window=182, fit_intercept=True),
+    train_ramps="actual",
+)
+```
+
+Nothing unknown at the issue time is read. A training row's twin is the actual hour mean of its own target's hour, which the fit's
+target already is (its offset), and of older hours (a lag reads an older hour), so it is known by the fit's cut when the target is
+published by one rule. Where the target's rule changes over time under `newest_target="published"` (a 2-day delay until one date, an
+hour after), an older hour can be known later than the row's own, so a period's newest target is also capped at the periods of the
+hours its twins reach (one day older across midnight), and a training row is kept only if every hour its twin reads is known.
+`availability="raise"` doesn't judge the twin; this cap does. The issue row never reads one. The regressors that don't read the base (the load's deviation) are the same either
+way, and so are the base on the issue row and the forecast's offset. The twin of a lag is lagged in elapsed time, as `LagTransformer`
+lags the base, so across a clock change it lands on the same hour. A lagged twin that lands on the repeated autumn hour is NaN (as its base lag is across a clock change), so `"actual"` drops those
+training rows: 4 per horizon per autumn. Refused: a regressor that leads the base (`_h+1`: its twin
+would read an hour after the row's target hour), a learner with no regressor that reads the base, and a pooled learner. The manifest
+records `train_ramps` only when it is `"actual"`, so a folder written before it resumes with the default, and a resume with the other
+value is refused.
 
 ## Newest targets
 

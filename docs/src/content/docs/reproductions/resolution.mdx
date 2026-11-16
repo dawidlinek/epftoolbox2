@@ -727,8 +727,9 @@ forecasts (its R2 run of the same hourly model, which holds them from 2 January 
 
 Refitted on the actual ramps, the same code gives the stored forecasts to the bit, so nothing else moved. The library's verdicts
 are the forecast-ramp row's: no lead in DE-LU, a smaller one in AT. Training on actual ramps is no look-ahead (the training days'
-prices are known at the issue), and here it is the better of the two; a `ShapeModel` can't express it, because a training row and
-the issue row read the same column. Most of B24_dyn's published lead over B24_static is that choice: cite it with this in mind.
+prices are known at the issue), and here it is the better of the two; a `ShapeModel` expresses it with `train_ramps="actual"`
+([Shape Model](/epftoolbox2/models/shape/#training-on-actual-ramps)), and its default doesn't, because a training row and the issue
+row read the same column. Most of B24_dyn's published lead over B24_static is that choice: cite it with this in mind.
 
 ## What Differs From the Study
 
