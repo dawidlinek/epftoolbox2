@@ -73,9 +73,17 @@ failing checks in `detail`, such as `range: 1 outside [-500, 4000] (19 at 5123.4
 
 ## In backtests
 
-Checks set on a pipeline apply to every run of it, backtests included, so a rung's backtest score counts the days it would have
-failed live. A run checks each day once every task of it has come back from the pool (an engine group sends a day back period by
-period) and writes nothing of a failing day but its skip records.
+Checks set on a pipeline apply to every run of it, backtests included, so a backtest **counts** the days each model would have
+failed live (`forecast_counts()`, the manifest). A run checks each day once every task of it has come back from the pool (an
+engine group sends a day back period by period) and writes nothing of a failing day but its skip records.
+
+- **Scores under checks are conditional on passing.** A failed day has no forecast, so it is in no MAE and out of the common keys
+  of every comparison: a model's worst days (a corrupted input that sent its forecast out of range) drop out of its own score. In
+  one case, OLS against a naive benchmark over six weeks with an input corrupted on three days: 1,005 common keys and an rMAE of
+  1.11 without checks, 934 keys and 0.35 with `range=(0, 400)`. The comparison tables (`tests()`, `compare()`, `leaderboard()`
+  with a benchmark, `mcs()`, `ranks()`, and a table with an `rMAEEvaluator` or `DMEvaluator` column) warn when a compared model
+  has `check_failed` days and hold the counts in `df.attrs["check_failed"]`. **To compare models, score what is delivered**, the
+  `FallbackEnsemble` and its `report.rungs()`, whose days a failed rung leaves to the next one, or run with `checks=None`.
 
 - **Resuming.** The manifest records the checks, and a resume with other checks, or none, raises `ManifestMismatchError`
   (`allow_manifest_mismatch=True` overrides it, and leaves the records on file as they were). A failed day is tried again by every

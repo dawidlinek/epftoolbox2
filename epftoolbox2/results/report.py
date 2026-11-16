@@ -53,6 +53,7 @@ from .breakdowns import error_split as split_errors
 from .matching import rows_of_refs, training_day_frame
 from .ref import ModelResultRef
 from .live import live_fingerprint
+from .checks import CHECK_FAILED
 from .store import fingerprint_path
 from .vintages import flag_mixed_classes, vintage_frame
 from .windows import TEST, VALIDATION, RunWindows
@@ -782,6 +783,7 @@ class EvaluationReport:
             _flag_test_length(table, n_days, span)
         _flag_partial_days(table, partial)
         self._flag_vintages(table, [(model, benchmark) for model in models])
+        self._flag_check_failed(table, [*models, benchmark])
         return table
 
     def mcs(
@@ -853,7 +855,9 @@ class EvaluationReport:
             }
         )
         table = table.sort_values("mae", kind="stable").reset_index(drop=True)
-        return self._finish_set_table(table, compared, label, alpha=alpha, statistic=statistic, reps=reps, seed=seed)
+        table = self._finish_set_table(table, compared, label, alpha=alpha, statistic=statistic, reps=reps, seed=seed)
+        self._flag_check_failed(table, list(table["model"]))
+        return table
 
     def ranks(
         self,
@@ -910,7 +914,9 @@ class EvaluationReport:
             {"model": names, "n_days": daily.n_days, "n_forecasts": daily.n_forecasts, "mae": daily.mae(), **columns}
         )
         table = table.sort_values(["rank", "mae"], kind="stable").reset_index(drop=True)
-        return self._finish_set_table(table, compared, label, level=level, reps=reps, seed=seed)
+        table = self._finish_set_table(table, compared, label, level=level, reps=reps, seed=seed)
+        self._flag_check_failed(table, list(table["model"]))
+        return table
 
     def compare(self, a: str, b: str, horizon: Union[int, str, None] = None) -> pd.DataFrame:
         """Two models on the forecasts they share, in one row. `ratio` is `mae_a / mae_b`: below 1, `a` is better.
@@ -978,6 +984,7 @@ class EvaluationReport:
         _flag_test_length(table, hac.n_days, hac.span_days)
         _flag_partial_days(table, {a: hac.partial_days})
         self._flag_vintages(table, [(a, b)])
+        self._flag_check_failed(table, [a, b])
         return table
 
     def leaderboard(self, benchmark: Optional[str] = None, horizon: Union[int, str, None] = None) -> pd.DataFrame:
@@ -1045,6 +1052,8 @@ class EvaluationReport:
         if benchmark is not None:
             _flag_partial_days(table, partial)
         self._flag_vintages(table, [panel.models])  # ranked by MAE all together
+        if benchmark is not None:  # tests on the keys each model shares with the benchmark
+            self._flag_check_failed(table, panel.models)
         return table
 
     # -- what the comparison tables share ---------------------------------------------------------------------------
@@ -1228,6 +1237,37 @@ class EvaluationReport:
         flag_mixed_classes(
             table, {name: ref.vintages for name, ref in self.refs.items()}, groups, stacklevel=stacklevel + 1
         )
+
+    def _flag_check_failed(self, table: pd.DataFrame, models: Sequence[str], stacklevel: int = 2) -> None:
+        """Say so when models compared in `table` on their common keys had days turned into `check_failed` skips (checks before
+        export, step 8f): those days are out of the common keys, so every score here is conditional on passing the checks and a
+        model's worst days can drop out of its own score. `table.attrs["check_failed"]` holds each such model's count; a table
+        of models without any gets no attribute."""
+        failed = {
+            name: int(self.refs[name].skipped.get(CHECK_FAILED, 0))
+            for name in dict.fromkeys(models)
+            if name in self.refs and self.refs[name].skipped
+        }
+        failed = {name: count for name, count in failed.items() if count}
+        if not failed:
+            return
+        table.attrs["check_failed"] = failed
+        warnings.warn(
+            f"Compared models had forecasts turned into check_failed skips by checks before export: {failed}. Those days are "
+            "out of the common keys, so these scores are conditional on passing the checks, and a model's worst days can drop "
+            "out of its own score. To compare models, score the delivered FallbackEnsemble (report.rungs()) or run with "
+            "checks=None. df.attrs['check_failed'] holds the counts.",
+            UserWarning,
+            stacklevel=stacklevel + 1,
+        )
+
+    def _flag_relative_check_failed(self, table: pd.DataFrame, models: Sequence[str], stacklevel: int = 2) -> None:
+        """`_flag_check_failed` for a table with a column on the keys each model shares with a benchmark (`rMAEEvaluator`,
+        `DMEvaluator`): each model with the benchmark."""
+        benchmarks = [getattr(e, "benchmark", getattr(e, "base_model", None)) for e in self.evaluators]
+        benchmarks = [name for name in benchmarks if isinstance(name, str)]
+        if benchmarks:
+            self._flag_check_failed(table, [*models, *benchmarks], stacklevel=stacklevel + 1)
 
     def _flag_dm_vintages(self, table: pd.DataFrame, models: Sequence[str], stacklevel: int = 2) -> None:
         """`_flag_vintages` for the pairs a `DMEvaluator` column compares: each model with the benchmark."""
@@ -1509,6 +1549,7 @@ class EvaluationReport:
         if by_evaluator:  # `DM` and `MCS` read them on other keys, so they needn't agree
             table.attrs["clones"] = by_evaluator
         self._flag_dm_vintages(table, list(model_dfs), stacklevel=3)
+        self._flag_relative_check_failed(table, list(model_dfs), stacklevel=3)
         return table
 
     def _grouped_table(
@@ -1540,6 +1581,7 @@ class EvaluationReport:
         table = pd.DataFrame(rows)
         _flag_unequal_counts(table, group_keys, list(model_dfs))
         self._flag_dm_vintages(table, list(model_dfs), stacklevel=3)
+        self._flag_relative_check_failed(table, list(model_dfs), stacklevel=3)
         return table
 
     def _with_source_columns(self, model_dfs: Mapping[str, pd.DataFrame]) -> Mapping[str, pd.DataFrame]:

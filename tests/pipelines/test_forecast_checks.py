@@ -10,6 +10,7 @@ unchecked run wrote it, line for line, and give each forecast of a failing day a
 
 import datetime
 import hashlib
+import warnings
 import json
 import math
 from concurrent.futures import Future
@@ -462,3 +463,47 @@ def test_a_residual_model_s_own_forecasts_are_checked_not_its_base_s(tmp_path):
     manifests = {path.name: json.loads(path.read_text()) for path in (tmp_path / "checked").rglob("*.manifest.json")}
     assert manifests.pop("residual.manifest.json")["checks"] == checks.to_dict()
     assert manifests and all("checks" not in manifest for manifest in manifests.values())  # the base's: unchecked
+
+
+def test_comparisons_on_common_keys_say_when_checks_left_days_out(tmp_path):
+    """A failed day is out of the common keys, so a model's worst days drop out of its own score (the review's case: OLS with an
+    input corrupted on three days against a naive benchmark). The comparison tables warn and hold the counts in
+    `df.attrs["check_failed"]`; without checks they hold no such attribute."""
+    from epftoolbox2.evaluators import MAEEvaluator, rMAEEvaluator
+
+    data = make_market_data(start="2023-01-01", days=90, freq="1h", noise=1.0, seed=5, horizon=1)
+    local = pd.Series(data.index.tz_localize(None).normalize(), index=data.index)
+    for day in ("2023-03-05", "2023-03-12", "2023-03-19"):
+        data.loc[local == pd.Timestamp(day), "wind_d+1"] *= 30
+    reports = {}
+    for tag, checks in (("off", None), ("on", ForecastChecks(range=(0.0, 400.0)))):
+        mp = ModelPipeline(checks=checks)
+        mp.add_model(OLSModel(PREDICTORS, training_window=28, name="ols"))
+        mp.add_model(NaiveModel(["price_d-1"], name="naive"))
+        mp.add_evaluator(MAEEvaluator(), rMAEEvaluator("naive"))
+        reports[tag] = mp.run(data, "2023-02-15", "2023-03-28", horizon=1, save_dir=str(tmp_path / tag))
+    off, on = reports["off"], reports["on"]
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        plain = off.compare("ols", "naive")
+        plain_summary = off.summary()
+    assert not [w for w in caught if "check_failed" in str(w.message)]  # nothing to say without checks
+    assert "check_failed" not in plain.attrs and "check_failed" not in plain_summary.attrs
+    with pytest.warns(UserWarning, match="conditional on passing the checks"):
+        checked = on.compare("ols", "naive")
+    with pytest.warns(UserWarning, match="check_failed"):
+        summary = on.summary()
+    # The corrupted days OLS forecasts out of range (two of the three), and naive's Monday after the spring switch (its 02:00
+    # reads the hour the clock skipped: `periods`).
+    counts = on.forecast_counts().set_index("model")[CHECK_FAILED].astype(int).to_dict()
+    assert counts == {"ols": 48, "naive": 23}
+    assert checked.attrs["check_failed"] == counts == summary.attrs["check_failed"]
+    with pytest.warns(UserWarning, match="check_failed"):
+        assert on.leaderboard("naive").attrs["check_failed"] == counts
+    with pytest.warns(UserWarning, match="check_failed"):
+        assert on.tests("naive").attrs["check_failed"] == counts
+    # What the warning is about: the corrupted days leave the common keys, and OLS's relative score collapses.
+    rmae = {tag: report.summary().set_index("model").loc["ols", "rMAE"] for tag, report in reports.items()}
+    assert rmae["off"] > 1.0 and rmae["on"] < 0.5
+    common = {tag: int(table["n_forecasts"].iloc[0]) for tag, table in (("off", plain), ("on", checked))}
+    assert common["on"] < common["off"]

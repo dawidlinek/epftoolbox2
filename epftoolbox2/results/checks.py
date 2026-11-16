@@ -59,9 +59,13 @@ def _ids(periods: Sequence[int]) -> str:
 class ForecastChecks:
     """What a member's forecasts of one target day must pass before they are exported, scored or served by a fallback.
 
-    Set on a pipeline, `ModelPipeline(checks=ForecastChecks(...))`, they apply to every model of every run, backtests included,
-    so a rung's backtest score counts its check failures as a live run would (decision 13 of step 8). Without them (the default,
-    `checks=None`) nothing is checked and nothing changes. They read predictions and the clock, never an actual.
+    Set on a pipeline, `ModelPipeline(checks=ForecastChecks(...))`, they apply to every model of every run, backtests included
+    (decision 13 of step 8), so a backtest counts each model's check failures (`forecast_counts()`) as a live run would. Its
+    scores don't: a failed day has no forecast, so a model's MAE, and every comparison on common keys, is over the days that
+    passed, conditional on passing, and a model's worst days can drop out of its own score (the comparison tables warn and
+    hold `df.attrs["check_failed"]`). To compare models, score what is delivered (a `FallbackEnsemble`, `report.rungs()`) or
+    run with `checks=None`. Without checks (the default) nothing is checked and nothing changes. They read predictions and the
+    clock, never an actual.
 
     Args:
         periods: Every period the clock gives the day has a forecast: 23, 24 or 24 hours on spring, normal and autumn days (92, 96,
