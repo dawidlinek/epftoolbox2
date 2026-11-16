@@ -793,3 +793,32 @@ def test_the_age_cap_is_at_least_two_refit_periods(tmp_path):
     with pytest.warns(UserWarning, match="181 days older, more than the 124"):
         beyond = serve_one(pipeline, data, live, "2023-07-10", horizon=1)
     assert beyond.fits["2023-07-01"]["source"] == "missing (older fit beyond cap)"
+
+
+# --- WCSS: a strided issue row ----------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("scaler", ["standard", "mlog", "npit"])
+def test_every_issue_row_reaches_the_model_as_a_c_contiguous_row(scaler, tmp_path, monkeypatch):
+    """A refit unit's issue rows are taken from the period's arrays by fancy indexing, which gives a Fortran-ordered block; a
+    VST's `fit_transform` kept that order, so with several days in a block the model got a strided row. numpy multiplies a
+    strided row by another kernel than a contiguous one, and on an AVX-512 node (WCSS's Xeon 8268) the two differ in the last
+    bit: a forecast then depended on how many days its block call held, and a served one (a call of one day) differed from the
+    backtest's (`ols-7D-15min-autumn-on`, 1 of 576 records). Every row must reach `_predict_fitted` C-contiguous, in a backtest
+    of a block and when served."""
+    seen = []
+    real = OLSModel._predict_fitted
+
+    def probe(self, fitted, test_x):
+        seen.append(bool(np.asarray(test_x).flags.c_contiguous))
+        return real(self, fitted, test_x)
+
+    monkeypatch.setattr(OLSModel, "_predict_fitted", probe)
+    data = frame(AUTUMN, "1h")
+    pipeline = pipeline_of(OLSModel(PREDICTORS, 21, scaler=scaler, refit="7D", name="m"))
+    backtest(pipeline, data, ("2023-10-23", "2023-10-26"), "1h", 1, tmp_path / "bt")
+    assert seen and all(seen), f"{seen.count(False)} of {len(seen)} backtest rows strided"
+    seen.clear()
+    pipeline.refit(data, tmp_path / "live", issue="2023-10-25", horizon=1)
+    pipeline._serve_stored(data, tmp_path / "live", issue="2023-10-25", horizon=1)
+    assert seen and all(seen), f"{seen.count(False)} of {len(seen)} served rows strided"
