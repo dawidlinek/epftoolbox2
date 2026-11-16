@@ -229,10 +229,13 @@ class _Actuals:
                 "monitor() needs the pipeline's information set to tell when an actual is known by now: pass issue_time= or "
                 f"information_set= to ModelPipeline, with a rule for '{self.target}'"
             )
-        reader = StepsReader(self.info, instants, [str(first_day.date())], self.freq)
-        minutes = reader.available(self.target, np.arange(len(instants)), np.zeros(len(instants), dtype=np.int64))
-        origin = reader._clock.ctx.origin  # the same reading `check_published` makes of a rule's minutes
-        return np.asarray(minutes, dtype=float) <= (self.now - origin) / pd.Timedelta(minutes=1)
+        # Each instant once and in time order, whatever batch it came in: a daily frame's rows are read as daily only where no
+        # two share a date (`information_set._daily_rows`), so two horizons with one target must not repeat it.
+        unique = instants.unique().sort_values()
+        reader = StepsReader(self.info, unique, [str(first_day.date())], self.freq)
+        minutes = reader.available(self.target, np.arange(len(unique)), np.zeros(len(unique), dtype=np.int64))
+        out = np.asarray(minutes, dtype=float) <= (self.now - reader.origin) / pd.Timedelta(minutes=1)
+        return out[unique.get_indexer(instants)]
 
 
 def _read_keys(member: MonitorMember, policy: str, cutoff: Any) -> pd.DataFrame:

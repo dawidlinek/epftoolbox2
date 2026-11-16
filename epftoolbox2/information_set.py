@@ -3661,6 +3661,11 @@ class StepsReader:
         )
         return np.asarray(out, dtype=float)
 
+    @property
+    def origin(self) -> pd.Timestamp:
+        """The instant the reader's minutes count from: the midnight of its first issue day in the data's zone."""
+        return self._clock.ctx.origin
+
     def issue(self, days: np.ndarray) -> np.ndarray:
         """The issue instant of each of these issue days (positions), on the same scale."""
         return self._clock.issue[np.asarray(days, dtype=np.int64)]

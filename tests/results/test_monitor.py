@@ -1070,3 +1070,23 @@ def test_a_long_one_line_list_of_rules_is_yaml_not_a_file_name():
 def test_monitor_takes_one_frame(live):
     with pytest.raises(TypeError, match="DataFrame"):
         pipeline().monitor({"DE": DATA}, live)
+
+
+def test_whether_a_daily_key_is_known_does_not_depend_on_its_batch():
+    """On a daily frame two horizons with one target date repeat an instant, which made the reader take the daily rows for hourly
+    ones: a key was known or not by what it was looked up next to."""
+    from epftoolbox2.results.monitor import _Actuals
+
+    index = pd.date_range("2026-03-01", "2026-03-20", freq="D", tz="Europe/Lisbon")
+    data = pd.DataFrame({"price": np.arange(len(index), dtype=float)}, index=index)
+    info = InformationSet(
+        "11:45", "Europe/Brussels", rules={"price": Availability.published("13:00", 1, "Europe/Brussels")}
+    ).in_data_zone(data.index)
+    for now in ("2026-03-10T12:30", "2026-03-10T13:30"):
+        look = _Actuals(data, "price", "1D", info, pd.Timestamp(now, tz="Europe/Brussels")).lookup
+        alone = pd.DataFrame({"run_date": pd.to_datetime(["2026-03-10"]), "hour": [0], "horizon": [1]})
+        batch = pd.DataFrame(
+            {"run_date": pd.to_datetime(["2026-03-10", "2026-03-09"]), "hour": [0, 0], "horizon": [1, 2]}
+        )
+        assert look(alone)[1][0] == look(batch)[1][0] == look(batch)[1][1]  # the same target: one answer
+        assert look(batch.iloc[::-1])[1].tolist() == look(batch)[1].tolist()[::-1]  # whatever the order
