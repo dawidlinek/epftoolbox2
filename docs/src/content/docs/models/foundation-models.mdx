@@ -269,7 +269,10 @@ The pre-flight compares the timestral package installed with the pinned commit, 
 The manifest records the build installed whichever way, and a resume with another one is refused: `1.0.0@a534bdb...` for one
 installed from the repository, and for one installed from a local directory or a wheel file (no commit) `1.0.0 (local build
 <digest>)`, a digest of its installed files (the hashes its RECORD lists), so two local builds of the same version don't pass
-for one. An editable install's RECORD lists its link to the source, not the source, so its edits go unseen.
+for one. An editable install records `editable <digest>` of the source files of the package it points to, so an edit refuses
+the resume; a build with no RECORD to identify it records `unidentified <token>`, which no other run's equals. Only the
+timestral package is recorded so: every other runtime package (torch from a local wheel, say) records its version, as
+before.
 
 ## CPU and GPU
 

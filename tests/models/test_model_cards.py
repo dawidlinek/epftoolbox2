@@ -157,7 +157,9 @@ def test_a_card_holds_its_fields_and_records_them_as_json():
         "corpus_end",
         "released",
         "stated_verdict",
+        "local_builds",
     ]
+    assert "local_builds" not in record  # empty: a card's record is as before it existed
     assert json.loads(json.dumps(record)) == record
     assert record["weights"] == {
         "repo": REPO,

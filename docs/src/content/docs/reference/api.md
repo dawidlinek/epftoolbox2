@@ -812,7 +812,8 @@ class ModelCard:                            # frozen dataclass
                  revenue_cap: Optional[str], attribution: Optional[str], weights: Optional[WeightsRef],
                  runtime: Tuple[str, ...],          # "pkg==1.2.3", "pkg>=1,<2", "pkg@<commit>" or a bare name
                  corpus: str, corpus_end: Optional[date], released: Optional[date],
-                 stated_verdict: Optional[str] = None): ...  # overrides the verdict by dates, with its reason
+                 stated_verdict: Optional[str] = None,  # overrides the verdict by dates, with its reason
+                 local_builds: Tuple[str, ...] = ()): ...  # runtime distributions a local build records by its files
 ```
 
 The pre-flight raises `MissingWeightsError` (`epftoolbox2.models._weights`) when weights are among its problems, else

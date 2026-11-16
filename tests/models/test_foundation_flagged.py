@@ -12,6 +12,7 @@ series over the context. The real packages' adapters, with tiny random weights, 
 import dataclasses
 import json
 import tomllib
+import warnings
 from types import SimpleNamespace
 from datetime import date
 from pathlib import Path
@@ -483,9 +484,9 @@ def test_only_weights_other_than_the_card_s_relax_the_commit(monkeypatch, tmp_pa
     assert TimestralModel(weights=str(tmp_path))._runtime_pins() == [f"timestral@{TIMESTRAL_COMMIT}", "torch"]
 
 
-def fake_distribution(root, name, version, files, direct_url=None):
-    """A `<name>-<version>.dist-info` in `root` (put first on sys.path) whose RECORD lists `files` ({path: content}), and
-    PEP 610's direct_url.json when given."""
+def fake_distribution(root, name, version, files, direct_url=None, record=True, top_level=None):
+    """A `<name>-<version>.dist-info` in `root` (put first on sys.path) whose RECORD lists `files` ({path: content}) (none
+    with `record=False`), PEP 610's direct_url.json when given, and top_level.txt naming `top_level` when given."""
     import base64
     import hashlib
 
@@ -497,10 +498,73 @@ def fake_distribution(root, name, version, files, direct_url=None):
         digest = base64.urlsafe_b64encode(hashlib.sha256(content).digest()).rstrip(b"=").decode()
         lines.append(f"{path},sha256={digest},{len(content)}")
     lines += [f"{name}/__pycache__/x.cpython-312.pyc,,", f"{info.name}/INSTALLER,sha256=abc,4", f"{info.name}/RECORD,,"]
-    (info / "RECORD").write_text("\n".join(lines) + "\n")
+    if record:
+        (info / "RECORD").write_text("\n".join(lines) + "\n")
     if direct_url is not None:
         (info / "direct_url.json").write_text(json.dumps(direct_url))
+    if top_level is not None:
+        (info / "top_level.txt").write_text(top_level + "\n")
     return info
+
+
+def recorded(monkeypatch, root, card=None):
+    """`runtime_versions` of `card` (Timestral 28M's) with the fake distributions of `root` first on sys.path."""
+    import importlib
+
+    with monkeypatch.context() as patch:
+        patch.syspath_prepend(str(root))
+        importlib.invalidate_caches()
+        return _cards.runtime_versions(card or TIMESTRAL_CARDS["28m"])
+
+
+def test_a_local_build_without_a_record_never_passes_for_another_and_an_editable_one_is_its_source(
+    monkeypatch, tmp_path
+):
+    """A build from a local directory with no RECORD (or none with hashes) has no digest of its files: it records a marker that
+    never equals another run's (one marker per process), so a resume refuses rather than take two such builds for one. An editable install's RECORD
+    lists its link to the source, so it records a digest of the source files of the package it points to: an edit moves it."""
+    direct = {"url": "file:///src/timestral", "dir_info": {}}
+    first, second = (
+        fake_distribution(tmp_path / label, "timestral", "1.0.0", {}, direct, record=False) for label in ("a", "b")
+    )
+    one = recorded(monkeypatch, first.parent)["timestral"]
+    assert recorded(monkeypatch, first.parent)["timestral"] == one  # one marker for the whole of a run (a process)
+    monkeypatch.setattr(_cards, "_UNIDENTIFIED", {})  # the next run: another process
+    two = recorded(monkeypatch, second.parent)["timestral"]
+    assert one != two and "unidentified" in one and "e3b0c44298fc1c14" not in one, (one, two)
+    source = tmp_path / "project"
+    package = source / "src" / "timestral"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("x = 1\n")
+    (package / "__pycache__").mkdir()
+    (package / "__pycache__" / "x.pyc").write_bytes(b"compiled")
+    editable = {"url": source.as_uri(), "dir_info": {"editable": True}}
+    fake_distribution(
+        tmp_path / "e",
+        "timestral",
+        "1.0.0",
+        {"__editable__.timestral-1.0.0.pth": b"/x"},
+        editable,
+        top_level="timestral",
+    )
+    before = recorded(monkeypatch, tmp_path / "e")["timestral"]
+    assert (
+        before.startswith("1.0.0 (local build editable ")
+        and before == recorded(monkeypatch, tmp_path / "e")["timestral"]
+    )
+    (package / "__pycache__" / "x.pyc").write_bytes(b"compiled again")  # not the source
+    assert recorded(monkeypatch, tmp_path / "e")["timestral"] == before
+    (package / "__init__.py").write_text("x = 2\n")
+    assert recorded(monkeypatch, tmp_path / "e")["timestral"] != before
+
+
+def test_only_a_distribution_the_card_names_records_a_local_build(monkeypatch, tmp_path):
+    """The local-build digest is for the distributions a card names (Timestral's timestral): a torch installed from a local
+    wheel records its version as before, so a manifest written before the digest existed still resumes."""
+    wheel = {"url": "file:///wheels/torch-2.11.0-cp312-linux_x86_64.whl", "archive_info": {}}
+    fake_distribution(tmp_path, "torch", "2.11.0", {"torch/__init__.py": b"torch"}, wheel)
+    assert recorded(monkeypatch, tmp_path)["torch"] == "2.11.0"
+    assert TIMESTRAL_CARDS["28m"].local_builds == ("timestral",) and PatchTSTFMModel._card.local_builds == ()
 
 
 def test_a_build_not_installed_from_a_repository_is_recorded_by_its_files(monkeypatch, tmp_path):
@@ -528,6 +592,28 @@ def test_a_build_not_installed_from_a_repository_is_recorded_by_its_files(monkey
     assert versions["one"].startswith("1.0.0 (local build ") and versions["one"] != versions["two"]
     assert versions["same"] == versions["one"]  # the same files, whatever path or archive they came from
     assert versions["git"] == "1.0.0@" + "c" * 40 and versions["index"] == "1.0.0"
+
+
+def test_the_pre_flight_resolves_timestral_s_weights_once(monkeypatch, tmp_path):
+    """`_own_weights` asks for the weights the pre-flight resolves anyway: one resolution (and one warning of files nobody
+    listed) per pre-flight, not one per question."""
+    real_resolve_model_weights = _cards.resolve_model_weights
+    installed_timestral(monkeypatch, commit="f" * 40)  # another build installed: the pins and the warning ask
+    monkeypatch.setattr(_cards, "resolve_model_weights", real_resolve_model_weights)
+    calls = []
+    real = _weights.resolve
+
+    def resolve(*args, **kwargs):
+        calls.append(args)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(_cards, "resolve", resolve)
+    for name in TIMESTRAL_CARDS["209m"].weights.files:
+        (tmp_path / name).write_bytes(b"not the reference")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        TimestralModel(weights=str(tmp_path))._preflight({})
+    assert len(calls) == 1, calls
 
 
 def test_with_runtime_commit_a_refusal_names_the_commit_the_run_needs(monkeypatch):
