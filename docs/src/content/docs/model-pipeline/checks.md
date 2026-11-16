@@ -86,8 +86,9 @@ engine group sends a day back period by period) and writes nothing of a failing 
   of every comparison: a model's worst days (a corrupted input that sent its forecast out of range) drop out of its own score. In
   one case, OLS against a naive benchmark over six weeks with an input corrupted on three days: 1,005 common keys and an rMAE of
   1.11 without checks, 934 keys and 0.35 with `range=(0, 400)`. The comparison tables (`tests()`, `compare()`, `leaderboard()`
-  with a benchmark, `mcs()`, `ranks()`, and a table with an `rMAEEvaluator` or `DMEvaluator` column) warn when a compared model
-  has `check_failed` days and hold the counts in `df.attrs["check_failed"]`. **To compare models, score what is delivered**, the
+  with a benchmark, `mcs()`, `ranks()`, and a table with an `rMAEEvaluator`, `DMEvaluator` or `MCSEvaluator` column) warn when a compared model
+  has `check_failed` days and hold the counts in `df.attrs["check_failed"]`, and so do the tables of an `aggregate()`d report,
+  whose models keep their counts. **To compare models, score what is delivered**, the
   `FallbackEnsemble` and its `report.rungs()`, whose days a failed rung leaves to the next one, or run with `checks=None`.
 
 - **Resuming.** The manifest records the checks, and a resume with other checks, or none, raises `ManifestMismatchError`

@@ -465,12 +465,9 @@ def test_a_residual_model_s_own_forecasts_are_checked_not_its_base_s(tmp_path):
     assert manifests and all("checks" not in manifest for manifest in manifests.values())  # the base's: unchecked
 
 
-def test_comparisons_on_common_keys_say_when_checks_left_days_out(tmp_path):
-    """A failed day is out of the common keys, so a model's worst days drop out of its own score (the review's case: OLS with an
-    input corrupted on three days against a naive benchmark). The comparison tables warn and hold the counts in
-    `df.attrs["check_failed"]`; without checks they hold no such attribute."""
-    from epftoolbox2.evaluators import MAEEvaluator, rMAEEvaluator
-
+def selection_reports(tmp_path, *evaluators):
+    """The review's case of a selection effect: OLS with an input corrupted on three days against a naive benchmark, run
+    without checks ("off") and with `range=(0, 400)` ("on"), with `evaluators`."""
     data = make_market_data(start="2023-01-01", days=90, freq="1h", noise=1.0, seed=5, horizon=1)
     local = pd.Series(data.index.tz_localize(None).normalize(), index=data.index)
     for day in ("2023-03-05", "2023-03-12", "2023-03-19"):
@@ -480,8 +477,26 @@ def test_comparisons_on_common_keys_say_when_checks_left_days_out(tmp_path):
         mp = ModelPipeline(checks=checks)
         mp.add_model(OLSModel(PREDICTORS, training_window=28, name="ols"))
         mp.add_model(NaiveModel(["price_d-1"], name="naive"))
-        mp.add_evaluator(MAEEvaluator(), rMAEEvaluator("naive"))
+        mp.add_evaluator(*evaluators)
         reports[tag] = mp.run(data, "2023-02-15", "2023-03-28", horizon=1, save_dir=str(tmp_path / tag))
+    return reports
+
+
+def flagged(call):
+    """`call()`'s table and whether it warned of check_failed days."""
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        table = call()
+    return table, any("check_failed" in str(w.message) for w in caught)
+
+
+def test_comparisons_on_common_keys_say_when_checks_left_days_out(tmp_path):
+    """A failed day is out of the common keys, so a model's worst days drop out of its own score (the review's case: OLS with an
+    input corrupted on three days against a naive benchmark). The comparison tables warn and hold the counts in
+    `df.attrs["check_failed"]`; without checks they hold no such attribute."""
+    from epftoolbox2.evaluators import MAEEvaluator, rMAEEvaluator
+
+    reports = selection_reports(tmp_path, MAEEvaluator(), rMAEEvaluator("naive"))
     off, on = reports["off"], reports["on"]
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
@@ -507,3 +522,39 @@ def test_comparisons_on_common_keys_say_when_checks_left_days_out(tmp_path):
     assert rmae["off"] > 1.0 and rmae["on"] < 0.5
     common = {tag: int(table["n_forecasts"].iloc[0]) for tag, table in (("off", plain), ("on", checked))}
     assert common["on"] < common["off"]
+
+
+def test_an_aggregated_report_keeps_the_check_failed_counts_and_counts_no_day_twice(tmp_path):
+    """`aggregate()` builds new refs: the failed days are in none of their days, and still out of the common keys, so the
+    models keep their `check_failed` counts (of forecasts) and the comparisons of the daily report flag them."""
+    from epftoolbox2.evaluators import MAEEvaluator, rMAEEvaluator
+
+    reports = selection_reports(tmp_path, MAEEvaluator(), rMAEEvaluator("naive"))
+    counts = {"ols": 48, "naive": 23}
+    daily = reports["on"].aggregate("1D", "mean")
+    for call in (lambda: daily.tests("naive"), lambda: daily.summary(), lambda: daily.leaderboard("naive")):
+        table, warned = flagged(call)
+        assert warned and table.attrs["check_failed"] == counts
+    table = daily.forecast_counts().set_index("model")
+    assert table[CHECK_FAILED].astype(int).to_dict() == counts
+    assert (table["missing"] == table["incomplete_day"]).all()  # the failed days in no count of days
+    assert (table["planned"] == table["produced"] + table["incomplete_day"]).all()
+    plain = reports["off"].aggregate("1D", "mean")
+    table, warned = flagged(lambda: plain.summary())
+    assert not warned and "check_failed" not in table.attrs and CHECK_FAILED not in plain.forecast_counts().columns
+
+
+def test_a_table_with_an_mcs_column_flags_check_failed_days_too(tmp_path):
+    """`MCSEvaluator` reads the keys every model of the table holds, so `summary()` and `by_hour()` with it flag the failed days
+    of every model; with `MAEEvaluator` alone, a model's own score, they don't."""
+    from epftoolbox2.evaluators import MAEEvaluator, MCSEvaluator
+
+    reports = selection_reports(tmp_path, MAEEvaluator(), MCSEvaluator(reps=200, seed=1))
+    for call in (lambda: reports["on"].summary(), lambda: reports["on"].by_hour()):
+        table, warned = flagged(call)
+        assert warned and table.attrs["check_failed"] == {"ols": 48, "naive": 23}
+    table, warned = flagged(lambda: reports["off"].summary())
+    assert not warned and "check_failed" not in table.attrs
+    alone = selection_reports(tmp_path / "mae", MAEEvaluator())["on"]
+    table, warned = flagged(lambda: alone.summary())
+    assert not warned and "check_failed" not in table.attrs
