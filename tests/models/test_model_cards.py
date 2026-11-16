@@ -157,7 +157,9 @@ def test_a_card_holds_its_fields_and_records_them_as_json():
         "corpus_end",
         "released",
         "stated_verdict",
+        "local_builds",
     ]
+    assert "local_builds" not in record  # empty: a card's record is as before it existed
     assert json.loads(json.dumps(record)) == record
     assert record["weights"] == {
         "repo": REPO,
@@ -978,12 +980,12 @@ def test_engine_ok_false_keeps_a_class_out_of_the_engine_whatever_it_defines(dat
 def test_importing_the_package_imports_no_extra(tmp_path):
     """No extra is even tried: each is a stub that logs an import attempt and raises (`tests.import_stubs`), so a guarded
     `try: import numba` counts too, which a look at `sys.modules` afterwards wouldn't see."""
-    from tests.import_stubs import run_without
+    from tests.import_stubs import FAMILY_PACKAGES, run_without
 
     code = "import epftoolbox2, epftoolbox2.models, epftoolbox2.cli\nfrom epftoolbox2.models import _cards, _weights\n"
     code += "epftoolbox2.verify()\n"
     heavy = ("numba", "torch", "huggingface_hub", "transformers", "safetensors", "tabpfn", "tabicl", "autogluon", "t0")
-    result, attempted = run_without(code, (*heavy, "chronos"), tmp_path)
+    result, attempted = run_without(code, tuple(dict.fromkeys((*heavy, *FAMILY_PACKAGES))), tmp_path)
     assert result.returncode == 0, result.stderr
     assert attempted == [], f"tried to import {attempted}"
     assert "Extras" in result.stdout and "fast" in result.stdout

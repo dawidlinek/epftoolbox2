@@ -83,6 +83,8 @@ def _check_alphas(value):
 
 
 class RidgeModel(BaseModel):
+    # Fits with scikit-learn: the manifest records the release (`BaseModel._uses_scikit_learn`).
+    _uses_scikit_learn = True
     # What the step-5 engine must put in the `ScaledStats` it hands `_fit_stats`: the scaled rows too, for the leverages.
     _ENGINE_NEEDS = frozenset({"rows"})
     # No bound in standard deviations: an issue row goes to the model path where RidgeCV's own rounding at it exceeds the budget

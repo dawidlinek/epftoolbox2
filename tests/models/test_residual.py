@@ -1204,10 +1204,24 @@ def test_residual_metrics_match_golden(monkeypatch):
 
 def test_the_residual_golden_is_of_the_lock_s_scikit_learn():
     """The release the golden file was written with is the one `uv.lock` pins, so the locked CI cells compare it (the others
-    skip its HGB numbers, visibly). Moving the lock's scikit-learn means writing the file again."""
-    import re
+    skip its HGB numbers, visibly). Moving the lock's scikit-learn means writing the file again. The lock holds a second
+    scikit-learn for an install with `[patchtst-fm]` (granite-tsfm pins it below 1.8, resolved apart by `[tool.uv] conflicts`);
+    the golden is the one every install without that extra gets."""
+    import tomllib
 
-    lock = (Path(__file__).parent.parent.parent / "uv.lock").read_text()
-    pinned = re.search(r'\[\[package\]\]\nname = "scikit-learn"\nversion = "([^"]+)"', lock)
-    assert pinned is not None, "no scikit-learn in uv.lock"
-    assert json.loads(GOLDEN_FILE.read_text())["scikit-learn"] == pinned.group(1)
+    lock = tomllib.loads((Path(__file__).parent.parent.parent / "uv.lock").read_text())
+    versions = [package["version"] for package in lock["package"] if package["name"] == "scikit-learn"]
+    assert versions, "no scikit-learn in uv.lock"
+    if len(versions) > 1:  # the project's dependency entries name each fork's version with its marker
+        project = next(package for package in lock["package"] if package["name"] == "epftoolbox2")
+
+        def without_extras(marker):  # what the marker says for an install that asks for no extra
+            return not marker or any(part.strip().startswith("extra !=") for part in marker.split(" or "))
+
+        versions = [
+            dependency["version"]
+            for dependency in project["dependencies"]
+            if dependency["name"] == "scikit-learn" and without_extras(dependency.get("marker"))
+        ]
+    assert len(versions) == 1, versions
+    assert json.loads(GOLDEN_FILE.read_text())["scikit-learn"] == versions[0]

@@ -15,6 +15,11 @@ from .residual import ResidualModel
 from .shape import ShapeModel
 from .foundation import ChronosModel, FoundationModel, T0Model
 
+# 6j's foundation families
+from .patchtst_fm import PatchTSTFMModel
+from .timestral import TimestralModel
+from .timesfm import TimesFMModel
+
 # The in-context families (step 6e): their packages are imported by a worker's first fit, never here.
 from .tabpfn import TabPFNModel
 from .tabicl import TabICLModel
@@ -39,6 +44,10 @@ __all__ = [
     "FoundationModel",
     "T0Model",
     "ChronosModel",
+    # 6j
+    "PatchTSTFMModel",
+    "TimestralModel",
+    "TimesFMModel",
     "TabPFNModel",
     "TabICLModel",
     "PredictorContext",

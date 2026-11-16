@@ -10,6 +10,8 @@ from .base import BaseModel
 
 
 class LassoCVModel(BaseModel):
+    # Fits with scikit-learn: the manifest records the release (`BaseModel._uses_scikit_learn`).
+    _uses_scikit_learn = True
     # What the step-5 engine must put in the `ScaledStats` it hands `_fit_stats`: the CV blocks (`_cv_stats.block_stats`).
     _ENGINE_NEEDS = frozenset({"blocks"})
     # The engine hands back a fit two of whose columns are near twins, 1 - |cos| of their centred values at most this (not

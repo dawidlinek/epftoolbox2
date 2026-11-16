@@ -34,7 +34,7 @@ from datetime import date
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Mapping, NamedTuple, Optional, Sequence, Tuple, Union
 
-from .._extras import EXTRAS, MissingExtraError, has_extra
+from .._extras import EXTRAS, MissingExtraError, has_extra, install_line
 from ._weights import REPO_PATTERN, REVISION_PATTERN, MissingWeightsError, ResolvedWeights, check_file_name, resolve
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -130,9 +130,14 @@ class ModelCard:
     corpus_end: Optional[date]
     released: Optional[date]
     stated_verdict: Optional[str] = None
+    # The runtime distributions a version doesn't identify when built locally (a package not on any index: Timestral's
+    # `timestral`), which `runtime_versions` records with a digest of the build (`local_build`). Any other distribution
+    # records its version alone, as manifests did before the digest existed.
+    local_builds: Tuple[str, ...] = ()
 
     def __post_init__(self):
         object.__setattr__(self, "runtime", tuple(self.runtime))
+        object.__setattr__(self, "local_builds", tuple(self.local_builds))
         object.__setattr__(self, "corpus_end", _as_date(self.corpus_end, "ModelCard.corpus_end"))
         object.__setattr__(self, "released", _as_date(self.released, "ModelCard.released"))
         for pin in self.runtime:
@@ -152,6 +157,8 @@ class ModelCard:
             elif isinstance(value, tuple):
                 value = list(value)
             out[item.name] = value
+        if not out["local_builds"]:  # only Timestral names one: every other card's record is as before
+            del out["local_builds"]
         return out
 
 
@@ -432,8 +439,96 @@ def installed_distribution(name: str, seen: Optional[Dict] = None) -> Optional[T
     return found
 
 
+# A local build that no file identifies (no RECORD, or none with hashes): a marker per process and distribution, so a manifest
+# made with it never equals another run's and a resume refuses rather than take two such builds for one.
+_UNIDENTIFIED: Dict[str, str] = {}
+
+
+def _unidentified(name: str) -> str:
+    import secrets
+
+    return _UNIDENTIFIED.setdefault(name, f"unidentified {secrets.token_hex(6)}")
+
+
+def _source_digest(distribution: Any, direct: Mapping[str, Any], name: str) -> Optional[str]:
+    """For an editable install: the sha256 (16 hex digits) of the source files of the top-level packages (`top_level.txt`,
+    else the distribution's name) under the directory its `direct_url.json` points to (or its `src/`), each file's path
+    relative to that directory and content hash, sorted; `__pycache__` and compiled files left out. None where none is found."""
+    import hashlib
+    from urllib.parse import unquote, urlparse
+
+    url = str(direct.get("url", ""))
+    if not url.startswith("file:"):
+        return None
+    root = Path(unquote(urlparse(url).path))
+    tops = (distribution.read_text("top_level.txt") or "").split() or [name.replace("-", "_")]
+    files: List[Path] = []
+    for top in tops:
+        for base in (root / top, root / "src" / top, root / f"{top}.py", root / "src" / f"{top}.py"):
+            if base.is_dir():
+                files += [
+                    path
+                    for path in base.rglob("*")
+                    if path.is_file() and "__pycache__" not in path.parts and path.suffix not in (".pyc", ".pyo")
+                ]
+                break
+            if base.is_file():
+                files.append(base)
+                break
+    if not files:
+        return None
+    lines = sorted(
+        f"{path.relative_to(root).as_posix()},{hashlib.sha256(path.read_bytes()).hexdigest()}" for path in files
+    )
+    return hashlib.sha256("\n".join(lines).encode()).hexdigest()[:16]
+
+
+def local_build(name: str, seen: Optional[Dict] = None) -> Optional[str]:
+    """What identifies a distribution installed from a local directory or an archive (PEP 610's `direct_url.json` without
+    `vcs_info`), whose version alone doesn't tell two builds apart: the sha256 of its RECORD's hashed entries outside its
+    `.dist-info` and `__pycache__`, sorted, 16 hex digits (the same files give the same digest whatever path or archive they
+    came from); for an editable install, whose RECORD lists its link to the source, `editable <digest>` of the source files
+    it points to (`_source_digest`); where no file identifies it (no RECORD, or none with hashes), `unidentified <token>`, a
+    marker of this process that never equals another run's. None for an install from an index (no `direct_url.json`) or a
+    repository (its commit says which), or a distribution not installed."""
+    import csv
+    import hashlib
+
+    key = ("build", name)
+    if seen is not None and key in seen:
+        return seen[key]
+    found = None
+    providers = runtime_providers(name, seen)
+    if providers:
+        distribution = importlib.metadata.distribution(providers[0])
+        try:
+            direct = json.loads(distribution.read_text("direct_url.json") or "null")
+        except (OSError, ValueError):
+            direct = None
+        if isinstance(direct, dict) and "vcs_info" not in direct:
+            if (direct.get("dir_info") or {}).get("editable"):
+                source = _source_digest(distribution, direct, name)
+                found = f"editable {source}" if source is not None else _unidentified(name)
+            else:
+                rows = csv.reader((distribution.read_text("RECORD") or "").splitlines())
+                entries = sorted(
+                    f"{row[0]},{row[1]}"
+                    for row in rows
+                    if len(row) >= 2
+                    and row[1]
+                    and ".dist-info/" not in row[0]
+                    and "__pycache__/" not in row[0]
+                    and not row[0].endswith(".pyc")
+                )
+                found = hashlib.sha256("\n".join(entries).encode()).hexdigest()[:16] if entries else _unidentified(name)
+    if seen is not None:
+        seen[key] = found
+    return found
+
+
 def runtime_versions(card: ModelCard, seen: Optional[Dict] = None) -> Dict[str, Optional[str]]:
-    """Each runtime distribution of the card -> its version, `version@commit` for one installed from a repository, None when it
+    """Each runtime distribution of the card -> its version, `version@commit` for one installed from a repository,
+    `version (local build <digest>)` for one installed from a local directory or an archive (`local_build`), None when it
     isn't installed: what a manifest records and a resume compares. A stand-in build is named after the version, `"3.4.1
     (xgboost-cpu)"` (and builds installed together, which the pre-flight refuses, all of them)."""
     out: Dict[str, Optional[str]] = {}
@@ -444,6 +539,9 @@ def runtime_versions(card: ModelCard, seen: Optional[Dict] = None) -> Dict[str, 
             out[name] = None
             continue
         text = found[0] if found[1] is None else f"{found[0]}@{found[1]}"
+        build = local_build(name, seen) if found[1] is None and name in card.local_builds else None
+        if build is not None:
+            text = f"{found[0]} (local build {build})"
         providers = runtime_providers(name, seen)
         stand_ins = [provider for provider in providers if provider != name]
         out[name] = f"{text} ({' + '.join(providers)})" if stand_ins else text
@@ -478,11 +576,22 @@ def class_path(cls: type) -> str:
 
 
 def card_variant(model_or_cls: Any) -> Optional[str]:
-    """The size (key of the class's `_card_variants`) whose card the model has, or None for a class with one card."""
+    """The size (key of the class's `_card_variants`) whose card the model has, or None for a class with one card. Matched by
+    the card's weights (repository and revision), not by identity: a deep copy or a pickle of the model (a run's copy, a
+    worker's, the GPU host's) holds an equal card, not the same object."""
     cls = model_or_cls if isinstance(model_or_cls, type) else type(model_or_cls)
     variants = getattr(cls, "_card_variants", None) or {}
     card = getattr(model_or_cls, "_card", None)
-    return next((size for size, candidate in variants.items() if candidate is card), None)
+    if card is None:
+        return None
+
+    def key(candidate: Any) -> Any:
+        weights = getattr(candidate, "weights", None)
+        return (weights.repo, weights.revision) if weights is not None else candidate
+
+    return next(
+        (size for size, candidate in variants.items() if candidate is card or key(candidate) == key(card)), None
+    )
 
 
 def fetch_command(model: Any) -> str:
@@ -515,6 +624,14 @@ def resolve_model_weights(model: Any, seen: Optional[Dict] = None) -> Optional[R
     return found
 
 
+def runtime_pins(model: Any, seen: Optional[Dict] = None) -> Tuple[str, ...]:
+    """The runtime pins the pre-flight checks for `model`: its card's, or what the model's class makes of them
+    (`_runtime_pins()`, an explicit override of a commit such as `TimestralModel(runtime_commit=...)`). The manifest records the
+    versions and commits installed whatever the pins say, and a resume compares them."""
+    own = getattr(model, "_runtime_pins", None)
+    return tuple(own(seen)) if callable(own) else model._card.runtime
+
+
 def card_problems(model: Any, seen: Optional[Dict] = None) -> List[Problem]:
     """What `model` lacks to run, from its card: the extra's modules, the runtime pins (checked once the extra is there) and
     its weights. Empty for a model without a card. Warns when the weights are not the card's (`not the reference weights`)."""
@@ -536,15 +653,18 @@ def card_problems(model: Any, seen: Optional[Dict] = None) -> List[Problem]:
                 Problem(
                     who,
                     "extra",
-                    f"needs the [{card.extra}] extra ({modules} not found): pip install 'epftoolbox2[{card.extra}]'",
+                    f"needs the [{card.extra}] extra ({modules} not found): {install_line(card.extra)}",
                     card.extra,
                 )
             )
     if extra_ok:
-        for pin in card.runtime:
+        pins = runtime_pins(model, seen)
+        # The commits these pins need, which the install line names in place of an extra's own source (runtime_commit=).
+        commits = {name: commit for name, _, commit in map(parse_pin, pins) if commit is not None}
+        for pin in pins:
             name, specifiers, commit = parse_pin(pin)
             found = installed_distribution(name, seen)
-            install = f"pip install 'epftoolbox2[{card.extra}]'" if card.extra else f"pip install '{pin}'"
+            install = install_line(card.extra, commits) if card.extra else f"pip install '{pin}'"
             providers = runtime_providers(name, seen)
             if len(providers) > 1:
                 problems.append(
@@ -562,7 +682,10 @@ def card_problems(model: Any, seen: Optional[Dict] = None) -> List[Problem]:
                 where = f"commit {found[1]}" if found[1] else "not from a repository"
                 problems.append(
                     Problem(
-                        who, "runtime", f"needs {name} at commit {commit}, installed: {found[0]} ({where})", card.extra
+                        who,
+                        "runtime",
+                        f"needs {name} at commit {commit}, installed: {found[0]} ({where}): {install}",
+                        card.extra,
                     )
                 )
             elif specifiers and not version_matches(found[0], specifiers):

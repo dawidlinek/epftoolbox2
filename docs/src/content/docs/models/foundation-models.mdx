@@ -1,6 +1,6 @@
 ---
 title: Foundation Models
-description: T0Model (t0-alpha, zero-shot or fine-tuned from the base weights) and ChronosModel (Chronos-2), pretrained sequence models of the target's history read through the information set; their extras, licences and contamination verdicts, epf weights fetch, CPU and GPU, stored fine-tunes
+description: T0Model (t0-alpha, zero-shot or fine-tuned from the base weights), ChronosModel (Chronos-2), PatchTSTFMModel (PatchTST-FM-r2, univariate), TimestralModel and TimesFMModel (flagged licences), pretrained sequence models of the target's history read through the information set; their extras, licences, attribution and contamination verdicts, epf weights fetch, CPU and GPU, stored fine-tunes
 ---
 
 import { Aside } from '@astrojs/starlight/components';
@@ -11,14 +11,21 @@ import { Aside } from '@astrojs/starlight/components';
 days of the target and the base columns you name as `known_ahead` (known through the end of the target day at the issue time,
 such as the TSO load forecast) and `past` (known up to now, read over the context only). Each forecast is the median of the
 model's quantiles. `T0Model` is zero-shot or fine-tuned from the base weights on a calendar (`fine_tune_every`, yearly by
-default); `ChronosModel` is zero-shot. Both share the base class `FoundationModel`, which more families build on.
+default); `ChronosModel` is zero-shot. Both share the base class `FoundationModel`, which three more families build on, all
+zero-shot: `PatchTSTFMModel` ([PatchTST-FM-r2](https://huggingface.co/ibm-granite/granite-timeseries-patchtst-fm-r2), IBM, 385 M,
+univariate), and two whose weights carry **flagged licences**, `TimestralModel`
+([Timestral](https://huggingface.co/mistralai/Timestral-209M), Mistral AI, 209 M / 123 M / 28 M, a revenue cap) and
+`TimesFMModel` ([TimesFM-3.0](https://huggingface.co/google/timesfm-3.0-pytorch), Google, 331 M, non-commercial); see
+[the flagged families](#patchtst-fm-timestral-and-timesfm-3).
 
 In the research behind this library (`recent` DE_LU and AT, test year 2025-10 to 2026-09, issued at 11:45 the day before the
 target day),
 zero-shot t0-alpha with the load forecast and a 364-day context had a test MAE of 20.15 EUR/MWh on DE_LU (LEAR's window average
 20.89), a monthly re-fine-tune of it over three seeds 18.96 and 16.33 on DE_LU and AT, and Chronos-2 with a 182-day context 20.56
 and 17.33. Alone they are about as good as LEAR's window average (17.78 on AT); the fine-tuned t0 is a member of the research's
-best clean ensembles.
+best clean ensembles. Timestral-209M with the load forecast and a 364-day context was the best single model of the research's
+zoo (18.48 and 15.90, though possibly contaminated: see its card), TimesFM-3 19.79 on DE_LU and PatchTST-FM-r2, univariate,
+19.85 and 16.51.
 
 ## Installing
 
@@ -26,14 +33,27 @@ Each family is an extra of its own, imported when a model first forecasts: the c
 and a run's pre-flight names a missing extra (or missing weights) before any model fits.
 
 ```bash
-pip install 'epftoolbox2[t0]'        # T0Model: tfc-t0 0.5.0, torch, huggingface_hub
-pip install 'epftoolbox2[chronos]'   # ChronosModel: chronos-forecasting 2.x, torch
+pip install 'epftoolbox2[t0]'            # T0Model: tfc-t0 0.5.0, torch, huggingface_hub
+pip install 'epftoolbox2[chronos]'       # ChronosModel: chronos-forecasting 2.x, torch
+pip install 'epftoolbox2[patchtst-fm]'   # PatchTSTFMModel: granite-tsfm 0.3.x (Python < 3.14), torch < 2.12
+pip install 'epftoolbox2[timesfm]'       # TimesFMModel: timesfm[torch] 3.0.2
+pip install 'epftoolbox2[timestral]' \
+  'timestral @ git+https://github.com/mistralai/timestral@a534bdbd244d64f3d9d743f46c7bf6fc330ed4ff'   # TimestralModel
 ```
 
 - **`tfc-t0` is pinned to 0.5.0.** Its git head moved single hours of the research's forecasts by up to 161 EUR/MWh, so the
   version (and a VCS commit, if any) is in the manifest and a resume with another one is refused.
-- **Python 3.11 to 3.15 with the GIL.** Both load safetensors, which has no free-threaded wheel: on 3.14t the extras don't
-  install.
+- **Python 3.11 to 3.15 with the GIL.** Every family loads safetensors, which has no free-threaded wheel: on 3.14t the extras
+  don't install. `[patchtst-fm]` needs Python 3.13 or older (granite-tsfm's own limit).
+- **The timestral package is not on PyPI.** Its extra installs its PyPI dependencies (torch, safetensors, huggingface_hub), and
+  the package itself comes from the commit the research ran, `a534bdbd244d64f3d9d743f46c7bf6fc330ed4ff`, as above. The
+  pre-flight reads the commit pip recorded (PEP 610's `direct_url.json`) and refuses another one, or a build not installed from
+  the repository, naming this command; see [Timestral's runtime](#timestrals-runtime).
+- **granite-tsfm pins torch below 2.12 and scikit-learn below 1.8.** The lock resolves `[patchtst-fm]` apart from every extra
+  that holds torch (`[torch]`, `[t0]`, `[chronos]`, `[tabpfn]`, `[tabicl]`, `[timesfm]`, `[timestral]`: `uv sync` refuses it
+  together with any of them), so an environment with PatchTST-FM is its own, with torch 2.11 and scikit-learn 1.7, and no
+  other extra and no core install moves. On Python 3.14 and later the extra installs nothing and changes nothing. An extra of
+  several families (6q's planned `[all]`) must leave `[patchtst-fm]` out, as it leaves the two flagged ones out.
 - **torch.** The lock and `uv sync` take the CPU build. For a GPU, install a CUDA build first (for example
   `pip install torch --index-url https://download.pytorch.org/whl/cu126`), then the extra.
 
@@ -43,14 +63,20 @@ A run never downloads. Fetch each family's weights once, on a machine with netwo
 ([Licences and Weights](/epftoolbox2/models/licences-and-weights/)):
 
 ```bash
-epf weights fetch T0Model        # theforecastingcompany/t0-alpha, 406.6 MB
-epf weights fetch ChronosModel   # amazon/chronos-2, 477.9 MB
+epf weights fetch T0Model           # theforecastingcompany/t0-alpha, 406.6 MB
+epf weights fetch ChronosModel      # amazon/chronos-2, 477.9 MB
+epf weights fetch PatchTSTFMModel   # ibm-granite/granite-timeseries-patchtst-fm-r2, 1.5 GB
+epf weights fetch TimesFMModel --accept TimesFM-Non-Commercial-1.0                 # google/timesfm-3.0-pytorch, 1.3 GB
+epf weights fetch TimestralModel --size 209m --accept Mistral-Modified-MIT        # mistralai/Timestral-209M, 837.3 MB
 ```
 
 | Family | Repository and revision | Files (sha256 pinned) | Licence | Corpus, its end; released | Verdict |
 |---|---|---|---|---|---|
 | t0-alpha | `theforecastingcompany/t0-alpha` @ `741927847fe0` | `config.json`, `model.safetensors` (406,601,742 B) | Apache-2.0, commercial use allowed | GIFT-Eval pretraining split (real series, each ending before 2022) and synthetic corpora; 2021-12-31; 2026-06-09 | `clean` for any window from 2022 |
 | Chronos-2 | `amazon/chronos-2` @ `29ec3766d36d` | `config.json`, `model.safetensors` (477,931,539 B) | Apache-2.0, commercial use allowed | real univariate series of the Chronos and GIFT-Eval pretraining corpora (no electricity prices) and synthetic data; no end date given; 2025-10-30 | `possibly contaminated` for a window starting before 2025-10-30, `clean (released before)` after |
+| PatchTST-FM-r2 | `ibm-granite/granite-timeseries-patchtst-fm-r2` @ `b125275f9204` | `config.json`, `model.safetensors` (1,538,472,531 B) | `Apache-2.0 OR OpenMDW-1.0`, commercial use allowed | a subset of the GIFT-Eval pretraining split, TSMixup of public datasets outside GIFT-Eval's test set, synthetic KernelSynth and CauKer series; documented, no end date; 2026-08-07 | `possibly contaminated` for a window starting on or before 2026-08-07, `clean (released before)` after: the card dates nothing (its GIFT-Eval split is the one t0-alpha's card dates to 2021) |
+| TimesFM-3.0 | `google/timesfm-3.0-pytorch` @ `43046b85ec22` | `config.json`, `model.safetensors` (1,322,900,097 B) | **`TimesFM-Non-Commercial-1.0`**: research, testing and evaluation only, no commercial or production use | GIFT-Eval pretraining (less fev-bench's datasets), Wikipedia pageviews to 2023-11, Google Trends to 2022, synthetic series; 2023-11-30; 2026-08-24 | `clean` for a window from December 2023 |
+| Timestral 209M / 123M / 28M | `mistralai/Timestral-209M` @ `9874d252ab0a` (123M `5a147287addd`, 28M `49b26409ac87`) | `config.json`, `model.safetensors` (837,272,778 / 490,446,978 / 111,297,425 B) | **`Mistral-Modified-MIT`**: MIT with no rights at all above USD 20 M global consolidated monthly revenue of your company or employer; attribution "2026 - Mistral AI" | synthetic pretraining, then real and synthetic post-training, the real datasets undocumented; no end date; 2026-10-15 | `possibly contaminated` for any window starting on or before 2026-10-15 |
 
 t0-alpha's repository history was squashed on 2026-10-15, so its files are pinned by their sha256 as well as the commit: a fetch
 of files with other hashes is refused. The Chronos-2 paper (arXiv 2510.15821) names its training corpora but no end date, so its
@@ -89,9 +115,14 @@ report = pipeline.run(df, "2025-10-01", "2026-09-30", horizon=1, save_dir="runs/
 | `device` | `"auto"` | `"auto"`, `"cpu"`, `"cuda"` or `"cuda:N"` |
 | `weights` | `None` | The card's weights from the cache, or a file or directory used as given |
 | `newest_target` | `"d-1"` | Where the target's context (and a fine-tune's targets) end: D-1, or `"published"` where the rule says |
-| `name` | `"t0"`, `"chronos2"` | The model's name |
+| `name` | `"t0"`, `"chronos2"`, `"patchtst_fm"`, `"timestral"`, `"timesfm3"` | The model's name |
+| `size` | `"209m"` (`TimestralModel`) | Which Timestral: `"209m"`, `"123m"` or `"28m"`, each with its own weights and card |
+| `symmetric_averaging` | `True` (`TimestralModel`) | Average the forecast with the reflected forecast of the negated context (the package's default) |
+| `clip_nonnegative` | `False` (`TimestralModel`) | Clamp the forecast at 0 where the context has no negative value (off: prices can be negative) |
+| `runtime_commit` | `None` (`TimestralModel`) | Another commit of the timestral package to run on instead of the pinned one ([below](#timestrals-runtime)) |
 
-`ChronosModel` takes the same but `fine_tune_every`, `seeds`, `fine_tune` and `random_state` (it is zero-shot).
+`ChronosModel`, `TimestralModel` and `TimesFMModel` take the same but `fine_tune_every`, `seeds`, `fine_tune` and
+`random_state` (they are zero-shot); `PatchTSTFMModel` takes neither those nor `known_ahead` and `past` (it is univariate).
 `FoundationModel` is the base of both, for a family of your own: it defines `_card`, `_load_backend(resolved, device)` returning
 a backend (`epftoolbox2.models._fm.Backend`: `predict(call)` with the quantiles of each step ahead of each item, and for a
 fine-tune `fine_tune`, `save_state`, `load_state`, `reset`) and which covariates it takes.
@@ -176,6 +207,72 @@ horizon and each of `seeds` seeds (3), a copy of the **base** weights, never the
 Yearly fine-tunes are the default but untested: the research measured a monthly re-fine-tune against none (1.55 % better on
 DE_LU, 1.7 % on AT, pooled over both markets), not a yearly one. `fine_tune_every="1MS"` is the monthly recipe on one market.
 </Aside>
+
+## PatchTST-FM, Timestral and TimesFM-3
+
+Three zero-shot families on the same base, each with its own extra and card:
+
+```python
+from epftoolbox2.information_set import InformationSet
+from epftoolbox2.models import PatchTSTFMModel, TimesFMModel, TimestralModel
+from epftoolbox2.pipelines import ModelPipeline
+
+pipeline = (
+    ModelPipeline(information_set=InformationSet("11:45"))
+    .add_model(PatchTSTFMModel(context=341, name="patchtst_fm"))  # the target alone
+    .add_model(TimestralModel(size="209m", known_ahead=["load_forecast"], name="timestral"))
+    .add_model(TimesFMModel(known_ahead=["load_forecast"], name="timesfm3"))
+)
+report = pipeline.run(df, "2025-10-01", "2026-09-30", horizon=1, save_dir="runs/flagged")
+```
+
+| Class | What its package gets | The forecast | Notes |
+|---|---|---|---|
+| `PatchTSTFMModel` | the target alone (`past_values`, float32): it has no `known_ahead` or `past` parameter, and setting either raises | the middle of the research's 19 levels of its 99, sorted per step (the 0.5 level) | Its window holds 8,192 steps with the forecast: the newest 8,192 - max(S, 128) context steps go in (8,064 for a day of hours), and the whole context's mean fills the rest of it and any gap; a longer context warns. On a CUDA device the package runs its backbone in bfloat16 autocast (the research's H100 runs did too; the manifest's runtime records `autocast`), on the CPU in float32 |
+| `TimestralModel` | `known_ahead` as `known_covariates` (over the context and the steps ahead), `past` as `past_covariates` (over the context), the context with NaN where a step has none (masked) | the level nearest 0.5 of its 21 (0.01, 0.05 to 0.95, 0.99) | `size` is 209m (the research's best), 123m (close on DE_LU, worse on AT) or 28m (the CPU option, 3 to 4 times cheaper); `symmetric_averaging` is the package's default; `clip_nonnegative` is **off** (prices can be negative; the research ran the package's clip on, which changed no forecast at 182 days of context or more). It reads up to 32,768 steps |
+| `TimesFMModel` | `known_ahead` as `past_future_covariates`, `past` as `past_only_covariates`, one batch per call | its median, decile index 4 | It reads at most 15,360 steps (640 days of hours; a longer context is cut to its newest steps and warns). The package fills a gap by linear interpolation and holds a past series' newest value after its newest known step, so nothing after the issue time goes in |
+
+Covariates go to each package in the order you list them.
+
+### Flagged licences
+
+- **TimesFM-3** is under the TimesFM Non-Commercial License v1.0: testing, evaluation and research not tied to commercial gain,
+  production or revenue. `epf weights fetch TimesFMModel` refuses without `--accept TimesFM-Non-Commercial-1.0`, and every
+  report shows `commercial_use: False`.
+- **Timestral** is under a modified MIT licence (`Mistral-Modified-MIT`): no rights at all if the global consolidated monthly
+  revenue of your company, or of your employer, exceeded USD 20 million in the preceding month (it reaches derivatives and
+  combined works), and the attribution "2026 - Mistral AI" goes with every copy. `epf weights fetch TimestralModel --size
+  <size>` refuses without `--accept Mistral-Modified-MIT`. Check the revenue figure of your organisation, and your employer's,
+  before relying on it.
+- **Every report** prints the licence, the revenue cap and the attribution with the verdict of each window
+  (`report.provenance()`, the terminal exporter's "Model provenance", the CSV exporter's `<stem>.provenance.csv`, the Excel
+  "Provenance" sheet), and the manifest records the card.
+- **Contamination.** Timestral's post-training corpus is undocumented and it was released on 2026-10-15, after the research's
+  test year: every window starting on or before that day is `possibly contaminated`, so don't present it as a clean benchmark
+  result. TimesFM-3's corpus ends in November 2023 (`clean` from December 2023). PatchTST-FM-r2's card lists its corpus but
+  dates none of it (its GIFT-Eval split is the one t0-alpha's card dates to 2021), so its verdict goes by its release, as
+  Chronos-2's: `possibly contaminated` for a window starting on or before 2026-08-07, both of the research's years included.
+- Neither flagged extra is part of an extra that installs several families.
+
+### Timestral's runtime
+
+The pre-flight compares the timestral package installed with the pinned commit, `a534bdbd244d64f3d9d743f46c7bf6fc330ed4ff`
+(the commit pip records in the package's `direct_url.json` when it installs from git):
+
+- **Installed from the repository at that commit**: it runs.
+- **Another commit, or a build not installed from the repository** (a wheel, a local directory): refused before any model fits,
+  naming the install command and, for another commit, the setting that runs on it.
+- **`TimestralModel(runtime_commit="<commit>")`** runs on that commit instead (7 to 40 hex digits), and refuses any other.
+- **`weights="/your/directory"`** with weights of your own (files whose hashes aren't the card's) runs on whatever build is
+  installed, with a warning; the card's own files under another path keep the pinned commit required.
+
+The manifest records the build installed whichever way, and a resume with another one is refused: `1.0.0@a534bdb...` for one
+installed from the repository, and for one installed from a local directory or a wheel file (no commit) `1.0.0 (local build
+<digest>)`, a digest of its installed files (the hashes its RECORD lists), so two local builds of the same version don't pass
+for one. An editable install records `editable <digest>` of the source files of the package it points to, so an edit refuses
+the resume; a build with no RECORD to identify it records `unidentified <token>`, which no other run's equals. Only the
+timestral package is recorded so: every other runtime package (torch from a local wheel, say) records its version, as
+before.
 
 ## CPU and GPU
 
@@ -262,3 +359,39 @@ its month of forecasts) 81 s.
 `verify` with the real weights on that CPU, on five issue days with a spring switch among them, is ok with its positive control,
 the rerun and the co-batch checks for Chronos-2 and for t0-alpha fine-tuned monthly (two steps, a 28-day context). The checks and
 their scripts are in the project's research folder (`library_check_step6/foundation/`).
+
+**PatchTST-FM-r2, Timestral and TimesFM-3** on the same rows and rules (`newest_target="published"`; Timestral with the
+library's `clip_nonnegative=False`, which gives the research's forecasts: the clip it ran never acts on a context with a
+negative price), max |library - stored| in EUR/MWh, on the CPU (AMD EPYC 7713, 8 torch threads, as the research ran Timestral):
+
+| Run | Stored forecasts from | DE_LU val / test | AT val / test | Gate |
+|---|---|---|---|---|
+| Timestral-209M, ctx 364, load forecast | CPU (timestral a534bdb) | 2.3e-4 / 3.2e-4 | 5.0e-5 / 2.0e-4 | 1e-3 |
+| TimesFM-3, ctx 364, load forecast (DE_LU) / univariate (AT) | H100 (timesfm 3.0.2) | 2.1e-3 / 9.4e-4 | 6.4e-4 / 6.8e-4 | 0.1 |
+| TimesFM-3, ctx 91, load forecast | H100 | | 9.2e-4 / 5.4e-4 | 0.1 |
+| PatchTST-FM-r2, ctx 341, univariate, on an H100 | H100 (granite-tsfm 0.3.10, bfloat16 autocast) | 2.79 / 2.70 | 2.37 / 2.96 | 1e-3, **not met** |
+
+Every year has the stored file's forecasts on identical keys (8,736 validation and 8,760 test per market), the mean difference
+is 3 to 5 x 10⁻⁵ (the files' rounding), and the MAEs equal the stored ones to 4 decimals: test Timestral-209M 18.4811 and 15.8979,
+TimesFM-3 19.7906 (DE_LU, load forecast) and 16.9939 (AT, univariate). On an H100 (`wcss/gpu_b1.sbatch` of the research
+folder) TimesFM-3 is within 5.0 x 10⁻⁵ of its stored H100 forecasts in all six years (the files' rounding) and Timestral-209M
+within 5.2 x 10⁻⁴ of its stored CPU ones.
+
+PatchTST-FM-r2 doesn't reproduce its stored forecasts to 1e-3. The package runs its backbone under bfloat16 autocast on a
+GPU, and the library's H100 run (granite-tsfm 0.3.12, torch 2.11) differs from the research's H100 one by up to 2.96 EUR/MWh,
+0.07 on average, with the same keys and MAEs within 0.003 (test 19.8475 against 19.8502 on DE_LU, 16.5120 against 16.5117 on
+AT): bfloat16 rounding moves single values. On the CPU it runs in float32 and differed by 0.32 and 1.93 on two days. Which part
+comes from the batches' composition (the research's calls held 64 consecutive days, the last one 44; the library's hold a
+calendar block of 64, padded) and which from the package or torch release was not separated; granite-tsfm 0.3.10's code gives
+the library's forecasts within 1.4 x 10⁻⁴ of 0.3.12's on the CPU.
+
+**Time** on that CPU at 8 torch threads, a machine loaded with other users' work (load 29 to 96 on 128 threads): a market-year
+of Timestral-209M with the load forecast took 1,881 to 2,211 s; one call of 64 items, the backend alone, took 256 to 259 s at a
+steady load of 26 (4.0 s an item: 1,467 s for the research's 364 items, against its 1,053 s on the same machine at load 11 to 24
+with torch 2.14.1, and 1,806 s for the 448 items the zero-shot calendar's seven blocks of 64 days hold over a year). TimesFM-3 took 775 to 991 s (364 days of context, load forecast), 423 to
+488 s (univariate) and 222 to 243 s (91 days). On the H100, a whole library run of a market-year took 7 to 19 s for TimesFM-3 at
+364 days (the first includes loading; the research's 18 to 27 s), 3.5 to 4.0 s at 91 days, 11 to 17 s for Timestral-209M and
+2.4 to 12.5 s for PatchTST-FM-r2.
+
+`verify` with the real weights on that CPU (five issue days with a spring switch among them, a 28-day context, one thread) is ok
+with its positive control, the rerun and the co-batch checks for all three. The scripts are in `library_check_step6/foundation_flagged/`.

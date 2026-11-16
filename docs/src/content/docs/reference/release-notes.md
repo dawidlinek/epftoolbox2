@@ -228,6 +228,11 @@ an issue day it didn't sample.
   to the bit, with the engine on or off. OLS, Ridge, LassoCV and LEAR store fits (`_fit_state`/`_from_state`); every scaler has
   `state()`, `BaseScaler.from_state()` and `transform()`. The other families fit at serve time. See
   [Stored Fits](/epftoolbox2/model-pipeline/stored-fits/).
+- **OLS, Ridge and LassoCV record their scikit-learn release.** Their manifests add `scikit_learn` (the release they fitted with),
+  as provenance, and a resume under another release warns, every time while the file mixes them, and lists each release in the
+  order first used. It isn't compared: every manifest written before has none, and comparing it would refuse to resume every
+  existing results folder. The lock holds two releases now, 1.7.2 for an environment with `[patchtst-fm]` (granite-tsfm pins
+  scikit-learn below 1.8) and 1.8.0 for every other, so one folder can meet both.
 - **The licence is stated as `AGPL-3.0-or-later`.** The package metadata names the SPDX expression (`License-Expression`, with
   `LICENSE` shipped in the wheel) instead of the version-neutral `AGPL-3.0`: the GNU Affero General Public License v3 or, at your
   option, any later version. The licence text is unchanged.
