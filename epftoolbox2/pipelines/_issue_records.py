@@ -195,9 +195,13 @@ def write_snapshot(snap: Snapshot, directory: Union[str, Path]) -> Path:
     table = table.replace_schema_metadata(meta)
     path = directory / SNAPSHOT_FILE
     temporary = directory / f".{SNAPSHOT_FILE}.tmp"
-    pq.write_table(table, temporary, compression="zstd")
-    _sync(temporary)
-    os.replace(temporary, path)
+    try:
+        pq.write_table(table, temporary, compression="zstd")
+        _sync_file(temporary)
+        os.replace(temporary, path)
+    except BaseException:
+        temporary.unlink(missing_ok=True)  # a failed write leaves nothing but what was there
+        raise
     _sync_directory(directory)
     return path
 
@@ -418,18 +422,22 @@ def waits_record(polls: Iterable[Any]) -> Dict[str, Any]:
     return {"polls": [jsonable(poll) for poll in polls]}
 
 
-def _sync(path: Path) -> None:
-    fd = os.open(path, os.O_RDONLY)
+def _sync_file(path: Path) -> None:
+    """fsync a written file through a descriptor open for writing: Windows refuses `fsync` on a read-only one."""
+    with open(path, "r+b") as f:
+        os.fsync(f.fileno())
+
+
+def _sync_directory(directory: Path) -> None:
+    """fsync a directory, so a rename in it is on disk: a read-only descriptor, which POSIX allows for a directory (Windows
+    can't open one, and needs nothing)."""
+    if os.name == "nt":  # pragma: no cover
+        return
+    fd = os.open(directory, os.O_RDONLY)
     try:
         os.fsync(fd)
     finally:
         os.close(fd)
-
-
-def _sync_directory(directory: Path) -> None:
-    if os.name == "nt":  # pragma: no cover (a directory can't be opened for fsync there)
-        return
-    _sync(directory)
 
 
 def write_json(directory: Union[str, Path], name: str, content: Any) -> Path:
@@ -439,10 +447,14 @@ def write_json(directory: Union[str, Path], name: str, content: Any) -> Path:
     path = directory / name
     temporary = directory / f".{name}.tmp"
     text = json.dumps(jsonable(content), indent=2, allow_nan=False) + "\n"
-    with open(temporary, "w", encoding="utf-8") as f:
-        f.write(text)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(temporary, path)
+    try:
+        with open(temporary, "w", encoding="utf-8") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temporary, path)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
     _sync_directory(directory)
     return path

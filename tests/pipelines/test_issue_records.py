@@ -400,3 +400,42 @@ def test_the_step_of_the_rows_is_read_whatever_the_index_unit(unit):
     hourly = live_frame(freq="1h").index.as_unit(unit)
     assert _step_minutes(quarter) == 15 and _step_minutes(quarter[::-1]) == 15
     assert _step_minutes(hourly) == 60
+
+
+def test_files_are_synced_through_a_writable_descriptor_and_a_failed_write_leaves_nothing(tmp_path, monkeypatch):
+    """Windows refuses fsync on a descriptor open for reading: a file's sync must go through one open for writing (checked here
+    by an fsync that refuses read-only descriptors of files, as Windows does). A write that fails leaves no temporary file."""
+    import fcntl
+    import os
+    import stat
+
+    real = os.fsync
+
+    def windows_like(fd):
+        if not stat.S_ISDIR(os.fstat(fd).st_mode) and fcntl.fcntl(fd, fcntl.F_GETFL) & os.O_ACCMODE == os.O_RDONLY:
+            raise OSError(9, "Bad file descriptor (fsync on a read-only descriptor)")
+        return real(fd)
+
+    monkeypatch.setattr(os, "fsync", windows_like)
+    snap = snapshot(live_frame(), ["lear"], PLAN, ISSUE, zone=ZONE)
+    assert read_snapshot(write_snapshot(snap, tmp_path)).hash == snap.hash
+    write_json(tmp_path, QUALITY_FILE, {"issue": ISSUE})
+
+    import pyarrow.parquet as pq
+
+    def broken(table, where, **kwargs):
+        open(where, "wb").write(b"PAR1 half a file")
+        raise OSError("disk full")
+
+    monkeypatch.setattr(pq, "write_table", broken)
+    with pytest.raises(OSError, match="disk full"):
+        write_snapshot(snap, tmp_path / "")
+
+    def no_rename(source, target):
+        raise OSError("rename refused")
+
+    monkeypatch.setattr(os, "replace", no_rename)
+    with pytest.raises(OSError, match="rename refused"):
+        write_json(tmp_path, CHECKS_FILE, {"failed": []})
+    assert sorted(path.name for path in tmp_path.iterdir()) == [SNAPSHOT_FILE, QUALITY_FILE]
+    assert read_snapshot(tmp_path / SNAPSHOT_FILE).hash == snap.hash  # the earlier file, untouched
