@@ -161,6 +161,12 @@ class _LiveRecords:
     def save_skip(self, record: Dict) -> bool:
         return super().save_skip(with_live(record, *self._stamp))
 
+    def overrule(self, record: Dict) -> None:
+        raise TypeError(
+            "a live revision writes each key once, at its own number, and reads nothing on file: check its records before "
+            "they are saved (`results.checks.check_records`), not over them"
+        )
+
 
 class LiveResultStore(_LiveRecords, ResultStore):
     """A live revision's JSONL store (`LiveRevision.open`)."""

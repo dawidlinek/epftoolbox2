@@ -22,7 +22,7 @@ logger = get_logger(__name__)
 
 _DP_SECTIONS = ("sources", "transformers", "validators")
 _MP_SECTIONS = ("models", "ensembles", "evaluators", "exporters")
-_MP_INLINE_KEYS = (*_MP_SECTIONS, "information_set", "availability", "engine")
+_MP_INLINE_KEYS = (*_MP_SECTIONS, "information_set", "availability", "engine", "checks")
 
 
 def _plain(value: Any) -> Any:
@@ -115,6 +115,8 @@ class Workflow:
 
     `model_pipeline.engine: on` runs the models the engine takes in engine groups (`ModelPipeline(engine=...)`), over what the
     pipeline YAML says; in array mode each task groups the models of its block, and nothing stored depends on the block.
+    `model_pipeline.checks: {class: ForecastChecks, params: {...}}` sets the checks before export (`ModelPipeline(checks=...)`)
+    over the pipeline YAML's, `checks: null` none.
 
     Example:
         >>> workflow = Workflow(
@@ -278,6 +280,9 @@ class Workflow:
             mp.availability = self._mp_inline["availability"]
         if "engine" in self._mp_inline:
             mp.engine = engine_from_yaml(self._mp_inline["engine"])  # `engine: on` unquoted reads as True
+        if "checks" in self._mp_inline:  # step 8f: `checks: {class: ForecastChecks, params: ...}`, or null for none
+            checks = self._mp_inline["checks"]
+            mp.checks = ModelPipeline._load_component("checks", checks) if checks else None
         if isinstance(self.model_index, int) and not all_models:
             mp._resolve_bases()  # a ResidualModel's base="name" is a model of the whole list, maybe of another task's slice
             mp.models = self._block_of(mp.models)

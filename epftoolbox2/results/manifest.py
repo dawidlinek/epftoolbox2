@@ -237,9 +237,13 @@ _COMPARED_FIELDS += ("residual",)
 # target's cut where a late issue time puts it after `test_end`; None (and no key) for any other model. With windows it is
 # compared on the data the stored forecasts read, as `actuals` is.
 _COMPARED_FIELDS += ("history_ahead",)
+# Step 8f's checks before export (`ModelPipeline(checks=...)`, `ForecastChecks.to_dict()`): a day failing them has `check_failed`
+# skip records in place of its forecasts, so a resume under other checks would mix days kept by two rules. None (and no key)
+# without checks.
+_COMPARED_FIELDS += ("checks",)
 # Compared fields a configuration digest holds only when set, so that the digest of every manifest written before them (a
 # `ResidualModel`'s `residual` field records its base's) doesn't move.
-_DIGESTED_WHEN_SET = ("history_ahead",)
+_DIGESTED_WHEN_SET = ("history_ahead", "checks")
 
 # How a run chooses a forecast's training rows: `Manifest.training_cut`.
 TRAINING_CUT_BY_DATE = {"rows": "dates"}
@@ -465,6 +469,9 @@ class Manifest:
     # the compared fields, so no configuration digest moves: a backtest run refuses a live manifest, and a live call a
     # backtest's, whatever else they hold.
     mode: Optional[str] = None
+    # The checks before export a run applied (step 8f, `ForecastChecks.to_dict()`); None (and no key) without them. Compared on
+    # resume.
+    checks: Optional[Dict[str, Any]] = None
 
     def differences(self, existing: "Manifest", skip: Sequence[str] = ()) -> List[str]:
         """Human-readable list of compared fields that disagree with `existing`; empty if compatible."""
@@ -562,6 +569,8 @@ class Manifest:
             del out["search"]
         if out["mode"] is None:  # a backtest's
             del out["mode"]
+        if out["checks"] is None:  # no checks before export
+            del out["checks"]
         return out
 
     @classmethod

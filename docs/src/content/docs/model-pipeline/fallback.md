@@ -49,8 +49,9 @@ model's curve, whatever went wrong with the others.
   [planned count](/epftoolbox2/model-pipeline/time-and-calendars/#what-is-planned): a spring day needs 23 hours (92 quarter-hours),
   an autumn day 24 (96), the repeated hour being one period. A key no member has still counts, so it leaves its day to no one.
 - **A skip record is no forecast.** A member with `missing_test_predictors` on one hour of a day doesn't have that day, and the
-  ladder moves on. A NaN or infinite prediction counts as missing too. Checks before export will write `check_failed` skip
-  records once step 8f's checks exist; the ladder will move past those the same way.
+  ladder moves on. A NaN or infinite prediction counts as missing too. [Checks before export](/epftoolbox2/model-pipeline/checks/)
+  turn a member's day that fails them into `check_failed` skip records, so the ladder moves past it the same way, in backtests too
+  when the pipeline has them.
 - **A day no member serves is missing.** It is counted in `forecast_counts()` under `member_missing`, as for an average, and the
   fallback never fills it in from parts of several members.
 - **A member without results** in `report(allow_missing=True)` is passed over with a warning that names it: it serves nothing,

@@ -747,6 +747,7 @@ class TestModelPipelineParameterFidelity:
 
     def test_every_registered_component_round_trips_with_non_default_values(self, tmp_path):
         from epftoolbox2.exporters import CsvExporter
+        from epftoolbox2.results import ForecastChecks
         from epftoolbox2.pipelines.model_pipeline import COMPONENT_REGISTRY as MODEL_REGISTRY
 
         originals = {
@@ -996,10 +997,12 @@ class TestModelPipelineParameterFidelity:
                 TerminalExporter(show=["hour"]),
             ],
         }
+        checks = ForecastChecks(periods=False, finite=False, range=(-500, None), not_constant=False, max_step=250)
         covered = {type(obj).__name__ for objs in originals.values() for obj in objs} | {"BatteryArbitrage"}
+        covered.add(type(checks).__name__)
         assert covered == {name for names in MODEL_REGISTRY.values() for name in names}  # add a new component here
 
-        pipeline = ModelPipeline()
+        pipeline = ModelPipeline(checks=checks)
         pipeline.models, pipeline.ensembles, pipeline.evaluators, pipeline.exporters = (
             originals[kind] for kind in ("models", "ensembles", "evaluators", "exporters")
         )
@@ -1019,6 +1022,7 @@ class TestModelPipelineParameterFidelity:
             reloaded = getattr(loaded, kind)
             assert [type(o) for o in reloaded] == [type(o) for o in objs], kind
             assert [public(o) for o in reloaded] == [public(o) for o in objs], kind
+        assert loaded.checks == checks and public(loaded.checks) == public(checks)
 
 
 # ---------------------------------------------------------------------------

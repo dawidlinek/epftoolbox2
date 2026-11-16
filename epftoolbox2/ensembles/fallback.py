@@ -27,8 +27,8 @@ class FallbackEnsemble(Ensemble):
     `per="day"` takes each (issue day, horizon, target day) whole from one member: the first whose forecasts of every planned key of
     that day exist with a finite prediction, so a delivered day is never stitched from two models. A key the clock doesn't have on
     the issue day or the target day isn't planned, so a spring day needs 23 hours (92 quarter-hours). `per="key"` takes each key
-    from the first member that has it. A skip record is no forecast, whatever its status (`missing_test_predictors`; `check_failed`
-    once step 8f's checks before export write it), so the ladder moves on past it. A day (or key) no member has is missing, counted
+    from the first member that has it. A skip record is no forecast, whatever its status (`missing_test_predictors`; `check_failed`,
+    which `ModelPipeline(checks=...)` writes for a member's day that fails its checks), so the ladder moves on past it. A day (or key) no member has is missing, counted
     in `forecast_counts()` as `member_missing`, and so is the day after a spring switch for every rung that reads `price_d-1` (its
     02:00 reads the hour the clock skipped): end the ladder with a rung that doesn't, or use `per="key"`. In
     `report(allow_missing=True)` a member without results is passed over with a warning, keeping its rung.

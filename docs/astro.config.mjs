@@ -74,6 +74,7 @@ export default defineConfig({
                         { label: 'Ensembles', link: '/model-pipeline/ensembles/' },
                         { label: 'Fallbacks', link: '/model-pipeline/fallback/' },
                         { label: 'Stored Fits', link: '/model-pipeline/stored-fits/' },
+                        { label: 'Checks Before Export', link: '/model-pipeline/checks/' },
                         { label: 'Hyper-parameter Search', link: '/model-pipeline/hyperparameter-search/' },
                         { label: 'Several Zones', link: '/model-pipeline/zones/' },
                         { label: 'Generation Targets', link: '/model-pipeline/generation/' },

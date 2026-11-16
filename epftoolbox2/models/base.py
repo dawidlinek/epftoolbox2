@@ -139,9 +139,11 @@ from ._units import (
     units_config,
     without_feature,
 )
+from ._checks import CheckGate  # step 8f: checks before export
 
 if TYPE_CHECKING:  # pragma: no cover
     from ..information_set import InformationSet
+    from ..results.checks import ForecastChecks
 
 logger = get_logger(__name__)
 
@@ -449,17 +451,23 @@ class _RunState:
     tasks: List[tuple] = field(default_factory=list)
     # `_worker.POOL_SPAWN_FOR_CUDA` when the run's pool spawned because CUDA was initialised in this process (`pool_start`).
     pool_note: Optional[str] = None
+    # Step 8f: the run's checks before export (`run(checks=...)`), which `_collect` passes every job through; None without them.
+    check_gate: Optional[CheckGate] = None
 
-    def skip(self, task: tuple, outcome: str, example: str, sink: Optional[_Sink]) -> None:
+    def skip(self, task: tuple, outcome: str, example: str, sink: Optional[_Sink], overrule: bool = False) -> None:
         """Count a task with no forecast under its reason (`outcome` before any ": detail"), in its window too, keep `example` if
-        it is the reason's first, and write its skip record through `sink` (none without a store)."""
+        it is the reason's first, and write its skip record through `sink` (none without a store). `overrule` writes it over the
+        key's forecast on file, one revision above it (`check_failed`, step 8f)."""
         reason = outcome.partition(": ")[0]
         self.skipped[reason] += 1
         if self.window_days is not None:
             self.window_skipped[self.window_days[task[2]][0]][reason] += 1
         self.skip_examples.setdefault(reason, example)
         if self.skip_record is not None and sink is not None:
-            sink.save_skip(self.skip_record(task, outcome))
+            if overrule:
+                sink.overrule(self.skip_record(task, outcome))
+            else:
+                sink.save_skip(self.skip_record(task, outcome))
 
     def close(self) -> None:
         """Let go of the store, and with it the results file's lock."""
@@ -842,6 +850,7 @@ class BaseModel(ABC):
         issue_days: Optional[Sequence[str]] = None,
         checked: Optional["_Checked"] = None,
         save_coefficients: bool = True,
+        checks: Optional["ForecastChecks"] = None,
     ) -> ModelResultRef:
         """Forecast every period and horizon the clock has on each day in [test_start, test_end] and on its target day.
 
@@ -894,6 +903,11 @@ class BaseModel(ABC):
         `checked` is what `ModelPipeline` found when it checked this model's inputs before any model ran (`_checked_inputs`): a run
         it was found for uses it instead of checking again, and any other run checks its inputs itself.
 
+        `checks` (`results.checks.ForecastChecks`, what `ModelPipeline(checks=...)` passes) checks each (issue day, horizon) of
+        forecasts before any is written: a day failing a check has none, each key a `check_failed` skip record with the failing
+        checks in `detail`, counted as a skip (see `models._checks`). The manifest records them, and a resume with others raises
+        `ManifestMismatchError`. None, the default, checks nothing.
+
         The run is `_prepare_run` (windows, the plan, the checks, the period frames, the masks, the store and its manifest, the
         pending tasks and the skips decided before any fit), `_execute` (the pool) and `_finish_run` (counts, the ref).
         """
@@ -919,6 +933,7 @@ class BaseModel(ABC):
             issue_days,
             checked,
             save_coefficients=save_coefficients,
+            checks=checks,
         )
         try:
             self._execute(state)
@@ -952,6 +967,7 @@ class BaseModel(ABC):
         save_coefficients: bool = True,
         writer: Optional[StoreWriter] = None,
         fit_path: Optional[str] = None,
+        checks: Optional["ForecastChecks"] = None,
     ) -> "_RunState":
         """Everything of `run` before the pool, for its arguments: the windows, the plan (or its check), the inputs' check
         (`checked` if it was found for this run, else `_check_inputs`), the period frames (`periods` if given: read once by
@@ -1176,6 +1192,8 @@ class BaseModel(ABC):
                     chained_inputs=getattr(self, "_chained_record", None),
                     scikit_learn=self._scikit_learn_version,
                 )
+                if checks is not None:  # step 8f: compared on resume, no key without them
+                    manifest.checks = checks.to_dict()
 
                 def check_stored():
                     check_stored_lists(
@@ -1267,6 +1285,8 @@ class BaseModel(ABC):
                 skip_examples={},
                 skip_record=self._skip_records(store, first_day, run_positions, plan, expanded),
             )
+            if checks is not None:  # step 8f: each job's forecasts through the checks (`_collect`)
+                state.check_gate = CheckGate(checks, freq, data.index.tz, first_day)
             for task in pending:
                 if (task[0], task[2]) in absent_slots:
                     state.skip(task, SKIP_MISSING_TEST_ROW, f"period {task[0]} on {test_days[task[2]]}", store)
@@ -1302,6 +1322,11 @@ class BaseModel(ABC):
         store = state.store
         windows = state.windows
         plan = state.plan
+        # Step 8f: a member-day still held (none when every task came back), checked, and its writes on file.
+        if state.check_gate is not None:
+            state.check_gate.finish(state, store if store else _MemorySink(state.in_memory))
+            if store:
+                store.flush()
         if store and state.pool_note:
             record_pool_start(manifest_path(store.path), state.manifest, state.pool_note)
         if store:
@@ -1785,7 +1810,11 @@ class BaseModel(ABC):
         self, state: "_RunState", results: List[Dict], skipped: List[Tuple[tuple, str]], sink: "_Sink"
     ) -> None:
         """What a job gave back, into the run: its records through `sink`, then each skipped task counted (per window too) and
-        its skip record through `sink`, with one example per reason."""
+        its skip record through `sink`, with one example per reason. With checks (step 8f) the gate does it, writing each
+        member-day's forecasts once the day is whole and has passed them (`models._checks.CheckGate`)."""
+        if state.check_gate is not None:
+            state.check_gate.collect(state, results, skipped, sink)
+            return
         for result in results:
             sink.save(result)
         for (hour, hz, day), outcome in skipped:
