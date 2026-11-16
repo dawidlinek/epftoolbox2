@@ -795,7 +795,7 @@ PARAM_SCHEMAS: dict[str, list[dict]] = {
         },
         {
             "name": "prefix",
-            "description": "Prefix of the emitted names, joined with _ (blank keeps the archived names)",
+            "description": "Prefix of the emitted names, joined with _ (blank keeps the archived names, whose built-in rules need with_source_rules)",
             "required": False,
             "default": "archive",
             "kind": "text",

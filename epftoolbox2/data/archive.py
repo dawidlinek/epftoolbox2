@@ -26,6 +26,7 @@ a cell and has no value there (NaN, or no row) saw nothing of it. `fetched_at` i
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import hashlib
 import io
@@ -35,18 +36,23 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple, Union
+from urllib.parse import quote, quote_plus
 
 import numpy as np
 import pandas as pd
 
 from epftoolbox2._clock import current_clock
-from epftoolbox2.data.cache_manager import hold_lock, make_file_lock, settled_until_of
+from filelock import Timeout
+
+from epftoolbox2.data.cache_manager import make_file_lock, settled_until_of
 from epftoolbox2.logging import get_logger
 
 logger = get_logger(__name__)
 
 __all__ = [
+    "EXIT_WARNING",
     "ArchiveError",
+    "ArchiveLockedError",
     "Fetch",
     "RecordResult",
     "SecretInArchiveError",
@@ -61,9 +67,12 @@ CATALOG_LOCK = "catalog.lock"
 # The catalog lines' layout; a reader refuses a newer one.
 ARCHIVE_FORMAT = 1
 OK, FAILED, SKIPPED = "ok", "failed", "skipped"
+# `RecordResult.exit_code` when every fetch was written but one asks for a look: no rows, or fewer columns than before.
+EXIT_WARNING = 4
+NO_ROWS = "no rows: a replay reads every day of its range as missing"
 REDACTED = "***"
 # Attribute and environment-variable names whose values are secrets: never written, and refused if a frame or line holds them.
-_SECRET_ATTRIBUTE = re.compile(r"(api_?key|token|secret|password|passwd)", re.IGNORECASE)
+_SECRET_ATTRIBUTE = re.compile(r"(api_?key|token|secret|password|passwd|auth|credential|(^|_)key$)", re.IGNORECASE)
 _SECRET_ENVIRONMENT = re.compile(r"(API_?KEY|TOKEN|SECRET|PASSWORD|PASSWD)$", re.IGNORECASE)
 # Shorter strings aren't searched for: a one-letter test key would refuse every file.
 _SECRET_MIN_LENGTH = 6
@@ -88,11 +97,16 @@ _CATALOG_COLUMNS = [
     "settled_until",
     "config",
     "error",
+    "warnings",
 ]
 
 
 class ArchiveError(ValueError):
     """An archive that can't be read as asked: no catalog, a column in no source or in several, a file that isn't its own."""
+
+
+class ArchiveLockedError(ArchiveError):
+    """The archive's catalog lock wasn't free within `SnapshotArchive.LOCK_TIMEOUT` seconds."""
 
 
 class SecretInArchiveError(ValueError):
@@ -124,24 +138,39 @@ def _plain(value: Any) -> Any:
     return repr(value)
 
 
-def source_secrets(source: Any) -> List[str]:
-    """The secret values a fetch of `source` must never write: its attributes named like a key, token or password (`api_key`
-    first of all), the credentials of a proxy URL, and every environment variable whose name ends so (`ENTSOE_API_KEY`), longest
-    first. Values shorter than 6 characters are left out."""
-    found = set()
-    for name, value in vars(source).items():
-        if not isinstance(value, str) or not value:
-            continue
-        if _SECRET_ATTRIBUTE.search(name):
+def _collect_secrets(name: Any, value: Any, found: set, named: bool) -> None:
+    """The strings of `value` that are secrets: every string under a name like a key, token, password, auth or credentials
+    (at any depth of dicts, lists and tuples), and the user info of a URL under a name ending in "url"."""
+    named = named or bool(_SECRET_ATTRIBUTE.search(str(name)))
+    if isinstance(value, str):
+        if named and value:
             found.add(value)
-        user = _PROXY_USER.match(value) if name.endswith("url") else None
+        user = _PROXY_USER.match(value) if str(name).lower().endswith("url") else None
         if user is not None:
             found.add(user.group(1))
             found.update(part for part in user.group(1).split(":") if part)
+    elif isinstance(value, dict):
+        for key, item in value.items():
+            _collect_secrets(key, item, found, named)
+    elif isinstance(value, (list, tuple, set, frozenset)):
+        for item in value:
+            _collect_secrets(name, item, found, named)
+
+
+def source_secrets(source: Any) -> List[str]:
+    """The secret values a fetch of `source` must never write, longest first: its attributes named like a key, token, password,
+    auth or credentials (`api_key` first of all, also nested in dicts, lists and tuples), the credentials of a URL, and every
+    environment variable whose name ends in API_KEY, TOKEN, SECRET or PASSWORD; each also URL-encoded. Values shorter than 6
+    characters are left out."""
+    found: set = set()
+    for name, value in vars(source).items():
+        _collect_secrets(name, value, found, False)
     for name, value in os.environ.items():
         if _SECRET_ENVIRONMENT.search(name):
             found.add(value)
-    return sorted((value for value in found if len(value) >= _SECRET_MIN_LENGTH), key=lambda v: (-len(v), v))
+    found = {value for value in found if len(value) >= _SECRET_MIN_LENGTH}
+    encoded = {form for value in found for form in (quote(value, safe=""), quote_plus(value, safe=""), quote(value))}
+    return sorted(found | encoded, key=lambda v: (-len(v), v))
 
 
 def _redact(text: str, secrets: Sequence[str]) -> str:
@@ -245,6 +274,13 @@ def _as_returned(frame: Any) -> Tuple[pd.DataFrame, Optional[pd.Timestamp]]:
         frame.index = frame.index.tz_convert("UTC")
     if not all(isinstance(column, str) for column in frame.columns):
         raise TypeError(f"fetch returned column names that aren't strings: {list(frame.columns)[:5]}")
+    if frame.index.has_duplicates:
+        twice = frame.index[frame.index.duplicated()].unique()
+        shown = ", ".join(stamp.isoformat() for stamp in twice[:5]) + (", ..." if len(twice) > 5 else "")
+        raise ValueError(
+            f"the frame holds {len(twice)} duplicated instants ({shown}): refused, as no one value of such a cell can be "
+            "read back"
+        )
     return frame, settled_until
 
 
@@ -300,9 +336,17 @@ class RecordResult:
         return self._with(SKIPPED)
 
     @property
+    def warned(self) -> List[Dict[str, Any]]:
+        """The ok lines with warnings: a fetch with no rows, or with fewer columns than the source's previous one."""
+        return [line for line in self.ok if line.get("warnings")]
+
+    @property
     def exit_code(self) -> int:
-        """0 when no fetch failed, 1 otherwise (what a scheduler should alert on)."""
-        return 1 if self.failed else 0
+        """1 when a fetch failed, else `EXIT_WARNING` (4) when one was written with warnings, else 0: what a scheduler should
+        alert on."""
+        if self.failed:
+            return 1
+        return EXIT_WARNING if self.warned else 0
 
     def summary(self) -> str:
         """One line per source: its key or class, the status, the rows or the error."""
@@ -311,6 +355,7 @@ class RecordResult:
             name = line.get("source") or line.get("class")
             if line["status"] == OK:
                 detail = f"{line['rows']} rows, {line['start']} to {line['end']}, fetched {line['fetched_at']}"
+                detail += "".join(f"; warning: {warning}" for warning in line.get("warnings") or ())
             else:
                 detail = line.get("error", "")
             out.append(f"{name}: {line['status']} ({detail})")
@@ -346,6 +391,10 @@ class SnapshotArchive:
         >>> archive.first_seen("load_forecast")      # each cell's first fetch with a value
         >>> archive.rewrites("load_forecast")        # the cells whose value changed between fetches
     """
+
+    # Seconds `record` waits for the catalog lock (another recording, or a lock file left by a process that died where the file
+    # system has no flock) before raising `ArchiveLockedError`.
+    LOCK_TIMEOUT = 600.0
 
     def __init__(self, path: Union[str, os.PathLike]):
         self.path = Path(os.path.expanduser(os.fspath(path)))
@@ -402,15 +451,33 @@ class SnapshotArchive:
         data_pipeline._validate_settings()  # binds the market zone to the sources that read it, as run() does
         now = current_clock().now()
         result = RecordResult()
+        previous = self._last_columns()
         for source in data_pipeline.sources:
             zone = _cache_day_zone(source, data_pipeline.timezone) or "UTC"
             start, end = _local_days(now, zone, int(days_back), int(days_ahead))
-            result.lines.append(self._record_one(source, start, end, zone))
+            line = self._record_one(source, start, end, zone, previous)
+            if line["status"] == OK and line["rows"]:
+                previous[line["source"]] = list(line["columns"])
+            result.lines.append(line)
         for line in result.failed:
-            logger.warning(f"Archive: {line['source']} failed: {line['error']}")
+            logger.warning(f"Archive: {line.get('source') or line.get('class')} failed: {line['error']}")
+        for line in result.warned:
+            logger.warning(f"Archive: {line['source']}: {'; '.join(line['warnings'])}")
         return result
 
-    def _record_one(self, source: Any, start: pd.Timestamp, end: pd.Timestamp, zone: str) -> Dict[str, Any]:
+    def _last_columns(self) -> Dict[str, List[str]]:
+        """Each key's columns in its newest ok line with rows, for the warning on a fetch with fewer."""
+        if not self.catalog_path.exists():
+            return {}
+        out: Dict[str, List[str]] = {}
+        for line in self._lines():
+            if line.get("status") == OK and line.get("source") and line.get("rows"):
+                out[line["source"]] = list(line.get("columns") or ())
+        return out
+
+    def _record_one(
+        self, source: Any, start: pd.Timestamp, end: pd.Timestamp, zone: str, previous: Dict[str, List[str]]
+    ) -> Dict[str, Any]:
         from epftoolbox2 import __version__
 
         secrets = source_secrets(source)
@@ -444,12 +511,20 @@ class SnapshotArchive:
             _refuse_secrets_in_frame(frame, secrets, f"The frame {key} returned")
             data = _parquet_bytes(frame)
             _refuse_secrets(data, secrets, f"The frame {key} returned")
+            warnings = []
+            if not len(frame):
+                warnings.append(NO_ROWS)
+            else:
+                missing = [column for column in previous.get(key, ()) if column not in frame.columns]
+                if missing:
+                    warnings.append(f"fewer columns than the previous fetch with rows: missing {missing}")
             line.update(
                 rows=int(len(frame)),
                 columns=list(frame.columns),
                 file=None,
                 sha256=hashlib.sha256(data).hexdigest(),
                 settled_until=_iso(settled_until),
+                warnings=warnings,
             )
         except Exception as exc:  # noqa: BLE001 - one source failing must not stop the others; the line says why
             if line["fetched_at"] is None:
@@ -462,26 +537,107 @@ class SnapshotArchive:
         self._append(line, data, secrets)
         return line
 
+    @contextlib.contextmanager
+    def _locked(self) -> Iterator[None]:
+        """The archive's catalog lock, waited for at most `LOCK_TIMEOUT` seconds of real time (another process holds it)."""
+        path = self.path / CATALOG_LOCK
+        lock = make_file_lock(path)
+        try:
+            lock.acquire(timeout=self.LOCK_TIMEOUT)
+        except Timeout:
+            raise ArchiveLockedError(
+                f"{path} wasn't free within {self.LOCK_TIMEOUT:g} s: another recording into {self.path} is running, or a "
+                "process died holding it where the file system has no flock (then the file stays behind: remove it when "
+                "no recording runs)"
+            ) from None
+        try:
+            yield
+        finally:
+            lock.release()
+
     def _append(self, line: Dict[str, Any], data: Optional[bytes], secrets: Sequence[str]) -> None:
-        """Write the frame (when there is one) under a name of its own, then its catalog line, under the archive's lock."""
+        """Write the frame (when there is one) under a name of its own, then its catalog line, under the archive's lock. A line
+        that can't be written (not JSON, a secret, an OSError) becomes a failed line, so the later sources still run."""
         self.path.mkdir(parents=True, exist_ok=True)
-        with hold_lock(make_file_lock(self.path / CATALOG_LOCK), f"archive {self.path}"):
-            if data is not None:
-                folder = self.path / line["source"]
-                folder.mkdir(exist_ok=True)
-                stem = _utc(line["fetched_at"]).strftime(_FILE_STAMP)
-                name, n = f"{stem}.parquet", 2
-                while (folder / name).exists():  # two fetches of one source at one instant (a clock standing still)
-                    name, n = f"{stem}-{n}.parquet", n + 1
-                line["file"] = f"{line['source']}/{name}"
+        with self._locked():
+            self._cut_torn_tail()
+            try:
+                self._write(line, data, secrets)
+                return
+            except Exception as exc:  # noqa: BLE001 - recorded as a failed line, as a failed fetch is
+                failed = self._as_failed(line, exc, secrets)
+            try:
+                self._write(failed, None, secrets)
+            except Exception as exc:  # noqa: BLE001 - nothing more can be written for this source; the result says so
+                failed["error"] += f"; the line couldn't be written either ({type(exc).__name__})"
+                failed["written"] = False
+            line.clear()
+            line.update(failed)
+
+    def _write(self, line: Dict[str, Any], data: Optional[bytes], secrets: Sequence[str]) -> None:
+        if data is not None:
+            folder = self.path / line["source"]
+            folder.mkdir(exist_ok=True)
+            stem = _utc(line["fetched_at"]).strftime(_FILE_STAMP)
+            name, n = f"{stem}.parquet", 2
+            while (folder / name).exists():  # two fetches of one source at one instant (a clock standing still)
+                name, n = f"{stem}-{n}.parquet", n + 1
+            line["file"] = f"{line['source']}/{name}"
+        try:
             text = json.dumps(line, sort_keys=False, allow_nan=False) + "\n"
             _refuse_secrets(text.encode(), secrets, f"The catalog line of {line['source']}")
-            if data is not None:
-                _write_durably(self.path / line["file"], data)
-            with open(self.catalog_path, "a", encoding="utf-8") as handle:
-                handle.write(text)
-                handle.flush()
-                os.fsync(handle.fileno())
+        except Exception:
+            line.pop("file", None)
+            raise
+        if data is not None:
+            _write_durably(self.path / line["file"], data)
+        with open(self.catalog_path, "a", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+
+    @staticmethod
+    def _as_failed(line: Dict[str, Any], exc: BaseException, secrets: Sequence[str]) -> Dict[str, Any]:
+        """`line` as a failed line: its identity and range, the error (redacted), and its config only when that can be written."""
+        keep = ("format", "source", "class", "started_at", "fetched_at", "start", "end", "day_zone")
+        failed = {name: line[name] for name in keep if name in line}
+        failed["status"] = FAILED
+        failed["error"] = _redact(f"{type(exc).__name__}: {exc}", secrets)
+        config = line.get("config")
+        try:
+            _refuse_secrets(json.dumps(config, allow_nan=False).encode(), secrets, "config")
+        except (ValueError, TypeError):
+            config = None
+        failed["config"] = config
+        failed["epftoolbox2"] = line.get("epftoolbox2")
+        return failed
+
+    def _cut_torn_tail(self) -> None:
+        """Cut a torn last line (a crash while appending) off the catalog, so the next line starts on a line of its own."""
+        try:
+            handle = open(self.catalog_path, "rb+")
+        except FileNotFoundError:
+            return
+        with handle:
+            size = handle.seek(0, os.SEEK_END)
+            if size == 0:
+                return
+            handle.seek(size - 1)
+            if handle.read(1) == b"\n":
+                return
+            end = size
+            while end > 0:  # back to the last newline, a block at a time
+                begin = max(0, end - 65536)
+                handle.seek(begin)
+                found = handle.read(end - begin).rfind(b"\n")
+                if found >= 0:
+                    end = begin + found + 1
+                    break
+                end = begin
+            logger.warning(f"Archive: cut a torn last line ({size - end} bytes) off {self.catalog_path}")
+            handle.truncate(end)
+            handle.flush()
+            os.fsync(handle.fileno())
 
     # -- reading ----------------------------------------------------------------------------------------------------------
 
@@ -526,6 +682,7 @@ class SnapshotArchive:
         )
         for name in ("started_at", "fetched_at", "start", "end", "settled_until"):
             table[name] = pd.to_datetime(table[name], utc=True)
+        table["warnings"] = [list(value) if isinstance(value, list) else [] for value in table["warnings"]]
         return table
 
     def keys(self) -> List[str]:
@@ -553,7 +710,9 @@ class SnapshotArchive:
     def fetches(self, source: str) -> List[Fetch]:
         """The ok fetches of one source (a key or a class name with one key), ordered by when they returned and then by the
         order written."""
-        lines = self._lines()
+        return self._fetches(source, self._lines())
+
+    def _fetches(self, source: str, lines: List[Dict[str, Any]]) -> List[Fetch]:
         key = self._resolve(source, lines)
         out = []
         for order, line in enumerate(lines):
@@ -574,21 +733,22 @@ class SnapshotArchive:
         out.sort(key=lambda fetch: (fetch.fetched_at, fetch.order))
         return out
 
-    def read(self, fetch: Fetch) -> pd.DataFrame:
-        """The frame of one fetch as stored, its bytes checked against the catalog's sha256."""
+    def read(self, fetch: Fetch, columns: Optional[List[str]] = None) -> pd.DataFrame:
+        """The frame of one fetch as stored (only `columns`, when given), its file's bytes checked against the catalog's
+        sha256 first."""
         data = (self.path / fetch.file).read_bytes()
         if hashlib.sha256(data).hexdigest() != fetch.sha256:
             raise ArchiveError(f"{self.path / fetch.file} doesn't match the sha256 its catalog line recorded")
-        frame = pd.read_parquet(io.BytesIO(data))
+        frame = pd.read_parquet(io.BytesIO(data), columns=columns)
         if not isinstance(frame.index, pd.DatetimeIndex) or frame.index.tz is None:
             raise ArchiveError(f"{self.path / fetch.file} isn't indexed by UTC instants")
         return frame
 
-    def _key_of_column(self, column: str, source: Optional[str]) -> str:
+    def _key_of_column(self, column: str, source: Optional[str], lines: List[Dict[str, Any]]) -> str:
         if source is not None:
-            return self.resolve(source)
+            return self._resolve(source, lines)
         holders = []
-        for line in self._lines():
+        for line in lines:
             if line.get("status") == OK and column in (line.get("columns") or ()) and line["source"] not in holders:
                 holders.append(line["source"])
         if len(holders) == 1:
@@ -601,12 +761,13 @@ class SnapshotArchive:
         """Every value `column` had in a fetch: one row per (cell, fetch) with a value, inside the range the fetch asked for,
         with `instant` (the cell, UTC), `fetched_at` and `value`, ordered by cell and then by fetch. `source` names the source
         when several hold the column."""
-        key = self._key_of_column(column, source)
+        lines = self._lines()  # once per call
+        key = self._key_of_column(column, source, lines)
         instants, fetched, order, values = [], [], [], []
-        for fetch in self.fetches(key):
+        for fetch in self._fetches(key, lines):
             if column not in fetch.columns:
                 continue
-            series = self.read(fetch)[column]
+            series = self.read(fetch, columns=[column])[column]
             series = series[(series.index >= fetch.start) & (series.index < fetch.end)].dropna()
             if series.index.has_duplicates:
                 raise ArchiveError(f"{self.path / fetch.file} holds {column!r} twice for one instant")

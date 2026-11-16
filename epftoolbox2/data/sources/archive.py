@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import bisect
 import os
+import warnings
 from typing import Any, Dict, List, Optional
 
 import numpy as np
@@ -67,6 +68,7 @@ class ArchiveSource(DataSource):
         self.columns = columns
         self.prefix = prefix
         self._validate_config()
+        self._warned = False
 
     def _validate_config(self) -> bool:
         from ...information_set import _check_zone, _parse_time  # the information set imports the sources
@@ -123,6 +125,15 @@ class ArchiveSource(DataSource):
         """The names of the columns `fetch` returns, prefix included. Without `columns` the archive's catalog says them."""
         return [self._named(column) for column in self._archived_columns()]
 
+    def _names_with_built_in_rules(self, names: Optional[List[str]] = None) -> List[str]:
+        """The emitted names a bare `InformationSet()` gives a built-in rule (exact or a pattern, such as `*_price_exaa`): rules
+        of the live API, which would judge the archive's values where `with_source_rules` didn't put this source's rule first."""
+        from ...information_set import InformationSet  # the information set imports the sources
+
+        bare = InformationSet()
+        names = self.column_names() if names is None else names
+        return [name for name in names if bare.resolve(name).layer == "defaults"]
+
     def availability(self):
         """The rule of every column it emits: published at `known_at` in `timezone` on the day `days_before` before the
         delivery day, a date of `timezone`; its archive is a snapshot (one value per cell, as fetched by then)."""
@@ -157,6 +168,11 @@ class ArchiveSource(DataSource):
 
     # -- the replay ---------------------------------------------------------------------------------------------------------
 
+    @staticmethod
+    def _reaches(fetch: Fetch, lo: pd.Timestamp, hi: pd.Timestamp) -> bool:
+        """Whether `fetch` asked for any of [lo, hi)."""
+        return fetch.end > lo and fetch.start < hi
+
     def _midnight(self, day: pd.Timestamp) -> pd.Timestamp:
         return day.tz_localize(self.timezone, ambiguous=True, nonexistent="shift_forward").tz_convert("UTC")
 
@@ -167,7 +183,25 @@ class ArchiveSource(DataSource):
         archive = self._archive()
         fetches = archive.fetches(self.source)
         wanted = self._archived_columns(fetches)
+        names = [self._named(column) for column in wanted]
+        if not self._warned:
+            self._warned = True
+            ruled = self._names_with_built_in_rules(names)
+            if ruled:
+                warnings.warn(
+                    f"ArchiveSource({self.source!r}): {ruled} have a built-in rule of the live API, which would judge the "
+                    f"archive's values, chosen as fetched by {self.known_at} {self.timezone} {self.days_before} day(s) before "
+                    "each delivery day, unless the information set puts this source's rule first: pass "
+                    "information_set.with_source_rules(data_pipeline.sources) (a Workflow does), or a prefix no built-in "
+                    "rule matches",
+                    UserWarning,
+                    stacklevel=2,
+                )
         returned = [fetch.fetched_at for fetch in fetches]
+        # Over the fetches up to each one: the earliest start and the latest end any of them asked for, so a day no older
+        # fetch reaches stops looking.
+        reach_lo = np.minimum.accumulate([fetch.start.value for fetch in fetches]) if fetches else np.array([])
+        reach_hi = np.maximum.accumulate([fetch.end.value for fetch in fetches]) if fetches else np.array([])
         frames: Dict[str, pd.DataFrame] = {}
         pieces = []
         for day in _iter_days(start, end, self.timezone) if end > start else ():
@@ -176,10 +210,14 @@ class ArchiveSource(DataSource):
             if lo >= hi:
                 continue
             open_ranges = [(lo, hi)]  # the parts of the day no fetch by the cut-off has asked for yet
-            for fetch in reversed(fetches[: bisect.bisect_right(returned, self.known_instant(day))]):
+            for j in range(bisect.bisect_right(returned, self.known_instant(day)) - 1, -1, -1):
                 if not open_ranges:
                     break
-                if fetch.end <= lo or fetch.start >= hi:
+                open_lo, open_hi = min(a for a, _ in open_ranges), max(b for _, b in open_ranges)
+                if reach_hi[j] <= open_lo.value or reach_lo[j] >= open_hi.value:
+                    break  # neither this fetch nor an older one asked for what is left of the day
+                fetch = fetches[j]
+                if not self._reaches(fetch, lo, hi):
                     continue
                 taken, rest = [], []
                 for a, b in open_ranges:
@@ -197,7 +235,6 @@ class ArchiveSource(DataSource):
                 frame = frames[fetch.file]
                 for x, y in taken:
                     pieces.append(frame.loc[(frame.index >= x) & (frame.index < y)].reindex(columns=wanted))
-        names = [self._named(column) for column in wanted]
         pieces = [piece for piece in pieces if len(piece)]
         if not pieces:
             return pd.DataFrame(columns=names, index=pd.DatetimeIndex([], tz="UTC"), dtype=float)

@@ -26,7 +26,9 @@ import yaml
 
 from epftoolbox2.clock import FakeClock, use_clock
 from epftoolbox2.data.archive import (
+    EXIT_WARNING,
     ArchiveError,
+    ArchiveLockedError,
     SecretInArchiveError,
     SnapshotArchive,
     _refuse_secrets,
@@ -761,14 +763,16 @@ def test_an_archive_column_s_rule_comes_before_every_other_and_a_rule_naming_it_
     for name in ("load_forecast", "load_forecast_d+1", "load_actual_day_max"):
         with pytest.raises(InformationSetError, match="nothing replaces it"):
             InformationSet("11:45", ZONE, rules={name: Availability.static()}).with_source_rules([source])
-    # Prefixed (the default), its names are its own: no built-in rule names them, so outside with_source_rules they have none.
-    prefixed = ArchiveSource("unused", "EntsoeSource", columns=["load_forecast"])
-    assert prefixed.column_names() == ["archive_load_forecast"]
+    # Prefixed (the default), most names are its own: no built-in rule names them, so outside with_source_rules they have
+    # none. A built-in pattern can still match one: `*_price_exaa` catches `archive_price_exaa`; with_source_rules pins it.
+    prefixed = ArchiveSource("unused", "EntsoeSource", columns=["load_forecast", "price_exaa"])
+    assert prefixed.column_names() == ["archive_load_forecast", "archive_price_exaa"]
     assert plain.resolve("archive_load_forecast").rule is None
-    assert (
-        InformationSet().with_source_rules([prefixed]).resolve("archive_load_forecast_d+1").rule
-        == prefixed.availability()
-    )
+    assert plain.resolve("archive_price_exaa").layer == "defaults"
+    assert prefixed._names_with_built_in_rules() == ["archive_price_exaa"]
+    pinned = InformationSet().with_source_rules([prefixed])
+    for name in ("archive_load_forecast_d+1", "archive_price_exaa_d+1"):
+        assert pinned.resolve(name).rule == prefixed.availability(), name
     # Other sources' columns resolve as before.
     assert info.resolve("price").rule == plain.resolve("price").rule
     # A rule added after with_source_rules would be ignored: the run's checks refuse it.
@@ -908,3 +912,208 @@ def test_secrets_of_a_source_and_the_environment(monkeypatch):
     assert "user:hunter2-pass" in found and "abc" not in found and "/not/a/secret" not in found
     assert "not-a-secret" not in found
     assert json.dumps(found)  # plain strings
+
+
+# --- review round 1 --------------------------------------------------------------------------------------------------------
+
+
+class Plain(DataSource):
+    """A frame of `columns` (each 1.0) over the range asked for, or what `answer(start, end)` gives; its config as given."""
+
+    def __init__(self, config=None, columns=("x",), answer=None, **attributes):
+        self.config = config if config is not None else {"source_type": "plain"}
+        self.columns = list(columns)
+        self.answer = answer
+        for name, value in attributes.items():
+            setattr(self, name, value)
+
+    def _validate_config(self):
+        return True
+
+    def get_cache_config(self):
+        return self.config
+
+    def fetch(self, start, end):
+        if self.answer is not None:
+            return self.answer(start, end)
+        index = pd.date_range(start, end, freq="1h", inclusive="left")
+        return pd.DataFrame({column: 1.0 for column in self.columns}, index=index)
+
+
+def test_a_torn_last_line_is_cut_off_before_the_next_line_is_appended(tmp_path):
+    clock = FakeClock(local("2026-10-24 09:00"))
+    pipeline = DataPipeline(sources=[Plain()], timezone=ZONE)
+    archive = SnapshotArchive(tmp_path)
+    with use_clock(clock):
+        archive.record(pipeline)
+        with open(archive.catalog_path, "a") as handle:
+            handle.write('{"source": "Plain-')  # a crash while appending
+        clock.advance(60)
+        archive.record(pipeline)
+    text = archive.catalog_path.read_text()
+    assert text.endswith("\n") and '{"source": "Plain-\n' not in text and '"Plain-{' not in text
+    assert list(archive.catalog()["status"]) == ["ok", "ok"]
+    assert len(archive.fetches("Plain")) == 2
+
+
+def test_a_line_that_cant_be_written_is_a_failed_line_and_the_later_sources_still_run(tmp_path, monkeypatch):
+    from epftoolbox2.data import archive as module
+
+    monkeypatch.setenv("SOME_SERVICE_TOKEN", "pa ss/w0rd+x")
+    real = module._write_durably
+
+    class Disk(Plain):
+        pass
+
+    def write(path, data):
+        if path.parent.name.startswith("Disk-"):
+            raise OSError("No space left on device")
+        return real(path, data)
+
+    monkeypatch.setattr(module, "_write_durably", write)
+    sources = [
+        Plain({"source_type": "nan", "scale": float("nan")}),  # the line isn't JSON
+        Plain({"source_type": "url", "pa%20ss%2Fw0rd%2Bx": True}),  # a key isn't redacted: the line holds a secret
+        Disk({"source_type": "disk"}),  # the file can't be written
+        Plain({"source_type": "fine"}),
+    ]
+    with use_clock(FakeClock(local("2026-10-24 09:00"))):
+        result = SnapshotArchive(tmp_path).record(DataPipeline(sources=sources, timezone=ZONE))
+    assert [line["status"] for line in result.lines] == ["failed", "failed", "failed", "ok"]
+    assert result.exit_code == 1
+    assert "ValueError" in result.lines[0]["error"] and "secret" in result.lines[1]["error"]
+    assert "No space left" in result.lines[2]["error"]
+    catalog = SnapshotArchive(tmp_path).catalog()
+    assert list(catalog["status"]) == ["failed", "failed", "failed", "ok"]
+    assert list(tmp_path.rglob("*.parquet")) == [tmp_path / result.lines[3]["file"]]
+    assert b"pa%20ss" not in every_byte(tmp_path) and b"pa ss/w0rd" not in every_byte(tmp_path)
+
+
+def test_an_emitted_name_with_a_built_in_rule_warns_when_read(week):
+    path, _, _ = week
+    span = (local("2026-10-22 00:00"), local("2026-10-23 00:00"))
+    with pytest.warns(UserWarning, match="load_forecast.*built-in rule"):
+        ArchiveSource(path, "EntsoeSource", columns=["load_forecast"], prefix="").fetch(*span)
+    import warnings
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        ArchiveSource(path, "EntsoeSource", columns=["load_forecast"]).fetch(*span)  # archive_load_forecast: none
+    # A pattern counts too: `*_price_exaa` is a built-in rule of the live API, and catches `archive_price_exaa`.
+    exaa = ArchiveSource("unused", "EntsoeSource", columns=["price_exaa"])
+    assert exaa._names_with_built_in_rules() == ["archive_price_exaa"]
+
+
+def test_an_empty_fetch_and_a_fetch_missing_columns_are_warnings_with_their_own_exit_code(tmp_path):
+    calls = {"n": 0}
+
+    def answer(start, end):
+        calls["n"] += 1
+        index = pd.date_range(start, end, freq="1h", inclusive="left")
+        if calls["n"] == 2:
+            return pd.DataFrame()  # an outage answered as "no data"
+        if calls["n"] == 3:
+            return pd.DataFrame({"x": 1.0}, index=index)  # y is gone
+        return pd.DataFrame({"x": 1.0, "y": 2.0}, index=index)
+
+    pipeline = DataPipeline(sources=[Plain(answer=answer)], timezone=ZONE)
+    clock = FakeClock(local("2026-10-24 09:00"))
+    results = []
+    with use_clock(clock):
+        for _ in range(4):
+            results.append(SnapshotArchive(tmp_path).record(pipeline))
+            clock.advance(60)
+    assert [r.exit_code for r in results] == [0, EXIT_WARNING, EXIT_WARNING, 0]
+    assert results[1].warned[0]["warnings"] == ["no rows: a replay reads every day of its range as missing"]
+    assert "fewer columns than the previous fetch with rows: missing ['y']" in results[2].warned[0]["warnings"][0]
+    assert "warning" in results[1].summary()
+    assert list(SnapshotArchive(tmp_path).catalog()["warnings"].map(len)) == [0, 1, 1, 0]
+
+
+def test_reading_a_column_reads_that_column_and_the_catalog_once(tmp_path, monkeypatch):
+    with use_clock(FakeClock(local("2026-10-24 09:00"))) as clock:
+        for _ in range(3):
+            SnapshotArchive(tmp_path).record(DataPipeline(sources=[Plain(columns=["x", "y"])], timezone=ZONE))
+            clock.advance(60)
+    archive = SnapshotArchive(tmp_path)
+    asked, lines = [], {"n": 0}
+    read_parquet, read_lines = pd.read_parquet, SnapshotArchive._lines
+    monkeypatch.setattr(pd, "read_parquet", lambda *a, **k: asked.append(k.get("columns")) or read_parquet(*a, **k))
+
+    def counted(self):
+        lines["n"] += 1
+        return read_lines(self)
+
+    monkeypatch.setattr(SnapshotArchive, "_lines", counted)
+    for method in (archive.observations, archive.first_seen, archive.rewrites):
+        asked.clear()
+        lines["n"] = 0
+        method("y")
+        assert asked == [["y"]] * 3 and lines["n"] == 1, method.__name__
+
+
+def test_days_no_fetch_reaches_look_at_no_fetch(week, monkeypatch):
+    path, _, _ = week
+    looked = {"n": 0}
+    reaches = ArchiveSource._reaches
+
+    def counted(fetch, lo, hi):
+        looked["n"] += 1
+        return reaches(fetch, lo, hi)
+
+    monkeypatch.setattr(ArchiveSource, "_reaches", staticmethod(counted))
+    source = ArchiveSource(path, "EntsoeSource", columns=["load_forecast"], known_at="23:00", days_before=-30)
+    frame = source.fetch(local("2026-09-01 00:00"), local("2026-10-01 00:00"))  # read a month after, before the archive
+    assert frame.empty and looked["n"] == 0
+
+
+def test_a_frame_with_a_duplicated_instant_is_refused_at_record(tmp_path):
+    def answer(start, end):
+        index = pd.date_range(start, periods=3, freq="1h")
+        return pd.DataFrame({"x": [1.0, 2.0, 3.0]}, index=index.append(index[1:2]).sort_values()[:3])
+
+    with use_clock(FakeClock(local("2026-10-24 09:00"))):
+        result = SnapshotArchive(tmp_path).record(DataPipeline(sources=[Plain(answer=answer)], timezone=ZONE))
+    assert result.exit_code == 1 and "duplicated instants" in result.failed[0]["error"]
+    assert "2026-10-20T23:00:00+00:00" in result.failed[0]["error"]
+    assert not list(tmp_path.rglob("*.parquet"))
+
+
+def test_nested_and_otherwise_named_secrets_and_their_url_encoded_forms(monkeypatch):
+    for name in list(os.environ):
+        if name.upper().endswith(("API_KEY", "TOKEN", "SECRET", "PASSWORD", "PASSWD", "APIKEY")):
+            monkeypatch.delenv(name)
+    source = Plain(
+        settings={"auth": {"user": "me", "token": "nested-tok-1"}, "headers": [{"Authorization": "Bearer xyz-123456"}]},
+        key="plain-key-12",
+        credentials="cred-value-9",
+        auth=("someone", "auth-pass-7"),  # everything under an auth name, the user too
+    )
+    found = source_secrets(source)
+    for secret in ("nested-tok-1", "Bearer xyz-123456", "plain-key-12", "cred-value-9", "auth-pass-7"):
+        assert secret in found, secret
+    assert "someone" in found and "me" not in found  # too short to search for
+    odd = Plain(api_key="a b/c+d=e&f")
+    with pytest.raises(SecretInArchiveError):
+        _refuse_secrets(b"...api_key=a%20b%2Fc%2Bd%3De%26f...", source_secrets(odd), "f")
+    with pytest.raises(SecretInArchiveError):
+        _refuse_secrets(b"...api_key=a+b%2Fc%2Bd%3De%26f...", source_secrets(odd), "f")
+
+
+def test_a_stale_lock_file_raises_naming_it_instead_of_hanging(tmp_path, monkeypatch):
+    from filelock import SoftFileLock
+
+    from epftoolbox2.data import archive as module
+
+    monkeypatch.setattr(module, "make_file_lock", lambda path: SoftFileLock(str(path)))
+    monkeypatch.setattr(SnapshotArchive, "LOCK_TIMEOUT", 0.2)
+    (tmp_path / "catalog.lock").write_text("")  # left by a process that died
+    with use_clock(FakeClock(local("2026-10-24 09:00"))):
+        with pytest.raises(ArchiveLockedError, match="catalog.lock"):
+            SnapshotArchive(tmp_path).record(DataPipeline(sources=[Plain()], timezone=ZONE))
+
+
+def test_a_pattern_of_yours_that_matches_an_archive_column_warns():
+    source = ArchiveSource("unused", "EntsoeSource", columns=["load_forecast"], prefix="")
+    with pytest.warns(UserWarning, match="load_\\*.*load_forecast"):
+        InformationSet("11:45", ZONE, rules={"load_*": Availability.static()}).with_source_rules([source])

@@ -820,7 +820,8 @@ def _built_in_rules() -> Dict[str, Availability]:
         ),
         # The EXAA auction (EntsoeSource(price_exaa=True), AT and DE_LU): see `_EXAA_RULE`.
         "price_exaa": _EXAA_RULE_VIENNA,
-        # Prefixed, as AT and DE_LU need to be told apart (`de_price_exaa`): a bare InformationSet has no source rules.
+        # Prefixed, as AT and DE_LU need to be told apart (`de_price_exaa`): a bare InformationSet has no source rules. It also
+        # matches an ArchiveSource's `archive_price_exaa`, which only `with_source_rules` gives the archive's own rule.
         "*_price_exaa": _EXAA_RULE_VIENNA,
         # ENTSO-E keeps the newest value of these only: A65 was revised after the gate on 22 of 42 days measured.
         "load_actual": Availability.realised(
@@ -1400,7 +1401,24 @@ class InformationSet:
         out._pinned = {**self._pinned, **archive_columns(sources)}
         out.refuse_rules_on_chained_columns()
         out.refuse_rules_on_archive_columns()
+        out._warn_of_patterns_on_archive_columns()
         return out
+
+    def _warn_of_patterns_on_archive_columns(self) -> None:
+        """A warning for each pattern in `rules` that matches a column an `ArchiveSource` replays: the archive's rule comes
+        first, so the pattern says nothing about that column, also where it is stricter."""
+        for key in self.rules:
+            if not any(ch in key for ch in "*?["):
+                continue
+            matched = sorted(column for column in self._pinned if fnmatch.fnmatchcase(column, key))
+            if matched:
+                warnings.warn(
+                    f"rules={{{key!r}: ...}} matches {matched}, replayed by an ArchiveSource: their rule is the archive's, "
+                    "which comes first, so the pattern is ignored for them (ArchiveSource(known_at=, days_before=) states "
+                    "another time)",
+                    UserWarning,
+                    stacklevel=3,
+                )
 
     def refuse_rules_on_archive_columns(self) -> None:
         """`InformationSetError` for a rule in `rules` that names a column an `ArchiveSource` replays, through its shifts,
