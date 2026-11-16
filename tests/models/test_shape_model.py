@@ -892,6 +892,29 @@ def test_the_learner_s_settings_are_the_model_s_and_set_on_the_learner():
     assert not model._engine_capable() and model._worker_model()[0] is OLSModel
 
 
+def test_the_learner_s_refit_from_is_the_model_s(frame, tmp_path):
+    """The learner's `refit_from` counts the ShapeModel's refit calendar: `"7D"` from Wednesday 22 March anchors 23 to 28 March
+    on it (not on Monday 27 March), the manifest records it, and a `"once"` learner runs and is `"60D"` from the same date."""
+    F = "2023-03-22"
+
+    def learner(refit):
+        return OLSModel(REGRESSORS, training_window=21, refit=refit, refit_from=F, fit_intercept=True)
+
+    weekly = ShapeModel(BASE, learner("7D"), min_native_days=1)
+    assert weekly.refit_from == F and weekly._refit_rules == (f"7D@{F}",)
+    with pytest.raises(ValueError, match="set it on the learner"):
+        weekly.refit_from = "2023-03-23"
+    path = tmp_path / "shape.jsonl"
+    quiet_run(weekly, frame, *DAYS, horizon=1, save_to=str(path))
+    records = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    assert len(records) > 6 * 90 and {r["refit_anchor"] for r in records} == {F}
+    assert json.loads(path.with_name("shape.manifest.json").read_text())["training_cut"]["refit_epoch"] == F
+    once = quiet_run(ShapeModel(BASE, learner("once"), min_native_days=1), frame, *DAYS, horizon=2)._results
+    block = quiet_run(ShapeModel(BASE, learner("60D"), min_native_days=1), frame, *DAYS, horizon=2)._results
+    as_text = {key: json.dumps(record, sort_keys=True) for key, record in by_key(once).items()}
+    assert once and as_text == {key: json.dumps(record, sort_keys=True) for key, record in by_key(block).items()}
+
+
 class DayLearner(OLSModel):
     _unit_kind = "day"
 

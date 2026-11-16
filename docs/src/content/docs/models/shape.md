@@ -62,13 +62,13 @@ shows the whole chain with its checks.
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `base` | str | Required | The column of the hourly forecast on every quarter-hour of its hour, `{horizon}` allowed: a chained column, such as `price_1h_fc_d+{horizon}` from a `ForecastSource` stepped by `ResampleTransformer` and lagged by `LagTransformer`. Read on the issue row only |
-| `learner` | model | Required | The model of the deviation, such as `OLSModel(shape_x, training_window=182, fit_intercept=True)`: its estimator, predictors (a list of names, `{horizon}` allowed), `training_window`, `refit`, `scaler`, `newest_target` and `binary_mask` |
+| `learner` | model | Required | The model of the deviation, such as `OLSModel(shape_x, training_window=182, fit_intercept=True)`: its estimator, predictors (a list of names, `{horizon}` allowed), `training_window`, `refit`, `refit_from`, `scaler`, `newest_target` and `binary_mask` |
 | `period` | str | `"1h"` | Keyword-only. The period whose mean the shape is taken from: the hour |
 | `native` | str or date | `"distinct"` | Keyword-only. Which target dates train: `"distinct"`, a date where some hour has quarter-hours that aren't all equal; or the first natively 15-minute date, such as `"2025-10-01"`, and the dates after it |
 | `min_native_days` | int or None | `None` | Keyword-only. The fewest native target dates a fit may train on, counted in its window from the first native date on: a forecast whose fit has fewer is skipped as `too_few_native_days`. `None` is each window's own length (an `"expanding"` window has no minimum); `0` skips nothing |
 | `name` | str | `"Shape"` | Keyword-only. The model's name, which names its results |
 
-The learner's settings are the model's: `shape.training_window`, `shape.refit` and the others read the learner's, and are set on
+The learner's settings are the model's: `shape.training_window`, `shape.refit`, `shape.refit_from` and the others read the learner's, and are set on
 the learner. A ShapeModel runs at `freq="15min"` only.
 
 ## What the learner trains on
