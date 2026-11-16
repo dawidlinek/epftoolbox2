@@ -348,7 +348,10 @@ class EvaluationReport:
         Each model is judged on its own days, so a model missing a period loses that day (or hour) and no other model does.
         Dropped days are counted, never lost silently: `forecast_counts()` of the new report has them as `missing` and under
         `incomplete_day` (`incomplete_hour` at `"1h"`), and a warning names the models. `planned` there is the days (hours)
-        with any forecast, so days without a single forecast are in the first report's `forecast_counts()`.
+        with any forecast, so days without a single forecast are in the first report's `forecast_counts()`. A day that failed
+        checks before export has no forecast to aggregate, so it is in no count of days; its model keeps the first report's
+        `check_failed` count (of forecasts, not days) in `skipped`, outside `missing`, so the comparison tables of the new
+        report still say that those days are out of their common keys.
 
         The evaluators carry over, except `EconomicEvaluator` at `"1D"` (a schedule needs the periods of a day), and the
         evaluators that read source-data columns (`ScaledMAEEvaluator`), which are left out with a warning: the new report
@@ -438,7 +441,12 @@ class EvaluationReport:
                 freq=freq,
                 _results=records,
                 produced=len(records),
-                skipped={_INCOMPLETE[freq]: missing},
+                # A day that failed checks before export is in no aggregated day, so not in `missing`: its count (of forecasts)
+                # carries over alone, for the comparison tables' flag (`_flag_check_failed`).
+                skipped={
+                    _INCOMPLETE[freq]: missing,
+                    **({CHECK_FAILED: ref.skipped[CHECK_FAILED]} if (ref.skipped or {}).get(CHECK_FAILED) else {}),
+                },
                 availability_listing=ref.availability_listing,
                 vintages=ref.vintages,
                 provenance=ref.provenance,
