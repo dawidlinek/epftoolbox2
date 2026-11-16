@@ -1138,10 +1138,29 @@ def test_the_newest_target_of_a_period_is_capped_at_the_hours_its_lagged_twin_re
     model = ramp_model()
     k = np.full((96, 2), -1, dtype=np.int64)
     k[95, 0] = -4  # the last quarter-hour of 23:00 is known to the day before yesterday's target on the first issue day
-    k[8, 1] = -3  # 02:00 on the second
+    k[8:, 1] = -3  # from 02:00 on the second day
     capped = model._capped_by_lag(k, pd.Timedelta(hours=1))
     assert capped[0:4, 0].tolist() == [-3] * 4  # 00:00-00:59 reads 23:00 of the day before: -4 + 1
     assert capped[4:92, 0].tolist() == [-1] * 88 and capped[92:96, 0].tolist() == [-1, -1, -1, -4]  # its own
-    assert capped[12:16, 1].tolist() == [-3] * 4  # 03:00 reads 02:00, whose quarter-hours are -3, -1, -1 and -1
-    assert capped[8:12, 1].tolist() == [-3, -1, -1, -1] and capped[0:4, 1].tolist() == [-1] * 4
-    assert k[95, 0] == -4 and k[8, 1] == -3 and (k == -1).sum() == 2 * 96 - 2  # the input is left as it was
+    assert (
+        capped[0:4, 1].tolist() == [-2] * 4
+        and capped[4:8, 1].tolist() == [-1] * 4
+        and capped[8:, 1].tolist() == [-3] * 88
+    )  # 03:00 reads 02:00: -3, and its own
+    assert (
+        k[95, 0] == -4 and (k[:, 1] == np.where(np.arange(96) >= 8, -3, -1)).all() and (k[:95, 0] == -1).all()
+    )  # untouched
+
+
+def test_a_newest_target_that_rises_with_the_period_falls_back_to_the_stricter_cap():
+    """The cap by wall-clock periods is safe only where `k` doesn't rise with the period within a date (true of every rule today:
+    a later period is known no earlier): an hour that an elapsed lag lands on instead, across a clock change, then has a `k` no newer
+    than the period's own. A `k` that does rise (`k[8:12] > k[4:8]`) takes the oldest of its day for every period."""
+    model = ramp_model()
+    k = np.full((96, 2), -1, dtype=np.int64)
+    k[4:8, 0] = -3
+    k[8:12, 0] = -1  # rises: the guard's case
+    k[:, 1] = np.where(np.arange(96) < 8, -1, -2)  # falls: the usual cap
+    capped = model._capped_by_lag(k, pd.Timedelta(hours=1))
+    assert (capped[:, 0] == -3).all()
+    assert capped[:8, 1].tolist() == [-1] * 8 and capped[8:, 1].tolist() == [-2] * 88

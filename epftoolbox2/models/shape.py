@@ -688,7 +688,10 @@ class ShapeModel(BaseModel):
                 hour_first = (in_day // 60) * 60 // step
                 for q in range(hour_first, hour_first + 60 // step):
                     out[p] = np.minimum(out[p], k[q] - days_back)
-        return out
+        # The periods are the wall clock's, an elapsed lag on a clock-change day lands an hour off them, and that is covered only
+        # while a later period's `k` is no newer than an earlier one's (every rule today): where it isn't, the oldest of the day.
+        rising = (np.diff(k, axis=0) > 0).any(axis=0)
+        return np.where(rising[None, :], np.minimum(out, k.min(axis=0)[None, :]), out)
 
     # -- the checks ----------------------------------------------------------------------------------------------------------
 
