@@ -173,7 +173,16 @@ def test_every_setting_reaches_the_workers(cls):
     (and `weights`, there only when set) must be in it, or a worker would fit with its default."""
     import inspect
 
-    parent_side = {"predictors", "training_window", "refit", "name", "scaler", "newest_target", "binary_mask"}
+    parent_side = {
+        "predictors",
+        "training_window",
+        "refit",
+        "refit_from",
+        "name",
+        "scaler",
+        "newest_target",
+        "binary_mask",
+    }
     parent_side |= {"normalise_by", "bounds", "zero_when", "block_predict", "weights"}
     assert set(cls(INPUTS)._model_kwargs) == set(inspect.signature(cls).parameters) - parent_side
     again = cls(

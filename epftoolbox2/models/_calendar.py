@@ -253,6 +253,8 @@ def check_binary_mask(value: Any, refit: Optional[str] = None) -> Optional[str]:
 # Refit anchors count from here: a Monday, so that "7D" refits on Mondays. Never move it: every anchor would move with it.
 _EPOCH = datetime.date(1970, 1, 5)
 REFIT_EPOCH = _EPOCH.isoformat()
+# "kMS" counts months from January 1970.
+_MONTH_EPOCH = datetime.date(1970, 1, 1)
 _REFIT_RULE = re.compile(r"([1-9][0-9]*)(D|MS)")
 
 # `refit="auto"`: each training window refits on its own rule (`member_rules`), daily up to `AUTO_DAILY_UP_TO` days and weekly beyond
@@ -263,42 +265,136 @@ REFIT_AUTO = "auto"
 AUTO_DAILY_UP_TO = 84
 AUTO_SHORT_RULE, AUTO_LONG_RULE = "1D", "7D"
 
+# `refit="once"` (with `refit_from=F`): one fit on F, trained as a forecast issued on F, serves every forecast issued on F or later;
+# a forecast issued before F has no such fit and raises. A model that predicts a block in one call (`_predict_block`, day and
+# pooled units) calls it on stretches of `ONCE_CALL_DAYS` days counted from F, each padded to that length as a "7D" block is, so
+# a call's shape and rows depend on the issue day and F alone, never on where a run ends.
+REFIT_ONCE = "once"
+ONCE_CALL_DAYS = 7
+# A resolved rule names the date its blocks count from after this mark (`resolved_rule`): `"7D@2024-01-03"`, `"once@2024-01-01"`.
+# A rule without it counts from the epochs above, so a model without `refit_from` resolves to the rule as written.
+_FROM = "@"
+
 
 def check_refit(value: Any) -> Optional[str]:
-    """`value` if it is None (a fit per forecast), `"kD"` or `"kMS"` with a whole k from 1, or `"auto"` (a rule per training
-    window, `member_rules`), else a ValueError."""
-    if value is None or value == REFIT_AUTO:
+    """`value` if it is None (a fit per forecast), `"kD"` or `"kMS"` with a whole k from 1, `"auto"` (a rule per training
+    window, `member_rules`) or `"once"` (one fit on `refit_from`), else a ValueError."""
+    if value is None or value == REFIT_AUTO or value == REFIT_ONCE:
         return value
     if not isinstance(value, str) or _REFIT_RULE.fullmatch(value) is None:
         raise ValueError(
-            f"refit must be None, 'kD' or 'kMS' with a whole k from 1, such as '7D' or '1MS', or 'auto', got {value!r}: None "
-            "fits every forecast on its own, '7D' once every 7 days and '1MS' on the first of every month, counted from Monday "
-            f"{REFIT_EPOCH}, and 'auto' a window of up to {AUTO_DAILY_UP_TO} days daily and a longer or 'expanding' one weekly"
+            f"refit must be None, 'kD' or 'kMS' with a whole k from 1, such as '7D' or '1MS', 'auto' or 'once', got {value!r}: "
+            "None fits every forecast on its own, '7D' once every 7 days and '1MS' on the first of every month, counted from "
+            f"Monday {REFIT_EPOCH} (or from refit_from), 'auto' a window of up to {AUTO_DAILY_UP_TO} days daily and a longer or "
+            "'expanding' one weekly, and 'once' one fit on refit_from for every forecast issued on it or later"
         )
     return value
 
 
-def member_rules(members: Sequence[Any], refit: Optional[str]) -> Tuple[Optional[str], ...]:
+def check_refit_from(value: Any) -> Optional[str]:
+    """`value` as an ISO date text if it is None, a `datetime.date` (not a datetime) or a `"YYYY-MM-DD"` text, else a ValueError.
+
+    `refit_from` is a local calendar date of the frame's zone, as an issue day is: the date the refit blocks count from."""
+    if value is None:
+        return None
+    if isinstance(value, datetime.date) and not isinstance(value, datetime.datetime):
+        return value.isoformat()
+    if isinstance(value, str):
+        try:
+            parsed = datetime.date.fromisoformat(value)
+        except ValueError:
+            parsed = None
+        if parsed is not None and parsed.isoformat() == value:
+            return value
+    raise ValueError(
+        f"refit_from must be None, a datetime.date or a 'YYYY-MM-DD' text, got {value!r}: the local date the refit blocks "
+        "count from, such as '2024-01-01'"
+    )
+
+
+def check_refit_pair(refit: Optional[str], refit_from: Optional[str]) -> None:
+    """A ValueError where `refit` and `refit_from` (both checked alone) don't go together: `refit_from` without `refit`, `"once"`
+    without `refit_from`, or `"kMS"` from a date that isn't the first of a month. Checked when a run resolves the rules
+    (`member_rules`), since a model's constructor may set the two in either order."""
+    if refit_from is None:
+        if refit == REFIT_ONCE:
+            raise ValueError(
+                "refit='once' needs refit_from: the date of the one fit, which trains as a forecast issued on it would (rows up "
+                "to the day before it) and serves every forecast issued on it or later"
+            )
+        return
+    if refit is None:
+        raise ValueError(
+            f"refit_from={refit_from!r} needs refit: it is the date the refit blocks count from, and refit=None fits every "
+            "forecast on its own. Give refit='once' for one fit on that date, or a rule such as '7D'"
+        )
+    if refit not in (REFIT_AUTO, REFIT_ONCE) and refit.endswith("MS") and refit_from[8:] != "01":
+        raise ValueError(
+            f"refit={refit!r} refits on the first of a month, so refit_from must be one, got {refit_from!r}"
+        )
+
+
+def resolved_rule(refit: Optional[str], refit_from: Optional[str]) -> Optional[str]:
+    """A rule as the calendar reads it: `refit` itself, or with `refit_from` the rule counted from that date (`"7D@2024-01-03"`)."""
+    if refit is None or refit_from is None:
+        return refit
+    return f"{refit}{_FROM}{refit_from}"
+
+
+def rule_name(rule: Optional[str]) -> Optional[str]:
+    """The rule as a model's `refit` names it, without the date a resolved rule counts from."""
+    return None if rule is None else rule.partition(_FROM)[0]
+
+
+def _parts(rule: str) -> Tuple[int, str, datetime.date]:
+    """(k, unit, origin) of a resolved rule: k and `"D"` or `"MS"` for `"kD"`/`"kMS"`, (0, `"once"`) for `"once"`, and the date
+    its blocks count from: `refit_from`, or the epochs (Monday 1970-01-05 for days, January 1970 for months)."""
+    name, _, origin = rule.partition(_FROM)
+    if name == REFIT_ONCE:
+        if not origin:
+            raise ValueError("refit='once' needs refit_from")
+        return 0, REFIT_ONCE, datetime.date.fromisoformat(origin)
+    found = _REFIT_RULE.fullmatch(name)
+    if found is None:
+        raise ValueError(f"a refit rule 'kD', 'kMS' or 'once', got {rule!r}")
+    k, unit = found.groups()
+    if origin:
+        return int(k), unit, datetime.date.fromisoformat(origin)
+    return int(k), unit, _EPOCH if unit == "D" else _MONTH_EPOCH
+
+
+def member_rules(
+    members: Sequence[Any], refit: Optional[str], refit_from: Optional[str] = None
+) -> Tuple[Optional[str], ...]:
     """The refit rule of each training window of a model (`resolve_training_window`'s members), in their order: `refit` for every
-    one of them, or with `"auto"` `"1D"` for a window of at most 84 days and `"7D"` for a longer one or `"expanding"`.
+    one of them, or with `"auto"` `"1D"` for a window of at most 84 days and `"7D"` for a longer one or `"expanding"`; with
+    `refit_from` each counted from that date (`resolved_rule`). A ValueError where the two don't go together (`check_refit_pair`).
 
     Each member is then fitted on the anchors of its own rule, so a list such as `[56, 728]` fits its 56-day window every day and
     its 728-day window on Mondays, and a forecast averages the newest fit of each. A single window under `"auto"` is the model with
     its rule: `training_window=56, refit="auto"` forecasts as `refit="1D"` does, 728 as `"7D"`."""
+    check_refit_pair(refit, refit_from)
     if refit != REFIT_AUTO:
-        return tuple(refit for _ in members)
+        return tuple(resolved_rule(refit, refit_from) for _ in members)
     return tuple(
-        AUTO_SHORT_RULE if member != EXPANDING and member <= AUTO_DAILY_UP_TO else AUTO_LONG_RULE for member in members
+        resolved_rule(
+            AUTO_SHORT_RULE if member != EXPANDING and member <= AUTO_DAILY_UP_TO else AUTO_LONG_RULE, refit_from
+        )
+        for member in members
     )
 
 
 def _nests(fine: str, coarse: str) -> bool:
     """Whether every block of `fine` lies inside a block of `coarse`, so that each anchor of `coarse` is one of `fine`: `"1D"` in
-    every rule, `"kD"` in `"KD"` and `"kMS"` in `"KMS"` when k divides K (both count from the same epoch)."""
-    (k_fine, unit_fine), (k_coarse, unit_coarse) = (_REFIT_RULE.fullmatch(rule).groups() for rule in (fine, coarse))
+    every rule, `"kD"` in `"KD"` and `"kMS"` in `"KMS"` when k divides K and both count from the same date, `"once"` in itself."""
+    (k_fine, unit_fine, from_fine), (k_coarse, unit_coarse, from_coarse) = _parts(fine), _parts(coarse)
+    if unit_fine == "D" and k_fine == 1:
+        return True
+    if REFIT_ONCE in (unit_fine, unit_coarse):
+        return fine == coarse
     if unit_fine == unit_coarse:
-        return int(k_coarse) % int(k_fine) == 0
-    return unit_fine == "D" and int(k_fine) == 1
+        return from_fine == from_coarse and k_coarse % k_fine == 0
+    return False
 
 
 def block_rule(rules: Sequence[Optional[str]]) -> Optional[str]:
@@ -334,30 +430,57 @@ def anchors_of_rules(days: Iterable[Any], rules: Sequence[Optional[str]]) -> Lis
 
 
 def refit_anchor(day: Any, refit: str) -> datetime.date:
-    """The local date a forecast issued on `day` is fitted on, with `refit` `"kD"` or `"kMS"` (see `check_refit`).
+    """The local date a forecast issued on `day` is fitted on, with `refit` a resolved rule (`member_rules`: `"kD"`, `"kMS"`, or
+    either or `"once"` counted from `refit_from`, see `check_refit`).
 
     `"kD"`: the last date on or before `day` a whole number of k days from Monday 1970-01-05, so `"7D"` is the Monday on or before
     it and `"1D"` the day itself. `"kMS"`: the first of the last month on or before `day` a whole number of k months from January
-    1970, so `"1MS"` is the first of its month, `"3MS"` January, April, July or October and `"12MS"` 1 January. It depends on the
-    issue day alone, never on where a run starts, and a local date has no clock to change.
+    1970, so `"1MS"` is the first of its month, `"3MS"` January, April, July or October and `"12MS"` 1 January. With `refit_from`
+    both count from that date instead (before it too), and `"once"` is `refit_from` itself for every day on or after it; a day
+    before it has no fit made by then, and raises. It depends on the issue day and the rule alone, never on where a run starts,
+    and a local date has no clock to change.
     """
     date = _as_date(day)
-    k, unit = _REFIT_RULE.fullmatch(refit).groups()
+    k, unit, origin = _parts(refit)
+    if unit == REFIT_ONCE:
+        if date < origin:
+            raise ValueError(
+                f"refit='once' fits once on refit_from={origin.isoformat()} and serves the forecasts issued on that date or "
+                f"later, so a forecast issued on {date.isoformat()} has no fit made by then (one made on {origin.isoformat()} "
+                "trains on rows after its issue day): start the test (and every validation window) on refit_from or later, or "
+                "give an earlier refit_from"
+            )
+        return origin
     if unit == "D":
-        return date - datetime.timedelta(days=(date - _EPOCH).days % int(k))
-    months = (date.year - 1970) * 12 + date.month - 1
-    first = months - months % int(k)
-    return datetime.date(1970 + first // 12, first % 12 + 1, 1)
+        return date - datetime.timedelta(days=(date - origin).days % k)
+    months = (date.year - origin.year) * 12 + date.month - origin.month
+    first = origin.month - 1 + months - months % k
+    return datetime.date(origin.year + first // 12, first % 12 + 1, 1)
 
 
 def refit_block_end(day: Any, refit: str) -> datetime.date:
-    """The last issue day fitted on the anchor of `day`: the day before the next refit day."""
+    """The last issue day fitted on the anchor of `day`: the day before the next refit day (`datetime.date.max` under `"once"`,
+    which has none)."""
     anchor = refit_anchor(day, refit)
-    k, unit = _REFIT_RULE.fullmatch(refit).groups()
+    k, unit, origin = _parts(refit)
+    if unit == REFIT_ONCE:
+        return datetime.date.max
     if unit == "D":
-        return anchor + datetime.timedelta(days=int(k) - 1)
-    months = (anchor.year - 1970) * 12 + anchor.month - 1 + int(k)
-    return datetime.date(1970 + months // 12, months % 12 + 1, 1) - datetime.timedelta(days=1)
+        return anchor + datetime.timedelta(days=k - 1)
+    months = anchor.year * 12 + anchor.month - 1 + k
+    return datetime.date(months // 12, months % 12 + 1, 1) - datetime.timedelta(days=1)
+
+
+def next_refit_day(day: Any, refit: str) -> Optional[datetime.date]:
+    """The first refit day on or after `day`: `day` itself where it is one, else the day after its block; under `"once"`
+    `refit_from` where `day` isn't after it, else None (no fit is made later)."""
+    date = _as_date(day)
+    _, unit, origin = _parts(refit)
+    if unit == REFIT_ONCE:
+        return origin if date <= origin else None
+    if refit_anchor(date, refit) == date:
+        return date
+    return refit_block_end(date, refit) + datetime.timedelta(days=1)
 
 
 def refit_anchors(days: Iterable[Any], refit: str) -> List[datetime.date]:
@@ -366,21 +489,32 @@ def refit_anchors(days: Iterable[Any], refit: str) -> List[datetime.date]:
 
 
 def block_days(day: Any, refit: str) -> List[datetime.date]:
-    """Every issue day of the block of `day` under `refit` (`"kD"` or `"kMS"`), in date order: from its anchor
-    (`refit_anchor`) to the day before the next refit day (`refit_block_end`), whichever days a run or a frame has."""
+    """Every issue day of the block call of `day` under `refit` (a resolved `"kD"`, `"kMS"` or `"once"`), in date order: from its
+    anchor (`refit_anchor`) to the day before the next refit day (`refit_block_end`), whichever days a run or a frame has. Under
+    `"once"`, whose one block has no end, the stretch of `ONCE_CALL_DAYS` days counted from `refit_from` that holds `day`."""
+    _, unit, origin = _parts(refit)
+    if unit == REFIT_ONCE:
+        first = refit_anchor(day, refit)
+        first += datetime.timedelta(days=(_as_date(day) - first).days // ONCE_CALL_DAYS * ONCE_CALL_DAYS)
+        return [first + datetime.timedelta(days=i) for i in range(ONCE_CALL_DAYS)]
     anchor = refit_anchor(day, refit)
     return [anchor + datetime.timedelta(days=i) for i in range((refit_block_end(day, refit) - anchor).days + 1)]
 
 
 def nominal_block_length(refit: str) -> int:
-    """How many rows a call that predicts a block of `refit` holds (`BaseModel._predict_block`): k for `"kD"` and 31 k for
-    `"kMS"`, the most issue days such a block can have, so that every call of a rule has one shape whatever days the block,
-    the frame or the run has. A ValueError for anything else (None, `"auto"`: a unit has one rule, its member's)."""
-    found = _REFIT_RULE.fullmatch(refit) if isinstance(refit, str) else None
-    if found is None:
-        raise ValueError(f"a block's nominal length needs one refit rule, 'kD' or 'kMS', got {refit!r}")
-    k, unit = found.groups()
-    return int(k) if unit == "D" else 31 * int(k)
+    """How many rows a call that predicts a block of `refit` holds (`BaseModel._predict_block`): k for `"kD"`, 31 k for `"kMS"`
+    and `ONCE_CALL_DAYS` for `"once"` (`block_days`), the most issue days such a block can have, so that every call of a rule has
+    one shape whatever days the block, the frame or the run has. A ValueError for anything else (None, `"auto"`: a unit has one
+    rule, its member's)."""
+    try:
+        k, unit, _ = _parts(refit)
+    except (AttributeError, ValueError):
+        raise ValueError(
+            f"a block's nominal length needs one refit rule, 'kD', 'kMS' or 'once', got {refit!r}"
+        ) from None
+    if unit == REFIT_ONCE:
+        return ONCE_CALL_DAYS
+    return k if unit == "D" else 31 * k
 
 
 class FitUnit(NamedTuple):

@@ -57,8 +57,9 @@ from ._calendar import (
     FREQ_STEPS,
     horizon_arguments,
     periods_per_day,
+    REFIT_EPOCH,
+    next_refit_day,
     refit_anchor,
-    refit_block_end,
     resolve_horizons,
 )
 from ._units import DAY, PER_PERIOD, PERIOD, unit_kind
@@ -144,6 +145,10 @@ def _model_description(model: BaseModel, calendar: bool = True) -> Dict[str, Any
     out = {"class": type(model).__name__}
     if calendar:
         out.update(name=model.name, training_window=model.training_window, refit=getattr(model, "refit", None))
+        if (
+            getattr(model, "refit_from", None) is not None
+        ):  # written only when set, so manifests made before it don't move
+            out["refit_from"] = model.refit_from
     out.update(
         predictors=[name for name in model.predictors if isinstance(name, str)],
         newest_target=getattr(model, "newest_target", "d-1"),
@@ -197,6 +202,7 @@ class ResidualModel(BaseModel):
             first day), or a number of days before the first issue day (every forecast then depends on that day); None works it
             out, which an expanding base can't (see the module docstring).
         name: The model's name, which names its results; the base's are `<name>.base`.
+        refit_from: The date the learner's refit calendar counts from (`BaseModel`'s `refit_from`; `refit="once"` needs it).
     """
 
     _engine_ok = False
@@ -205,7 +211,7 @@ class ResidualModel(BaseModel):
     # Read by `ModelPipeline._load_component`: parameters that hold a model, saved as {class, params}.
     _NESTED_MODELS = ("base", "learner")
     # What a nested model's YAML leaves out: the learner's own window, refit rule and name, which this model replaces.
-    _NESTED_OMIT = {"learner": ("training_window", "refit", "name")}
+    _NESTED_OMIT = {"learner": ("training_window", "refit", "refit_from", "name")}
     _WRITTEN_WHEN_SET = {**BaseModel._WRITTEN_WHEN_SET, "warmup": None}
 
     def __init__(
@@ -216,6 +222,7 @@ class ResidualModel(BaseModel):
         refit: Optional[str] = "7D",
         warmup: Union[int, str, datetime.date, None] = None,
         name: str = "residual",
+        refit_from: Union[str, datetime.date, None] = None,
     ):
         self.name = name  # first: the checks below name the model
         self._named_base: Optional[BaseModel] = None  # a pipeline's model `base` names (`bind_base`)
@@ -239,6 +246,7 @@ class ResidualModel(BaseModel):
             newest_target=learner.newest_target,
             refit=refit,
             binary_mask=learner.binary_mask,
+            refit_from=refit_from,
         )
         self._warn_about_the_learner_s_own()
 
@@ -336,7 +344,7 @@ class ResidualModel(BaseModel):
         that this model replaces. The default is that of the first class of the learner's method resolution order whose
         `__init__` names the parameter (`OLSModel` takes `refit` through `**kw`: BaseModel's), compared normalised, so a
         learner left at its defaults, or loaded from a file that leaves them out, gives none."""
-        for key in ("training_window", "refit"):
+        for key in ("training_window", "refit", "refit_from"):
             mine, theirs = getattr(self, key), getattr(self.learner, key, None)
             default = _class_default(type(self.learner), key)
             if key == "training_window":
@@ -423,6 +431,7 @@ class ResidualModel(BaseModel):
         stage = copy.deepcopy(self.learner)
         stage.training_window = self.training_window
         stage.refit = self.refit
+        stage.refit_from = self.refit_from
         return stage
 
     @property
@@ -526,8 +535,15 @@ class ResidualModel(BaseModel):
         reach = 0 if newest is None else int(newest.reach)
         day = _later(first, window + lag + horizon + reach)
         block = getattr(base, "_refit_block", None) if getattr(base, "refit", None) is not None else None
-        if block is not None and refit_anchor(day, block) < day:
-            day = _later(refit_block_end(day, block), 1)
+        if block is not None:
+            later = next_refit_day(day, block)
+            if later is None:
+                raise ValueError(
+                    f"{self.name}: the base fits once (refit='once') on {refit_anchor(day, block)}, before {day}, the first day "
+                    "its largest training window is filled: its one fit would train on fewer days. Start the frame earlier or "
+                    "give the base a later refit_from"
+                )
+            day = later
         return day
 
     def _warmup_start(
@@ -840,6 +856,9 @@ class ResidualModel(BaseModel):
         refit = (existing.get("training_cut") or {}).get("refit")
         if refit != self.refit:
             diffs.append(f"training_cut.refit: {refit!r} (existing results) vs {self.refit!r} (this run)")
+        epoch, ours = (existing.get("training_cut") or {}).get("refit_epoch"), self.refit_from or REFIT_EPOCH
+        if epoch is not None and epoch != ours:
+            diffs.append(f"training_cut.refit_epoch: {epoch!r} (existing results) vs {ours!r} (this run)")
         if diffs:
             raise ManifestMismatchError(
                 f"{self.name}: the results in {path.parent} were produced with a different configuration than this run "

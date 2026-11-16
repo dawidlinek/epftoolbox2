@@ -13,6 +13,7 @@ its predictions run on one OpenMP thread (`threadpoolctl`), so that a forecast i
 any thread count: scikit-learn's histogram sums reduce over threads.
 """
 
+import datetime
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
@@ -110,6 +111,7 @@ class HistGBModel(BaseModel):
         normalise_by: Optional[str] = None,
         bounds: Optional[Tuple[Optional[float], Optional[float]]] = None,
         zero_when: Optional[str] = None,
+        refit_from: Union[str, datetime.date, None] = None,
     ):
         # `refit` last, whose check reads the unit kind (`periods`); it keeps its place among the parameters a file writes.
         super().__init__(
@@ -123,6 +125,7 @@ class HistGBModel(BaseModel):
             normalise_by=normalise_by,
             bounds=bounds,
             zero_when=zero_when,
+            refit_from=refit_from,
         )
         self.periods = periods
         self.target_transform = target_transform

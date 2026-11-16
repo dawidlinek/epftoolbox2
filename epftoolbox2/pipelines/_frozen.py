@@ -6,7 +6,7 @@ member rebuilt with other predictors would be frozen over the results of the old
 what the model would record, in the fields a resume compares that the model alone decides, and a difference refuses: its class,
 its predictors (the layout per period and horizon of a fixed list, the import path of a predictor function), its training window,
 its parameters (`model_params`: the scaler, `_model_kwargs`, `block_predict`, a per-row target), the kind and target transform of
-day and pooled units, and of `training_cut` the parts the model sets (`refit`, its epoch and the rules `"auto"` resolves to,
+day and pooled units, and of `training_cut` the parts the model sets (`refit`, its epoch (`refit_from` where given) and the rules `"auto"` resolves to,
 `binary_mask="fit"` without a refit, `newest_target`). A predictor function's `fingerprint` (its source and the information set
 it answers through) is compared too, and only warns: a comment edited in it, or an information set built otherwise, changes it as
 well. What depends on the data, the information set or the run's dates (data hashes, test period, the rules a `training_cut`
@@ -22,7 +22,7 @@ from typing import Any, Dict, List, Mapping, NamedTuple, Optional
 
 import pandas as pd
 
-from ..models._calendar import MASK_FIT, REFIT_AUTO, REFIT_EPOCH
+from ..models._calendar import MASK_FIT, REFIT_AUTO, REFIT_EPOCH, rule_name
 from ..models._row_target import manifest_params as row_target_params
 from ..models._units import manifest_fields as unit_fields
 from ..models.base import BaseModel
@@ -65,9 +65,9 @@ def _model_cut(model: BaseModel) -> Dict[str, Any]:
     """The parts of a manifest's `training_cut` the model alone decides, as `BaseModel._training_cut` writes them."""
     cut: Dict[str, Any] = {}
     if model.refit is not None:
-        cut.update(refit=model.refit, refit_epoch=REFIT_EPOCH)
+        cut.update(refit=model.refit, refit_epoch=getattr(model, "refit_from", None) or REFIT_EPOCH)
         if model.refit == REFIT_AUTO:
-            cut["refit_rules"] = list(model._refit_rules)
+            cut["refit_rules"] = [rule_name(rule) for rule in model._refit_rules]
     elif model.binary_mask == MASK_FIT:
         cut["binary_mask"] = MASK_FIT
     if model.newest_target != "d-1":

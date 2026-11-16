@@ -9,6 +9,7 @@ and a weights file whose name the package reads as another version is refused, s
 (8 gave 19.56 against 19.58 EUR/MWh MAE on DE, not significant), seed 0 for every fit, one preprocessing job, the median.
 """
 
+import datetime
 from datetime import date
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -179,6 +180,7 @@ class TabPFNModel(InContextModel):
         normalise_by: Optional[str] = None,
         bounds: Optional[Tuple[Optional[float], Optional[float]]] = None,
         zero_when: Optional[str] = None,
+        refit_from: Union[str, datetime.date, None] = None,
     ):
         super().__init__(
             predictors,
@@ -191,6 +193,7 @@ class TabPFNModel(InContextModel):
             normalise_by=normalise_by,
             bounds=bounds,
             zero_when=zero_when,
+            refit_from=refit_from,
         )
         self.n_estimators = n_estimators
         self._setup(refit, random_state, device, weights, block_predict)
