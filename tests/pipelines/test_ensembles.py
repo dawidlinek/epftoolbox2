@@ -2881,3 +2881,71 @@ def test_what_is_handed_out_cannot_be_written_into(tmp_path):
     for values in (member.codes, member.day_in_test, member.prediction, member.actual):
         with pytest.raises(ValueError, match="read-only"):
             values[0] = values[0]
+
+
+def _read_each_time(patch):
+    """Make `MemberReads` read every member from its records, as every ensemble did before there was a cache."""
+    from epftoolbox2.ensembles import _compute
+
+    patch.setattr(
+        _compute.MemberReads,
+        "member",
+        lambda self, ensemble, name, ref, stored: _compute._read_member(ensemble, name, ref, stored),
+    )
+
+
+def _counting_reads(patch):
+    from epftoolbox2.ensembles import _compute
+
+    read = []
+    original = _compute._read_member
+    patch.setattr(
+        _compute, "_read_member", lambda ensemble, name, *rest: read.append(name) or original(ensemble, name, *rest)
+    )
+    return read
+
+
+def test_members_in_a_parquet_directory_are_read_once_and_give_the_same_files(tmp_path, monkeypatch):
+    """A Parquet member is a directory of parts: its key is theirs, and the report is that of reading it each time."""
+    from epftoolbox2.results.parquet_store import convert
+
+    outputs = {}
+    for label, cached in (("cached", True), ("each time", False)):
+        directory = tmp_path / label.replace(" ", "_")
+        write_members(directory, a=0.0, b=2.0, c=-3.0)
+        convert(directory, "parquet")
+        assert all((directory / f"{name}.parquet").is_dir() for name in "abc")
+        with monkeypatch.context() as patch:
+            read = _counting_reads(patch)
+            if not cached:
+                _read_each_time(patch)
+            report = report_of(directory, *averaged_over_shared_members(), validation=HV, test=HT)
+        if cached:
+            assert sorted(read) == ["a", "ab", "b", "c"]
+        outputs[label] = (
+            {n: (directory / f"{n}.jsonl").read_bytes() for n in ("ab", "bc", "abc", "ab_c")},
+            report.summary().to_csv(),
+            report.choices().to_csv(),
+        )
+    assert outputs["cached"] == outputs["each time"]
+
+
+def test_results_held_in_memory_are_read_once_and_give_the_same_forecasts(df, monkeypatch):
+    """A run without a `save_dir` holds its results (and its ensembles') in memory: the key is the records' identity."""
+    outputs = {}
+    for label, cached in (("cached", True), ("each time", False)):
+        with monkeypatch.context() as patch:
+            read = _counting_reads(patch)
+            if not cached:
+                _read_each_time(patch)
+            report = built(
+                ols("a"),
+                ols("small", SMALL),
+                AverageEnsemble(["a", "small"], name="e1"),
+                AverageEnsemble(["small", "a"], name="e2"),
+                AverageEnsemble(["e1", "a"], name="e3"),
+            ).run(df, test=T, horizon=1)
+        if cached:
+            assert sorted(read) == ["a", "e1", "small"]
+        outputs[label] = {name: forecast_lines(records_of(report, name)) for name in ("e1", "e2", "e3")}
+    assert outputs["cached"] == outputs["each time"] and len(outputs["cached"]["e3"]) == 3 * DAY
