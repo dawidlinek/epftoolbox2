@@ -655,7 +655,9 @@ def test_entsoe_waits_out_retry_after_on_the_clock(no_real_sleep):
     with use_clock(clock):
         text = source._api_request({"documentType": "A65"}, pd.Timestamp("2026-10-20", tz="UTC"), clock.now())
     assert text == "<ok/>" and clock.sleeps[0] == 90.0 and 50 <= clock.sleeps[1] <= 60  # waited on the fake clock
-    assert clock.now() == pd.Timestamp(LATE, tz="UTC") + pd.Timedelta(seconds=sum(clock.sleeps))
+    # The clock moves in whole microseconds: each sleep is rounded to one.
+    waited = clock.now() - pd.Timestamp(LATE, tz="UTC")
+    assert abs(waited - pd.Timedelta(seconds=sum(clock.sleeps))) <= pd.Timedelta(microseconds=len(clock.sleeps))
 
 
 def test_entsoe_gives_up_after_its_retries_without_a_real_sleep(no_real_sleep):

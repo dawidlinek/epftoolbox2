@@ -560,8 +560,9 @@ class OpenMeteoBase(DataSource):
                 if not (isinstance(data, dict) and data.get("error")):
                     response.raise_for_status()
                     return data
-            except requests.RequestException as e:
-                return _http.Retry(str(e), exception=e)
+            except requests.RequestException as e:  # retried, whatever the status; a 4xx is still a client error
+                status = getattr(response, "status_code", None)
+                return _http.Retry(str(e), exception=e, status=status if isinstance(status, int) else None)
 
             reason = data.get("reason", "Unknown error")
             if unavailable and unavailable in reason:
@@ -571,7 +572,9 @@ class OpenMeteoBase(DataSource):
             if "Too many concurrent requests" in reason:
                 return _http.Retry(reason)  # the backoff
             if "Hourly API request limit exceeded" in reason or "Daily API request limit exceeded" in reason:
-                raise RuntimeError(f"Open-Meteo: {reason} Retry later or fetch fewer variables per request.")
+                raise _http.unavailable(
+                    RuntimeError(f"Open-Meteo: {reason} Retry later or fetch fewer variables per request.")
+                )
             raise ValueError(f"Open-Meteo API error: {reason}")
 
         def log(attempt: int, retries: int, retry: _http.Retry, wait: Optional[float]) -> None:

@@ -465,7 +465,8 @@ class DataPipeline:
         path.parent.mkdir(parents=True, exist_ok=True)
         meta_path = path.with_name(path.name + ".meta.json")
 
-        with hold_lock(make_file_lock(path.with_name(path.name + ".lock")), str(path)):
+        # The lock's wait keeps to the refresh's time (`hold_lock`); each source's fetch opens its own limits inside.
+        with _http.limits(refresh.deadline), hold_lock(make_file_lock(path.with_name(path.name + ".lock")), str(path)):
             meta = _read_json(meta_path)
             fresh = path.exists() and meta.get("fingerprint") == digest
             stale = fresh and _is_file_cache_stale(meta, end)

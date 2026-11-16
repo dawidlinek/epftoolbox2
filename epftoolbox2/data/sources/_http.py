@@ -34,6 +34,7 @@ __all__ = [
     "Retry",
     "SourceTimeout",
     "is_unavailable",
+    "unavailable",
     "limits",
     "request",
     "retry_after_seconds",
@@ -66,14 +67,22 @@ class Retry:
         error: What went wrong, for the log and the error raised when the retries run out (no secret in it).
         wait: Seconds the server asked to wait (Retry-After), else None for the backoff.
         exception: The exception behind it, for a source that raises that one when its retries run out.
+        status: The answer's HTTP status, for one the exception doesn't carry (a body that isn't JSON).
     """
 
-    __slots__ = ("error", "wait", "exception")
+    __slots__ = ("error", "wait", "exception", "status")
 
-    def __init__(self, error: str, wait: Optional[float] = None, exception: Optional[BaseException] = None):
+    def __init__(
+        self,
+        error: str,
+        wait: Optional[float] = None,
+        exception: Optional[BaseException] = None,
+        status: Optional[int] = None,
+    ):
         self.error = error
         self.wait = wait
         self.exception = exception
+        self.status = status  # the HTTP status behind it, when the exception doesn't carry its response
 
     def __repr__(self) -> str:
         return f"Retry({self.error!r}, wait={self.wait!r})"
@@ -128,9 +137,21 @@ def is_unavailable(error: BaseException) -> bool:
     return isinstance(error, (SourceTimeout, *NETWORK_ERRORS)) or getattr(error, _UNAVAILABLE, False)
 
 
+def unavailable(error: BaseException) -> BaseException:
+    """`error`, marked as a source out of reach for now (`is_unavailable`): a rate limit a source raises at once rather
+    than wait out (Energy-Charts' Retry-After beyond its cap, Open-Meteo's hourly or daily limit)."""
+    try:
+        setattr(error, _UNAVAILABLE, True)
+    except AttributeError:  # an exception class with __slots__
+        pass
+    return error
+
+
 def _client_error(retry: Retry) -> bool:
-    """A 4xx answer other than 429 behind `retry` (Open-Meteo retries every HTTP error)."""
-    status = getattr(getattr(retry.exception, "response", None), "status_code", None)
+    """A 4xx answer other than 429 behind `retry` (Open-Meteo retries every HTTP error, also a 403 page that isn't JSON)."""
+    status = retry.status
+    if status is None:
+        status = getattr(getattr(retry.exception, "response", None), "status_code", None)
     return isinstance(status, int) and 400 <= status < 500 and status != 429
 
 
@@ -275,9 +296,4 @@ def request(
     if deadline is not None and seconds_left() <= 0:
         raise timed_out("another attempt")  # the last attempt ran into the deadline: out of time, not failed
     failure = give_up(last, attempts)
-    if not _client_error(last):
-        try:
-            setattr(failure, _UNAVAILABLE, True)
-        except AttributeError:  # an exception class with __slots__
-            pass
-    raise failure
+    raise failure if _client_error(last) else unavailable(failure)

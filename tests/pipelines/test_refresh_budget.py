@@ -15,6 +15,7 @@ sources' loops are driven directly. No test opens a socket (`no_network`) or sle
 """
 
 import json
+import warnings
 import logging
 from unittest.mock import Mock
 from urllib.parse import quote, quote_plus
@@ -864,3 +865,93 @@ def test_a_timeout_on_the_last_attempt_is_a_timeout(clock):
     with pytest.raises(SourceTimeout):
         pipeline.run(START, END, budget=100, retries=1)
     assert pipeline.last_refresh.sources[0].status == "timeout"
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# After the second review
+# ---------------------------------------------------------------------------------------------------------------------
+
+
+class Page:
+    """A real HTTP answer (`requests.Response`) behind Open-Meteo's `json()`/`raise_for_status()` calls."""
+
+    def __init__(self, status, body):
+        self.status_code, self.reason, self.text, self.headers = status, "x", body, {}
+        self._response = requests.Response()
+        self._response.status_code = status
+        self._response._content = body.encode()
+
+    def json(self):
+        return self._response.json()
+
+    def raise_for_status(self):
+        self._response.raise_for_status()
+
+
+@pytest.mark.parametrize(
+    "status, body, unavailable",
+    [(403, "<html>Forbidden</html>", False), (401, '{"detail": "no"}', False), (503, "<html>busy</html>", True)],
+)
+def test_an_open_meteo_client_error_is_not_out_of_reach_whatever_its_body(status, body, unavailable):
+    """Second review 1: a gateway's 403 page (not JSON) is a refused request, not a server out of reach."""
+    with use_clock(FakeClock(NOW)), pytest.raises(Exception) as raised:
+        _open_meteo_request(Broken(Page(status, body)))()
+    assert _http.is_unavailable(raised.value) is unavailable
+
+
+@pytest.mark.parametrize("which", ["energy_charts", "open_meteo"])
+def test_a_rate_limit_that_is_not_waited_out_is_out_of_reach(which):
+    """Second review 2: Energy-Charts' Retry-After beyond its cap and Open-Meteo's hourly limit are raised at once, and
+    on_failure="cache" answers them like any 429."""
+    if which == "energy_charts":
+        session, make = Broken(Reply(429)), _energy_charts_request
+        session.item.headers = {"Retry-After": "86400"}
+    else:
+        session = Broken(Reply(200, {"error": True, "reason": "Hourly API request limit exceeded."}))
+        make = _open_meteo_request
+    with use_clock(FakeClock(NOW)), pytest.raises(Exception) as raised:
+        make(session)()
+    assert len(session.timeouts) == 1 and _http.is_unavailable(raised.value)
+
+
+def test_the_single_file_caches_lock_wait_counts_against_the_budget(clock, tmp_path):
+    """Second review 3: the lock of a single-file cache, held by another process, is waited for only as long as the time
+    left (a fraction of a real second here)."""
+    import threading
+
+    other = FileLock(str(tmp_path / "sources.parquet.lock"))
+    other.acquire()
+    outcome = {}
+
+    def run():
+        with use_clock(clock):
+            try:
+                DataPipeline(sources=[Ramp()]).run(START, END, cache="sources.parquet", budget=0.3)
+            except Exception as exc:  # noqa: BLE001 - looked at below
+                outcome["error"] = exc
+
+    worker = threading.Thread(target=run)
+    worker.start()
+    worker.join(20)
+    blocked = worker.is_alive()
+    other.release()
+    worker.join()
+    assert not blocked, "the run waited for the file cache's lock past its budget"
+    assert isinstance(outcome.get("error"), SourceTimeout) and "lock" in str(outcome["error"])
+
+
+def test_a_time_of_day_deadline_long_past_warns_that_it_is_todays(tmp_path, monkeypatch):
+    """Second review 4: "00:30" at 23:50 is 00:30 of today, 23 h ago, never tomorrow's: the run warns."""
+    monkeypatch.chdir(tmp_path)
+    with use_clock(FakeClock("2026-10-21 23:50")):
+        pipeline = DataPipeline(sources=[Ramp()])
+        with pytest.warns(RuntimeWarning, match=r"'00:30' is 23\.3 h before now.*full date"):
+            pipeline.run(START, END, deadline="00:30")
+    assert pipeline.last_refresh.deadline == utc("2026-10-21 00:30")
+
+
+def test_a_time_of_day_deadline_just_past_does_not_warn(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    with use_clock(FakeClock("2026-10-21 12:10")), warnings.catch_warnings():
+        warnings.simplefilter("error")
+        DataPipeline(sources=[Ramp()]).run(START, END, deadline="11:55")

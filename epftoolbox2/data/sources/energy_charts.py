@@ -551,7 +551,9 @@ class EnergyChartsSource(DataSource):
             if status == 429:
                 wait = wait if wait is not None else 60.0
                 if wait > self.MAX_RETRY_WAIT_SECONDS:
-                    raise EnergyChartsApiError(f"EnergyCharts: {label}: rate limited, Retry-After {wait:.0f} s")
+                    raise _http.unavailable(
+                        EnergyChartsApiError(f"EnergyCharts: {label}: rate limited, Retry-After {wait:.0f} s")
+                    )
                 bucket.block(self._clock(), wait)
             return _http.Retry(error, wait=wait)
 

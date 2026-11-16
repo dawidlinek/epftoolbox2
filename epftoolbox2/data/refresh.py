@@ -14,6 +14,7 @@ models decide what that means. Nothing is filled with an older value.
 import math
 import numbers
 import re
+import warnings
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 from urllib.parse import quote, quote_plus
@@ -36,6 +37,9 @@ REDACTED = "***"
 
 # A deadline given as a time of day alone: "11:55" or "11:55:30".
 _TIME_OF_DAY = re.compile(r"^\s*(\d{1,2}):(\d{2})(?::(\d{2}))?\s*$")
+# A time-of-day deadline this far behind the run's start is more likely meant for tomorrow: warned about.
+_LONG_PAST_HOURS = 12
+
 # A string with a full date: a four-digit year next to a month and a day.
 _FULL_DATE = re.compile(r"\d{4}-\d{1,2}-\d{1,2}|\d{1,2}[./]\d{1,2}[./]\d{4}|\d{4}\d{2}\d{2}")
 
@@ -252,7 +256,16 @@ class Refresh:
                     raise ValueError(f"deadline must be a time of day 'HH:MM' or a timestamp, got {deadline!r}")
                 today = self.started.tz_convert(timezone or "UTC").tz_localize(None).normalize()
                 local = today + pd.Timedelta(hours=hours, minutes=minutes, seconds=seconds)
-                return local.tz_localize(timezone or "UTC", ambiguous=True, nonexistent="shift_forward")
+                instant = local.tz_localize(timezone or "UTC", ambiguous=True, nonexistent="shift_forward")
+                behind = (self.started - instant) / pd.Timedelta(hours=1)
+                if behind > _LONG_PAST_HOURS:
+                    warnings.warn(
+                        f"deadline {deadline!r} is {behind:.1f} h before now: a time of day alone is today's date, "
+                        "never tomorrow's, so it leaves no time; give a full date for a deadline after midnight",
+                        RuntimeWarning,
+                        stacklevel=4,
+                    )
+                return instant
             if not _FULL_DATE.search(deadline):
                 raise ValueError(
                     f"deadline must be a time of day 'HH:MM' or a timestamp with a full date, got {deadline!r}"
