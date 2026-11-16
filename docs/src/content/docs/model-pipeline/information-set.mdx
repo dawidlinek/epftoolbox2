@@ -443,7 +443,9 @@ which columns that affects. With `availability="warn"` such a column is listed a
 `unknown` says, and one warning at the start of the run names every such column once, with the models that read it, and points to
 `InformationSet.with_source_rules(data_pipeline.sources)` (a `Workflow` applies it) and to `rules=`: the forecasts read the column as
 known at the issue time, and nothing can tell whether it is. The built-in rules match exact names only, with no name pattern, so
-a prefixed `ch_price` or a gas price named `*_price` never gets the day-ahead price's rule by its name. `leakage_probe` and `verify` follow `unknown` at every level, because they can't perturb such a column.
+a prefixed `ch_price` or a gas price named `*_price` never gets the day-ahead price's rule by its name. The warning names at most 30 columns, and three models per column; `report.availability()` lists all of them. The training
+target isn't named: at `newest_target="d-1"` it ends at D-1 by construction, and a target without a rule is refused at `"published"`. A
+`report()` of stored results warns again, as it does for late inputs. `leakage_probe` and `verify` follow `unknown` at every level, because they can't perturb such a column.
 
 ---
 

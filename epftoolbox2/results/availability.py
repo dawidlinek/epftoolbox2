@@ -65,6 +65,8 @@ _ROLE_ORDER = {
     ROLE_PAST: 5,
     ROLE_KNOWN_AHEAD: 6,
 }
+_SHOWN_READERS = 3  # how many models a no-rule warning names per column
+_SHOWN_COLUMNS = 30  # and how many columns it names
 _SHOWN_PER_MODEL = 5  # how many rows of a model a warning spells out
 
 _Key = Tuple[str, str, str, str]  # (predictor, role, status, list)
@@ -293,7 +295,12 @@ def warn_about(listings: Mapping[str, Optional[Iterable[Mapping[str, Any]]]], st
     listed too, and isn't warned about) and one for the columns without a rule, which the run reads as known."""
     flagged = {model: [row for row in listing or [] if is_flagged(row)] for model, listing in listings.items()}
     by_model = {model: rows for model, rows in flagged.items() if rows}
-    ruleless = {model: [row for row in rows if row["status"] == NO_RULE] for model, rows in by_model.items()}
+    # A training target without a rule is no input to declare: at newest_target="d-1" it ends at D-1 by construction, and at
+    # "published" the run refuses it before it gets here. It stays in the listing, which report.availability() shows.
+    ruleless = {
+        model: [row for row in rows if row["status"] == NO_RULE and row["role"] != ROLE_TARGET]
+        for model, rows in by_model.items()
+    }
     ruleless = {model: rows for model, rows in ruleless.items() if rows}
     late = {model: [row for row in rows if row["status"] != NO_RULE] for model, rows in by_model.items()}
     late = {model: rows for model, rows in late.items() if rows}
@@ -319,7 +326,15 @@ def _no_rule_message(ruleless: Mapping[str, List[Mapping[str, Any]]]) -> str:
         for row in rows:
             if model not in readers.setdefault(row["predictor"], []):
                 readers[row["predictor"]].append(model)
-    shown = "; ".join(f"{column} ({', '.join(models)})" for column, models in sorted(readers.items()))
+    columns = sorted(readers.items())
+
+    def readers_of(models: List[str]) -> str:
+        more = f", and {len(models) - _SHOWN_READERS} more models" if len(models) > _SHOWN_READERS else ""
+        return ", ".join(models[:_SHOWN_READERS]) + more
+
+    shown = "; ".join(f"{column} ({readers_of(models)})" for column, models in columns[:_SHOWN_COLUMNS])
+    if len(columns) > _SHOWN_COLUMNS:
+        shown += f"; and {len(columns) - _SHOWN_COLUMNS} more columns"
     return (
         f"Information set: {len(readers)} column(s) have no rule, so every forecast reads them as known at the issue "
         f"time: {shown}. The built-in rules match exact names only, so a prefixed column such as de_price has none unless "
