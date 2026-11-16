@@ -4,8 +4,10 @@ through `current_clock()`.
 - The package's source reads no clock but through it (an AST scan), and the scan itself flags every form it looks for.
 - `FakeClock`: `sleep(3600)` returns at once and advances an hour; `tick`, `advance`, `use_clock` nesting.
 - Under a `FakeClock` follow it: "today" (`resolve_date(value, tz)`, at 23:30 UTC on 10-21 it is 10-22 in Warsaw), the
-  per-source cache's unsettled boundary, Retry-After waits (ENTSO-E, PSE, Energy-Charts), Open-Meteo's cut between final and
-  provisional rows, manifest and ensemble timestamps, and `forecast_only`'s "today", which is the issue zone's.
+  per-source cache's unsettled boundary, Retry-After waits and backoffs (ENTSO-E, PSE, Energy-Charts, Open-Meteo,
+  OpenHolidays), Open-Meteo's cut between final and provisional rows, manifest and ensemble timestamps, and `forecast_only`'s
+  "today", which is the issue zone's. Real time whatever the clock (step 8b): a Retry-After given as an HTTP date (an
+  instant on the server's clock) and Energy-Charts' rate limit (the server counts real seconds).
 - With `SYSTEM` and under a `FakeClock` a run writes the same records; pool workers never read the clock.
 """
 
@@ -14,6 +16,7 @@ import contextlib
 import datetime
 import json
 import os
+import re
 import threading
 import time
 from pathlib import Path
@@ -97,6 +100,9 @@ _PARSERS = {
     "numpy.datetime64",
 }
 _NOW_WORDS = {"now", "today"}
+# A time of day alone, which a parser completes with the machine's date ("11:55", "11:55:30"). Only a literal is seen: a
+# variable's text isn't known to a scan, so `DataPipeline.run`'s `deadline` resolves a time of day itself, on the clock.
+_TIME_OF_DAY = re.compile(r"^\s*\d{1,2}:\d{2}(:\d{2})?\s*$")
 # Where a bare call's time is given by keyword.
 _TIME_KEYWORDS = {"secs", "t", "timeval", "dt"}
 _FUNCTIONS = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
@@ -175,7 +181,7 @@ def _now_strings(tree):
 
 def _is_now(node, names=frozenset()):
     if isinstance(node, ast.Constant) and isinstance(node.value, str):
-        return node.value.strip().lower() in _NOW_WORDS
+        return node.value.strip().lower() in _NOW_WORDS or bool(_TIME_OF_DAY.match(node.value))
     if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
         return any(_is_now(element, names) for element in node.elts)
     return isinstance(node, ast.Name) and node.id in names
@@ -276,6 +282,8 @@ REAL_TIME_WAITS = {
     ("models/_device_worker.py", "timed wait: idle.wait(1.0)"),
     ("models/_device_worker.py", "timed wait: self._process.join(timeout=10)"),
     ("models/_device_worker.py", "timed wait: process.join(timeout=10)"),
+    # A refresh's wait for another process's cache lock, cut to the time the refresh has left (step 8b)
+    ("data/cache_manager.py", "timed wait: lock.acquire(timeout=left)"),
 }
 
 
@@ -313,6 +321,8 @@ def test_the_package_reads_no_clock_but_through_current_clock():
         "import datetime\ndatetime.date.today()",
         "import datetime as dt\ndt.datetime.utcnow()",
         "import pandas as pd\npd.Timestamp('now')",
+        "import pandas as pd\npd.Timestamp('11:55')",
+        "import pandas as pd\npd.to_datetime(' 11:55:30 ')",
         "import pandas as pd\npd.to_datetime(' Today ')",
         "import numpy as np\nnp.datetime64('now')",
         # Aliases, and the forms of the code review's probe
@@ -382,8 +392,10 @@ def test_the_scan_passes_what_reads_no_clock(code):
 
 def test_only_real_time_code_uses_the_system_clock_itself():
     """`SYSTEM` directly, never faked, only where real time is the point: the results store's writer (buffers stamped in one
-    thread and aged in another) and its wait for another process's moment on a lock file, and the tuner's waits for its
-    workers' processes."""
+    thread and aged in another) and its wait for another process's moment on a lock file, the tuner's waits for its
+    workers' processes, a server's Retry-After given as an HTTP date (an instant of real time, `data/sources/_http.py`), and
+    Energy-Charts' rate limit (the server counts a client's requests in real seconds, so a replay on a fake clock against
+    the real API must not send them faster)."""
     users = set()
     for path in package_files():
         if path.name in ("_clock.py", "clock.py"):
@@ -391,7 +403,13 @@ def test_only_real_time_code_uses_the_system_clock_itself():
         names = {node.id for node in ast.walk(ast.parse(path.read_text())) if isinstance(node, ast.Name)}
         if "SYSTEM" in names:
             users.add(str(path.relative_to(PACKAGE)))
-    assert users == {"results/store.py", "results/parquet_store.py", "tune/bayes.py"}
+    assert users == {
+        "results/store.py",
+        "results/parquet_store.py",
+        "tune/bayes.py",
+        "data/sources/_http.py",
+        "data/sources/energy_charts.py",
+    }
 
 
 @pytest.mark.parametrize("module", ["models/_worker.py", "models/_engine_worker.py"])
@@ -600,29 +618,46 @@ class _Session:
 RETRY_AT = "Thu, 22 Oct 2026 00:30:00 GMT"  # an hour after LATE
 
 
-@pytest.mark.parametrize("module", ["entsoe", "pse", "energy_charts"])
-def test_a_retry_after_date_is_read_against_the_clock(module):
+def _http_date(seconds_from_now: float) -> str:
+    """An HTTP date `seconds_from_now` after the machine's now, as a real server would send it."""
+    return (SYSTEM.now() + pd.Timedelta(seconds=seconds_from_now)).strftime("%a, %d %b %Y %H:%M:%S GMT")
+
+
+def test_a_retry_after_date_is_an_instant_of_real_time():
+    """A server's HTTP date is measured against the machine's clock, not the fake now: a replay on a fake clock against a real
+    server waits what the server asked for. Every source reads Retry-After through `_http.retry_after_seconds`."""
     import importlib
 
-    parse = importlib.import_module(f"epftoolbox2.data.sources.{module}")._retry_after_seconds
+    from epftoolbox2.data.sources import _http
+
+    parse = _http.retry_after_seconds
     with use_clock(FakeClock(LATE)):
-        assert parse(RETRY_AT) == 3600.0
-    with use_clock(FakeClock("2026-10-22 01:00")):
-        assert parse(RETRY_AT) == 0.0  # in the past: no wait
-    assert parse("7") == 7.0
+        assert parse(RETRY_AT) == 0.0  # an hour after the fake now, but long past on the machine's clock
+        assert 80 <= parse(_http_date(90)) <= 90
+        assert parse(_http_date(-90)) == 0.0  # in the past: no wait
+    assert parse("7") == 7.0 and parse(None) is None and parse("soon") is None
+    for module in ("entsoe", "pse", "energy_charts"):
+        assert not hasattr(importlib.import_module(f"epftoolbox2.data.sources.{module}"), "_retry_after_seconds")
 
 
 def test_entsoe_waits_out_retry_after_on_the_clock(no_real_sleep):
     from epftoolbox2.data.sources.entsoe import EntsoeSource
 
     source = EntsoeSource("PL", "test-key", type=["load"])
-    later = "Wed, 21 Oct 2026 23:31:30 GMT"  # 90 s after the clock's now
-    source.session = _Session([_Answer(429, "Too many", {"Retry-After": later}), _Answer(200, "<ok/>")])
+    source.session = _Session(
+        [
+            _Answer(429, "Too many", {"Retry-After": "90"}),
+            _Answer(429, "Too many", {"Retry-After": _http_date(60)}),
+            _Answer(200, "<ok/>"),
+        ]
+    )
     clock = FakeClock(LATE)
     with use_clock(clock):
         text = source._api_request({"documentType": "A65"}, pd.Timestamp("2026-10-20", tz="UTC"), clock.now())
-    assert text == "<ok/>" and clock.sleeps == [90.0]
-    assert clock.now() == pd.Timestamp(LATE, tz="UTC") + pd.Timedelta(seconds=90)
+    assert text == "<ok/>" and clock.sleeps[0] == 90.0 and 50 <= clock.sleeps[1] <= 60  # waited on the fake clock
+    # The clock moves in whole microseconds: each sleep is rounded to one.
+    waited = clock.now() - pd.Timestamp(LATE, tz="UTC")
+    assert abs(waited - pd.Timedelta(seconds=sum(clock.sleeps))) <= pd.Timedelta(microseconds=len(clock.sleeps))
 
 
 def test_entsoe_gives_up_after_its_retries_without_a_real_sleep(no_real_sleep):
@@ -650,46 +685,44 @@ def test_pse_waits_out_retry_after_on_the_clock(no_real_sleep):
     assert clock.sleeps == [120.0]
 
 
-def test_energy_charts_reads_its_clock_its_waits_and_its_rate_limit_on_the_clock(no_real_sleep, monkeypatch):
+def test_energy_charts_waits_for_a_retry_on_the_clock_and_keeps_its_rate_limit_in_real_time(no_real_sleep, monkeypatch):
+    """A retry's wait is on the current clock, like every source's, and the rate limit on the machine's (`SYSTEM`, which
+    stands in here for real time): after a 429 the server's 30 s are waited on the fake clock and again, before the next
+    request, by the rate limit in real time, so a replay on a fake clock against the real API keeps the server's limit."""
     from epftoolbox2.data.sources import energy_charts as ec
 
+    real = FakeClock("2026-11-10 12:00")
+    monkeypatch.setattr(ec, "SYSTEM", real)
     monkeypatch.setattr(ec, "_BUCKETS", {})
     source = ec.EnergyChartsSource("de", type=["price"], use_cache=False)
     clock = FakeClock(LATE)
     with use_clock(clock):
-        assert source._now() == clock.now() and source._clock() == clock.monotonic() == 0.0
-        source._sleep(5)
-        assert clock.sleeps == [5]
-        # 429 with Retry-After: the bucket is blocked on the fake clock, and the wait is a fake one.
+        assert source._now() == clock.now()
+        assert source._clock() == real.monotonic() == 0.0
+        source._wait(5)
+        source._sleep(3)
+        assert clock.sleeps == [5] and real.sleeps == [3]
         source.session = _Session(
             [_Answer(429, "rate", {"Retry-After": "30"}), _Answer(200, body={"unix_seconds": [], "price": []})]
         )
         assert source._request("price", {}, "price") == {"unix_seconds": [], "price": []}
-    assert sum(clock.sleeps) >= 35  # the 30 s the server asked for, waited out in fake time
-    assert list(ec._BUCKETS) == [("price", id(clock))]
+    assert clock.sleeps == [5, 30.0]  # the server's 30 s, waited out in fake time
+    assert real.sleeps == [3, 30.0]  # and by the rate limit, in real time
+    assert list(ec._BUCKETS) == ["price"]
 
 
-def test_energy_charts_buckets_go_with_their_clock_and_take_an_unhashable_one(monkeypatch):
-    """The rate limit's buckets are kept per clock (its stamps are that clock's seconds) and dropped with it, so a test's fake
-    clocks, with their `sleeps`, don't stay referenced; a clock that can't be hashed (a dataclass with `__eq__`) still works."""
+def test_energy_charts_shares_one_rate_limit_per_endpoint_whatever_the_clock(no_real_sleep, monkeypatch):
+    """The limit is the server's, per client IP: requests made on two fake clocks (and on an unhashable clock of one's own)
+    spend one bucket, and the third price request in a row waits 30 s of real time."""
     import dataclasses
-    import gc
-    import weakref
 
     from epftoolbox2.data.sources import energy_charts as ec
 
+    real = FakeClock("2026-11-10 12:00")
+    monkeypatch.setattr(ec, "SYSTEM", real)
     monkeypatch.setattr(ec, "_BUCKETS", {})
     source = ec.EnergyChartsSource("de", type=["price"], use_cache=False)
     body = {"unix_seconds": [], "price": []}
-    clock = FakeClock(LATE)
-    alive = weakref.ref(clock)
-    with use_clock(clock):
-        source.session = _Session([_Answer(200, body=body)])
-        source._request("price", {}, "price")
-    assert list(ec._BUCKETS) == [("price", id(clock))]
-    del clock
-    gc.collect()
-    assert alive() is None and ec._BUCKETS == {}
 
     @dataclasses.dataclass
     class Pinned(Clock):  # eq=True: no __hash__
@@ -706,9 +739,12 @@ def test_energy_charts_buckets_go_with_their_clock_and_take_an_unhashable_one(mo
 
     with pytest.raises(TypeError):
         hash(Pinned(pd.Timestamp(LATE, tz="UTC")))
-    with use_clock(Pinned(pd.Timestamp(LATE, tz="UTC"))):
-        source.session = _Session([_Answer(200, body=body)])
-        assert source._request("price", {}, "price") == body
+    for clock in (FakeClock(LATE), FakeClock("2024-01-01"), Pinned(pd.Timestamp(LATE, tz="UTC"))):
+        with use_clock(clock):
+            source.session = _Session([_Answer(200, body=body)])
+            assert source._request("price", {}, "price") == body
+    assert list(ec._BUCKETS) == ["price"]
+    assert real.sleeps == [30.0]  # a burst of two, then one every 30 s
 
 
 def test_open_meteo_backs_off_and_waits_out_its_rate_limit_on_the_clock(no_real_sleep):

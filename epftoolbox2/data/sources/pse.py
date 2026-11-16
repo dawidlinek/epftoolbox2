@@ -1,12 +1,11 @@
 import re
-from email.utils import parsedate_to_datetime
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Union
 
 import pandas as pd
 import requests
 
-from epftoolbox2._clock import current_clock
 from epftoolbox2.logging import get_logger
+from . import _http
 from .base import DataSource
 
 MARKET_ZONE = "Europe/Warsaw"
@@ -69,19 +68,6 @@ DEFAULT_DATASETS = ("kse-load", "csdac-pln")
 
 class PseApiError(RuntimeError):
     """The PSE reports API refused a request or answered with something that is not a table."""
-
-
-def _retry_after_seconds(value: Optional[str]) -> Optional[float]:
-    if not value:
-        return None
-    try:
-        return max(0.0, float(value))
-    except ValueError:
-        pass
-    try:
-        return max(0.0, (parsedate_to_datetime(value) - current_clock().now()).total_seconds())
-    except (TypeError, ValueError):
-        return None
 
 
 class PseSource(DataSource):
@@ -293,43 +279,41 @@ class PseSource(DataSource):
 
     def _get_json(self, url: str, params: Optional[dict], label: str) -> dict:
         """GET one page. Retries 429/5xx and network errors; anything else raises PseApiError."""
-        error = ""
-        for attempt in range(self.MAX_RETRIES + 1):
-            wait = None
-            try:
-                response = self.session.get(
-                    url,
-                    params=params,
-                    headers={"User-Agent": self.USER_AGENT, "Accept": "application/json"},
-                    timeout=self.REQUEST_TIMEOUT,
-                )
-            except (requests.ConnectionError, requests.Timeout, requests.exceptions.ChunkedEncodingError) as exc:
-                error = f"{type(exc).__name__}: {exc}"
-            except requests.RequestException as exc:
-                raise PseApiError(f"PSE [{label}]: request failed: {exc}") from None
-            else:
-                status = response.status_code
-                if status < 400:
-                    try:
-                        body = response.json()
-                    except ValueError:
-                        raise PseApiError(f"PSE [{label}]: the answer is not JSON: {response.text[:200]!r}") from None
-                    if not isinstance(body, dict):
-                        raise PseApiError(f"PSE [{label}]: unexpected answer {str(body)[:200]}")
-                    return body
-                error = f"HTTP {status}: {self._reason(response)}"
-                if status != 429 and status < 500:
-                    raise PseApiError(f"PSE [{label}] failed with {error}")
-                wait = _retry_after_seconds(response.headers.get("Retry-After"))
 
-            if attempt == self.MAX_RETRIES:
-                break
-            if wait is None:
-                wait = self.RETRY_BACKOFF_SECONDS * 2**attempt
-            wait = min(wait, self.MAX_RETRY_WAIT_SECONDS)
-            self.logger.warning(f"PSE [{label}]: {error}; retrying in {wait:.0f} s ({attempt + 1}/{self.MAX_RETRIES})")
-            current_clock().sleep(wait)
-        raise PseApiError(f"PSE [{label}] failed after {self.MAX_RETRIES + 1} attempts: {error}")
+        def read(response) -> Union[dict, _http.Retry]:
+            status = response.status_code
+            if status < 400:
+                try:
+                    body = response.json()
+                except ValueError:
+                    raise PseApiError(f"PSE [{label}]: the answer is not JSON: {response.text[:200]!r}") from None
+                if not isinstance(body, dict):
+                    raise PseApiError(f"PSE [{label}]: unexpected answer {str(body)[:200]}")
+                return body
+            error = f"HTTP {status}: {self._reason(response)}"
+            if status != 429 and status < 500:
+                raise PseApiError(f"PSE [{label}] failed with {error}")
+            return _http.Retry(error, wait=_http.retry_after_seconds(response.headers.get("Retry-After")))
+
+        def log(attempt: int, retries: int, retry: _http.Retry, wait: Optional[float]) -> None:
+            if wait is not None:
+                self.logger.warning(f"PSE [{label}]: {retry.error}; retrying in {wait:.0f} s ({attempt + 1}/{retries})")
+
+        return _http.request(
+            self.session,
+            url,
+            params=params,
+            headers={"User-Agent": self.USER_AGENT, "Accept": "application/json"},
+            timeout=self.REQUEST_TIMEOUT,
+            retries=self.MAX_RETRIES,
+            backoff=self.RETRY_BACKOFF_SECONDS,
+            max_wait=self.MAX_RETRY_WAIT_SECONDS,
+            read=read,
+            refuse=lambda exc: PseApiError(f"PSE [{label}]: request failed: {exc}"),
+            give_up=lambda last, attempts: PseApiError(f"PSE [{label}] failed after {attempts} attempts: {last.error}"),
+            log=log,
+            label=f"PSE [{label}]",
+        )
 
     @staticmethod
     def _reason(response) -> str:

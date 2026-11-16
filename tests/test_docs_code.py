@@ -80,6 +80,7 @@ PUBLIC_PACKAGES = (
     "epftoolbox2.information_set",
     "epftoolbox2.presets",
     "epftoolbox2.clock",
+    "epftoolbox2.data.refresh",
 )
 
 FENCE = re.compile(r"^(?P<indent>[ \t]*)(?P<fence>`{3,}|~{3,})(?P<info>.*)$")

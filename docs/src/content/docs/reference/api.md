@@ -26,7 +26,13 @@ class DataPipeline:
         start: Union[str, pd.Timestamp],  # Start date
         end: Union[str, pd.Timestamp],    # End date
         cache: Union[bool, str] = False,  # Caching option
-    ) -> pd.DataFrame: ...
+        *,
+        budget: Optional[float] = None,   # Seconds the sources may take, from now on the clock
+        deadline: Union[None, str, pd.Timestamp] = None,  # An instant (naive: in `timezone`), or "HH:MM" today
+        timeout: Optional[float] = None,  # Seconds per HTTP request, in place of each source's own
+        retries: Optional[int] = None,    # Retries per HTTP request, in place of each source's own
+        on_failure: str = "raise",        # "raise", or "cache" (with cache=True): an unreachable source's cached rows
+    ) -> pd.DataFrame: ...                # last_refresh then holds a RefreshRecord of the run
 
     def save(
         self,
@@ -36,6 +42,45 @@ class DataPipeline:
 
     @classmethod
     def load(cls, path: Union[str, Path]) -> "DataPipeline": ...  # Load from YAML
+```
+
+`pipeline.last_refresh` says what the last `run` did, source by source (see
+[Refresh with a budget](/epftoolbox2/data-pipeline/caching/#refresh-with-a-budget)):
+
+```python
+from epftoolbox2.data.refresh import RefreshError, RefreshRecord, SourceRefresh, SourceTimeout
+
+class RefreshRecord:                        # DataPipeline.last_refresh
+    start: pd.Timestamp                     # The run's range [start, end), UTC
+    end: pd.Timestamp
+    started: pd.Timestamp                   # The clock's now when the run began
+    deadline: Optional[pd.Timestamp]        # The earlier of `deadline` and started + `budget`
+    budget: Optional[float]                 # The run's arguments, as given (None: not given)
+    timeout: Optional[float]
+    retries: Optional[int]
+    on_failure: str
+    cache: str                              # "none", "sources" (cache=True) or "file" (a path)
+    seconds: float                          # The refresh's time on the clock
+    sources: Tuple[SourceRefresh, ...]      # In the pipeline's order; with "raise", up to the source that raised
+    ok: bool                                # Every source ok
+    failed: Tuple[str, ...]                 # The names of those that aren't
+    last_valid: Dict[str, Optional[pd.Timestamp]]  # Of every column the sources gave
+    def __getitem__(self, name: str) -> SourceRefresh: ...  # record["EntsoeSource #1"]
+    def to_dict(self) -> Dict[str, Any]: ...  # JSON-safe
+
+class SourceRefresh:
+    name: str                               # "<class> #<position>"
+    status: str                             # "ok", "failed", "timeout" or "skipped"
+    seconds: float                          # Its turn's time on the clock
+    requests: int                           # HTTP requests sent
+    retries: int                            # How many of them asked again
+    error: Optional[str]                    # "<class>: <message>", every key of the pipeline's sources as ***
+    rows: Optional[int]                     # Rows given in [start, end) (None: a single-file cache hit)
+    last_valid: Optional[Dict[str, Optional[pd.Timestamp]]]  # Per column, the last timestamp with a value
+    def to_dict(self) -> Dict[str, Any]: ...
+
+class SourceTimeout(RuntimeError): ...      # A source ran out of the refresh's time; `deadline` is the instant
+class RefreshError(RuntimeError): ...       # on_failure="cache" and no source gave a row
 ```
 
 ---
@@ -1022,11 +1067,13 @@ class CsvExporter(Exporter):
 
 ## Clock
 
-Every time of day the library reads (`"today"`, `"now_d-7"`, a source's Retry-After, manifest timestamps), every interval it
-times and every wait it makes for itself go through one clock: `SYSTEM`, the machine's, unless code runs inside
-`use_clock(clock)` (a context variable, read in the calling thread). What settles data (the cache's unsettled boundary,
-Energy-Charts' response cache, Open-Meteo's cut between final and provisional rows) reads the earlier of the clock's now and the
-machine's, and waits on other processes stay on real time. Pool workers never read the clock.
+Every time of day the library reads (`"today"`, `"now_d-7"`, a refresh's budget, manifest timestamps), every interval it
+times and every wait it makes for itself (a retry's backoff, a Retry-After) go through one clock: `SYSTEM`, the machine's,
+unless code runs inside `use_clock(clock)` (a context variable, read in the calling thread). What settles data (the cache's
+unsettled boundary, Energy-Charts' response cache, Open-Meteo's cut between final and provisional rows) reads the earlier of
+the clock's now and the machine's. Real time, whatever the clock: waits on other processes, a Retry-After given as an HTTP date
+(an instant on the server's clock) and Energy-Charts' rate limit (the server counts real seconds). Pool workers never read the
+clock.
 
 ```python
 from epftoolbox2.clock import Clock, FakeClock, SYSTEM, current_clock, use_clock

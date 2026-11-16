@@ -2,8 +2,8 @@
 
 `current_clock()` is the clock in use: `SYSTEM`, the machine's, unless code runs inside `use_clock(clock)`, a context
 variable, so a block of code (a test, a simulated week) sees another clock and the rest of the process doesn't. Every time
-of day the package reads (a source's Retry-After, manifest timestamps, `"today"`), every interval it times and every wait it
-makes for itself (a retry's backoff, a Retry-After) goes through it. A `FakeClock` stands still until it is advanced: its
+of day the package reads (manifest timestamps, `"today"`, a refresh's deadline), every interval it times and every wait it
+makes for itself (a retry's backoff, a Retry-After) goes through it, but for the few listed below. A `FakeClock` stands still until it is advanced: its
 `sleep` advances it and returns at once, so code that waits never waits.
 
 What settles data reads `settled_now()`, the earlier of the clock's now and the machine's: the per-source cache's unsettled
@@ -21,6 +21,9 @@ What doesn't read the current clock, on purpose:
   batching ages and polls, so that a buffer stamped in one thread and aged in another is on one clock.
 - Waits on other processes, which run on real time: the tuner's waits for its workers (`tune/bayes.py`) and the results
   lock's wait for another process's moment on a lock file (`results/store.py`) use `SYSTEM` too.
+- A server's clock: a Retry-After given as an HTTP date is an instant of real time, measured against `SYSTEM`
+  (`data/sources/_http.py`; the wait it gives is on the current clock), and Energy-Charts' rate limit counts and waits in
+  real seconds (`SYSTEM`), as the server does, so a replay on a `FakeClock` against the real API can't send faster.
 
 `tests/test_clock.py` scans the package's source for other clock reads and timed waits.
 """

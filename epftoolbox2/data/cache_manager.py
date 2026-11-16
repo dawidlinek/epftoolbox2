@@ -29,6 +29,7 @@ import pandas as pd
 from filelock import FileLock, SoftFileLock, Timeout
 
 from epftoolbox2._clock import settled_now
+from epftoolbox2.data.sources._http import SourceTimeout, time_left
 from epftoolbox2.logging import get_logger
 
 # Bump when the on-disk layout or the meaning of cached ranges changes: every existing cache is then ignored.
@@ -100,12 +101,25 @@ def atomic_write(path: Path, write: Callable[[Path], None]) -> None:
 
 @contextmanager
 def hold_lock(lock: FileLock, description: str) -> Iterator[None]:
-    """Acquire an inter-process file lock (re-entrant for the same lock object), logging when we have to wait."""
+    """Acquire an inter-process file lock (re-entrant for the same lock object), logging when we have to wait.
+
+    Inside a refresh with a deadline (`DataPipeline.run(..., budget=, deadline=)`) the wait lasts only as long as the
+    refresh's time (`_http.time_left`), and then raises `SourceTimeout`: the other process may hold the lock for its whole
+    fetch. That wait is on real time (another process's), the seconds left being read on the clock."""
     try:
         lock.acquire(timeout=0)
     except Timeout:
         logger.info(f"Cache: waiting for another process that is writing {description}")
-        lock.acquire()
+        left = time_left()
+        if left is None:
+            lock.acquire()
+        else:
+            try:
+                lock.acquire(timeout=left)
+            except Timeout:
+                raise SourceTimeout(
+                    f"Cache: no time is left to wait for the cache lock of {description}, held by another process"
+                ) from None
     try:
         yield
     finally:

@@ -230,7 +230,30 @@ an issue day it didn't sample.
   between final and provisional rows) reads the earlier of the clock's now and the machine's, so a clock ahead of real time
   can't leave provisional values in a real cache; waits on other processes (the tuner's for its workers, a results lock's) stay
   on real time. With `SYSTEM` every number is as before. A test that patched a source module's `time.sleep` must use a
-  `FakeClock` now: the sources no longer import `time`. See [Clock](/epftoolbox2/reference/api/#clock).
+  `FakeClock` now: the sources no longer import `time`. Two waits keep real time whatever the clock (step 8b): a Retry-After
+  given as an HTTP date is an instant on the server's clock, read against the machine's, and Energy-Charts' rate limit counts
+  and waits real seconds, one limit per endpoint for the process, so a replay on a `FakeClock` against a real server keeps the
+  server's limits; a test that drives that rate limit on a fake clock sets the source's `_clock` and `_sleep` (and `_wait`, its
+  retries' waits, which follow the current clock). See [Clock](/epftoolbox2/reference/api/#clock).
+- **A refresh with a budget: `DataPipeline.run(..., budget=, deadline=, timeout=, retries=, on_failure=)` and `last_refresh`**
+  (step 8b). `budget` (seconds from now, on the clock) and `deadline` (an instant; a naive one in the pipeline's zone) bound the
+  whole refresh, the earlier counting (`deadline="11:55"` is that time today in the pipeline's zone, on the clock, never
+  tomorrow, and warns when more than 12 h past; another string needs a full date): the sources are asked one after another, each within what is left, a request only while time is left and
+  with its timeout cut to it, and a wait that would end at or after the deadline (a backoff, a Retry-After, Energy-Charts' rate
+  limit, another process's cache lock) is never started: the source raises `SourceTimeout` (`epftoolbox2.data.refresh`)
+  instead (`skipped` when it couldn't send a request, `timeout` after). Every source is started, so a full cache hit or a
+  local source needs no time. `timeout` and `retries` replace every request's own; they are run arguments, so YAML files and
+  cache keys don't move. `on_failure="cache"` (with `cache=True`) gives a source out of reach (out of time, a network error,
+  retries run out on 429 or 5xx) only what its cache holds, settled rows and never the last two days before now, and goes on;
+  an invalid key, a missing file or a bug is raised, a source whose cache holds no row warns, and no row at all raises
+  `RefreshError`. `"raise"`, the default, raises as before. `pipeline.last_refresh` is a `RefreshRecord`, also after a run that raised: per source
+  its status (`ok`, `failed`, `timeout`, `skipped`), seconds on the clock, requests and retries, its error with every key of the
+  pipeline's sources replaced by `***` (plain and URL-encoded), its rows and the last valid timestamp of each column; `to_dict()`
+  is JSON. The retry loops of ENTSO-E, PSE, Energy-Charts, Open-Meteo and OpenHolidays are one (`data/sources/_http.py`) with each
+  source's counts, backoffs, caps, timeouts and messages: a run without the new arguments sends the same requests, waits the same
+  and returns the same frame (a non-retried request error of PSE and Energy-Charts is raised with no exception context at all
+  now, as ENTSO-E's was, instead of a suppressed one). A full hit of the source cache takes its lock only inside each read, no
+  longer across them. See [Refresh with a budget](/epftoolbox2/data-pipeline/caching/#refresh-with-a-budget).
 - **Live directories: revisions visible once committed, deliveries, and readers by policy** (step 8c; the live calls that write them
   come next). A live pipeline writes into a directory of its own (`live.json`), each call for an issue day a new revision of every
   model's records, numbered 1 + the highest number any line of the day carries and taken before its first record, so a crashed
