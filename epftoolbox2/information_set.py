@@ -1191,15 +1191,19 @@ class ResolvedColumn:
     key: Optional[str] = None  # the rule's key (exact name or pattern)
     layer: Optional[str] = None
     built_from: Optional["ResolvedColumn"] = None  # what `base` was built from, if a transformer's feature (see `slot`)
+    # The slot length in minutes the DailyProfileTransformer that built `base` was given (`with_source_rules`), if told: a `_sNN`
+    # name doesn't carry it.
+    slot_length: Optional[int] = None
 
     @property
     def slot(self) -> Optional[Tuple[int, int]]:
         """(start, length) in minutes of the DailyProfileTransformer slot that `base` names, or None.
 
         `price_h05` holds the price of 05:00-06:00 on its row's local day, the same value on every row of that day,
-        so its availability is that of slot (300, 60), whatever the row's period. `_sNN` is a 15-minute slot.
+        so its availability is that of slot (300, 60), whatever the row's period. `_sNN` is a slot of `slot_length` minutes
+        when the information set was told it (`with_source_rules`, a transformer's `freq`), else a 15-minute one.
         """
-        return _profile_slot(self.base)
+        return _profile_slot(self.base, self.slot_length)
 
     @property
     def day_aggregate(self) -> bool:
@@ -1250,14 +1254,30 @@ def parse_predictor(name: str) -> List[Tuple[str, Tuple[Shift, ...]]]:
     return chain
 
 
-def _profile_slot(base: str) -> Optional[Tuple[int, int]]:
-    """(start, length) in minutes of the slot of day a DailyProfileTransformer column `base` names, or None."""
+def _profile_slot(base: str, slot_length: Optional[int] = None) -> Optional[Tuple[int, int]]:
+    """(start, length) in minutes of the slot of day a DailyProfileTransformer column `base` names, or None. An `_sNN` slot is
+    `slot_length` minutes long if told, else a quarter-hour: `_s05` of a 30-minute profile is 02:30, not 01:15."""
     match = _PROFILE_SLOT.match(base)
     if match is None:
         return None
     length = _SLOT_MINUTES[match["unit"]]
+    if match["unit"] == "s" and slot_length is not None:
+        length = slot_length
     start = int(match["n"]) * length
     return (start, length) if start < 1440 else None
+
+
+def _profile_slot_lengths(sources: Iterable[Any]) -> Dict[str, int]:
+    """Column -> slot length in minutes of each DailyProfileTransformer among `sources` that names its slots `_sNN` (every length
+    but an hour), so that the information set reads `_s05` of a 30-minute profile at 02:30."""
+    from .data.transformers.daily_profile import DailyProfileTransformer
+
+    out: Dict[str, int] = {}
+    for source in sources:
+        if isinstance(source, DailyProfileTransformer) and source._step != pd.Timedelta(hours=1):
+            minutes = int(source._step / pd.Timedelta(minutes=1))
+            out.update({column: minutes for column in source.columns})
+    return out
 
 
 def _built_from_name(base: str) -> Optional[str]:
@@ -1383,6 +1403,7 @@ class InformationSet:
         self.use_defaults = use_defaults
         self._source_rules: Dict[str, Rule] = {}
         self._source_zones: Dict[str, str] = {}
+        self._slot_lengths: Dict[str, int] = {}  # column -> minutes of the slots of its DailyProfileTransformer profile
         self._chained: Dict[str, ChainedInput] = {}
         # Column -> the archive replay whose rule chose its values (`archive_columns`).
         self._pinned: Dict[str, str] = {}
@@ -1397,6 +1418,7 @@ class InformationSet:
         out = self.copy()
         out._source_rules = {**self._source_rules, **{k: _as_rule(v) for k, v in source_rules(sources).items()}}
         out._source_zones = {**self._source_zones, **_source_market_zones(sources)}
+        out._slot_lengths = {**self._slot_lengths, **_profile_slot_lengths(sources)}
         out._chained = {**self._chained, **chained_sources(sources)}
         out._pinned = {**self._pinned, **archive_columns(sources)}
         out.refuse_rules_on_chained_columns()
@@ -1492,6 +1514,7 @@ class InformationSet:
         )
         out._source_rules = dict(self._source_rules)
         out._source_zones = dict(self._source_zones)
+        out._slot_lengths = dict(self._slot_lengths)
         out._chained = dict(self._chained)
         out._pinned = dict(self._pinned)
         return out
@@ -1565,13 +1588,24 @@ class InformationSet:
         if (self._chained and self.chained_of(column) is not None) or self._pinned_of(column) is not None:
             # A profile or day aggregate of a chained or archive column: its source's rule, read at its slot; no rule of its own.
             source = self.resolve(column)
-            return ResolvedColumn(name, base, shifts, source.rule, source.key, source.layer, source)
+            return ResolvedColumn(
+                name, base, shifts, source.rule, source.key, source.layer, source, self._slot_length_of(base, column)
+            )
         user = _find_rule(name, chain, self.rules, "rules")
         if user is not None and user.base != base:
             return user
         source = self.resolve(column)
         ruling = source if user is None else user
-        return ResolvedColumn(name, base, shifts, ruling.rule, ruling.key, ruling.layer, source)
+        return ResolvedColumn(
+            name, base, shifts, ruling.rule, ruling.key, ruling.layer, source, self._slot_length_of(base, column)
+        )
+
+    def _slot_length_of(self, base: str, column: str) -> Optional[int]:
+        """The slot length in minutes a DailyProfileTransformer was given for `column`, if `base` names one of its slots and
+        the information set was told (`with_source_rules`); `column` is what `base` was built from, with its shifts."""
+        if not self._slot_lengths or _profile_slot(base) is None:
+            return None
+        return self._slot_lengths.get(column)
 
     def _chained_rule(self, name: str, chain: List[Tuple[str, Tuple[Shift, ...]]]) -> Optional[ResolvedColumn]:
         """The source rule of the chained (or archive, `_pinned`) column `name` reads through its shifts (the full name down to
@@ -1587,15 +1621,21 @@ class InformationSet:
         """`resolve` for data with slots of `step` minutes.
 
         Only on 15-minute data is a two-digit `_sNN` column surely a quarter-hour (another slot length is off the grid or
-        has three digits). On hourly data it can be a slot of any length, and reading `load_actual_s30` of a 30-minute
-        profile (15:00) as a quarter-hour (07:30) by the rule of `load_actual` would turn the error for a column without
-        a rule into a silent look-ahead, so there it needs a user's rule on its own name.
+        has three digits), unless the information set was told the profile's slot length (`with_source_rules` of the
+        transformer, which a `Workflow` does). On hourly data an untold one can be a slot of any length, and reading
+        `load_actual_s30` of a 30-minute profile (15:00) as a quarter-hour (07:30) by the rule of `load_actual` would turn the
+        error for a column without a rule into a silent look-ahead, so there it needs a user's rule on its own name.
         """
         col = self.resolve(name)
         link = col
         while step != 15 and link.built_from is not None:
             own = _find_rule(link.name, parse_predictor(link.name), self.rules, "rules")
-            if link.slot is not None and link.slot[1] == _SLOT_MINUTES["s"] and own is None:
+            if (
+                link.slot is not None
+                and link.slot_length is None
+                and link.slot[1] == _SLOT_MINUTES["s"]
+                and own is None
+            ):
                 return ResolvedColumn(name, col.base, col.shifts, None)
             link = link.built_from
         return col
@@ -3764,6 +3804,9 @@ def _available_array(
                 )
             return latest
         slot, length = col.slot or (1440.0 - step, step)
+        length = max(
+            length, step
+        )  # a slot shorter than the frame's period still holds a whole row: 15:00 of hourly data is 15:00-16:00
         slots = np.full(len(reached), float(slot))
         occurrence = np.full(len(reached), col.slot is not None)
         return _available_array(
@@ -4069,7 +4112,9 @@ def _delivered_span(
         return start, end
     reached = _shifted_day(col.shifts, day, minute, later, ctx)
     if col.slot is not None:
-        return _delivered_span(col.built_from, reached, np.full(len(reached), float(col.slot[0])), col.slot[1], ctx)
+        return _delivered_span(
+            col.built_from, reached, np.full(len(reached), float(col.slot[0])), max(col.slot[1], step), ctx
+        )
     start, _ = _delivered_span(col.built_from, reached - (col.window - 1), np.zeros(len(reached)), step, ctx)
     _, end = _delivered_span(col.built_from, reached, np.full(len(reached), 1440.0 - step), step, ctx)
     return start, end
