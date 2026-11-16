@@ -1,10 +1,10 @@
 """What a live revision keeps of its issue (step 8f), as functions over a frame and records: what `forecast()` (8e) writes into
 `issues/<issue>/r<rev>/` (`results.live.LiveRevision.directory`) before it commits the revision.
 
-- `snapshot(frame, models, plan, issue)`: the input snapshot, every column any model read on the issue rows of D as float64 with
+- `snapshot(frame, models, plan, issue, zone=)`: the input snapshot, every column any model read on the issue rows of D as float64 with
   each key's list hash, and its hash (`snapshot_hash`), the `snapshot` every record of the revision carries;
   `write_snapshot` writes it as `inputs.parquet`, `read_snapshot` reads it back and checks the hash.
-- `quality(frame, refresh, rules, issue)`: `quality.json`, per source the refresh status and the last valid timestamp of each
+- `quality(frame, refresh, rules, issue, zone=)`: `quality.json`, per source the refresh status and the last valid timestamp of each
   column, and per input column the missing cells on the issue rows, the cells its `{column}_imputed` flag marks, its last valid
   timestamp and its vintage class.
 - `check(records, checks, clock_periods)`: the checks before export over the revision's member records
@@ -58,13 +58,24 @@ def _day(issue: Any) -> datetime.date:
     return datetime.date.fromisoformat(str(issue))
 
 
-def issue_rows(frame: pd.DataFrame, issue: Any) -> np.ndarray:
-    """Which rows of `frame` are dated D, the issue day, by their local date (the index's own zone, the wall clock of a naive
-    index): the rows a forecast issued on D is made from, both occurrences of a repeated autumn hour among them."""
+def _aware_index(frame: pd.DataFrame) -> pd.DatetimeIndex:
+    """The frame's index, which must hold instants: a naive index can't tell the two occurrences of a repeated hour apart."""
     index = frame.index
     if not isinstance(index, pd.DatetimeIndex):
         raise TypeError("the frame needs a DatetimeIndex")
-    wall = index.tz_localize(None) if index.tz is not None else index
+    if index.tz is None:
+        raise ValueError(
+            "the frame's index is naive: its rows' instants are unknown (the two 02:00 rows of an autumn day tie), so no "
+            "issue day can be read from it. Give it its zone (tz_localize) first."
+        )
+    return index
+
+
+def issue_rows(frame: pd.DataFrame, issue: Any, zone: str) -> np.ndarray:
+    """Which rows of `frame` are dated D, the issue day, by their local date in `zone`, the issue zone (the issue calendar's,
+    whatever zone the index is in): the rows a forecast issued on D is made from, both occurrences of a repeated autumn hour
+    among them. A naive index raises."""
+    wall = _aware_index(frame).tz_convert(zone).tz_localize(None)
     return np.asarray(wall.normalize() == pd.Timestamp(_day(issue)))
 
 
@@ -107,20 +118,18 @@ def _float64(frame: pd.DataFrame, columns: Sequence[str]) -> pd.DataFrame:
 
 
 def snapshot_hash(inputs: pd.DataFrame) -> str:
-    """The sha256 of a snapshot's inputs: its rows' instants (UTC nanoseconds; the wall clock of a naive index), then each column
+    """The sha256 of a snapshot's inputs: its rows' instants (UTC nanoseconds; a naive index raises), then each column
     in sorted name order, its name and its float64 bytes (little-endian), each part preceded by its length. So the same values
     give the same hash whatever the order of the frame's columns, one changed cell another, and it never depends on how a file
     stores them (Parquet bytes differ across pyarrow versions). NaNs hash as one NaN and -0.0 as 0.0."""
-    index = inputs.index
-    if not isinstance(index, pd.DatetimeIndex):
-        raise TypeError("a snapshot's inputs need a DatetimeIndex")
+    index = _aware_index(inputs).as_unit("ns")
     order = np.argsort(index.asi8, kind="stable")
     columns = sorted(str(column) for column in inputs.columns)
     if len(set(columns)) != len(columns):
         raise ValueError("two columns of one name in a snapshot")
     values = _float64(inputs.set_axis([str(column) for column in inputs.columns], axis=1), columns)
     digest = hashlib.sha256(_SNAPSHOT_TAG)
-    instants = (index.tz_convert("UTC") if index.tz is not None else index).as_unit("ns").asi8[order]
+    instants = index.tz_convert("UTC").asi8[order]
     digest.update(len(instants).to_bytes(8, "little"))
     digest.update(instants.astype("<i8").tobytes())
     digest.update(len(columns).to_bytes(8, "little"))
@@ -141,8 +150,9 @@ class Snapshot(NamedTuple):
     hash: str
 
 
-def snapshot(frame: pd.DataFrame, models: Sequence[Any], plan: Mapping[str, Any], issue: Any) -> Snapshot:
-    """The input snapshot of issue day `issue` (a date or its ISO text).
+def snapshot(frame: pd.DataFrame, models: Sequence[Any], plan: Mapping[str, Any], issue: Any, *, zone: str) -> Snapshot:
+    """The input snapshot of issue day `issue` (a date or its ISO text) in `zone`, the issue zone (`live.json`'s
+    `issue_timezone`): its rows are those of that local date, whatever zone the frame's index is in, and a naive index raises.
 
     `models` are the revision's models (names, or models with a `name`), `plan` each one's lists as the issue planned them:
     model name -> {(period, horizon): its columns}, or one list of columns for every key. The inputs are every column of any of
@@ -160,8 +170,8 @@ def snapshot(frame: pd.DataFrame, models: Sequence[Any], plan: Mapping[str, Any]
     missing = sorted(read - set(map(str, frame.columns)))
     if missing:
         raise KeyError(f"the frame has no column {missing}")
-    rows = frame.loc[issue_rows(frame, issue)]
-    rows = rows.iloc[np.argsort(rows.index.asi8, kind="stable")]
+    rows = frame.loc[issue_rows(frame, issue, zone)]
+    rows = rows.iloc[np.argsort(rows.index.as_unit("ns").asi8, kind="stable")]
     inputs = _float64(rows, sorted(read))
     return Snapshot(_day(issue).isoformat(), inputs, lists, snapshot_hash(inputs))
 
@@ -264,8 +274,34 @@ def _step_minutes(index: pd.DatetimeIndex) -> int:
     """The spacing of a frame's rows in minutes, from its UTC instants: 60 for hourly and daily frames, as the rules read them."""
     if len(index) < 2:
         return 60
-    step = int(np.median(np.diff(index.asi8)) // 60_000_000_000)
+    instants = np.unique(index.as_unit("ns").asi8)  # sorted, whatever the index's unit and order
+    if len(instants) < 2:
+        return 60
+    step = int(np.median(np.diff(instants)) // 60_000_000_000)
     return 15 if step == 15 else 60
+
+
+def is_imputed_flag(column: str) -> bool:
+    """Whether a column is an `ImputeTransformer(flag=True)` flag, `x_imputed`, or one shifted with its column, `x_imputed_d+1`."""
+    if column.endswith(_IMPUTED):
+        return True
+    shifted = _SHIFT.match(column)
+    return shifted is not None and shifted["base"].endswith(_IMPUTED)
+
+
+def issue_instant(issue: Any, zone: str, rules: Any = None) -> pd.Timestamp:
+    """When issue day D is issued: `rules`' issue time (an `InformationSet`'s `issue_time` in its `issue_timezone`, `zone` for
+    "data"; a repeated time at its second occurrence, a skipped one shifted forward, as the rules read a clock time), or without
+    rules the last instant of D in `zone`."""
+    day = _day(issue)
+    if rules is not None and getattr(rules, "issue_time", None):
+        tz = getattr(rules, "issue_timezone", None) or zone
+        tz = zone if tz == "data" else tz
+        return pd.Timestamp(f"{day.isoformat()} {rules.issue_time}").tz_localize(
+            tz, ambiguous=False, nonexistent="shift_forward"
+        )
+    end = pd.Timestamp(day + datetime.timedelta(days=1)).tz_localize(zone, ambiguous=True, nonexistent="shift_forward")
+    return end - pd.Timedelta(1, "ns")
 
 
 def _vintage(rules: Any, column: str, step: int) -> Optional[str]:
@@ -282,29 +318,35 @@ def quality(
     rules: Any,
     issue: Any,
     *,
+    zone: str,
     columns: Optional[Sequence[str]] = None,
+    issued_at: Any = None,
 ) -> Dict[str, Any]:
-    """`quality.json` of issue day `issue`: what is known of the inputs' quality, read off the frame and the refresh record.
+    """`quality.json` of issue day `issue` in `zone`, the issue zone: what is known of the inputs' quality, read off the frame
+    and the refresh record, as of `issued_at` (an instant; by default `issue_instant(issue, zone, rules)`).
 
     - `sources`: per source of `refresh` (8b's `RefreshRecord` or a mapping of its shape; see `_sources` for the two fields read)
       its status and each column's last valid timestamp; None without a refresh record (a frame used as given).
-    - `columns`: per input column (`columns`, else every column of the frame but the `_imputed` flags) `issue_rows` (rows dated
-      D), `missing` (of those, cells without a value), `imputed` (of those, cells its flag marks; None without a flag column)
-      and `flag` (that column), `last_valid` (the frame's last timestamp with a value, None for none) and `vintage` (its rule's
-      class in `rules`, an `InformationSet`; None without one).
+    - `columns`: per input column (`columns`, else every column of the frame but the imputation flags, shifted ones too)
+      `issue_rows` (rows dated D in `zone`), `missing` (of those, cells without a value), `imputed` (of those, cells its flag
+      marks; None without a flag column) and `flag` (that column), `last_valid` (the latest row stamped at or before
+      `issued_at` with a value, None for none, whatever the order of the rows) and `vintage` (its rule's class in `rules`, an
+      `InformationSet`; None without one). A naive index raises.
 
     A cell the frame holds is never judged: no value is called implausible or turned into a missing one (validators stay
     advisory, step 8's decision 17)."""
-    index = frame.index
-    if not isinstance(index, pd.DatetimeIndex):
-        raise TypeError("the frame needs a DatetimeIndex")
+    index = _aware_index(frame)
     if columns is None:
-        columns = [str(column) for column in frame.columns if not str(column).endswith(_IMPUTED)]
+        columns = [str(column) for column in frame.columns if not is_imputed_flag(str(column))]
     lacking = [column for column in columns if column not in frame.columns]
     if lacking:
         raise KeyError(f"the frame has no column {lacking}")
-    rows = issue_rows(frame, issue)
+    rows = issue_rows(frame, issue, zone)
     step = _step_minutes(index)
+    cut = issue_instant(issue, zone, rules) if issued_at is None else pd.Timestamp(issued_at)
+    if cut.tzinfo is None:
+        raise ValueError(f"issued_at is an instant: give it a zone, got {issued_at!r}")
+    known = np.asarray(index <= cut)
     out: Dict[str, Dict[str, Any]] = {}
     for column in columns:
         values = frame[column]
@@ -314,7 +356,8 @@ def quality(
         if flag is not None:
             marks = frame[flag].to_numpy(dtype=np.float64, na_value=0.0)[rows]
             flagged = int(np.count_nonzero(marks != 0))
-        last = index[present][-1] if present.any() else None
+        stamped = index[present & known]
+        last = stamped.max() if len(stamped) else None
         out[column] = {
             "issue_rows": int(rows.sum()),
             "missing": int(np.count_nonzero(~present[rows])),

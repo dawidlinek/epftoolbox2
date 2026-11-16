@@ -99,7 +99,7 @@ def oracle_hash(frame, columns, issue):
 
 def test_a_snapshot_holds_the_issue_rows_of_what_the_models_read():
     frame = live_frame()
-    snap = snapshot(frame, ["lear", "fallback"], PLAN, ISSUE)
+    snap = snapshot(frame, ["lear", "fallback"], PLAN, ISSUE, zone=ZONE)
     assert snap.issue == ISSUE
     assert list(snap.inputs.columns) == ["exaa_d+1", "load_d+1"]  # wind and the target nobody reads aren't in it
     assert len(snap.inputs) == 100  # both occurrences of the repeated hour's quarter-hours
@@ -113,7 +113,7 @@ def test_a_snapshot_holds_the_issue_rows_of_what_the_models_read():
         "list_hash": list_hash(["load_d+1", "exaa_d+1"]),
     }
     assert len(snap.lists) == 192
-    one_list = snapshot(frame, ["fallback"], {"fallback": ["load_d+1"]}, datetime.date(2026, 10, 25))
+    one_list = snapshot(frame, ["fallback"], {"fallback": ["load_d+1"]}, datetime.date(2026, 10, 25), zone=ZONE)
     assert one_list.lists == [
         {"model": "fallback", "period": None, "horizon": None, "list_hash": list_hash(["load_d+1"])}
     ]
@@ -121,68 +121,77 @@ def test_a_snapshot_holds_the_issue_rows_of_what_the_models_read():
 
 def test_the_hash_is_the_same_for_the_same_values_whatever_the_column_order():
     frame = live_frame()
-    first = snapshot(frame, ["lear"], PLAN, ISSUE).hash
+    first = snapshot(frame, ["lear"], PLAN, ISSUE, zone=ZONE).hash
     shuffled = frame[list(reversed(frame.columns))]
-    assert snapshot(shuffled, ["lear"], PLAN, ISSUE).hash == first
+    assert snapshot(shuffled, ["lear"], PLAN, ISSUE, zone=ZONE).hash == first
     # The rows in another order, other days changed, an int column of the same values, -0.0 for 0.0, one NaN for another.
-    assert snapshot(frame.iloc[::-1], ["lear"], PLAN, ISSUE).hash == first
+    assert snapshot(frame.iloc[::-1], ["lear"], PLAN, ISSUE, zone=ZONE).hash == first
     other_days = frame.copy()
     other_days.loc[other_days.index.tz_localize(None).normalize() != pd.Timestamp(ISSUE), "load_d+1"] += 1.0
-    assert snapshot(other_days, ["lear"], PLAN, ISSUE).hash == first
+    assert snapshot(other_days, ["lear"], PLAN, ISSUE, zone=ZONE).hash == first
     zeros = frame.copy()
     zeros["exaa_d+1"] = 0.0
     negative = zeros.copy()
     negative["exaa_d+1"] = -0.0
-    assert snapshot(zeros, ["lear"], PLAN, ISSUE).hash == snapshot(negative, ["lear"], PLAN, ISSUE).hash
+    assert (
+        snapshot(zeros, ["lear"], PLAN, ISSUE, zone=ZONE).hash
+        == snapshot(negative, ["lear"], PLAN, ISSUE, zone=ZONE).hash
+    )
     nans = frame.copy()
-    at = int(np.flatnonzero(issue_rows(frame, ISSUE))[10])  # a cell the snapshot holds
+    at = int(np.flatnonzero(issue_rows(frame, ISSUE, ZONE))[10])  # a cell the snapshot holds
     nans.iloc[at, 2] = np.nan
     payload = with_payload_nan(frame, at, 2)
-    assert snapshot(nans, ["lear"], PLAN, ISSUE).hash == snapshot(payload, ["lear"], PLAN, ISSUE).hash
+    assert (
+        snapshot(nans, ["lear"], PLAN, ISSUE, zone=ZONE).hash
+        == snapshot(payload, ["lear"], PLAN, ISSUE, zone=ZONE).hash
+    )
     as_ints = frame.copy()
     as_ints["exaa_d+1"] = np.round(as_ints["exaa_d+1"])
     as_ints_int = as_ints.astype({"exaa_d+1": "int64"})
-    assert snapshot(as_ints, ["lear"], PLAN, ISSUE).hash == snapshot(as_ints_int, ["lear"], PLAN, ISSUE).hash
+    assert (
+        snapshot(as_ints, ["lear"], PLAN, ISSUE, zone=ZONE).hash
+        == snapshot(as_ints_int, ["lear"], PLAN, ISSUE, zone=ZONE).hash
+    )
 
 
 def test_the_hash_differs_on_one_changed_cell_and_on_other_instants():
     frame = live_frame()
-    first = snapshot(frame, ["lear"], PLAN, ISSUE).hash
-    rows = np.flatnonzero(issue_rows(frame, ISSUE))
+    first = snapshot(frame, ["lear"], PLAN, ISSUE, zone=ZONE).hash
+    rows = np.flatnonzero(issue_rows(frame, ISSUE, ZONE))
     seen = {first}
     for row in rows[[0, 37, 99]]:
         for column in ("load_d+1", "exaa_d+1"):
             changed = frame.copy()
             changed.iloc[row, changed.columns.get_loc(column)] = np.nextafter(changed.iloc[row][column], np.inf)
-            seen.add(snapshot(changed, ["lear"], PLAN, ISSUE).hash)
+            seen.add(snapshot(changed, ["lear"], PLAN, ISSUE, zone=ZONE).hash)
     missing = frame.copy()
     missing.iloc[rows[5], missing.columns.get_loc("load_d+1")] = np.nan
-    seen.add(snapshot(missing, ["lear"], PLAN, ISSUE).hash)
+    seen.add(snapshot(missing, ["lear"], PLAN, ISSUE, zone=ZONE).hash)
     renamed = frame.rename(columns={"exaa_d+1": "exab_d+1"})
-    seen.add(snapshot(renamed, ["lear"], {"lear": {(0, 1): ["load_d+1", "exab_d+1"]}}, ISSUE).hash)
+    seen.add(snapshot(renamed, ["lear"], {"lear": {(0, 1): ["load_d+1", "exab_d+1"]}}, ISSUE, zone=ZONE).hash)
     shifted = frame.copy()
     shifted.index = shifted.index + pd.Timedelta(minutes=15)
-    seen.add(snapshot(shifted, ["lear"], PLAN, ISSUE).hash)
+    seen.add(snapshot(shifted, ["lear"], PLAN, ISSUE, zone=ZONE).hash)
     assert len(seen) == 10  # the first, six changed cells, a missing one, a renamed column, other instants
 
 
 def test_a_snapshot_refuses_what_it_can_t_hold():
     frame = live_frame()
     with pytest.raises(KeyError, match="no plan"):
-        snapshot(frame, ["lear", "other"], PLAN, ISSUE)
+        snapshot(frame, ["lear", "other"], PLAN, ISSUE, zone=ZONE)
     with pytest.raises(KeyError, match="no column"):
-        snapshot(frame, ["x"], {"x": ["solar_d+1"]}, ISSUE)
+        snapshot(frame, ["x"], {"x": ["solar_d+1"]}, ISSUE, zone=ZONE)
     text = frame.assign(**{"load_d+1": "high"})
     with pytest.raises(TypeError, match="float64"):
-        snapshot(text, ["lear"], PLAN, ISSUE)
+        snapshot(text, ["lear"], PLAN, ISSUE, zone=ZONE)
     with pytest.raises(TypeError, match="a day, not an instant"):
-        snapshot(frame, ["lear"], PLAN, pd.Timestamp(ISSUE, tz=ZONE))
+        snapshot(frame, ["lear"], PLAN, pd.Timestamp(ISSUE, tz=ZONE), zone=ZONE)
     with pytest.raises(ValueError, match="two models"):
-        snapshot(frame, ["lear", "lear"], PLAN, ISSUE)
+        snapshot(frame, ["lear", "lear"], PLAN, ISSUE, zone=ZONE)
 
 
 def test_write_and_read_a_snapshot(tmp_path):
-    snap = snapshot(live_frame(), ["lear", "fallback"], PLAN, ISSUE)
+    snap = snapshot(live_frame(), ["lear", "fallback"], PLAN, ISSUE, zone=ZONE)
     path = write_snapshot(snap, tmp_path)
     assert path == tmp_path / SNAPSHOT_FILE and not list(tmp_path.glob(".*"))
     back = read_snapshot(path)
@@ -222,12 +231,16 @@ class Refresh:  # stands in for 8b's RefreshRecord
 def test_quality_counts_missing_and_imputed_cells_on_the_issue_rows():
     frame = live_frame(freq="1h")
     raw = frame.copy()
-    rows = np.flatnonzero(issue_rows(raw, ISSUE))
+    rows = np.flatnonzero(issue_rows(raw, ISSUE, ZONE))
     raw.iloc[rows[:3], raw.columns.get_loc("load_d+1")] = np.nan  # three cells of the issue day, imputed below
     raw.iloc[rows[0] - 2, raw.columns.get_loc("load_d+1")] = np.nan  # one of the day before
     raw.iloc[rows[4:6], raw.columns.get_loc("exaa_d+1")] = np.nan  # two left missing
-    raw.iloc[-5:, raw.columns.get_loc("wind_d+1")] = np.nan  # the last five hours
+    issued = pd.Timestamp(f"{ISSUE} 11:45").tz_localize(ZONE)
+    before = np.flatnonzero(raw.index <= issued)
+    raw.iloc[before[-3:], raw.columns.get_loc("wind_d+1")] = np.nan  # the three hours before the issue time
     imputed = ImputeTransformer(columns=["load_d+1"], method="ffill", flag=True).transform(raw)
+    imputed["load_imputed_d+1"] = imputed["load_d+1_imputed"]  # a flag shifted with its column: no input either
+    imputed = imputed.iloc[np.random.default_rng(1).permutation(len(imputed))]  # in no order: last_valid reads instants
     rules = InformationSet(
         "11:45",
         ZONE,
@@ -239,7 +252,7 @@ def test_quality_counts_missing_and_imputed_cells_on_the_issue_rows():
             "exaa": {"status": "timeout", "last_valid": {"exaa_d+1": None}},
         }
     )
-    found = quality(imputed, refresh, rules, ISSUE)
+    found = quality(imputed, refresh, rules, ISSUE, zone=ZONE)
     assert found["issue"] == ISSUE
     assert found["sources"] == {
         "entsoe": {"status": "ok", "last_valid": {"load_d+1": "2026-10-26T23:00:00+01:00"}},
@@ -252,19 +265,27 @@ def test_quality_counts_missing_and_imputed_cells_on_the_issue_rows():
         "missing": 0,
         "imputed": 3,
         "flag": "load_d+1_imputed",
-        "last_valid": imputed.index[-1].isoformat(),
+        "last_valid": imputed.index[imputed.index <= issued].max().isoformat(),  # 11:00, cut at the issue time
         "vintage": "unknown",
     }
+    assert columns["load_d+1"]["last_valid"] == "2026-10-25T11:00:00+01:00"
     assert columns["exaa_d+1"]["missing"] == 2 and columns["exaa_d+1"]["imputed"] is None
     assert columns["exaa_d+1"]["vintage"] == "snapshot"
-    assert columns["wind_d+1"]["last_valid"] == imputed.index[-6].isoformat() and columns["wind_d+1"]["missing"] == 0
-    plain = quality(imputed, None, None, ISSUE, columns=["exaa_d+1"])
+    assert columns["wind_d+1"]["last_valid"] == "2026-10-25T08:00:00+01:00"  # the three hours before 11:45 empty
+    plain = quality(imputed, None, None, ISSUE, zone=ZONE, columns=["exaa_d+1", "load_d+1"])
     assert plain["sources"] is None and plain["columns"]["exaa_d+1"]["vintage"] is None
+    assert (
+        plain["columns"]["load_d+1"]["last_valid"] == "2026-10-25T23:00:00+01:00"
+    )  # no rules: the end of the issue day
+    later = quality(imputed, None, None, ISSUE, zone=ZONE, columns=["load_d+1"], issued_at="2026-10-26 05:00+01:00")
+    assert later["columns"]["load_d+1"]["last_valid"] == "2026-10-26T05:00:00+01:00"
+    utc = quality(imputed.tz_convert("UTC"), None, None, ISSUE, zone=ZONE, columns=["load_d+1"])
+    assert utc["columns"]["load_d+1"]["issue_rows"] == 25  # the issue zone's date, whatever the index's zone
     json.dumps(found, allow_nan=False)  # plain JSON
     with pytest.raises(KeyError):
-        quality(imputed, None, None, ISSUE, columns=["solar"])
+        quality(imputed, None, None, ISSUE, zone=ZONE, columns=["solar"])
     with pytest.raises(TypeError, match="sources"):
-        quality(imputed, {"entsoe": "ok"}, None, ISSUE)
+        quality(imputed, {"entsoe": "ok"}, None, ISSUE, zone=ZONE)
 
 
 def test_a_shifted_column_finds_its_shifted_flag():
@@ -275,7 +296,7 @@ def test_a_shifted_column_finds_its_shifted_flag():
     assert imputed_flag(frame, "load_d+1") == "load_imputed_d+1"
     assert imputed_flag(frame, "wind") == "wind_imputed"
     assert imputed_flag(frame, "load") is None
-    assert quality(frame, None, None, ISSUE)["columns"]["load_d+1"]["imputed"] == 1
+    assert quality(frame, None, None, ISSUE, zone=ZONE)["columns"]["load_d+1"]["imputed"] == 1
 
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -343,7 +364,7 @@ def test_refresh_and_waits_records_are_plain_json(tmp_path):
 
 def test_snapshot_hash_itself_sorts_columns_and_rows_and_reads_one_nan():
     """`snapshot_hash` on inputs in any column and row order, as a later check may build them, and NaNs of any payload."""
-    inputs = snapshot(live_frame(), ["lear"], PLAN, ISSUE).inputs
+    inputs = snapshot(live_frame(), ["lear"], PLAN, ISSUE, zone=ZONE).inputs
     first = snapshot_hash(inputs)
     assert snapshot_hash(inputs[list(reversed(inputs.columns))]) == first
     assert snapshot_hash(inputs.iloc[::-1]) == first
@@ -351,3 +372,31 @@ def test_snapshot_hash_itself_sorts_columns_and_rows_and_reads_one_nan():
     nan.iloc[3, 0] = np.nan
     payload = with_payload_nan(inputs, 3, 0)
     assert snapshot_hash(nan) == snapshot_hash(payload) != first
+
+
+def test_the_issue_day_is_the_issue_zone_s_whatever_the_index_and_a_naive_index_is_refused():
+    """A frame in UTC holds the 25 hours of the autumn day of Berlin, and hashes as the same frame in Berlin; a naive index,
+    whose two 02:00 rows tie, raises."""
+    frame = live_frame(freq="1h")
+    berlin = snapshot(frame, ["lear"], {"lear": ["load_d+1"]}, ISSUE, zone=ZONE)
+    utc = snapshot(frame.tz_convert("UTC"), ["lear"], {"lear": ["load_d+1"]}, ISSUE, zone=ZONE)
+    assert len(berlin.inputs) == len(utc.inputs) == 25 and berlin.hash == utc.hash
+    assert int(issue_rows(frame.tz_convert("UTC"), ISSUE, "UTC").sum()) == 24  # the UTC date is another day
+    naive = frame.tz_localize(None)
+    for call in (
+        lambda: snapshot(naive, ["lear"], {"lear": ["load_d+1"]}, ISSUE, zone=ZONE),
+        lambda: snapshot_hash(berlin.inputs.tz_localize(None)),
+        lambda: quality(naive, None, None, ISSUE, zone=ZONE),
+    ):
+        with pytest.raises(ValueError, match="naive"):
+            call()
+
+
+@pytest.mark.parametrize("unit", ["ns", "us", "ms", "s"])
+def test_the_step_of_the_rows_is_read_whatever_the_index_unit(unit):
+    from epftoolbox2.pipelines._issue_records import _step_minutes
+
+    quarter = live_frame(freq="15min").index.as_unit(unit)
+    hourly = live_frame(freq="1h").index.as_unit(unit)
+    assert _step_minutes(quarter) == 15 and _step_minutes(quarter[::-1]) == 15
+    assert _step_minutes(hourly) == 60
