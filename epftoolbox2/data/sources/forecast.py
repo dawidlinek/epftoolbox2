@@ -133,7 +133,7 @@ class ForecastSource(DataSource):
     records (with `issued_at`) outside a live directory are refused.
 
     Its availability rule and its upstream's identity come from `InformationSet.with_source_rules` (a `Workflow` applies it):
-    a model run outside one must pass `information_set.with_source_rules(data_pipeline.sources)`, else the column has no rule.
+    a model run outside one must pass `information_set.with_source_rules([*data_pipeline.sources, *data_pipeline.transformers])`, else the column has no rule.
 
     Args:
         path: The upstream run's `save_dir`.

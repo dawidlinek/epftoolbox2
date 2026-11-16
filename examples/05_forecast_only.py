@@ -88,7 +88,9 @@ def main(data_start="now_d-735", data_end="today_d+5"):
     ]
 
     # Forecasts are issued at 11:45, before the 12:00 CET day-ahead gate closure
-    information_set = InformationSet("11:45", "Europe/Warsaw").with_source_rules(data_pipeline.sources)
+    information_set = InformationSet("11:45", "Europe/Warsaw").with_source_rules(
+        [*data_pipeline.sources, *data_pipeline.transformers]
+    )
 
     report = (
         ModelPipeline(information_set=information_set, availability="raise")

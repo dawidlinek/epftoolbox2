@@ -33,7 +33,7 @@ class ArchiveSource(DataSource):
     The rule of every column it emits is `Availability.published(known_at, days_before, timezone=timezone, vintage="snapshot")`
     (`availability()`): `InformationSet.with_source_rules` gives it (a `Workflow` applies it), and it comes before every rule,
     assumption and pattern of the information set, as the values were chosen by it; a rule of yours that names one of its
-    columns raises. Outside a `Workflow` pass `information_set.with_source_rules(data_pipeline.sources)`. The default `prefix`
+    columns raises. Outside a `Workflow` pass `information_set.with_source_rules([*data_pipeline.sources, *data_pipeline.transformers])`. The default `prefix`
     keeps its column names off the built-in rules of the archived source's names (`archive_load_forecast`, not `load_forecast`).
 
     Rows of the archive's realised series (actual load, say) for day d are mostly not out on d - 1: replay them with
@@ -192,7 +192,7 @@ class ArchiveSource(DataSource):
                     f"ArchiveSource({self.source!r}): {ruled} have a built-in rule of the live API, which would judge the "
                     f"archive's values, chosen as fetched by {self.known_at} {self.timezone} {self.days_before} day(s) before "
                     "each delivery day, unless the information set puts this source's rule first: pass "
-                    "information_set.with_source_rules(data_pipeline.sources) (a Workflow does), or a prefix no built-in "
+                    "information_set.with_source_rules([*data_pipeline.sources, *data_pipeline.transformers]) (a Workflow does), or a prefix no built-in "
                     "rule matches",
                     UserWarning,
                     stacklevel=2,
