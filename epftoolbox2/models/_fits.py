@@ -415,6 +415,9 @@ class UnitFit:
         forecast of the call. `flat=False` keeps `_predict_fitted`'s coefficients as they are, as `_fit_member` does."""
         from ._worker import flat_coefficients
 
+        rows = np.ascontiguousarray(
+            rows, dtype=np.float64
+        )  # as `_fit_unit`'s: a strided row takes another product kernel
         out: List[Optional[Tuple[float, list]]] = [None] * rows.shape[0]
         if self.engine is not None:
             out = [self.engine.forecast(model, rows[row : row + 1]) for row in range(rows.shape[0])]

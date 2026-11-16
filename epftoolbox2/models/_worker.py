@@ -1161,7 +1161,10 @@ def _fit_unit(
     if not forecast:
         return outcomes
 
-    test_rows = arrays["x"][[test for _, test in forecast]][:, col_idx]
+    # C order: fancy indexing gives a Fortran-ordered block, whose row slices are strided, and numpy multiplies a strided row by
+    # another kernel than a contiguous one (on AVX-512 nodes the two differ in the last bit), so a forecast would depend on how
+    # many days its call holds. Every row reaches the model contiguous, as a call of one day's does.
+    test_rows = np.ascontiguousarray(arrays["x"][[test for _, test in forecast]][:, col_idx])
     predicted = None
     if stored is not None:
         predicted = stored.forecasts(model, test_rows)

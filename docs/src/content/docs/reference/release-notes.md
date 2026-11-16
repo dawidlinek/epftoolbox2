@@ -120,6 +120,13 @@ an issue day it didn't sample.
 
 ### Fixed
 
+- **A refit unit's forecasts no longer depend on how many days its block call holds, on AVX-512 machines.** The issue rows of a
+  refit unit were taken as a Fortran-ordered block, and a variance-stabilising scaler (`asinh`, `mlog`, `poly`, `npit`) kept that
+  order, so with several days in one call the model multiplied a strided row; numpy takes another kernel for it than for a
+  contiguous row, and on AVX-512 nodes (measured on an Intel Xeon Platinum 8268) the two differ in the last bit. A forecast then
+  differed between a run of its whole block and a run of its day alone, or a resume. Every row now reaches the model contiguous.
+  Where the two kernels agree (the AVX2 machines this library is checked on) no number moves; on AVX-512 machines such forecasts
+  of `refit` models with a VST can move in the last bit, to what a run of their day alone gives.
 - **A chained column's hour lag is no coverage hole on the spring switch.** `x_d+1_h-1` (the hour before, as `LagTransformer`
   builds it, a ramp's regressor) on 03:00 of the day before a spring switch reads the forecast for 02:00 of the switch day, which
   doesn't exist; the coverage check let off such rows for day shifts alone, so a complete upstream warned at every level and was
