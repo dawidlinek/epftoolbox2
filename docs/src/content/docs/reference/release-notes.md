@@ -169,7 +169,8 @@ an issue day it didn't sample.
     `MLPDailyModel` with an explicit scaler don't. The torch golden metrics (`MLPDaily`) are rewritten.
   - **Resuming and YAML.** The scaler is in the manifest's `model_params` and YAML always writes it: a pipeline file saved before
     keeps `scaler: standard`, and results written with standardised inputs refuse the default with `ManifestMismatchError` on
-    `model_params`, whose message says to pass `scaler="standard"`. Nothing is mixed.
+    `model_params`, whose message says to pass `scaler="standard"`; a `BayesSearch` journal of such trials refuses with the
+    same reason and way back. Nothing is mixed.
   - **The old behaviour.** `MLPDailyModel(..., scaler="standard")`.
 
 ### Fixed

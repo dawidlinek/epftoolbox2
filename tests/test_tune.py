@@ -877,6 +877,31 @@ def test_a_residual_journal_whose_base_had_the_old_mask_default_is_refused(df, m
     )
 
 
+def test_an_mlp_daily_journal_scored_with_standardised_inputs_says_why_it_is_refused(df, monkeypatch, tmp_path):
+    """MLPDailyModel's inputs were standardised by default up to 2.3 and go through the Invariant now: its old trials refuse
+    with that reason and the way back, `scaler="standard"`, which then resumes."""
+    from epftoolbox2.models import MLPDailyModel
+    from epftoolbox2.tune.bayes import model_fingerprint
+
+    def mlp(params, **kwargs):
+        return MLPDailyModel(["price_h05_d-1"], hidden=[8], training_window=params["window"], name="mlp", **kwargs)
+
+    journal = tmp_path / "s.journal"
+    old_journal(
+        mlp,
+        lambda model: model_fingerprint(mlp({"window": model.training_window}, scaler="standard")),
+        journal,
+        df,
+        monkeypatch,
+    )
+    with pytest.raises(ValueError, match="standardised inputs, its default up to 2.3.*scaler='standard'"):
+        BayesSearch(mlp, SPACE, n_trials=4, seed=0, storage=journal, sampler="random").run(df, horizon=1, validation=V)
+    standard = BayesSearch(
+        lambda params: mlp(params, scaler="standard"), SPACE, n_trials=4, seed=0, storage=journal, sampler="random"
+    )
+    standard.run(df, horizon=1, validation=V)
+
+
 def test_several_workers_need_a_storage(df, monkeypatch):
     monkeypatch.setenv(bayes.ENV_WORKERS, "2")
     with pytest.raises(ValueError, match="storage="):

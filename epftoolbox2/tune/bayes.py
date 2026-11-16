@@ -554,6 +554,18 @@ def _accepted_fingerprints(model: Any) -> Tuple[str, ...]:
     return (own,)
 
 
+def _standard_scaler_fingerprint(model: Any) -> Optional[str]:
+    """The fingerprint of an `MLPDailyModel` with standardised inputs (its default up to 2.3), or None for any other model or
+    one that has them."""
+    if type(model).__name__ != "MLPDailyModel" or getattr(model, "scaler", "standard") == "standard":
+        return None
+    import copy
+
+    standard = copy.deepcopy(model)
+    standard.scaler = "standard"
+    return model_fingerprint(standard)
+
+
 def _set_seeds(model: Any, seeds: int, where: str) -> None:
     """A rung's (or `best()`'s) `seeds` in place of the model's: only for a class that takes `seeds`."""
     if "seeds" not in inspect.signature(type(model)).parameters or not hasattr(model, "seeds"):
@@ -1021,6 +1033,12 @@ class BayesSearch:
                         "each forecast's binary columns on the test's first day (up to 2.3); None now reads them from each "
                         f"fit's own rows. Build {where} with binary_mask='first_day' in make to resume this search as it was "
                         "scored, or use another storage file."
+                    )
+                if _standard_scaler_fingerprint(model) == stored:
+                    raise ValueError(
+                        f"Trial {t.number} of {name!r} in {self.storage} was scored with an MLPDailyModel of standardised inputs, "
+                        "its default up to 2.3; its inputs now go through Lago's Invariant by default. Build it with "
+                        "scaler='standard' in make to resume this search as it was scored, or use another storage file."
                     )
                 raise ValueError(
                     f"Trial {t.number} of {name!r} in {self.storage} was scored with another model than make builds now "
