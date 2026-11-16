@@ -83,3 +83,5 @@ paths:
 
 ## Known issues (don't fix as a side effect of other work)
 - Open-Meteo `{prefix}_{col}_d+i` columns are shifted by `24h * i` in UTC (`open_meteo.py`, `_parse_weather_data`), not by local calendar days, so around each DST switch they point one hour off the model's targets (23 rows per switch per i). `shift_calendar_days` is the fix.
+- **Transformer lookback** (8e review): `Transformer.lookback_days()` is how many local days before a row its output reads, None when it can't be told (the base's default, `LambdaTransformer`, `ImputeTransformer` without `limit`). Every built-in transformer answers; a new one must, or `ModelPipeline.forecast()` warns that its refresh range may be short. Lags: the largest backward lag rounded up to days; `RollingStatsTransformer`: `window_days + lag_days - 1`; within-day transformers 0.
+- **Read-only caches** (8e review): `DataPipeline.run(cache_writes=False)` reads the per-source and single-file caches and writes nothing (`CacheManager(read_only=True)`: no directory, lock, metadata or dropped entry); a dry run's refresh uses it (decision 6).

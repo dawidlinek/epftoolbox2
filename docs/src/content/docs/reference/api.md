@@ -32,6 +32,7 @@ class DataPipeline:
         timeout: Optional[float] = None,  # Seconds per HTTP request, in place of each source's own
         retries: Optional[int] = None,    # Retries per HTTP request, in place of each source's own
         on_failure: str = "raise",        # "raise", or "cache" (with cache=True): an unreachable source's cached rows
+        cache_writes: bool = True,        # False: read the caches, write nothing to them (a dry run's refresh)
     ) -> pd.DataFrame: ...                # last_refresh then holds a RefreshRecord of the run
 
     def save(
@@ -276,8 +277,10 @@ class ForecastResult:
     snapshot: Optional[str]               # The sha256 of the issue's inputs, in every record of the revision
     planned: Optional[int]                # Keys of the delivered model; missing: those without a forecast
     rungs: Dict[str, int]                 # A FallbackEnsemble delivered: each target day's rung
+    planned_keys: Optional[List[Tuple[int, int]]]  # (period, horizon) of every planned key: each is exported
 
-    def frame(self, model: Optional[str] = None) -> pd.DataFrame: ...  # One row per key of the delivered model (or model)
+    def frame(self, model: Optional[str] = None) -> pd.DataFrame: ...  # One row per key of the delivered model (or model);
+                                                                       # ValueError for a busy or late result
     def table(self, grid: str = "products", model: Optional[str] = None) -> pd.DataFrame: ...  # What export writes
     def export(self, path, format: str = "csv", grid: str = "products", model: Optional[str] = None) -> Path: ...
     # grid "products": one row per market product (UTC start, slot, occurrence: the repeated autumn hour twice); "periods"
@@ -655,6 +658,11 @@ def archive_key(source: DataSource) -> Optional[str]: ...  # "<ClassName>-<hash 
 ---
 
 ## Transformers
+
+Every transformer has `lookback_days() -> Optional[int]`: how many local days before a row its output reads (a lag's, a rolling
+window's; 0 for the row's own day), None when that can't be told (`LambdaTransformer`, `ImputeTransformer` without a `limit`). A
+transformer of your own should override it: `ModelPipeline.forecast()` widens a refresh's range by the longest, and warns for
+None.
 
 ```python
 class ResampleTransformer(Transformer):

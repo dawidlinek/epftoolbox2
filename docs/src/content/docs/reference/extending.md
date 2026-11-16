@@ -76,7 +76,14 @@ class RollingMeanTransformer(Transformer):
         for col in self.columns:
             result[f"{col}_rolling_mean_{self.window}"] = df[col].rolling(self.window).mean()
         return result
+
+    def lookback_days(self) -> int:
+        return -(-self.window // 24)  # rows (hours) back, in whole days
 ```
+
+`lookback_days()` says how many local days before a row the output reads: a live call (`ModelPipeline.forecast()`) asks the
+data pipeline for that much more history, so a window computed live is the backtest's. Without it the call warns that its data
+range may be short and points to `span=`.
 
 ---
 
