@@ -646,9 +646,8 @@ class BaseModel(ABC):
         self.normalise_by = normalise_by  # validated in __setattr__, as the two below
         self.bounds = bounds
         self.zero_when = zero_when
-        self.refit_from = (
-            refit_from  # validated in __setattr__; with refit when a run resolves the rules (`_refit_rules`)
-        )
+        # Validated in __setattr__, and with refit when a run resolves the rules (`_refit_rules`).
+        self.refit_from = refit_from
 
         self._data: Optional[pd.DataFrame] = None
         self._hour_data: Dict[int, pd.DataFrame] = {}

@@ -145,9 +145,8 @@ def _model_description(model: BaseModel, calendar: bool = True) -> Dict[str, Any
     out = {"class": type(model).__name__}
     if calendar:
         out.update(name=model.name, training_window=model.training_window, refit=getattr(model, "refit", None))
-        if (
-            getattr(model, "refit_from", None) is not None
-        ):  # written only when set, so manifests made before it don't move
+        # Written only when set, so manifests made before it don't move.
+        if getattr(model, "refit_from", None) is not None:
             out["refit_from"] = model.refit_from
     out.update(
         predictors=[name for name in model.predictors if isinstance(name, str)],
