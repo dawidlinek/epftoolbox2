@@ -141,10 +141,14 @@ ShapeModel(
 ```
 
 Nothing unknown at the issue time is read. A training row's twin is the actual hour mean of its own target's hour, which the fit's
-target already is (its offset), and of older hours (a lag reads an older hour); so it is known by the fit's cut, whatever
-`newest_target` is. The issue row never reads one. The regressors that don't read the base (the load's deviation) are the same either
+target already is (its offset), and of older hours (a lag reads an older hour), so it is known by the fit's cut when the target is
+published by one rule. Where the target's rule changes over time under `newest_target="published"` (a 2-day delay until one date, an
+hour after), an older hour can be known later than the row's own, so a period's newest target is also capped at the periods of the
+hours its twins reach (one day older across midnight), and a training row is kept only if every hour its twin reads is known.
+`availability="raise"` doesn't judge the twin; this cap does. The issue row never reads one. The regressors that don't read the base (the load's deviation) are the same either
 way, and so are the base on the issue row and the forecast's offset. The twin of a lag is lagged in elapsed time, as `LagTransformer`
-lags the base, so across a clock change it lands on the same hour. Refused: a regressor that leads the base (`_h+1`: its twin
+lags the base, so across a clock change it lands on the same hour. A lagged twin that lands on the repeated autumn hour is NaN (as its base lag is across a clock change), so `"actual"` drops those
+training rows: 4 per horizon per autumn. Refused: a regressor that leads the base (`_h+1`: its twin
 would read an hour after the row's target hour), a learner with no regressor that reads the base, and a pooled learner. The manifest
 records `train_ramps` only when it is `"actual"`, so a folder written before it resumes with the default, and a resume with the other
 value is refused.
