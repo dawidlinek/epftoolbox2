@@ -638,9 +638,12 @@ def test_a_pooled_model_over_one_zone_fits_once_as_the_model_does(tmp_path):
         return OLSModel(POOLED_PREDICTORS, training_window=30, refit=refit, refit_from=first, name="m")
 
     run = dict(test=HOURLY_TEST, horizon=2, freq="1h", target="price")
-    ModelPipeline().add_model(model("once")).run(frame, save_dir=str(tmp_path / "plain"), **run)
-    ModelPipeline().add_model(PooledModel(model("once"))).run({"PL": frame}, save_dir=str(tmp_path / "once"), **run)
-    ModelPipeline().add_model(PooledModel(model("60D"))).run({"PL": frame}, save_dir=str(tmp_path / "block"), **run)
+    # The model path on all three: the engine's sums give the plain model's fit within 1e-8, not to the bit.
+    ModelPipeline(engine="off").add_model(model("once")).run(frame, save_dir=str(tmp_path / "plain"), **run)
+    pooled = ModelPipeline(engine="off").add_model(PooledModel(model("once")))
+    pooled.run({"PL": frame}, save_dir=str(tmp_path / "once"), **run)
+    block = ModelPipeline(engine="off").add_model(PooledModel(model("60D")))
+    block.run({"PL": frame}, save_dir=str(tmp_path / "block"), **run)
     once = lines(tmp_path / "once" / "PL" / "m.jsonl")
     assert once == lines(tmp_path / "plain" / "m.jsonl") == lines(tmp_path / "block" / "PL" / "m.jsonl")
     assert {json.loads(line)["refit_anchor"] for line in once} == {first}
