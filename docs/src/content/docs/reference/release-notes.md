@@ -228,6 +228,13 @@ an issue day it didn't sample.
 
 ### New
 
+- **`ShapeModel(train_ramps="actual")` trains on the actual hourly ramps.** The default, `"forecast"`, is unchanged: a training row reads the
+  base's forecast, as the issue row does. With `"actual"` a training row's regressors that read the base (the base itself, or lagged by
+  hours or minutes, as the hourly ramp is) hold the target's actual hour mean at that target hour and lag, as the resolution study's
+  B24_dyn was fitted, and the issue row keeps the forecast. Nothing unknown at the issue time is read; a lead of the base, a pooled
+  learner and a learner with no regressor that reads the base are refused. The manifest records the setting only when it is `"actual"`,
+  so folders written before resume as they were. No forecast of the default moves.
+
 - **Stored fits: `ModelPipeline.refit(data, save_dir, issue="today", if_due=True)`.** Fits each model's units for an issue day
   ahead of time, on the backtest's rows and cut, and stores them in the live directory as `fits/<model>/<anchor>/units.npz` (arrays
   only, read without pickle) and `fit.json` (the configuration digest, the units, the hash of the rows read, the sha256 of
