@@ -41,8 +41,8 @@ class CheckGate:
         return self.first_day + datetime.timedelta(days=day)
 
     def _start(self, model: "BaseModel", state: "_RunState", sink: Any) -> None:
-        """What the run's tasks are of each member-day, the forecasts on file of the member-days this run gives a record and
-        that have some, and those of them without a task (every new record a skip decided before any fit) checked now."""
+        """What the run's tasks are of each member-day, and the forecasts on file of the member-days this run gives a record and
+        that have some. Those without a task (every new record a skip decided before any fit) are checked by `finish`."""
         self._expected = Counter((task[2], task[1]) for task in state.tasks)
         store = state.store
         if store is None or not store.has_results():
@@ -61,8 +61,6 @@ class CheckGate:
             found = wanted.get((record.get("run_date"), record.get("horizon")))
             if found is not None and record.get("hour") in found[1]:
                 self._on_file.setdefault(found[0], {})[int(record["hour"])] = record.get("prediction")
-        for key in [key for key in self._on_file if self._expected.get(key, 0) == 0]:
-            self._finish(key, state, sink)
 
     def collect(
         self, model: "BaseModel", state: "_RunState", results: List[Dict], skipped: List[Tuple[tuple, str]], sink: Any
@@ -88,7 +86,8 @@ class CheckGate:
                 self._finish(key, state, sink)
 
     def finish(self, model: "BaseModel", state: "_RunState", sink: Any) -> None:
-        """At the end of the run: every member-day still held checked with what it has (none is, when every task came back)."""
+        """At the end of the run: every member-day still held checked with what it has (none is, when every task came back),
+        and every one with forecasts on file and no task, from those alone."""
         if self._expected is None:
             self._start(model, state, sink)
         for key in sorted({*self._held, *self._on_file}):
