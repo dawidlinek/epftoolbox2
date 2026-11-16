@@ -56,7 +56,9 @@ from ._lars import LearFit
 from ._stats import IssueMetric, LinearFit, SolveError, StandardParams
 
 # The version of the files' layout and of what a unit holds: in every configuration digest, so a later format refits.
-FORMAT = 2  # 2: fit.json records the rows read from their first date (`rows.from`), `incomplete` and `notes`
+FORMAT = (
+    3  # 2: the rows read from their first date, `incomplete`, `notes`; 3: each unit's `rows_hash` of the cells it reads
+)
 FITS_DIR = "fits"
 UNITS_FILE = "units.npz"
 FIT_FILE = "fit.json"
@@ -870,9 +872,20 @@ def stored_anchors(save_dir: Union[str, Path], model_name: str) -> List[datetime
     return sorted(out)
 
 
-# How much older than the anchor it stands in for a fit `fit_missing="previous"` serves: one missed month of a "1MS" model, up
-# to four missed weeks of a "7D" one. An older fit isn't served; its forecasts are `no_stored_fit` skips.
+# How much older than the anchor it stands in for a fit `fit_missing="previous"` serves, at least: two refit periods of the
+# model's coarsest rule where those are longer (`previous_cap`). An older fit isn't served; its forecasts are `no_stored_fit`
+# skips, and the anchor's `source` says the cap stopped it.
 PREVIOUS_MAX_DAYS = 31
+
+
+def previous_cap(model: Any) -> int:
+    """The age in days, from the anchor it stands in for, up to which an older fit is served: `PREVIOUS_MAX_DAYS`, or two
+    nominal periods of the model's coarsest refit rule (`_calendar.nominal_block_length`: k days of "kD", 31 k of "kMS") where
+    that is more, so a model refitted every two months still has its last fit served after one missed refit."""
+    from ._calendar import nominal_block_length
+
+    rule = getattr(model, "_refit_block", None)
+    return PREVIOUS_MAX_DAYS if rule is None else max(PREVIOUS_MAX_DAYS, 2 * nominal_block_length(rule))
 
 
 def find_fit(
@@ -883,36 +896,50 @@ def find_fit(
     digest: str,
     previous: bool = True,
     kernels: Any = _ANY,
-) -> Optional[StoredFit]:
-    """The stored fit of the model `name` of `anchor` with this configuration digest (and kernel backend), or with `previous`
-    the newest stored older one of the same, at most `PREVIOUS_MAX_DAYS` older (decision 15: a missed refit leaves the last fit
-    in use, its age recorded, with a warning); None where there is neither. A fit is never taken from an anchor after `anchor`,
-    nor from another configuration. An unreadable `fit.json` is no fit, with a warning; an older anchor's tampered `units.npz`
-    too, while the anchor's own raises `StoredFitError`. `model` builds the fits back (`_from_state`)."""
+    max_days: int = PREVIOUS_MAX_DAYS,
+) -> Tuple[Optional[StoredFit], Optional[datetime.date]]:
+    """(the stored fit of the model `name` of `anchor` with this configuration digest and kernel backend, or with `previous` the
+    newest stored older one of the same at most `max_days` older (decision 15: a missed refit leaves the last fit in use, its age
+    recorded, with a warning), or None; the newest older anchor of the same configuration passed over for being older than that,
+    or None). A fit is never taken from an anchor after `anchor`, nor from another configuration. An unreadable `fit.json` is no
+    fit, with a warning; an older anchor's tampered `units.npz` too, while the anchor's own raises `StoredFitError`. `model`
+    builds the fits back (`_from_state`)."""
     try:
         found = read_fit(anchor_dir(save_dir, name, anchor), model, digest, kernels)
     except UnreadableFitError as exc:
         warnings.warn(f"{name}: no stored fit of {anchor}: {exc}", UserWarning, stacklevel=3)
         found = None
     if found is not None or not previous:
-        return found
+        return found, None
+    beyond = None
     for older in reversed(stored_anchors(save_dir, name)):
-        if older >= anchor or (anchor - older).days > PREVIOUS_MAX_DAYS:
+        if older >= anchor:
             continue
         try:
             found = read_fit(anchor_dir(save_dir, name, older), model, digest, kernels)
         except StoredFitError as exc:
             warnings.warn(f"{name}: the stored fit of {older} is passed over: {exc}", UserWarning, stacklevel=3)
             continue
-        if found is not None:
-            warnings.warn(
-                f"{name}: no stored fit of {anchor}; the forecasts are served from the fit of {older}, {(anchor - older).days} "
-                "day(s) older",
-                UserWarning,
-                stacklevel=3,
-            )
-            return found
-    return None
+        if found is None:
+            continue
+        if (anchor - older).days > max_days:
+            beyond = older
+            break
+        warnings.warn(
+            f"{name}: no stored fit of {anchor}; the forecasts are served from the fit of {older}, {(anchor - older).days} "
+            "day(s) older",
+            UserWarning,
+            stacklevel=3,
+        )
+        return found, None
+    if beyond is not None:
+        warnings.warn(
+            f"{name}: no stored fit of {anchor}, and the newest older one, of {beyond}, is {(anchor - beyond).days} days older, "
+            f"more than the {max_days} an older fit is served for: its forecasts are no_stored_fit skips",
+            UserWarning,
+            stacklevel=3,
+        )
+    return None, beyond
 
 
 # ---------------------------------------------------------------------------------------------------------------------------
@@ -1238,17 +1265,6 @@ def incomplete_days(plan: IssuePlan, anchor: datetime.date, data: pd.DataFrame) 
     return out
 
 
-def rows_hash(data: pd.DataFrame, columns: Sequence[str], first: str, through: str) -> Optional[str]:
-    """The hash of what an anchor's fits read (`hash_columns` of `columns` on the rows dated `first` to `through`): another value
-    on those rows, a value filled in or revised, moves it; rows outside them don't, so a rolling frame doesn't. None where a
-    column is missing."""
-    from ..results.manifest import hash_columns
-
-    if any(column not in data.columns for column in columns):
-        return None
-    return hash_columns(data.sort_index().loc[first:through], list(columns))
-
-
 def run_fits(plan: IssuePlan, items: Sequence[FitItem]) -> List[Tuple[Dict[str, Any], Dict[str, np.ndarray]]]:
     """Fit `items` of `plan` in a pool of processes (`_worker._pool_init`: one BLAS thread each, as a backtest's), one job per
     period; (meta, arrays) of each, in the order of `items`."""
@@ -1290,6 +1306,31 @@ def run_fits(plan: IssuePlan, items: Sequence[FitItem]) -> List[Tuple[Dict[str, 
     return out  # type: ignore[return-value]
 
 
+def unit_rows_hash(plan: IssuePlan, anchor: datetime.date, key: UnitKey) -> str:
+    """The sha256 of exactly the cells a unit's fit reads: the dates of its span's rows (before any filter), its list's values
+    on them and their targets at its horizon (and a per-row target's scale column), NaN in one bit pattern. Another value there
+    (a target filled in, a revision) moves it; a row or column the fit doesn't read, such as the inputs of the issue day's row or
+    a revised forecast on a row past the span, doesn't."""
+    from ._row_target import scale_column
+
+    item = plan.items[anchor][key]
+    rows, col_idx = _item_rows(item, plan.inputs)[:2]
+    cfg = plan.inputs.config
+    arrays = plan.inputs.hour_arrays[key[0]]
+    columns = list(col_idx)
+    scale = scale_column(arrays, cfg.get("row_target"), key[1])
+    if scale is not None:
+        columns.append(scale)
+    first = datetime.date.fromisoformat(cfg["test_start"]).toordinal() - int(cfg["offset"])
+    digest = hashlib.sha256()
+    digest.update(np.ascontiguousarray(arrays["days"][rows] + first, dtype="<i8").tobytes())
+    for values in (arrays["x"][rows][:, columns], arrays["y"][rows, key[1] - 1]):
+        values = np.array(values, dtype="<f8", order="C")
+        values[np.isnan(values)] = np.nan
+        digest.update(values.tobytes())
+    return digest.hexdigest()
+
+
 def _unit_meta(plan: IssuePlan, anchor: datetime.date, key: UnitKey, made: Dict[str, Any]) -> Dict[str, Any]:
     newest = int(plan.newest[(anchor, key)])
     item = plan.items[anchor][key]
@@ -1300,6 +1341,7 @@ def _unit_meta(plan: IssuePlan, anchor: datetime.date, key: UnitKey, made: Dict[
         "window": cfg["training_window"] if members is None else members[item.unit.member],
         "newest": newest,
         "newest_target_day": (anchor + datetime.timedelta(days=min(newest, key[1] - 1))).isoformat(),
+        "rows_hash": unit_rows_hash(plan, anchor, key),
         **made,
     }
 
@@ -1308,6 +1350,14 @@ MASK_ISSUE_DAY_NOTE = (
     "mask: a refit=None unit's binary-column mask is read on its issue day, as a backtest of that day alone reads it; a backtest "
     "over a longer test reads it on the test's first day, and the two differ where a column turns binary or stops being "
     "binary between them (binary_mask='fit' reads each fit's own)"
+)
+INCOMPLETE_NOTE = (
+    "incomplete: the fit of {anchor} was made from a frame without every '{target}' value of {days}, which its rule said was out: "
+    "it trains on fewer rows than a backtest of a complete frame"
+)
+STALE_NOTE = (
+    "stale: the fit of {anchor} read cells the frame now holds otherwise (a value filled in or revised): served as it was made, "
+    "not as a backtest of this frame"
 )
 ENGINE_FIT_ERROR_NOTE = (
     "engine: {n} unit(s) have a fit from shared statistics and a model-path fit_error: an issue row too far out for the engine "
@@ -1328,9 +1378,9 @@ def anchor_notes(plan: IssuePlan, units: Sequence[Dict[str, Any]]) -> List[str]:
     return notes
 
 
-def anchor_rows(plan: IssuePlan, anchor: datetime.date, data: pd.DataFrame) -> Dict[str, Any]:
-    """What an anchor's fits read: the used columns on the rows dated from the first row of any unit's span to the newest target
-    day of any unit, and their hash (`rows_hash`)."""
+def anchor_rows(plan: IssuePlan, anchor: datetime.date) -> Dict[str, Any]:
+    """Where an anchor's fits read (provenance): the used columns, from the first row of any unit's span to the newest target day
+    of any unit. What they read is hashed per unit (`unit_rows_hash`)."""
     firsts = [day for (a, _), day in plan.first_rows.items() if a == anchor and day is not None]
     first = min(firsts, default=anchor).isoformat()
     through = max(
@@ -1340,12 +1390,7 @@ def anchor_rows(plan: IssuePlan, anchor: datetime.date, data: pd.DataFrame) -> D
         ),
         default=anchor,
     ).isoformat()
-    return {
-        "from": first,
-        "through": through,
-        "columns": list(plan.used_columns),
-        "hash": rows_hash(data, plan.used_columns, first, through),
-    }
+    return {"from": first, "through": through, "columns": list(plan.used_columns)}
 
 
 def anchor_meta(
@@ -1373,7 +1418,7 @@ def anchor_meta(
         "target": plan.target,
         "freq": plan.freq,
         "kernels": plan.kernels,
-        "rows": anchor_rows(plan, anchor, data),
+        "rows": anchor_rows(plan, anchor),
         "incomplete": list(incomplete),
         "notes": anchor_notes(plan, units),
         "package_version": _package_version(),
@@ -1381,13 +1426,15 @@ def anchor_meta(
     }
 
 
-def stale_rows(stored: "StoredFit", data: pd.DataFrame) -> bool:
-    """Whether the rows a stored fit read are no longer the frame's: their hash over the same dates and columns moved (a value
-    filled in, revised, or gone), or the fit recorded none."""
-    rows = stored.meta.get("rows") or {}
-    if not {"from", "through", "columns", "hash"} <= set(rows):
-        return True
-    return rows_hash(data, rows["columns"], rows["from"], rows["through"]) != rows["hash"]
+def stale_rows(stored: "StoredFit", plan: IssuePlan, anchor: datetime.date) -> bool:
+    """Whether the cells a stored fit of `anchor` read are no longer the frame's: a unit's hash (`unit_rows_hash`) of the units
+    the plan has moved (a value filled in, revised, or gone), or a unit recorded none."""
+    for key, unit in stored.units.items():
+        if key not in plan.items.get(anchor, {}):
+            continue  # a unit of a list this day doesn't use: nothing of the frame to compare it with
+        if unit.meta.get("rows_hash") != unit_rows_hash(plan, anchor, key):
+            return True
+    return False
 
 
 def fitted_units(
@@ -1496,7 +1543,7 @@ def refit_models(
                     f"{model.name}: the stored fit of {anchor} is refitted whole: {exc}", UserWarning, stacklevel=4
                 )
                 stored = None
-            if stored is not None and stale_rows(stored, data):
+            if stored is not None and stale_rows(stored, plan, anchor):
                 result.stale.setdefault(model.name, []).append(anchor.isoformat())
                 stored = None  # the rows it read moved: refitted whole, nothing of it kept
             held = set() if stored is None else set(stored.units)
@@ -1590,8 +1637,10 @@ def serve(
     anchor has no stored fit: `fit_missing="previous"` serves the newest stored older one (a refit model; its age recorded in
     `Served.fits`, the records' `refit_anchor` the fit's own), `"fit"` fits it inline (refused, as `refit`, while a training
     target it reads isn't out), `"skip"` gives its forecasts as `no_stored_fit` skips; a refit=None model fits inline unless
-    `"skip"`, as the backtest does. An older fit is served only within `PREVIOUS_MAX_DAYS` of the anchor it stands in for, with a
-    warning. Units a stored fit lacks (a predictor function's list it wasn't fitted for) are fitted inline where the anchor would
+    `"skip"`, as the backtest does. An older fit is served only within `previous_cap` days of the anchor it stands in for, with a
+    warning; one past it leaves the anchor "missing (older fit beyond cap)", with a warning. A stored fit made from a frame
+    missing a newest target says so (`incomplete`, a note, a warning); one whose cells the frame now holds otherwise is fitted
+    inline with `"fit"` (`replaced: "stale"`), else served as it is, marked `stale`, with a note and a warning. Units a stored fit lacks (a predictor function's list it wasn't fitted for) are fitted inline where the anchor would
     be; with "previous" they are `no_stored_fit` skips. A model whose fits aren't stored (`stores_fits`) gets `status`
     "not_stored", no records: it fits at serve time through its own run."""
     from threadpoolctl import threadpool_limits
@@ -1633,12 +1682,42 @@ def serve(
     lookup: Dict[datetime.date, Optional[Tuple[Dict[UnitKey, UnitFit], datetime.date]]] = {}
     fits: Dict[str, Dict[str, Any]] = {}
     notes: List[str] = []
+    cap = previous_cap(model)
     for anchor in sorted(plan.items):
-        stored = (
-            None
+        stored, beyond = (
+            (None, None)
             if save_dir is None
-            else find_fit(save_dir, model.name, inputs.model, anchor, plan.digest, previous, plan.kernels)
+            else find_fit(save_dir, model.name, inputs.model, anchor, plan.digest, previous, plan.kernels, cap)
         )
+        if stored is not None and stored.anchor == anchor and stale_rows(stored, plan, anchor):
+            if fit_missing == "fit":
+                warnings.warn(
+                    f"{model.name}: the stored fit of {anchor} read cells the frame now holds otherwise (a value filled in or "
+                    "revised): fitted inline from the frame",
+                    UserWarning,
+                    stacklevel=3,
+                )
+                check_published(plan, [anchor], current_clock().now(), data)
+                made, units = fitted_units(plan, anchor, _sorted_keys(plan.items[anchor]))
+                notes.extend(anchor_notes(plan, [meta for meta, _ in made]))
+                lookup[anchor] = (units, anchor)
+                fits[anchor.isoformat()] = {
+                    "source": "inline",
+                    "used": anchor.isoformat(),
+                    "fit_age_days": (issue - anchor).days,
+                    "replaced": "stale",
+                }
+                continue
+            warnings.warn(
+                f"{model.name}: the stored fit of {anchor} read cells the frame now holds otherwise (a value filled in or "
+                "revised), and is served as it is: refit, or serve with fit_missing='fit', for the frame's",
+                UserWarning,
+                stacklevel=3,
+            )
+            notes.append(STALE_NOTE.format(anchor=anchor))
+            stale = True
+        else:
+            stale = False
         if stored is not None:
             units = dict(stored.units)
             entry = {
@@ -1646,6 +1725,20 @@ def serve(
                 "used": stored.anchor.isoformat(),
                 "fit_age_days": (issue - stored.anchor).days,
             }
+            if stale:
+                entry["stale"] = True
+            incomplete = list(stored.meta.get("incomplete") or [])
+            if incomplete:
+                entry["incomplete"] = incomplete
+                notes.append(
+                    INCOMPLETE_NOTE.format(anchor=stored.anchor, days=", ".join(incomplete), target=plan.target)
+                )
+                warnings.warn(
+                    f"{model.name}: the stored fit of {stored.anchor} was made from a frame without every '{plan.target}' "
+                    f"value of {', '.join(incomplete)}: it trains on fewer rows than a backtest of a complete frame",
+                    UserWarning,
+                    stacklevel=3,
+                )
             notes.extend(stored.meta.get("notes", []))
             missing = _sorted_keys(set(plan.items[anchor]) - set(units)) if stored.anchor == anchor else []
             if missing and inline:
@@ -1666,7 +1759,12 @@ def serve(
             }
         else:
             lookup[anchor] = None
-            fits[anchor.isoformat()] = {"source": "missing", "used": None, "fit_age_days": None}
+            fits[anchor.isoformat()] = {
+                "source": "missing" if beyond is None else "missing (older fit beyond cap)",
+                "used": None,
+                "fit_age_days": None,
+                **({} if beyond is None else {"beyond_cap": beyond.isoformat(), "cap_days": cap}),
+            }
 
     results: List[Dict] = []
     skipped: List[Tuple[tuple, str]] = []

@@ -444,7 +444,8 @@ def test_fit_json_says_what_the_fit_is_of_and_what_it_read(tmp_path):
     assert meta["anchor"] == "2023-03-20" and meta["issue"] == "2023-03-22" and meta["fit_path"] == "engine-2"
     assert meta["created_at"] == "2023-03-21T20:00:00+00:00" and meta["refit"] == "7D"
     assert meta["training_cut"] == {"rows": "dates", "refit": "7D", "refit_epoch": "1970-01-05"}
-    assert meta["rows"]["through"] == "2023-03-19" and len(meta["rows"]["hash"]) == 64
+    assert meta["rows"] == {"from": "2023-02-25", "through": "2023-03-19", "columns": meta["rows"]["columns"]}
+    assert all(len(unit["rows_hash"]) == 64 for unit in meta["units"])
     assert (
         meta["artifacts"][UNITS_FILE] == __import__("hashlib").sha256((directory / UNITS_FILE).read_bytes()).hexdigest()
     )
@@ -655,8 +656,16 @@ def test_an_unreadable_older_fit_is_passed_over_and_an_old_fit_has_a_maximum_age
         result = serve_one(pipeline, data, live, "2023-03-28", horizon=1)
     assert result.fits["2023-03-27"] == {"source": "previous", "used": "2023-03-13", "fit_age_days": 15}
     # 13 March stands in for no anchor more than PREVIOUS_MAX_DAYS later.
-    late = serve_one(pipeline, data, live, "2023-04-18", horizon=1)
-    assert _fits.PREVIOUS_MAX_DAYS == 31 and late.fits["2023-04-17"]["source"] == "missing"
+    with pytest.warns(UserWarning, match="more than the 31 an older fit is served for"):
+        late = serve_one(pipeline, data, live, "2023-04-18", horizon=1)
+    assert _fits.previous_cap(pipeline.models[0]) == 31
+    assert late.fits["2023-04-17"] == {
+        "source": "missing (older fit beyond cap)",
+        "used": None,
+        "fit_age_days": None,
+        "beyond_cap": "2023-03-13",
+        "cap_days": 31,
+    }
 
 
 def test_a_refit_none_model_says_its_mask_is_the_issue_day_s(tmp_path):
@@ -723,3 +732,64 @@ def test_units_a_stored_fit_lacks_are_fitted_inline(tmp_path):
         pipeline_of(OLSModel(PREDICTORS, 21, name="m")), data, "2023-03-22", tmp_path / "bt", horizon=2
     )
     assert keyed(result.records) == expected
+
+
+# --- review round 2 -----------------------------------------------------------------------------------------------------
+
+
+def test_an_incomplete_fit_says_so_when_served_and_fit_refits_it_from_a_frame_that_holds_the_rows(tmp_path):
+    """A separate serving process finds a fit made from a frame one day short: the anchor's entry, a note and a warning say it
+    was incomplete and that the frame now holds what it lacked; `fit_missing="fit"` fits it inline from the frame, the backtest's
+    records to the bit."""
+    full = frame(SPRING, "1h")
+    partial = full.copy()
+    partial.loc["2023-03-21", "price"] = np.nan
+    live = tmp_path / "live"
+    pipeline = pipeline_of(OLSModel(PREDICTORS, 21, name="m"))
+    with use_clock(FakeClock(pd.Timestamp("2023-03-21 20:00", tz="UTC"))):
+        with pytest.warns(UserWarning, match="doesn't hold every"):
+            pipeline.refit(partial, live, issue="2023-03-22", horizon=1)
+        with pytest.warns(UserWarning) as caught:
+            served = serve_one(pipeline, full, live, "2023-03-22", horizon=1)
+        assert any("without every 'price' value of 2023-03-21" in str(w.message) for w in caught)
+        assert any("served as it is" in str(w.message) for w in caught)
+        entry = served.fits["2023-03-22"]
+        assert entry["source"] == "stored" and entry["incomplete"] == ["2023-03-21"] and entry["stale"] is True
+        assert any(note.startswith("incomplete:") for note in served.notes)
+        assert any(note.startswith("stale:") for note in served.notes)
+        with pytest.warns(UserWarning, match="fitted inline from the frame"):
+            refitted = serve_one(pipeline, full, live, "2023-03-22", horizon=1, fit_missing="fit")
+    assert refitted.fits["2023-03-22"]["source"] == "inline" and refitted.fits["2023-03-22"]["replaced"] == "stale"
+    expected = backtest_of_day(pipeline_of(OLSModel(PREDICTORS, 21, name="m")), full, "2023-03-22", tmp_path / "bt")
+    assert keyed(refitted.records) == expected
+    assert keyed(served.records) != expected
+
+
+def test_the_rows_hash_covers_the_cells_a_fit_reads_alone(tmp_path):
+    """A weekly fit of 20 March reads the rows up to 18 March (newest target 19 March at h = 1). A revised day-ahead forecast on
+    the row of 19 March, which no unit reads, leaves it as it is; one on a training row refits it."""
+    data = frame(SPRING, "1h")
+    live = tmp_path / "live"
+    pipeline = pipeline_of(OLSModel(PREDICTORS, 21, refit="7D", name="m"))
+    pipeline.refit(data, live, issue="2023-03-22", horizon=1)
+    unread = data.copy()
+    unread.loc["2023-03-19", "load_d+1"] += 50.0
+    assert pipeline.refit(unread, live, issue="2023-03-22", horizon=1).noop
+    read = unread.copy()
+    read.loc["2023-03-18 07:00", "load_d+1"] += 50.0
+    assert pipeline.refit(read, live, issue="2023-03-22", horizon=1).stale == {"m": ["2023-03-20"]}
+
+
+def test_the_age_cap_is_at_least_two_refit_periods(tmp_path):
+    """A model refitted every two months still has its last fit served after a missed refit, and one past the cap says so."""
+    data = make_market_data(start="2022-11-01", days=260, freq="1h", horizon=2, noise=2.0)
+    live = tmp_path / "live"
+    pipeline = pipeline_of(OLSModel(PREDICTORS, 21, refit="2MS", name="m"))
+    assert _fits.previous_cap(pipeline.models[0]) == 124
+    pipeline.refit(data, live, issue="2023-01-10", horizon=1)  # anchor 1 January
+    with pytest.warns(UserWarning, match="served from the fit of 2023-01-01, 59 day"):
+        served = serve_one(pipeline, data, live, "2023-03-10", horizon=1)  # anchor 1 March: not stored
+    assert served.fits["2023-03-01"] == {"source": "previous", "used": "2023-01-01", "fit_age_days": 68}
+    with pytest.warns(UserWarning, match="181 days older, more than the 124"):
+        beyond = serve_one(pipeline, data, live, "2023-07-10", horizon=1)
+    assert beyond.fits["2023-07-01"]["source"] == "missing (older fit beyond cap)"

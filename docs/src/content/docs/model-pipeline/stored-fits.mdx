@@ -52,10 +52,11 @@ live manifest compares (the model class, the lists, target, horizons, freq, trai
 parameters and scaler, the training cut, the fit path), when the information set says an input is known, and the format of the
 files; a change of any of them refits, and a fit of another configuration is never served. A fit made with the other LEAR kernel
 backend (`EPFTOOLBOX2_KERNELS`, whose fits agree within 1e-10, not to the bit) is refitted and never served either, and one made by
-another package version is served with a warning. `fit.json` records the hash of the rows the fits read (the used columns from the
-first training row of any unit to the newest target): where the frame's rows there differ (a value filled in, revised or gone)
-the anchor is refitted whole and `RefitResult.stale` names it. Rows outside that span don't count, so a rolling frame doesn't
-refit. A `fit.json` that can't be read, or is of another format, is refitted with a warning. `if_due=False` refits anyway.
+another package version is served with a warning. Each unit in `fit.json` records the hash of exactly the cells its fit reads
+(the dates of its training rows, its inputs on them and their targets): where the frame holds any of them otherwise (a value
+filled in, revised or gone) the anchor is refitted whole and `RefitResult.stale` names it. A cell no fit reads doesn't count: a
+revised forecast on the issue day's row or on a row after the newest training row, or rows before the span, so a rolling frame
+doesn't refit. A `fit.json` that can't be read, or is of another format, is refitted with a warning. `if_due=False` refits anyway.
 
 **A fit is refused while what it reads isn't out.** `refit` reads the rules in the information set and raises
 `FitTooEarlyError`, naming the publication time, and writes nothing (not even `live.json`):
@@ -76,10 +77,18 @@ the anchor and a warning says so; the rows hash refits it once the frame holds t
 The serve path, which the live `forecast()` call uses, reads each anchor's `fit.json`, checks the sha256 of `units.npz` (a changed
 file raises `StoredFitError`), the configuration digest and the kernel backend, and forecasts every planned key through the
 backtest's own lines: the issue row's skips, the scaler's transform of it, the model's forecast of one row, the inverse, the record.
-Where an anchor has no stored fit, a refit model serves the newest stored older fit of the same configuration, at most 31 days
-older than the anchor it stands in for, with a warning (`fit_missing="previous"`, the default; an unreadable older fit is passed
-over), fits it inline (`"fit"`), or leaves its forecasts as `no_stored_fit` skips (`"skip"`); a `refit=None` model fits its issue
-day inline, as the backtest does. Each anchor's entry gives the fit served and `fit_age_days`, the issue day less its anchor. Units
+Where an anchor has no stored fit, a refit model serves the newest stored older fit of the same configuration, with a warning
+(`fit_missing="previous"`, the default; an unreadable older fit is passed over), fits it inline (`"fit"`), or leaves its forecasts
+as `no_stored_fit` skips (`"skip"`); a `refit=None` model fits its issue day inline, as the backtest does. An older fit is served
+only up to 31 days older than the anchor it stands in for, or two periods of the model's refit rule where those are longer (124
+days for `"2MS"`); past that the anchor's `source` is `"missing (older fit beyond cap)"`, with a warning, and its forecasts are
+skips.
+
+A stored fit made from a frame missing a newest target (`incomplete`) says so when served: its entry lists the days, the result's
+`notes` say it, and a warning too. Where the frame now holds cells the stored fit read otherwise (the missing values arrived, or a
+value was revised), the entry is marked `stale`, with a note and a warning: `"fit"` fits the anchor inline from the frame
+(`replaced: "stale"`, the backtest's records of this frame), while `"previous"` and `"skip"` serve the stored fit as it was made.
+Refitting (`refit`) replaces it for good. Each anchor's entry gives the fit served and `fit_age_days`, the issue day less its anchor. Units
 an anchor's stored fit lacks (a predictor function's list it wasn't fitted for) are fitted inline where the anchor would be, and
 are `no_stored_fit` skips under `"previous"`.
 
