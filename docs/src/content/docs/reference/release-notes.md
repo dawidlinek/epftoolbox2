@@ -120,6 +120,11 @@ an issue day it didn't sample.
 
 ### Fixed
 
+- **A report reads each member's records once.** An ensemble read the records of each of its members from the file, so a member
+  that many ensembles average (the zoo leaderboard's 12 best are in every top-k) was read once per ensemble. A report now reads each
+  once and hands it to every ensemble that has it. The ensembles' files, manifests and every table are bit for bit as before
+  (the leaderboard fixture reads 24 members instead of 54 in DE-LU and 46 in AT, and the report takes about 28 % less CPU time).
+
 - **A refit unit's forecasts no longer depend on how many days its block call holds.** The issue rows of a
   refit unit were taken as a Fortran-ordered block, and a variance-stabilising scaler (`asinh`, `mlog`, `poly`, `npit`) kept that
   order, so with several days in one call the model multiplied a strided row; numpy takes another kernel for it than for a

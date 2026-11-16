@@ -48,8 +48,8 @@ members (not toto2b1) and merge.py 8; that row's numbers are checked on a plain 
 validation MAEs are compared with a report of the validation year's 8,736 forecasts as a test window.
 
 One test per setting builds everything it checks (a module fixture this costly would be built again in every xdist worker): 15-19
-s each on a 12-core machine, most of it the report reading each member's records once per ensemble that averages it. The records
-go through the Parquet store, which that report reads 2.6 times faster than JSONL files; a JSONL store gives the same numbers.
+s each on a 12-core machine before the report read each member's records once (it had read them once per ensemble that averages it:
+54 reads in DE-LU and 46 in AT, now 24 each). The records go through the Parquet store, which that report reads 2.6 times faster than JSONL files; a JSONL store gives the same numbers.
 """
 
 import datetime
