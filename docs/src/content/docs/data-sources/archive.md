@@ -90,8 +90,12 @@ Choose `known_at` and `days_before` by what the column is:
 - Several vintages of one archive are several `ArchiveSource`s with different `columns` or `prefix`.
 
 The default `prefix` matters outside a `Workflow`: the archived names (`load_forecast`, `price`) have built-in rules of the live
-API, and a prefixed name has none, so a run that forgot `with_source_rules` reports the column as having no rule instead of
-judging the archive's values by the API's publication times.
+API, and most prefixed names have none, so a run that forgot `with_source_rules` reports the column as having no rule instead of
+judging the archive's values by the API's publication times. A built-in pattern can still match a prefixed name:
+`*_price_exaa` catches `archive_price_exaa`. So the first `fetch` warns about every emitted name a bare `InformationSet()`
+gives a rule (exact or by a pattern), with `prefix=""` or without: with `with_source_rules` the warning says nothing new, as the
+archive's rule comes first. A pattern of yours that matches an archive column warns in `with_source_rules`: it is ignored for
+that column, also where it is stricter.
 
 ## What It Refuses
 

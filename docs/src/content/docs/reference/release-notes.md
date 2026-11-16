@@ -257,7 +257,9 @@ an issue day it didn't sample.
   gives each cell's first fetch with a value, `rewrites(column)` each change between fetches. `ArchiveSource(path, source,
   known_at="11:45", days_before=1, timezone="Europe/Brussels", columns=None, prefix="archive")` gives each delivery day the values
   of the newest fetch by `known_at` on the day `days_before` before it, with the rule `published(known_at, days_before, timezone,
-  vintage="snapshot")`, which `with_source_rules` puts before every other rule (one naming its columns raises). `record_snapshot()`
+  vintage="snapshot")`, which `with_source_rules` puts before every other rule (one naming its columns raises, a pattern matching one warns;
+  a name with a built-in rule of the live API warns when read). A fetch with no rows or fewer columns exits `EXIT_WARNING` (4).
+  `record_snapshot()`
   records a pipeline YAML for a scheduled job; `record`'s `budget`, `deadline`, `timeout` and `retries` wait for the refresh budget
   (step 8b) and raise until then. Nothing that doesn't read an archive moves. See
   [Snapshot Archives](/epftoolbox2/operations/snapshots/) and [ArchiveSource](/epftoolbox2/data-sources/archive/).

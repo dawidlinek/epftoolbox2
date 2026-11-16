@@ -496,9 +496,9 @@ What every source of a data pipeline returned, and when, recorded by a job you s
 [Snapshot Archives](/epftoolbox2/operations/snapshots/).
 
 ```python
-from epftoolbox2.data.archive import RecordResult, SnapshotArchive, archive_key, record_snapshot
+from epftoolbox2.data.archive import EXIT_WARNING, RecordResult, SnapshotArchive, archive_key, record_snapshot
 
-class SnapshotArchive:
+class SnapshotArchive:  # LOCK_TIMEOUT = 600.0: seconds record waits for catalog.lock, then ArchiveLockedError
     def __init__(self, path: Union[str, os.PathLike]): ...
     def record(self, data_pipeline: DataPipeline, days_back: int = 3, days_ahead: int = 2, *,
                budget: Any = None, deadline: Any = None,  # step 8b's refresh budget: pending, any set raises
@@ -507,13 +507,13 @@ class SnapshotArchive:
     def keys(self) -> List[str]: ...  # the source keys it holds
     def resolve(self, source: str) -> str: ...  # a key, or a class name with one key -> the key
     def fetches(self, source: str) -> List[Fetch]: ...  # the ok fetches, by fetched_at
-    def read(self, fetch: Fetch) -> pd.DataFrame: ...  # the frame as stored, its sha256 checked
+    def read(self, fetch: Fetch, columns: Optional[List[str]] = None) -> pd.DataFrame: ...  # as stored, sha256 checked
     def observations(self, column: str, source: Optional[str] = None) -> pd.DataFrame: ...  # instant, fetched_at, value
     def first_seen(self, column: str, source: Optional[str] = None) -> pd.DataFrame: ...  # by instant: fetched_at, value
     def rewrites(self, column: str, source: Optional[str] = None) -> pd.DataFrame: ...  # before/after, their fetched_at
     def content_digest(self) -> Optional[str]: ...  # the sha256 of the catalog
 
-class RecordResult:  # lines (one per source), ok, failed, skipped, exit_code (1 when a fetch failed)
+class RecordResult:  # lines (one per source), ok, failed, skipped, warned, exit_code (1 failed, EXIT_WARNING = 4 warned, 0)
     def summary(self) -> str: ...
 
 def record_snapshot(config: Any, archive: Union[str, os.PathLike], *, days_back: int = 3,

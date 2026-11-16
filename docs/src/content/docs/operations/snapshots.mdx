@@ -41,10 +41,16 @@ One call of `record(data_pipeline, days_back=3, days_ahead=2)`:
   appends its catalog line. The file is written in full (fsync, then renamed into place) before its line, so a line never names a
   part of a file, and a crash leaves at most a file without a line, which nothing reads;
 - **skips** a source without a cache config (a CSV file, another pipeline's stored forecasts): there is nothing to download. A
-  source whose fetch raises gets a `failed` line with the error, and the other sources still run.
+  source whose fetch raises, whose frame holds a secret or the same instant twice (refused: no one value of such a cell could be
+  read back), or whose file or line can't be written (a full disk, a config with NaN in it) gets a `failed` line with the error,
+  and the other sources still run;
+- **warns** about a fetch that returned no rows (an outage answered as "no data": a replay then reads every day of its range as
+  missing) and about one with fewer columns than that source's newest fetch with rows. Both are written, with `warnings` on
+  their line.
 
-`record` returns a `RecordResult`: `lines` (each source's line, in the pipeline's order), `ok`, `failed`, `skipped`, `summary()`
-and `exit_code`, 1 when a fetch failed, for the scheduler to alert on. The transformers and validators of the pipeline don't
+`record` returns a `RecordResult`: `lines` (each source's line, in the pipeline's order), `ok`, `failed`, `skipped`, `warned`,
+`summary()` and `exit_code`, for the scheduler to alert on: 1 when a fetch failed, else `EXIT_WARNING` (4) when one was written
+with warnings, else 0. The transformers and validators of the pipeline don't
 run: the archive holds what the sources returned, before anything was made of it.
 
 `record` also takes `budget`, `deadline`, `timeout` and `retries`, the refresh budget of `DataPipeline.run` that is still to come
@@ -60,7 +66,10 @@ parsing never shows as a rewrite. `catalog()` shows each key's config.
 ### The catalog
 
 `catalog.jsonl` has one line per fetch, appended under `catalog.lock`, so two recordings at once (a slow run overlapping the
-next) don't interleave:
+next) don't interleave. `record` waits at most `SnapshotArchive.LOCK_TIMEOUT` seconds (600) for the lock and then raises
+`ArchiveLockedError` naming the lock file: where the file system has no `flock`, a process that died holding it leaves the file
+behind, to be removed by hand when no recording runs. A torn last line (a crash while appending) is skipped by every reader, and
+cut off by the next `record` before it appends:
 
 ```json
 {"format": 1, "source": "EntsoeSource-3f2a9c41d07e5b18", "class": "epftoolbox2.data.sources.entsoe.EntsoeSource",
@@ -74,14 +83,16 @@ next) don't interleave:
 
 `fetched_at` is the instant the answer was in hand, on the library's clock (`epftoolbox2.clock`), so a value counts as seen only
 from when it was. `started_at` is when the request began; `start` and `end` the range asked for. A `failed` line has `error`
-instead of `rows`, `file` and `sha256`. Every reader checks a file's bytes against its `sha256`.
+instead of `rows`, `file` and `sha256`, and its `config` only when that can be written. Every reader checks a file's bytes
+against its `sha256`. `warnings` lists what an ok fetch asks a look for.
 
 <Aside type="caution" title="Secrets">
-Nothing secret is written. A source's cache config never holds its API key, and any entry named like a key, token or password is
-dropped from the line anyway; errors are redacted. Before a frame or a line is written, its bytes are searched for the source's
-secrets (`api_key` and any attribute named like a key, token or password, a proxy URL's credentials) and for every environment
-variable whose name ends in `API_KEY`, `TOKEN`, `SECRET` or `PASSWORD`; a frame that holds one is not written and its source
-gets a `failed` line. Keep the key in the environment, as a pipeline YAML's `${ENTSOE_API_KEY}` reference reads it.
+Nothing secret is written. A source's cache config never holds its API key, and any entry named like a key, token, password,
+auth or credentials is dropped from the line anyway; errors are redacted. Before a frame or a line is written, its text and bytes
+are searched for the source's secrets (every string under an attribute named like a key, token, password, auth or credentials,
+also inside dicts, lists and tuples, and a URL's credentials) and for every environment variable whose name ends in `API_KEY`,
+`TOKEN`, `SECRET` or `PASSWORD`, each also URL-encoded; a frame or line that holds one is not written and its source gets a
+`failed` line. Keep the key in the environment, as a pipeline YAML's `${ENTSOE_API_KEY}` reference reads it.
 </Aside>
 
 ## Reading
