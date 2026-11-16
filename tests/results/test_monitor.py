@@ -127,11 +127,9 @@ REVISIONS = {
     DAYS[9]: [("10:45", True)],
 }
 DELIVERIES = [(DAYS[2], 1, "10:50"), (DAYS[3], 1, "11:10"), (DAYS[9], 1, "11:00")]
-NAIVE_GAP = (
-    DAYS[4],
-    1,
-    5,
-)  # (day, revision, hour) of a naive forecast the first revision of day 4 lacks, at every horizon
+# (member, day, revision, hour) forecasts a revision lacks, at every horizon: the first revision of day 4 has no naive forecast of
+# hour 5 and the second of day 2 no lear forecast of hour 7, so each of the two has keys the other lacks (skill is on the common ones)
+GAPS = {("naive", DAYS[4], 1, 5), ("lear", DAYS[2], 2, 7)}
 
 
 def record(member: str, day: str, revision: int, horizon: int, hour: int) -> dict:
@@ -170,7 +168,7 @@ def write_live(directory, *, receipts=True, save_format="jsonl") -> None:
                     out = rev.open(member, "jsonl" if member == "best" else save_format)  # an ensemble is JSONL
                     for hour in HOURS:
                         for horizon in HORIZONS:
-                            if member == "naive" and (day, number, hour) == NAIVE_GAP:
+                            if (member, day, number, hour) in GAPS:
                                 continue
                             out.save({**record(member, day, number, horizon, hour), "revision": 1})
                 if commits:
@@ -257,7 +255,7 @@ class Oracle:
                 continue
             for horizon in HORIZONS:
                 for hour in HOURS:
-                    if member == "naive" and (day, revision, hour) == NAIVE_GAP:
+                    if (member, day, revision, hour) in GAPS:
                         continue
                     target = plus(day, horizon)
                     actual = actual_of(target, hour)
@@ -367,11 +365,11 @@ def test_the_revision_a_key_is_read_from_follows_the_policy(live):
             assert quality[day] == revision
         if policy == "delivered":
             assert set(quality) == {DAYS[2], DAYS[3], DAYS[9]}
-    # the predictions are those of the revision: r2 of day 2 adds 0.75 to every forecast
+    # the predictions are those of the revision: r2 of day 4 adds 0.75 to every forecast
     daily = run_monitor(live, policy="latest", windows=(10,)).daily()
     first = run_monitor(live, policy="first", windows=(10,)).daily()
-    key = (daily["member"] == "lear") & (daily["run_date"] == DAYS[2]) & (daily["horizon"] == 1)
-    other = (first["member"] == "lear") & (first["run_date"] == DAYS[2]) & (first["horizon"] == 1)
+    key = (daily["member"] == "lear") & (daily["run_date"] == DAYS[4]) & (daily["horizon"] == 1)
+    other = (first["member"] == "lear") & (first["run_date"] == DAYS[4]) & (first["horizon"] == 1)
     assert daily[key]["bias"].iloc[0] - first[other]["bias"].iloc[0] == pytest.approx(0.75)
 
 
@@ -549,22 +547,27 @@ def test_a_spring_day_has_23_hours_in_the_daily_rmse(tmp_path):
 
 
 def test_skill_is_on_the_keys_both_members_hold_with_counts(live):
-    """The first revision of day 4 has no naive forecast of hour 5 (24 hours, 2 horizons, so 2 keys): the skill of lear on day 4
-    is on the keys the two share, and lear's own MAE on all of its keys."""
-    report = run_monitor(live, policy="first", windows=(10,))
-    got = row(report, 10, "lear")
-    oracle = Oracle("first")
-    own = oracle.keys("lear", DAYS)
-    other = oracle.keys("naive", DAYS)
-    assert got["forecasts"] == len(own) and len(other) == len(own) - 2
-    assert got["common_naive"] == len(other)  # the common keys: the naive's, which are lear's but two
-    skill = oracle.skill("lear", "naive", 10)
-    assert got["skill_naive"] == pytest.approx(skill["skill"], rel=1e-12)
-    # not the ratio of the two MAEs over their own keys
-    assert got["skill_naive"] != pytest.approx(got["mae"] / row(report, 10, "naive")["mae"], rel=1e-9)
-    assert (
-        row(report, 10, "naive")["skill_naive"] != row(report, 10, "naive")["skill_naive"]
-    )  # a benchmark has none against itself
+    """Each member lacks keys the other has: the first revision of day 4 has no naive forecast of hour 5, the second of day 2 no
+    lear forecast of hour 7 (24 hours x 2 horizons, so 2 keys each). The skill of lear is on the keys the two share, whichever of
+    them lacks keys, and each member's own MAE is on all of its keys."""
+    for policy in ("first", "latest"):
+        report = run_monitor(live, policy=policy, windows=(10,))
+        got = row(report, 10, "lear")
+        oracle = Oracle(policy)
+        own = oracle.keys("lear", DAYS)
+        other = oracle.keys("naive", DAYS)
+        assert got["forecasts"] == len(own) and row(report, 10, "naive")["forecasts"] == len(other)
+        assert got["common_naive"] == len(own.merge(other, on=["day", "horizon", "hour"]))
+        # "first": the naive lacks 2 keys of lear's (the common ones are the naive's); "latest": lear lacks 2 the naive has
+        if policy == "first":
+            assert got["common_naive"] == len(other) == len(own) - 2
+        else:
+            assert got["common_naive"] == len(own) == len(other) - 2
+        skill = oracle.skill("lear", "naive", 10)
+        assert got["skill_naive"] == pytest.approx(skill["skill"], rel=1e-12)
+        # not the ratio of the two MAEs over their own keys
+        assert got["skill_naive"] != pytest.approx(got["mae"] / row(report, 10, "naive")["mae"], rel=1e-9)
+        assert math.isnan(row(report, 10, "naive")["skill_naive"])  # a benchmark has none against itself
 
 
 def test_the_tables_lead_with_skill(live):
@@ -1046,3 +1049,13 @@ def test_the_actual_of_a_key_is_the_one_a_run_scores(start, days, test, zone, mo
     assert known.sum() == np.isfinite(expected).sum() > 400
     # the run itself leaves out a key whose target doesn't exist; a key it keeps with no actual has none here either
     assert not (known & ~np.isfinite(expected)).any()
+
+
+def test_the_default_rule_of_the_price_serves_when_no_rule_is_given(live):
+    """An information set with no rule of its own for the target reads the library's default for `price` (published 13:00 the day
+    before), which is the rule the fixtures give explicitly."""
+    pipe = pipeline()
+    pipe.information_set = InformationSet("11:45", ZONE)
+    with use_clock(FakeClock(NOW)):
+        plain = pipe.monitor(DATA, live, benchmarks=["naive"], windows=(10,))
+    pd.testing.assert_frame_equal(plain.tables(), run_monitor(live, windows=(10,)).tables())
