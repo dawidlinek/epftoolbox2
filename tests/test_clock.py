@@ -16,6 +16,7 @@ import contextlib
 import datetime
 import json
 import os
+import re
 import threading
 import time
 from pathlib import Path
@@ -99,6 +100,9 @@ _PARSERS = {
     "numpy.datetime64",
 }
 _NOW_WORDS = {"now", "today"}
+# A time of day alone, which a parser completes with the machine's date ("11:55", "11:55:30"). Only a literal is seen: a
+# variable's text isn't known to a scan, so `DataPipeline.run`'s `deadline` resolves a time of day itself, on the clock.
+_TIME_OF_DAY = re.compile(r"^\s*\d{1,2}:\d{2}(:\d{2})?\s*$")
 # Where a bare call's time is given by keyword.
 _TIME_KEYWORDS = {"secs", "t", "timeval", "dt"}
 _FUNCTIONS = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
@@ -177,7 +181,7 @@ def _now_strings(tree):
 
 def _is_now(node, names=frozenset()):
     if isinstance(node, ast.Constant) and isinstance(node.value, str):
-        return node.value.strip().lower() in _NOW_WORDS
+        return node.value.strip().lower() in _NOW_WORDS or bool(_TIME_OF_DAY.match(node.value))
     if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
         return any(_is_now(element, names) for element in node.elts)
     return isinstance(node, ast.Name) and node.id in names
@@ -278,6 +282,8 @@ REAL_TIME_WAITS = {
     ("models/_device_worker.py", "timed wait: idle.wait(1.0)"),
     ("models/_device_worker.py", "timed wait: self._process.join(timeout=10)"),
     ("models/_device_worker.py", "timed wait: process.join(timeout=10)"),
+    # A refresh's wait for another process's cache lock, cut to the time the refresh has left (step 8b)
+    ("data/cache_manager.py", "timed wait: lock.acquire(timeout=left)"),
 }
 
 
@@ -315,6 +321,8 @@ def test_the_package_reads_no_clock_but_through_current_clock():
         "import datetime\ndatetime.date.today()",
         "import datetime as dt\ndt.datetime.utcnow()",
         "import pandas as pd\npd.Timestamp('now')",
+        "import pandas as pd\npd.Timestamp('11:55')",
+        "import pandas as pd\npd.to_datetime(' 11:55:30 ')",
         "import pandas as pd\npd.to_datetime(' Today ')",
         "import numpy as np\nnp.datetime64('now')",
         # Aliases, and the forms of the code review's probe

@@ -28,7 +28,17 @@ import requests
 
 from epftoolbox2._clock import SYSTEM, Clock, current_clock
 
-__all__ = ["NETWORK_ERRORS", "Limits", "Retry", "SourceTimeout", "limits", "request", "retry_after_seconds"]
+__all__ = [
+    "NETWORK_ERRORS",
+    "Limits",
+    "Retry",
+    "SourceTimeout",
+    "is_unavailable",
+    "limits",
+    "request",
+    "retry_after_seconds",
+    "time_left",
+]
 
 # Errors of `session.get` that a source asks again after (the rest of `requests.RequestException` is a mistake in the
 # request itself, see `request`'s `refuse`).
@@ -96,6 +106,32 @@ def limits(
         yield current
     finally:
         _LIMITS.reset(token)
+
+
+def time_left() -> Optional[float]:
+    """Seconds left of the refresh's deadline on the current clock (never negative), or None outside a refresh with one."""
+    active = _LIMITS.get()
+    if active is None or active.deadline is None:
+        return None
+    return max(0.0, (active.deadline - current_clock().now()).total_seconds())
+
+
+# Set on the error `request` raises when a source's retries ran out on answers worth asking again (network errors, 429,
+# 5xx): the source is unavailable for now, not refusing the request.
+_UNAVAILABLE = "_epftoolbox2_source_unavailable"
+
+
+def is_unavailable(error: BaseException) -> bool:
+    """Whether `error` says a source is out of reach for now: it ran out of time (`SourceTimeout`), out of retries on
+    network errors or server-side answers (`request`), or hit a network error itself. An authentication or request error,
+    a missing file or a bug is not: `DataPipeline.run(on_failure="cache")` raises those."""
+    return isinstance(error, (SourceTimeout, *NETWORK_ERRORS)) or getattr(error, _UNAVAILABLE, False)
+
+
+def _client_error(retry: Retry) -> bool:
+    """A 4xx answer other than 429 behind `retry` (Open-Meteo retries every HTTP error)."""
+    status = getattr(getattr(retry.exception, "response", None), "status_code", None)
+    return isinstance(status, int) and 400 <= status < 500 and status != 429
 
 
 def retry_after_seconds(value: Optional[str]) -> Optional[float]:
@@ -236,4 +272,12 @@ def request(
         if log is not None:
             log(attempt, retries, outcome, wait)
         sleep(wait)
-    raise give_up(last, attempts)
+    if deadline is not None and seconds_left() <= 0:
+        raise timed_out("another attempt")  # the last attempt ran into the deadline: out of time, not failed
+    failure = give_up(last, attempts)
+    if not _client_error(last):
+        try:
+            setattr(failure, _UNAVAILABLE, True)
+        except AttributeError:  # an exception class with __slots__
+            pass
+    raise failure

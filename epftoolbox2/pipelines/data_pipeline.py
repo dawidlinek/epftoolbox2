@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import re
+import warnings
 import numpy as np
 import pandas as pd
 from pathlib import Path
@@ -30,7 +31,7 @@ from epftoolbox2.data.cache_manager import (
     without_ranges,
     without_settled_until,
 )
-from epftoolbox2.data.refresh import Refresh, RefreshRecord, SourceRefresh, last_valid, redact
+from epftoolbox2.data.refresh import Refresh, RefreshError, RefreshRecord, SourceRefresh, last_valid, redact
 from epftoolbox2.data.sources import _http
 from epftoolbox2.data.sources._http import SourceTimeout
 from epftoolbox2.logging import get_logger
@@ -531,6 +532,7 @@ class DataPipeline:
         labelled = []
         unsettled_from = []
         secrets = _secrets(self.sources)
+        failures: List[str] = []
 
         for name, source in zip(self._source_names(), self.sources):
             began = refresh.began()
@@ -538,7 +540,7 @@ class DataPipeline:
                 name, source, start, end, cache_manager, refresh
             )
             error = None if failure is None else redact(f"{type(failure).__name__}: {failure}", secrets)
-            if failure is not None and refresh.on_failure == "raise":
+            if failure is not None and (refresh.on_failure == "raise" or not _http.is_unavailable(failure)):
                 refresh.add(
                     SourceRefresh(
                         name,
@@ -552,6 +554,16 @@ class DataPipeline:
                 raise failure
             if failure is not None:
                 logger.warning(f"Pipeline: {name} {status} ({error}); it gives only the settled rows its cache holds")
+                failures.append(f"{name} {status} ({error})")
+                if df is None or df.empty:
+                    columns = getattr(source, "output_columns", None)
+                    named = f" ({', '.join(columns())})" if callable(columns) else ""
+                    warnings.warn(
+                        f"{name} {status} and its cache holds no row of [{start}, {end}): its columns{named} are "
+                        f"missing from the frame ({error})",
+                        RuntimeWarning,
+                        stacklevel=4,
+                    )
             if settled_until is not None:
                 unsettled_from.append(settled_until)
             # Sources may return rows outside the request (ENTSO-E load from start - 1 day, Open-Meteo up to
@@ -574,6 +586,8 @@ class DataPipeline:
                 labelled.append((name, df))
 
         unsettled = min(unsettled_from) if unsettled_from else None
+        if not labelled and failures:
+            raise RefreshError(f"no source gave a row of [{start}, {end}): {'; '.join(failures)}")
         if not labelled:
             logger.warning("Pipeline: No data returned from any source")
             return pd.DataFrame(), unsettled
@@ -601,26 +615,31 @@ class DataPipeline:
         """One source's fetch within the refresh's limits: its frame, the instant it declared its rows unsettled from,
         its status, what it raised (None when ok) and its request counts. A source that raised, or got no time, has the
         rows its cache holds (``on_failure="cache"``: settled ones only, see ``_cached_rows``)."""
-        counted = None
-        if refresh.time_is_up():
-            failure: Exception = SourceTimeout(
-                f"{name}: no time was left for it before the refresh's deadline {refresh.deadline.isoformat()}",
-                refresh.deadline,
-            )
-            status = "skipped"
-        else:
-            try:
-                with _http.limits(refresh.deadline, refresh.timeout, refresh.retries) as counted:
-                    if cache_manager is not None:
-                        df, settled_until = self._fetch_with_cache(source, start, end, cache_manager)
-                    else:
-                        df, settled_until = self._fetch_source(source, start, end)
-                return df, settled_until, "ok", None, counted
-            except Exception as exc:  # noqa: BLE001 - recorded, then raised or answered from the cache (on_failure)
-                failure, status = exc, "timeout" if isinstance(exc, SourceTimeout) else "failed"
-        if refresh.on_failure == "raise":
+        # Always started, also after the deadline: a full hit of its cache or work of its own needs no time, and a
+        # request it really needs raises `SourceTimeout` (`_http.request`, or the cache lock's wait).
+        try:
+            with _http.limits(refresh.deadline, refresh.timeout, refresh.retries) as counted:
+                if cache_manager is not None:
+                    df, settled_until = self._fetch_with_cache(source, start, end, cache_manager)
+                else:
+                    df, settled_until = self._fetch_source(source, start, end)
+            return df, settled_until, "ok", None, counted
+        except Exception as exc:  # noqa: BLE001 - recorded, then raised or answered from the cache (on_failure)
+            failure = exc
+        if not isinstance(failure, SourceTimeout):
+            status = "failed"
+        else:  # out of time before it sent a request (a cache lock's wait too): it got no time at all
+            status = "timeout" if counted.requests else "skipped"
+        # Only a source out of reach for now is answered from its cache; an invalid key, a missing file or a bug is raised.
+        if refresh.on_failure == "raise" or not _http.is_unavailable(failure):
             return None, None, status, failure, counted
-        return self._cached_rows(source, start, end, cache_manager), None, status, failure, counted
+        with _http.limits(refresh.deadline):  # the cache lock's wait keeps to what is left too
+            try:
+                cached = self._cached_rows(source, start, end, cache_manager)
+            except SourceTimeout:
+                logger.warning(f"Pipeline: {name}'s cache is locked by another process; it gives no row")
+                cached = pd.DataFrame()
+        return cached, None, status, failure, counted
 
     @staticmethod
     def _cached_rows(

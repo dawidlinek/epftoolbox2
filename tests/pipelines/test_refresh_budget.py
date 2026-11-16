@@ -27,7 +27,7 @@ from filelock import FileLock, Timeout
 
 from epftoolbox2.clock import FakeClock, use_clock
 from epftoolbox2.data import cache_manager
-from epftoolbox2.data.refresh import RefreshRecord, SourceRefresh, SourceTimeout
+from epftoolbox2.data.refresh import RefreshError, RefreshRecord, SourceRefresh, SourceTimeout
 from epftoolbox2.data.sources import EnergyChartsSource, OpenMeteoSource, PseSource, _http, _openholidays
 from epftoolbox2.data.sources import energy_charts as ec
 from epftoolbox2.data.sources.base import DataSource
@@ -256,7 +256,7 @@ def test_the_run_takes_the_earlier_of_budget_and_deadline_and_reads_a_naive_dead
 def test_a_deadline_in_the_past_asks_no_source(clock):
     server = Server(clock)
     pipeline = DataPipeline(sources=[entsoe(server)])
-    with pytest.raises(SourceTimeout, match="no time was left for it"):
+    with pytest.raises(SourceTimeout, match="no time is left for a request"):
         pipeline.run(START, END, deadline=utc(NOW) - HOUR)
     assert server.calls == [] and [s.status for s in pipeline.last_refresh.sources] == ["skipped"]
 
@@ -284,7 +284,7 @@ def test_the_runs_timeout_and_retries_replace_the_sources_own(clock):
         ({"retries": -1}, "retries must be a whole number"),
         ({"retries": 1.5}, "retries must be a whole number"),
         ({"retries": True}, "retries must be a whole number"),
-        ({"deadline": "soon"}, "deadline must be an instant"),
+        ({"deadline": "soon"}, "deadline must be a time of day 'HH:MM' or a timestamp with a full date"),
         ({"on_failure": "skip"}, "on_failure must be one of"),
         ({"on_failure": "cache"}, "pass cache=True"),
         ({"on_failure": "cache", "cache": "file.parquet"}, "pass cache=True"),
@@ -473,9 +473,9 @@ def test_no_cached_unsettled_value_is_served_even_when_the_clock_moved_on(clock)
 
 
 def test_the_other_sources_are_untouched_and_a_source_without_a_cache_gives_nothing(clock):
-    class Csv(DataSource):  # no cache of its own, like CsvSource
+    class Csv(DataSource):  # no cache of its own, behind a network share that is down
         def fetch(self, start, end):
-            raise FileNotFoundError("prices.csv")
+            raise requests.ConnectionError("prices.csv: host is down")
 
         def _validate_config(self):
             return True
@@ -485,12 +485,13 @@ def test_the_other_sources_are_untouched_and_a_source_without_a_cache_gives_noth
 
     _fill_the_cache(clock)
     pipeline = DataPipeline(sources=[entsoe(Server(clock, mode="503")), entsoe(Server(clock), prefix="ok"), Csv()])
-    df = pipeline.run(START, END, cache=True, retries=0, on_failure="cache")
+    with pytest.warns(RuntimeWarning, match="Csv #3 failed and its cache holds no row"):
+        df = pipeline.run(START, END, cache=True, retries=0, on_failure="cache")
     assert list(df.columns) == ["price", "ok_price"]
     assert df["ok_price"].notna().all() and df["price"].last_valid_index() == SETTLED - HOUR
     statuses = {entry.name: (entry.status, entry.rows) for entry in pipeline.last_refresh.sources}
     assert statuses == {"EntsoeSource #1": ("failed", 432), "EntsoeSource #2": ("ok", 528), "Csv #3": ("failed", 0)}
-    assert pipeline.last_refresh["Csv #3"].error == "FileNotFoundError: prices.csv"
+    assert pipeline.last_refresh["Csv #3"].error == "ConnectionError: prices.csv: host is down"
     assert pipeline.last_refresh["Csv #3"].last_valid == {}
 
 
@@ -502,7 +503,7 @@ def test_a_source_whose_turn_comes_after_the_deadline_is_skipped_and_gives_its_c
     df = pipeline.run(START, END, cache=True, budget=90, on_failure="cache")
     assert [(s.status, s.requests) for s in pipeline.last_refresh.sources] == [("timeout", 2), ("skipped", 0)]
     assert second.calls == [] and list(df.columns) == ["price"]  # the second has no cache yet: no rows
-    assert pipeline.last_refresh["EntsoeSource #2"].error.startswith("SourceTimeout: EntsoeSource #2: no time was left")
+    assert pipeline.last_refresh["EntsoeSource #2"].error.startswith("SourceTimeout: ENTSOE [PL]: A44 ")
 
 
 def test_a_budget_of_zero_serves_the_cache_alone(clock):
@@ -617,7 +618,9 @@ class Leaky(DataSource):
         self.api_key = api_key
 
     def fetch(self, start, end):
-        raise RuntimeError(f"GET https://api.example/?token={quote_plus(self.api_key)} failed for {self.api_key}")
+        raise requests.ConnectionError(
+            f"GET https://api.example/?token={quote_plus(self.api_key)} failed for {self.api_key}"
+        )
 
     def _validate_config(self):
         return True
@@ -640,11 +643,12 @@ def test_no_secret_reaches_the_record_or_the_log(clock, logs, case):
             source.session.get = Mock(side_effect=requests.exceptions.URLRequired(f"bad url (token {KEY})"))
         pipeline = DataPipeline(sources=[source])
         arguments = {"budget": 25} if case == "timeout_after_network_errors" else {}
-    pipeline.run(START, END, cache=True, on_failure="cache", **arguments)
+    with pytest.raises((RefreshError, EntsoeApiError)) as first:  # no cache to answer from; a URL error is raised
+        pipeline.run(START, END, cache=True, on_failure="cache", **arguments)
     cached = repr(pipeline.last_refresh)
     with pytest.raises(Exception) as raised:
         pipeline.run(START, END, **arguments)
-    texts = [cached, repr(pipeline.last_refresh), json.dumps(pipeline.last_refresh.to_dict()), *logs]
+    texts = [cached, str(first.value), repr(pipeline.last_refresh), json.dumps(pipeline.last_refresh.to_dict()), *logs]
     if case != "own_message":  # a source's own error is raised as it is; ENTSO-E's carry no key
         texts.append(str(raised.value))
     assert logs
@@ -683,7 +687,8 @@ def test_the_cache_lock_is_held_around_the_fetch_and_let_go_by_one_that_times_ou
     assert seen and all(seen)  # held while it asked
     [lock] = tmp_path.glob(".cache/sources/*/.lock")
     assert not _held(lock)  # and let go by the timeout
-    pipeline.run(START, END, cache=True, budget=100, on_failure="cache")
+    with pytest.raises(RefreshError):  # out of time, and nothing cached yet
+        pipeline.run(START, END, cache=True, budget=100, on_failure="cache")
     assert not _held(lock) and pipeline.last_refresh.sources[0].status == "timeout"
 
 
@@ -725,3 +730,137 @@ def test_waits_stay_within_each_sources_cap_also_with_more_retries():
     with use_clock(FakeClock(NOW)) as clock, _http.limits(retries=7), pytest.raises(requests.ConnectionError):
         _open_meteo_request(Broken(requests.ConnectionError("reset")))()
     assert clock.sleeps == [2.0, 4.0, 8.0, 16.0, 32.0, 60.0, 60.0]
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# After the reviews
+# ---------------------------------------------------------------------------------------------------------------------
+
+
+class Local(DataSource):
+    """An offline source without a cache of its own (a CSV file, a calendar without HTTP)."""
+
+    def __init__(self, error=None):
+        self.error = error
+
+    def fetch(self, start, end):
+        if self.error is not None:
+            raise self.error
+        hours = pd.date_range(start, end, freq="1h", inclusive="left")
+        return pd.DataFrame({"is_holiday": np.zeros(len(hours))}, index=hours)
+
+    def _validate_config(self):
+        return True
+
+    def get_cache_config(self):
+        return None
+
+
+def test_a_fully_cached_source_needs_no_time(clock):
+    """Review 1: a source is always started; only a request it really needs can run out of time."""
+    healthy = DataPipeline(sources=[entsoe(Server(clock))]).run(START, "2026-10-15", cache=True)
+    server = Server(clock, mode="503")
+    pipeline = DataPipeline(sources=[entsoe(server), Local()])
+    df = pipeline.run(START, "2026-10-15", cache=True, budget=0)
+    assert server.calls == [] and [s.status for s in pipeline.last_refresh.sources] == ["ok", "ok"]
+    pd.testing.assert_series_equal(df["price"], healthy["price"], check_freq=False)
+    assert df["is_holiday"].notna().all()
+
+
+def test_offline_sources_after_a_slow_one_keep_their_columns(clock):
+    pipeline = DataPipeline(sources=[entsoe(Server(clock, mode="hang", latency=None)), Local(), Ramp()])
+    _fill_the_cache(clock)
+    df = pipeline.run(START, END, cache=True, budget=90, on_failure="cache")
+    assert [s.status for s in pipeline.last_refresh.sources] == ["timeout", "ok", "ok"]
+    assert {"is_holiday", "ramp_long"} <= set(df.columns)
+
+
+@pytest.mark.parametrize(
+    "make",
+    [
+        lambda clock: entsoe(Broken(answer(PRICE_DOC.replace("Publication", "Acknowledgement"), 401))),
+        lambda clock: Local(FileNotFoundError("prices.csv")),
+        lambda clock: Local(TypeError("a bug")),
+    ],
+    ids=["invalid-key", "missing-file", "programming-error"],
+)
+def test_on_failure_cache_raises_what_no_cache_should_answer(clock, make):
+    """Review 2: only a timeout, a network error or a server that kept failing is answered from the cache."""
+    _fill_the_cache(clock)
+    pipeline = DataPipeline(sources=[make(clock)])
+    with pytest.raises((EntsoeApiError, FileNotFoundError, TypeError)):
+        pipeline.run(START, END, cache=True, on_failure="cache")
+    assert pipeline.last_refresh.sources[0].status == "failed"
+
+
+def test_on_failure_cache_raises_when_no_source_gave_a_row(clock):
+    pipeline = DataPipeline(sources=[entsoe(Server(clock, mode="503"))])
+    with pytest.raises(RefreshError, match="no source gave a row.*EntsoeSource #1 failed"):
+        pipeline.run(START, END, cache=True, retries=0, on_failure="cache")
+    assert pipeline.last_refresh.sources[0].rows == 0
+
+
+def test_a_failed_source_without_cached_rows_is_warned_about_loudly(clock):
+    pipeline = DataPipeline(sources=[entsoe(Server(clock)), entsoe(Server(clock, mode="503"), prefix="b")])
+    with pytest.warns(RuntimeWarning, match=r"EntsoeSource #2 failed and its cache holds no row.*missing"):
+        df = pipeline.run(START, END, cache=True, retries=0, on_failure="cache")
+    assert list(df.columns) == ["price"]
+
+
+@pytest.mark.parametrize(
+    "timezone, expected", [("Europe/Berlin", "2026-10-21 09:55"), (None, "2026-10-21 11:55")], ids=["Berlin", "UTC"]
+)
+def test_a_deadline_of_a_time_alone_is_today_on_the_clock_in_the_pipelines_zone(
+    timezone, expected, tmp_path, monkeypatch
+):
+    """Review 3: "11:55" is that time of today's date on the clock, not on the machine's date."""
+    monkeypatch.chdir(tmp_path)
+    with use_clock(FakeClock("2026-10-21 08:00")):
+        pipeline = DataPipeline(sources=[Ramp()], timezone=timezone)
+        pipeline.run(START, END, deadline="11:55")
+    assert pipeline.last_refresh.deadline == utc(expected)
+
+
+@pytest.mark.parametrize("deadline", ["now", "noon", "11am", "Oct 21"])
+def test_a_deadline_string_without_a_full_date_is_refused(clock, deadline):
+    with pytest.raises(ValueError, match="deadline"):
+        DataPipeline(sources=[Ramp()]).run(START, END, deadline=deadline)
+
+
+def test_a_cache_lock_held_by_another_process_counts_against_the_budget(clock, tmp_path):
+    """Review 4: a second process waits for the cache lock only as long as its time lasts (here a fraction of a real
+    second: the lock is another process's and waits on real time)."""
+    import threading
+
+    _fill_the_cache(clock)
+    [path] = tmp_path.glob(".cache/sources/*/.lock")
+    other = FileLock(str(path))
+    other.acquire()
+    outcome = {}
+
+    def run():
+        with use_clock(clock):
+            pipeline = DataPipeline(sources=[entsoe(Server(clock))])
+            try:
+                outcome["df"] = pipeline.run(START, END, cache=True, budget=0.3, on_failure="cache")
+            except Exception as exc:  # noqa: BLE001 - looked at below
+                outcome["error"] = exc
+            outcome["record"] = pipeline.last_refresh
+
+    worker = threading.Thread(target=run)
+    worker.start()
+    worker.join(20)
+    blocked = worker.is_alive()
+    other.release()
+    worker.join()
+    assert not blocked, "the run waited for the lock past its budget"
+    entry = outcome["record"].sources[0]
+    assert entry.status == "skipped" and "cache lock" in entry.error and entry.requests == 0
+
+
+def test_a_timeout_on_the_last_attempt_is_a_timeout(clock):
+    """Review 5: the last attempt ran into the deadline, so the source ran out of time, it didn't fail."""
+    pipeline = DataPipeline(sources=[entsoe(Server(clock, mode="hang", latency=None))])
+    with pytest.raises(SourceTimeout):
+        pipeline.run(START, END, budget=100, retries=1)
+    assert pipeline.last_refresh.sources[0].status == "timeout"

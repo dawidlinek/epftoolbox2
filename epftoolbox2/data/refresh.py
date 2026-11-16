@@ -13,6 +13,7 @@ models decide what that means. Nothing is filled with an older value.
 
 import math
 import numbers
+import re
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 from urllib.parse import quote, quote_plus
@@ -22,15 +23,26 @@ import pandas as pd
 from epftoolbox2._clock import Clock
 from epftoolbox2.data.sources._http import SourceTimeout
 
-__all__ = ["RefreshRecord", "SourceRefresh", "SourceTimeout", "STATUSES", "ON_FAILURE"]
+__all__ = ["RefreshError", "RefreshRecord", "SourceRefresh", "SourceTimeout", "STATUSES", "ON_FAILURE"]
 
 # What happened to a source: fetched (or served by its cache without a request), its fetch raised, its fetch ran out of the
-# refresh's time (`SourceTimeout`), or no time was left when its turn came.
+# refresh's time (`SourceTimeout`) after sending requests, or before it could send one (a deadline already past, a cache
+# lock another process held for longer than the time left).
 STATUSES = ("ok", "failed", "timeout", "skipped")
 # What a source that isn't ok gives: raise its error (today's behaviour), or its cached settled rows.
 ON_FAILURE = ("raise", "cache")
 
 REDACTED = "***"
+
+# A deadline given as a time of day alone: "11:55" or "11:55:30".
+_TIME_OF_DAY = re.compile(r"^\s*(\d{1,2}):(\d{2})(?::(\d{2}))?\s*$")
+# A string with a full date: a four-digit year next to a month and a day.
+_FULL_DATE = re.compile(r"\d{4}-\d{1,2}-\d{1,2}|\d{1,2}[./]\d{1,2}[./]\d{4}|\d{4}\d{2}\d{2}")
+
+
+class RefreshError(RuntimeError):
+    """`DataPipeline.run(..., on_failure="cache")` had no row to give: every source that was asked failed or ran out of
+    time and no cache held a row. The message names each source and what it raised."""
 
 
 def _iso(instant: Optional[pd.Timestamp]) -> Optional[str]:
@@ -44,7 +56,8 @@ class SourceRefresh:
     Attributes:
         name: `"<class> #<position>"`, the pipeline's name for it in its warnings (`"EntsoeSource #1"`).
         status: `"ok"` (fetched, or served by its cache without a request), `"failed"` (its fetch raised), `"timeout"` (it
-            ran out of the refresh's time: `SourceTimeout`) or `"skipped"` (no time was left when its turn came).
+            ran out of the refresh's time after sending requests: `SourceTimeout`) or `"skipped"` (it ran out of time
+            before it could send one: the deadline had passed, or another process held its cache lock for longer).
         seconds: The time its turn took, on the clock.
         requests: HTTP requests it sent; a source that reads files sends none.
         retries: How many of those asked again after a failed answer.
@@ -217,10 +230,7 @@ class Refresh:
     def _deadline(self, deadline: Any, timezone: Optional[str]) -> Optional[pd.Timestamp]:
         candidates = []
         if deadline is not None:
-            try:
-                instant = pd.Timestamp(deadline)
-            except (TypeError, ValueError) as e:
-                raise ValueError(f"deadline must be an instant (a timestamp), got {deadline!r}") from e
+            instant = self._instant(deadline, timezone)
             if instant is pd.NaT:
                 raise ValueError("deadline must be an instant, got NaT")
             # A naive deadline is a time of the pipeline's zone, as a naive `start` or `end` is.
@@ -230,8 +240,27 @@ class Refresh:
             candidates.append(self.started + pd.Timedelta(seconds=self.budget))
         return min(candidates) if candidates else None
 
-    def time_is_up(self) -> bool:
-        return self.deadline is not None and self.clock.now() >= self.deadline
+    def _instant(self, deadline: Any, timezone: Optional[str]) -> pd.Timestamp:
+        """The deadline as a timestamp. A time of day alone ("11:55") is that time on today's date in ``timezone``
+        (UTC without one) on the clock, however late it is: past, it leaves no time. Any other string needs a full date,
+        so that no parser fills one in from the machine's clock."""
+        if isinstance(deadline, str):
+            time_of_day = _TIME_OF_DAY.match(deadline)
+            if time_of_day:
+                hours, minutes, seconds = (int(part or 0) for part in time_of_day.groups())
+                if hours > 23 or minutes > 59 or seconds > 59:
+                    raise ValueError(f"deadline must be a time of day 'HH:MM' or a timestamp, got {deadline!r}")
+                today = self.started.tz_convert(timezone or "UTC").tz_localize(None).normalize()
+                local = today + pd.Timedelta(hours=hours, minutes=minutes, seconds=seconds)
+                return local.tz_localize(timezone or "UTC", ambiguous=True, nonexistent="shift_forward")
+            if not _FULL_DATE.search(deadline):
+                raise ValueError(
+                    f"deadline must be a time of day 'HH:MM' or a timestamp with a full date, got {deadline!r}"
+                )
+        try:
+            return pd.Timestamp(deadline)
+        except (TypeError, ValueError) as e:
+            raise ValueError(f"deadline must be an instant (a timestamp), got {deadline!r}") from e
 
     def began(self) -> float:
         return self.clock.monotonic()
