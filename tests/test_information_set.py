@@ -2319,6 +2319,8 @@ def test_an_untold_slot_name_on_an_hourly_model_that_takes_a_rule_warns_once(mon
         own._resolve_for("load_actual_s30", 60)
         own._resolve_for("load_actual_s30_d-1", 60)
     assert len(caught) == 1
+    text = str(caught[0].message)
+    assert "ModelPipeline.load" in text and "Workflow" in text and "rule of its own" in text  # both remedies
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         own._resolve_for("load_actual_s30", 60)  # once

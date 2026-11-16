@@ -1279,8 +1279,10 @@ def _warn_untold_slot(base: str) -> None:
     warnings.warn(
         f"{base}: an `_sNN` slot name doesn't say its length, and this information set wasn't told it, so the column is read as "
         "a quarter-hour. For a DailyProfileTransformer of another slot length (freq='30min') that is the wrong time, and the "
-        "check can accept a value that isn't known yet. Pass the transformer: "
-        "information_set.with_source_rules([*data_pipeline.sources, *data_pipeline.transformers]) (a Workflow does).",
+        "check can accept a value that isn't known yet. In Python pass the transformers: "
+        "information_set.with_source_rules([*data_pipeline.sources, *data_pipeline.transformers]). A saved pipeline "
+        "(ModelPipeline.load, the CLI) can't be told: run it through a Workflow, which does, or give the column a rule of its "
+        "own written for its real slot time.",
         UserWarning,
         stacklevel=2,
     )
