@@ -1271,7 +1271,7 @@ def test_what_the_function_only_reads_on_training_days_is_recorded_and_listed(fr
     pipeline = ModelPipeline(information_set=INFO).add_model(
         OLSModel(only_on_training_days, training_window=WINDOW, name="m")
     )
-    with pytest.warns(UserWarning, match="not known"):
+    with pytest.warns(UserWarning, match="no rule"):
         report = pipeline.run(data, test=TEST, horizon=1, save_dir=tmp_path)
     manifest = json.loads((tmp_path / "m.manifest.json").read_text())
     assert {"signal_d-1", "no_rule_value", "no_rule_published"} <= set(manifest["column_hashes"])
