@@ -883,7 +883,9 @@ def _issue(
         if store is not None and store.is_live():
             recorded = store.zone()
             if recorded is not None and recorded != zone:
-                raise ValueError(
+                from ..results.store import LiveDirectoryError
+
+                raise LiveDirectoryError(
                     f"{store.save_dir} issues in {recorded}, this pipeline in {zone}: use another save_dir for it"
                 )
         # 2. ensure: an issue with a committed revision, ok or fallback, by the deadline is done.
@@ -895,13 +897,16 @@ def _issue(
                     return result(status, revision=number, noop=True)
         if deadline_at is not None and clock.now() > deadline_at:
             return _late(store, writes, issue, call, started, deadline_at, result)
-        if writes:
+        if store is not None:
+            # What the directory is: compared on every call, a dry run's too. A deadline is each call's own (its call line
+            # and its revision's commit line hold it), never the directory's.
             identity: Dict[str, Any] = {"issue_timezone": zone}
-            if isinstance(settings["deadline"], str) and _HH_MM.match(settings["deadline"]):
-                identity["deadline"] = settings["deadline"].strip()
             if pipeline.frozen_choices:
                 identity["frozen_choices"] = pipeline.frozen_choices
-            store.init(**identity)
+            if writes:
+                store.init(**identity)
+            else:
+                check_identity(store, identity)
 
         # 3. refresh and poll.
         info = settings["info"]
@@ -977,9 +982,24 @@ def _issue(
             zone=data_zone,
         )
 
-        # 7. late, unchanged, or a new revision.
+        # 7. late, unchanged, or a new revision. The live manifests are compared on every call that gets this far (a dry
+        # run's and an unchanged one's too) and written only with a revision.
         if deadline_at is not None and clock.now() > deadline_at:
             return _late(store, writes, issue, call, started, deadline_at, result, **outcome)
+
+        def manifests_checked(write: bool) -> None:
+            for name, manifest in manifests.items():
+                if manifest is None:
+                    continue
+                if pipeline.checks is not None:
+                    manifest.checks = pipeline.checks.to_dict()
+                path = results_path(store.save_dir, name, settings["formats"][name])
+                check_and_write_live(
+                    manifest_path(path), manifest, model_name=name, save_format=settings["formats"][name], write=write
+                )
+
+        if store is not None:
+            manifests_checked(write=False)
         if store is not None and store.is_live():
             latest = latest_committed(store, issue)
             if latest is not None:
@@ -997,19 +1017,14 @@ def _issue(
                             call=call,
                             started=started,
                             unchanged=True,
+                            **({} if deadline_at is None else {"deadline": deadline_at.isoformat()}),
                         )
                     return result(head_status, revision=number, unchanged=True, call=line, **outcome)
         if not writes:  # a dry run, or no live directory: what a commit would be
             number = store.next_revision(issue) if store is not None and store.is_live() else (1 if store else None)
             return result(status, revision=number, **outcome)
 
-        for name, manifest in manifests.items():
-            if manifest is None:
-                continue
-            if pipeline.checks is not None:
-                manifest.checks = pipeline.checks.to_dict()
-            path = pipeline.results_path(store.save_dir, _Named(name), settings["formats"][name])
-            check_and_write_live(manifest_path(path), manifest, model_name=name, save_format=settings["formats"][name])
+        manifests_checked(write=True)
         revision = store.begin(issue, issued_at=clock.now(), snapshot=snap.hash, call=call, started=started)
         for name, held_records in every.items():
             writer = revision.open(name, settings["formats"][name])
@@ -1046,11 +1061,31 @@ def _issue(
         raise
 
 
-class _Named:
-    """A name where `ModelPipeline.results_path` reads a model's."""
+def results_path(save_dir: Path, name: str, save_format: str) -> Path:
+    """A model's or ensemble's results in the live directory, as `ModelPipeline.results_path` names them."""
+    return Path(save_dir) / f"{name.lower().replace(' ', '_')}{SAVE_FORMATS[save_format]}"
 
-    def __init__(self, name: str):
-        self.name = name
+
+def check_identity(store: LiveStore, identity: Mapping[str, Any]) -> None:
+    """What `LiveStore.init` compares, for a call that writes nothing (a dry run): a key `live.json` holds with another value
+    raises `LiveDirectoryError`; a directory holding a backtest's results was refused when the lock was asked for."""
+    from ..results.live import _as_json
+    from ..results.store import LiveDirectoryError
+
+    if not store.is_live():
+        return
+    stored = store.identity()
+    differ = {
+        key: (stored[key], _as_json(value))
+        for key, value in identity.items()
+        if key in stored and stored[key] != _as_json(value)
+    }
+    if differ:
+        raise LiveDirectoryError(
+            f"{store.identity_path} was made for another live pipeline: "
+            + "; ".join(f"{key}: {held!r} on file, {given!r} now" for key, (held, given) in differ.items())
+            + ". Use another save_dir for this one."
+        )
 
 
 def _late(

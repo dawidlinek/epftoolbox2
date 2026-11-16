@@ -12,7 +12,6 @@ grids, `run(forecast_only=True, save_dir=...)`, a late `ctx.value()` at "raise",
 import datetime
 import hashlib
 import json
-import os
 from concurrent.futures import Future
 
 import numpy as np
@@ -36,6 +35,8 @@ from epftoolbox2.pipelines import DataPipeline
 from epftoolbox2.pipelines._issue_records import read_snapshot
 from epftoolbox2.results.checks import ForecastChecks
 from epftoolbox2.results.live import LiveStore
+from epftoolbox2.results.manifest import ManifestMismatchError
+from epftoolbox2.results.store import LiveDirectoryError
 from epftoolbox2.results.store import read_records
 from tests.synthetic import PREDICTORS, make_market_data
 
@@ -640,15 +641,42 @@ def test_verify_through_the_serve_path_is_ok_with_its_control(refit):
     assert not leaky.verify(DATA, "2023-03-01", "2023-03-08", horizon=2, days=2, through="serve").ok
 
 
-def test_the_deadline_and_the_issue_zone_go_into_live_json(tmp_path):
+def test_each_call_keeps_its_own_deadline_and_the_directory_its_issue_zone(tmp_path):
+    """The deadline is each call's (an earlier one tomorrow is no other pipeline): its call line and its revision's commit
+    line hold it, and readers cut off at "deadline" read it there. `live.json` holds the issue zone, compared on every call."""
     live = tmp_path / "live"
     with use_clock(FakeClock(AT)):
         simple().forecast(DATA, ISSUE, live, horizon=2, deadline="11:55")
+        changed = DATA.copy()
+        changed.loc[
+            changed.index[changed.index.normalize() == pd.Timestamp(ISSUE, tz="Europe/Warsaw")][5], "load_d+1"
+        ] += 9
+        second = simple().forecast(changed, ISSUE, live, horizon=2, deadline="11:40")
+    assert second.revision == 2
     identity = json.loads((live / "live.json").read_text())
-    assert (identity["issue_timezone"], identity["deadline"]) == ("Europe/Warsaw", "11:55")
-    commit = LiveStore(live).committed()[ISSUE][1]
-    assert commit.deadline == pd.Timestamp("2023-03-07 10:55", tz="UTC")
-    assert os.path.isdir(live / "issues" / ISSUE / "r1")
+    assert identity["issue_timezone"] == "Europe/Warsaw" and "deadline" not in identity
+    commits = LiveStore(live).committed()[ISSUE]
+    assert commits[1].deadline == pd.Timestamp("2023-03-07 10:55", tz="UTC")
+    assert commits[2].deadline == pd.Timestamp("2023-03-07 10:40", tz="UTC")
+    seen = LiveStore(live).visible("latest", "deadline")
+    assert sorted(seen[ISSUE]) == [1, 2]
+    other = ModelPipeline(issue_time="11:45", issue_timezone="Europe/Berlin").add_model(ols())
+    with pytest.raises(LiveDirectoryError, match="Europe/Warsaw"):
+        other.forecast(DATA, ISSUE, live, horizon=2, dry_run=True)
+
+
+def test_a_dry_run_refuses_what_the_real_call_would(tmp_path):
+    live = tmp_path / "live"
+    simple().forecast(DATA, ISSUE, live, horizon=2)
+    before = snapshot_of(live)
+    narrower = pipeline(
+        ols(window=14), ols("b", PREDICTORS[:2], 14), ensembles=[FallbackEnsemble(["a", "b"], name="fb")]
+    )
+    with pytest.raises(ManifestMismatchError, match="training_window"):
+        narrower.forecast(DATA, ISSUE, live, horizon=2, dry_run=True)
+    assert snapshot_of(live) == before
+    with pytest.raises(ManifestMismatchError, match="training_window"):
+        narrower.forecast(DATA, ISSUE, live, horizon=2)
 
 
 # --- the data range a refresh asks for ---------------------------------------------------------------------------------------
