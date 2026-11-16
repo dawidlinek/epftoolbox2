@@ -37,7 +37,9 @@ report = pipeline.run(df, test=("2025-10-01", "2026-09-30"), horizon=1, save_dir
 the residual model instead. Either way the residual model runs **its own** base: `lear` above is fitted twice, once as itself and
 once as the base. `warmup="2024-10-01"` starts the base's forecasts on that date, whatever days a run forecasts (see
 [Warm-up](#warm-up)), and the default `binary_mask` reads each of their binary columns from its own fit's rows, so the base's
-forecasts are the pipeline's `lear` records to the bit (see [The base's forecasts](#the-bases-forecasts-and-the-base-models-own)).
+forecasts are the pipeline's `lear` records on the model path: to the bit with `ModelPipeline(engine="off")`, and within the
+engine's tolerances where the default engine fits `lear` from shared sums (see
+[The base's forecasts](#the-bases-forecasts-and-the-base-models-own)).
 
 ## Parameters
 
@@ -134,7 +136,9 @@ The learner's first fit needs base forecasts of its training rows, so the base s
 
 The base starts at the warm-up, not where the pipeline's own copy of it starts. With the default `binary_mask` (or `"fit"`, or
 `refit`) each base forecast reads its binary columns from its own fit's rows, so its forecasts are the records of the same model run
-beside the residual model to the bit, and comparing the two models compares what the learner adds. A base with
+beside the residual model on the model path, and comparing the two models compares what the learner adds. The base always runs on
+the model path: with the engine on (the default) a pipeline's own OLS, Ridge, LassoCV or LEAR of the same settings is fitted from
+shared sums, within 1e-8 EUR/MWh (Ridge 1e-9) of those records rather than to the bit; `engine="off"` makes them the same bits. A base with
 `binary_mask="first_day"` (the default up to 2.3) reads each forecast's mask on its run's first day, the warm-up start, so its
 forecasts, and `base_prediction`, can differ from those records, and a run warns.
 
@@ -168,7 +172,9 @@ base without `warmup=`, and Parquet results (its records hold `base_prediction`,
 `save_format="jsonl"`; `epf results convert --to parquet` refuses its results and its base's, before converting anything). A
 `Workflow` refuses Parquet and a `base="name"` that names no earlier model before its data pipeline runs, also in an array task
 whose slice holds the base alone; an array task's ResidualModel runs a base that is another task's model, resolved on the whole
-list. With `ModelPipeline(engine="on")` it runs on its own path, as with `"off"`, its base too. `verify` of a model whose base has
+list. With the engine on (`ModelPipeline()`, the default) it runs on its own path, as with `"off"`, its base too, so the base's
+forecasts are the model path's: within the engine's tolerances (1e-8 EUR/MWh, Ridge 1e-9) of the pipeline's own records of the same
+model where that one runs in an engine group, and those records to the bit with `engine="off"`. `verify` of a model whose base has
 `newest_target="published"` needs the learner `"published"` too: a probe gives the information set only to a model that says it
 reads it.
 

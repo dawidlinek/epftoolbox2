@@ -140,6 +140,23 @@ an issue day it didn't sample.
     it (in Python, or `binary_mask: first_day` in YAML) to resume results written before or to reproduce their numbers. A YAML
     file without `binary_mask` runs the new default. A `ResidualModel` warns about a base with `"first_day"` instead of one with
     None.
+- **The engine is on by default.** `ModelPipeline(engine=None)`, the default, runs OLS, Ridge, LassoCV and LEAR (`"lars"`) in
+  engine groups, fitted from shared exact sums, where every model ran on its own before. See
+  [The Engine](/epftoolbox2/model-pipeline/engine/).
+  - **What moves.** Those four classes' forecasts, within 1e-8 EUR/MWh (Ridge 1e-9) of the model path, with the same penalty and
+    kink: in the last bits, not to the bit. Every other model (NaiveModel, trees, networks, foundation models, a model with a
+    per-row target, a `train_on="matching"` list, a `ResidualModel` and its base, LEAR `"cd"`) and every `forecast_only` run is
+    as before. The golden metrics move within their pinned 1e-9 relative tolerance and are not rewritten. A `ResidualModel`'s
+    base, which runs on the model path, now agrees with the pipeline's own model of the same settings within those tolerances,
+    not to the bit. Stored fits (`refit`) record the fit path in their configuration digest, so a live directory's fits are
+    made again once, by `refit(if_due=True)`, under the new default.
+  - **Resuming.** With `engine` left out, each model follows its own folder: one written on the model path (no `fit_path` in its
+    manifest, as every folder up to 2.3) resumes on the model path, with a log line, so old results keep resuming as they were
+    written; a new folder, or one with `fit_path: "engine-2"`, runs in the engine. An explicit `engine` applies to every model,
+    and a folder written the other way refuses with `ManifestMismatchError` on `fit_path`. Nothing is mixed.
+  - **The old behaviour.** `ModelPipeline(engine="off")`, or `engine: off` in the pipeline's YAML or `model_pipeline.engine: off`
+    in a workflow. YAML writes `engine` only when it was given, so a file saved up to 2.3 (without it) runs the new default.
+    `BayesSearch.run(engine="off")` keeps its own default.
 
 ### Fixed
 

@@ -48,7 +48,8 @@ holds `"horizon"`. Its rows are the union of what each zone's own model would tr
 4. **Each zone's forecast** is its issue row, scaled by its own zone's scaler, forecast on its own from the fit and inverted by that
    scaler. Every zone's rows train every unit, whether or not the zone has a forecast left to make there, so a resume equals a fresh run.
 
-With one zone (and one horizon) nothing is added: a pooled model over one zone is the model itself, to the bit. With `"horizon"` in
+With one zone (and one horizon) nothing is added: a pooled model over one zone is the model itself, to the bit, as the model runs on the model path (`engine="off"`); the
+same model in a pipeline with the engine on (the default) is fitted from shared sums, within the engine's tolerances of it. With `"horizon"` in
 `over` the predictors of each horizon are stacked by their place in the list (`load_d+3` under `load_d+4`), so every horizon's list
 must have the same length, or the run raises before any fit. The coefficients of a record are the fit's, the zone and horizon columns
 last.
