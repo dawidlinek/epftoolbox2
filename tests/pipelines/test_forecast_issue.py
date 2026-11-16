@@ -27,6 +27,9 @@ from epftoolbox2.models import _engine_worker
 from epftoolbox2.models.context import Use
 from epftoolbox2.models._worker import _worker_init
 from epftoolbox2.pipelines import ModelPipeline, _live
+from epftoolbox2.data.sources import CsvSource
+from epftoolbox2.data.transformers import LambdaTransformer, RollingStatsTransformer, TimezoneTransformer
+from epftoolbox2.pipelines import DataPipeline
 from epftoolbox2.pipelines._issue_records import read_snapshot
 from epftoolbox2.results.checks import ForecastChecks
 from epftoolbox2.results.live import LiveStore
@@ -643,3 +646,87 @@ def test_the_deadline_and_the_issue_zone_go_into_live_json(tmp_path):
     commit = LiveStore(live).committed()[ISSUE][1]
     assert commit.deadline == pd.Timestamp("2023-03-07 10:55", tz="UTC")
     assert os.path.isdir(live / "issues" / ISSUE / "r1")
+
+
+# --- the data range a refresh asks for ---------------------------------------------------------------------------------------
+
+
+def csv_pipeline(raw, tmp_path, *transformers):
+    """A real data pipeline over a CSV of `raw` (UTC), which returns exactly the range it is asked for, transformed."""
+    path = tmp_path / "market.csv"
+    raw.tz_convert("UTC").rename_axis("datetime").reset_index().to_csv(path, index=False)
+    return DataPipeline(
+        sources=[CsvSource(str(path))],
+        transformers=[TimezoneTransformer("Europe/Warsaw"), *transformers],
+        timezone="Europe/Warsaw",
+    )
+
+
+ROLLING = RollingStatsTransformer("load", window_days=60, stat="mean", lag_days=1)
+ROLLED = {**RULES, ROLLING.output_column: Availability.static()}
+
+
+def test_the_range_covers_a_rolling_window_reaching_far_behind_the_oldest_training_row(tmp_path):
+    raw = market(days=200, start="2022-10-01")
+    data = csv_pipeline(raw, tmp_path, ROLLING)
+    info = InformationSet("11:45", "Europe/Warsaw", rules=ROLLED)
+
+    def make():
+        return pipeline(ols(predictors=[*PREDICTORS, ROLLING.output_column], window=56), info=info)
+
+    whole = data.run("2022-10-01", "2023-04-15")
+    folder = tmp_path / "backtest"
+    make().run(whole, ISSUE, ISSUE, horizon=2, save_dir=str(folder))
+    result = make().forecast(data, ISSUE, tmp_path / "live", horizon=2, cache=False)
+    # The rolling mean is a running sum, so its last bits depend on where the frame starts: equal within 1e-9, not to the bit.
+    # A range that cuts the window leaves the oldest training rows without it, and those fits lose rows (differences of 1e-2).
+    expected = {(r["hour"], r["horizon"]): r["prediction"] for r in lines(folder / "a.jsonl")}
+    got = {(r["hour"], r["horizon"]): r["prediction"] for r in result.records["a"] if r["status"] == "ok"}
+    assert result.status == "ok" and len(expected) == 48 and set(got) == set(expected)
+    worst = max(abs(got[key] - expected[key]) for key in expected)
+    assert worst < 1e-9, worst
+
+
+def test_a_transformer_that_can_t_say_its_lookback_warns_and_span_sets_the_range(tmp_path):
+    raw = market(days=200, start="2022-10-01")
+    double = LambdaTransformer(columns={"twice": "load * 2"})
+    data = csv_pipeline(raw, tmp_path, double)
+    with pytest.warns(UserWarning, match="LambdaTransformer can't say how far back it reads"):
+        pipeline(ols()).forecast(data, ISSUE, None, horizon=2, cache=False)
+    import warnings as _warnings
+
+    with _warnings.catch_warnings():
+        _warnings.simplefilter("error", UserWarning)
+        pipeline(ols()).forecast(data, ISSUE, None, horizon=2, cache=False, span=("2022-10-01", "2023-03-10"))
+
+
+def test_the_range_covers_an_older_stored_fit_served_in_place_of_a_missing_one(tmp_path):
+    raw = market(days=330, start="2022-06-01")
+    data = csv_pipeline(raw, tmp_path)
+    whole = data.run("2022-06-01", "2023-04-15")
+
+    def make():
+        return pipeline(ols(refit="3MS", window=56))
+
+    live = tmp_path / "live"
+    make().refit(whole, live, issue="2022-10-01", horizon=2)  # October's fit; January's is missing
+    with _no_stale_warning():
+        result = make().forecast(data, ISSUE, live, horizon=2, cache=False)
+    entry = result.models["a"]["fits"]["2023-01-01"]
+    assert entry["source"] == "previous" and entry["used"] == "2022-10-01" and "stale" not in entry
+
+
+class _no_stale_warning:
+    def __enter__(self):
+        import warnings as _warnings
+
+        self._catch = _warnings.catch_warnings(record=True)
+        self.seen = self._catch.__enter__()
+        _warnings.simplefilter("always")
+        return self
+
+    def __exit__(self, *exc):
+        self._catch.__exit__(*exc)
+        stale = [str(w.message) for w in self.seen if "holds otherwise" in str(w.message)]
+        assert not stale, stale
+        return False

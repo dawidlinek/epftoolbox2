@@ -71,6 +71,10 @@ class DailyStatsTransformer(Transformer):
         if "peak" not in self.stats and self.peak_hours != PEAK_HOURS:
             raise ValueError(f"peak_hours sets the block of stats=['peak']; it means nothing for stats={self.stats}")
 
+    def lookback_days(self) -> int:
+        """Its output on a row reads the row's own local day only."""
+        return 0
+
     def transform(self, df: pd.DataFrame) -> pd.DataFrame:
         index = check_index(df, "DailyStatsTransformer")
         check_unique_index(index, "DailyStatsTransformer")

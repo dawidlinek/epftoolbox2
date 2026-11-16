@@ -94,6 +94,10 @@ class ResampleTransformer(Transformer):
             raise ValueError(f"ResampleTransformer: agg '{agg}' needs a numeric column, '{series.name}' is not")
         return "first"
 
+    def lookback_days(self) -> int:
+        """Its output on a row reads the row's own local day only."""
+        return 0
+
     def transform(self, df: pd.DataFrame) -> pd.DataFrame:
         if not isinstance(df.index, pd.DatetimeIndex):
             raise ValueError("DataFrame index must be a DatetimeIndex")

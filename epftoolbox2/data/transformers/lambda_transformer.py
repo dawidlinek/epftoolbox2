@@ -93,6 +93,10 @@ class LambdaTransformer(Transformer):
         self.func = func
         self.columns = columns
 
+    def lookback_days(self) -> None:
+        """A function can read any row: it can't be told."""
+        return None
+
     def transform(self, df: pd.DataFrame) -> pd.DataFrame:
         if self._func is not None:
             result = self._func(df)

@@ -184,6 +184,10 @@ class SolarGeometryTransformer(Transformer):
         """The names of the columns it adds, in order."""
         return [f"{self.prefix}_{name}" if self.prefix else name for name in COLUMNS]
 
+    def lookback_days(self) -> int:
+        """Its output on a row reads the row's own local day only."""
+        return 0
+
     def transform(self, df: pd.DataFrame) -> pd.DataFrame:
         index = df.index
         if not isinstance(index, pd.DatetimeIndex):

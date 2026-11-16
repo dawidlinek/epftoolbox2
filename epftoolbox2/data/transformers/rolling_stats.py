@@ -86,6 +86,10 @@ class RollingStatsTransformer(Transformer):
         """The name of the column it adds."""
         return rolling_name(self.column, self.window_days, self.stat, self.lag_days)
 
+    def lookback_days(self) -> int:
+        """The window's oldest day: `window_days + lag_days - 1` days before the row's."""
+        return self.window_days + self.lag_days - 1
+
     def transform(self, df: pd.DataFrame) -> pd.DataFrame:
         index = check_index(df, "RollingStatsTransformer")
         if self.column not in df.columns:

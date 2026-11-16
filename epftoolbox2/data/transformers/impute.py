@@ -1,3 +1,5 @@
+from typing import Optional
+import math
 import numpy as np
 import pandas as pd
 
@@ -66,6 +68,18 @@ class ImputeTransformer(Transformer):
         self.limit = limit
         self.flag = flag
         self.suffix = suffix
+
+    def lookback_days(self) -> Optional[int]:
+        """How far back a fill may read: its `limit` in days, rounded up (rows counted as hours, the longest slot of a sub-daily
+        frame); None without a limit, since a fill then reaches back to the last real value, however old."""
+        if self.limit is None:
+            return None
+        if isinstance(self.limit, str):
+            span = pd.Timedelta(self.limit)
+        else:
+            span = pd.Timedelta(hours=int(self.limit))
+        days = int(math.ceil(span / pd.Timedelta(days=1)))
+        return days * (7 if self.method == "previous_week" else 1)
 
     def transform(self, df: pd.DataFrame) -> pd.DataFrame:
         self._check_frame(df)

@@ -33,6 +33,7 @@ from __future__ import annotations
 import datetime
 import json
 import re
+import warnings
 import tempfile
 import uuid
 from pathlib import Path
@@ -73,8 +74,8 @@ from ..results.store import SAVE_FORMATS, STATUS_OK, check_save_format, read_rec
 from . import _issue_records as records_io
 
 REFRESH = ("auto", "never")
-# How many days before the oldest row a fit reads a refreshed frame starts, for the transformers' lags and the newest targets'
-# reach (`span` overrides it).
+# Days more than the oldest row a fit reads and the transformers' longest lookback: the newest targets' reach and a margin
+# (`span` overrides the whole range).
 LOOKBACK_PAD_DAYS = 31
 FITS_FILE = "fits.json"
 _LIVE_KEYS = ("revision", "issued_at", "mode", "snapshot")
@@ -153,22 +154,74 @@ def resolve_issue(issue: Any, zone: str) -> datetime.date:
         raise ValueError(f"issue must be a date or 'today', got {issue!r}") from None
 
 
-def data_span(models: Sequence[Any], day: datetime.date, horizons: Sequence[int]) -> Tuple[str, str]:
-    """The range a refresh asks the data pipeline for: from the oldest row any fit of D reads (its anchor less its largest
-    training window, the horizon and `LOOKBACK_PAD_DAYS` for lags) to the last target day. An `"expanding"` window has no
-    oldest row: pass `span`."""
-    back = 0
-    for model in models:
-        members = list(getattr(model, "_members", None) or [getattr(model, "training_window", 0) or 0])
-        if EXPANDING in members:
+def _named_base(model: Any, models: Sequence[Any]) -> Any:
+    """A `ResidualModel`'s base as a model: its own, the one it was bound to, or the pipeline's model its name names."""
+    base = getattr(model, "base", None)
+    if base is None or not isinstance(base, str):
+        return base
+    bound = getattr(model, "_named_base", None)
+    return bound if bound is not None else next((other for other in models if other.name == base), None)
+
+
+def history_days(model: Any, day: datetime.date, models: Sequence[Any] = ()) -> int:
+    """How many days before the issue day D the oldest row a forecast of `model` on D reads is: its fit's anchor less its largest
+    training window, and for a refit model the newest older fit `fit_missing="previous"` may serve (`previous_cap`), whose rows
+    the stale check reads. A `ResidualModel` with a dated `warmup` reads its base's forecasts from that date, each with the base's
+    own history. An `"expanding"` window, or a residual model without a dated warm-up, has no oldest row: ValueError."""
+    from ..models._fits import previous_cap, stores_fits
+    from ..models.residual import ResidualModel
+
+    if isinstance(model, ResidualModel):
+        if not isinstance(model.warmup, str):
             raise ValueError(
-                f"{model.name}: an 'expanding' training window reads the whole history, which forecast() can't bound: pass "
+                f"{model.name}: a ResidualModel without a dated warmup reads base forecasts from where its run starts: pass "
                 "span=(start, end) for the data pipeline's run"
             )
-        start = model._fit_start(day.isoformat()) if hasattr(model, "_fit_start") else day.isoformat()
-        anchor = datetime.date.fromisoformat(str(start)[:10])
-        back = max(back, (day - anchor).days + max(int(member) for member in members))
-    first = day - datetime.timedelta(days=back + max(horizons) + LOOKBACK_PAD_DAYS)
+        start = datetime.date.fromisoformat(model.warmup)
+        base = _named_base(model, models)
+        return (day - start).days + (0 if base is None else history_days(base, start, models))
+    members = list(getattr(model, "_members", None) or [getattr(model, "training_window", 0) or 0])
+    if EXPANDING in members:
+        raise ValueError(
+            f"{model.name}: an 'expanding' training window reads the whole history, which forecast() can't bound: pass "
+            "span=(start, end) for the data pipeline's run"
+        )
+    start = model._fit_start(day.isoformat()) if hasattr(model, "_fit_start") else day.isoformat()
+    anchor = datetime.date.fromisoformat(str(start)[:10])
+    back = (day - anchor).days + max(int(member) for member in members)
+    if getattr(model, "refit", None) is not None and stores_fits(model) is None:
+        back += previous_cap(model)  # an older stored fit served in its place reads rows that far back
+    return back
+
+
+def transformer_lookback(data: Any) -> Tuple[int, List[str]]:
+    """The longest lookback (days) a data pipeline's transformers state (`Transformer.lookback_days`), and the names of those
+    that can't state one."""
+    longest, unknown = 0, []
+    for transformer in getattr(data, "transformers", None) or []:
+        days = transformer.lookback_days() if hasattr(transformer, "lookback_days") else None
+        if days is None:
+            unknown.append(type(transformer).__name__)
+        else:
+            longest = max(longest, int(days))
+    return longest, unknown
+
+
+def data_span(models: Sequence[Any], day: datetime.date, horizons: Sequence[int], data: Any = None) -> Tuple[str, str]:
+    """The range a refresh asks the data pipeline for: from the oldest row any forecast of D reads (`history_days`), less the
+    horizon, the transformers' longest lookback (`transformer_lookback`) and `LOOKBACK_PAD_DAYS`, to the last target day. A
+    transformer that can't state its lookback is warned about: the range may then cut a lag or a window, and `span=` sets it."""
+    back = max((history_days(model, day, models) for model in models), default=0)
+    lookback, unknown = transformer_lookback(data)
+    if unknown:
+        warnings.warn(
+            f"forecast(): {', '.join(dict.fromkeys(unknown))} can't say how far back it reads, so the data range asked for "
+            f"(the fits' rows plus {lookback + LOOKBACK_PAD_DAYS} days) may cut what it computes on the oldest training rows, "
+            "which would then differ from the backtest's: pass span=(start, end) to set the range",
+            UserWarning,
+            stacklevel=4,
+        )
+    first = day - datetime.timedelta(days=back + max(horizons) + lookback + LOOKBACK_PAD_DAYS)
     last = day + datetime.timedelta(days=max(horizons) + 1)
     return first.isoformat(), last.isoformat()
 
@@ -664,7 +717,7 @@ def forecast(
     formats = {model.name: save_format for model in pipeline.models}
     formats.update({ensemble.name: "jsonl" for ensemble in pipeline.ensembles})  # an ensemble's records are JSONL
     if span is None and _is_pipeline(data):
-        span = data_span(pipeline.models, day, horizons)
+        span = data_span(pipeline.models, day, horizons, data)
     options = dict(cache=cache, budget=budget_s, timeout=timeout_s, retries=retries, on_failure=on_failure)
     source = _Data(data, span, options, refresh, deadline_at)
     store = None if save_dir is None else LiveStore(save_dir)
