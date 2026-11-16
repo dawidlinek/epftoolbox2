@@ -332,6 +332,45 @@ def test_a_live_directory_from_before_the_engine_flip_refits_once_and_never_mixe
     assert old.fits["2023-03-20"]["source"] == "missing"
 
 
+@pytest.mark.parametrize("engine", ["off", None])
+def test_a_live_directory_from_before_the_mask_flip_refits_once_and_never_serves_the_old_fits(tmp_path, engine):
+    """`refit=None` fits stored under the first-day rule (`binary_mask="first_day"`, the default up to 2.3, record for record
+    and manifest for manifest) on the model path: LEAR's coordinate descent, which the engine fits on the model path whatever
+    the engine, so only the mask rule differs (`training_cut["binary_mask"]` in the configuration digest). The default serves
+    none of them, at their own issue day or as an older one (it fits the day inline, or skips it), refits the day once, and
+    then serves its own, the bits of a live directory made under the default from scratch."""
+    data = frame(SPRING, "1h")
+    live, fresh = tmp_path / "live", tmp_path / "fresh"
+
+    def daily(**mask):
+        return pipeline_of(lear(21, solver="cd", name="m", **mask), engine=engine)
+
+    before = daily(binary_mask="first_day")
+    for day in ("2023-03-21", "2023-03-22"):
+        before.refit(data, live, issue=day, horizon=2)
+    meta = json.loads((fit_dir(live, "m", datetime.date(2023, 3, 22)) / FIT_FILE).read_text())
+    assert "binary_mask" not in meta["training_cut"] and meta["fit_path"] is None
+
+    after = daily()
+    # Neither the 22nd's own fit nor the 21st's as an older one: a refit=None day is fitted inline instead, or skipped.
+    inline = serve_one(after, data, live, "2023-03-22")
+    assert inline.fits["2023-03-22"]["source"] == "inline"
+    skipped = serve_one(after, data, live, "2023-03-22", fit_missing="skip")
+    assert skipped.fits["2023-03-22"]["source"] == "missing"
+    assert {r["status"] for r in skipped.records} == {"no_stored_fit"}
+    assert after.refit(data, live, issue="2023-03-22", horizon=2).fitted == {"m": ["2023-03-22"]}
+    assert after.refit(data, live, issue="2023-03-22", horizon=2).noop  # once
+    meta = json.loads((fit_dir(live, "m", datetime.date(2023, 3, 22)) / FIT_FILE).read_text())
+    assert meta["training_cut"]["binary_mask"] == "fit" and meta["fit_path"] is None
+    served = serve_one(after, data, live, "2023-03-22")
+    assert served.fits["2023-03-22"]["source"] == "stored"
+    daily().refit(data, fresh, issue="2023-03-22", horizon=2)
+    assert (
+        keyed(served.records) == keyed(serve_one(daily(), data, fresh, "2023-03-22").records) == keyed(inline.records)
+    )
+    assert serve_one(before, data, live, "2023-03-22", fit_missing="skip").fits["2023-03-22"]["source"] == "missing"
+
+
 def test_a_tampered_units_file_raises_and_another_digest_is_never_served(tmp_path):
     data = frame(SPRING, "1h")
     live = tmp_path / "live"
