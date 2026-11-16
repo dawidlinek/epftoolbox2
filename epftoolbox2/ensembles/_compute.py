@@ -12,6 +12,9 @@ What may be averaged is read from the manifests of the leaf models, the models u
 target, horizon, list of horizons, weekdays issued on, frequency, time zone and information set, and one value in every column two
 of them read.
 
+A report reads each member's records once, however many ensembles average it (`MemberReads`, held by one `compute` after another):
+a member's arrays are the same whichever ensemble asks, so the cached ones are read-only.
+
 A `FallbackEnsemble` reads its members the same way, is checked the same way, and takes each day (or key) from the first member
 that has all of what the clock plans for it (`_fallback_forecasts`).
 """
@@ -119,6 +122,50 @@ class _Member:
         return data.hexdigest()
 
 
+class MemberReads:
+    """The members' records of one report, read once each: `ModelPipeline._compute_ensembles` makes one and hands it to every
+    `compute`, so a member that many ensembles average (the zoo's 12 best, in every top-k) is read from its file once, not once per
+    ensemble. What an ensemble's read depends on is the member's results (the file, with its size and times, or the records held in
+    memory), the clock's zone, the frequency a record without one takes, the live reader's policy and cut-off, and the windows on
+    file (`stored`): the key holds them all, so a member's file rewritten in between (an ensemble's, once computed) is read again.
+    The arrays handed out are read-only: a caller that wrote into one would fail rather than change another ensemble's numbers."""
+
+    def __init__(self) -> None:
+        self._held: Dict[Any, Tuple[ModelResultRef, _Member]] = {}
+        self.reads = 0  # how many members were read from their records, for the tests
+
+    def member(self, ensemble: Ensemble, name: str, ref: ModelResultRef, stored: Optional[RunWindows]) -> _Member:
+        key = _read_key(ref, stored)
+        if key is not None and key in self._held:
+            return self._held[key][1]
+        found = _read_member(ensemble, name, ref, stored)
+        self.reads += 1
+        if key is not None:
+            for values in (found.codes, found.day_in_test, found.prediction, found.actual):
+                values.setflags(write=False)
+            self._held[key] = (ref, found)  # the ref stays alive, so an `id` in the key is never another object's
+        return found
+
+
+def _read_key(ref: ModelResultRef, stored: Optional[RunWindows]) -> Optional[Tuple[Any, ...]]:
+    """What `_read_member` of `ref` depends on, or None for results it can't tell the state of."""
+    settings = (repr(ref.zone), ref.freq, ref.policy, repr(ref.cutoff), id(stored))
+    if ref.path is None:
+        return ("memory", id(ref._results), *settings) if ref._results is not None else None
+    path = Path(ref.path)
+    try:
+        # A directory (Parquet) is its files', a file its own: the size and time of each, as the cache of a data source is.
+        files = sorted(path.rglob("*")) if path.is_dir() else [path]
+        state = tuple(
+            (str(f.relative_to(path)) if path.is_dir() else "", f.stat().st_mtime_ns, f.stat().st_size)
+            for f in files
+            if f.is_file()
+        )
+    except OSError:
+        return None
+    return ("file", str(path), state, *settings)
+
+
 @dataclass
 class _Grid:
     """All members on one sorted grid of keys. `predictions[i, j]` is NaN where member j has no forecast for key i."""
@@ -160,6 +207,7 @@ def compute(
     leaves: Sequence[str],
     provenance: Optional[Callable[[], Tuple[str, Optional[str]]]] = None,
     in_sample_through: Optional[str] = None,
+    reads: Optional[MemberReads] = None,
 ) -> Computed:
     """Compute `ensemble` from `refs`, which hold its members and its `leaves`, and write it to `path`, if any.
 
@@ -175,10 +223,14 @@ def compute(
     `in_sample_through` is the latest `chosen_through` of a frozen average among its members, however nested: what is issued on
     or before it was chosen on, for this ensemble too, which then makes no forecast of it (`chosen_in_sample`), so a fallback
     over a frozen average doesn't serve those days from its lower rungs. Its own `chosen_through`, if it has one, counts as well.
+
+    `reads` is the report's members' records read so far (`MemberReads`): a member in it isn't read again. Without one each member
+    is read from its records, as before.
     """
+    reads = MemberReads() if reads is None else reads
     absent = [name for name in ensemble.members if name not in refs] if isinstance(ensemble, FallbackEnsemble) else []
     members = {
-        name: _Member.absent() if name in absent else _read_member(ensemble, name, refs[name], stored)
+        name: _Member.absent() if name in absent else reads.member(ensemble, name, refs[name], stored)
         for name in ensemble.members
     }
     manifests = {name: None if name in absent else _read_manifest(refs[name]) for name in ensemble.members}

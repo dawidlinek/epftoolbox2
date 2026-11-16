@@ -53,7 +53,7 @@ from ..models._pooled import (
     with_missing_columns,
 )
 from ..models._cards import preflight, read_provenance
-from ..ensembles._compute import compute
+from ..ensembles._compute import MemberReads, compute
 from ..ensembles.average import AverageEnsemble
 from ..ensembles.base import Ensemble
 from ..ensembles.fallback import FallbackEnsemble
@@ -1674,6 +1674,9 @@ class ModelPipeline:
         is a run's (`FrameHashes.provenance`), which its ensembles' manifests record as its models' do."""
         like = next(iter(refs.values()))
         held = dict(refs)
+        reads = (
+            MemberReads()
+        )  # each member's records are read once for the report, not once per ensemble that averages it
         leaves: Dict[str, List[str]] = {}
         test_only_names: set = set()
         through: Dict[str, str] = {}  # each ensemble's latest `chosen_through`, its own or a member's
@@ -1708,6 +1711,7 @@ class ModelPipeline:
                 leaves[ensemble.name],
                 provenance,
                 through.get(ensemble.name),
+                reads,
             )
             held[ensemble.name] = result.ref
             # A ref with no window to show, as a `top` ensemble has in a validation report, is not a row of its tables.
