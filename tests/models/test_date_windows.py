@@ -985,7 +985,8 @@ def test_results_staged_by_the_row_cut_and_accepted_are_warned_about_every_time_
     data = market("spring", horizon=2)
     S = SWITCH_DAYS["spring"]
     run = dict(test=(day_of(S, -1), day_of(S, 1)), horizon=2)
-    pipeline = ModelPipeline().add_model(OLSModel(PREDICTORS, training_window=WINDOW, name="m"))
+    # engine="off": the row cut is staged by patching the model path's `_worker` internals.
+    pipeline = ModelPipeline(engine="off").add_model(OLSModel(PREDICTORS, training_window=WINDOW, name="m"))
     pipeline.add_evaluator(MAEEvaluator())
     stage_with_the_row_cut(monkeypatch, pipeline, data, tmp_path, **run)
     stale = (S, 2, 2)  # built from the row of S-1, with the price of S+1 as its actual

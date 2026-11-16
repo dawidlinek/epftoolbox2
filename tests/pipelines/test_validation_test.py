@@ -119,8 +119,8 @@ def stored(path):
     return [json.loads(line) for line in Path(path).read_text().splitlines() if line]
 
 
-def pipeline(*models, info=None, level=None, evaluators=()):
-    built = ModelPipeline(information_set=info, availability=level)
+def pipeline(*models, info=None, level=None, evaluators=(), engine=None):
+    built = ModelPipeline(information_set=info, availability=level, engine=engine)
     for model in models:
         built.add_model(model)
     built.add_evaluator(*evaluators)
@@ -889,12 +889,14 @@ def test_aggregate_stays_on_its_window(df):
 
 def manifest_of(path):
     manifest = json.loads(manifest_path(path).read_text())
-    return {k: v for k, v in manifest.items() if k not in ("created_at", "updated_at", "git_sha")}
+    # `engine` is the last run's provenance (how many fits it made: a resume makes fewer), which the code never compares.
+    return {k: v for k, v in manifest.items() if k not in ("created_at", "updated_at", "git_sha", "engine")}
 
 
 def test_validation_first_and_test_later_equals_a_fresh_combined_run(df, tmp_path):
+    # engine="off": the fits are counted through `OLSModel._fit_predict`, which only the model path calls.
     resumed, fresh = tmp_path / "resumed", tmp_path / "fresh"
-    pipeline(ols()).run(df, validation=V, horizon=2, save_dir=str(resumed))
+    pipeline(ols(), engine="off").run(df, validation=V, horizon=2, save_dir=str(resumed))
     before = (resumed / "m.jsonl").read_text()
     calls = []
     fit_predict = OLSModel._fit_predict
@@ -905,11 +907,11 @@ def test_validation_first_and_test_later_equals_a_fresh_combined_run(df, tmp_pat
 
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(OLSModel, "_fit_predict", counted)
-        pipeline(ols()).run(df, validation=V, test=T, horizon=2, save_dir=str(resumed))
+        pipeline(ols(), engine="off").run(df, validation=V, test=T, horizon=2, save_dir=str(resumed))
     assert len(calls) == 3 * 2 * 24  # only the test days
     assert (resumed / "m.jsonl").read_text().startswith(before)
 
-    pipeline(ols()).run(df, validation=V, test=T, horizon=2, save_dir=str(fresh))
+    pipeline(ols(), engine="off").run(df, validation=V, test=T, horizon=2, save_dir=str(fresh))
     assert lines(stored(resumed / "m.jsonl")) == lines(stored(fresh / "m.jsonl"))
 
 

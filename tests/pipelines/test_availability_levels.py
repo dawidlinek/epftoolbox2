@@ -92,8 +92,8 @@ def ols(predictors=None, name="m"):
     return OLSModel(PREDICTORS if predictors is None else predictors, training_window=45, name=name)
 
 
-def pipeline(*models, level=None, info=INFO):
-    out = ModelPipeline(information_set=info, availability=level)
+def pipeline(*models, level=None, info=INFO, engine=None):
+    out = ModelPipeline(information_set=info, availability=level, engine=engine)
     for model in models:
         out.add_model(model)
     return out
@@ -351,7 +351,9 @@ def test_the_warning_comes_before_any_fit(df, monkeypatch):
     monkeypatch.setattr(OLSModel, "_fit_predict", noting_fit)
     with warnings.catch_warnings(record=True) as captured:
         warnings.simplefilter("always")
-        pipeline(ols(PREDICTORS + ["observed"])).run(df, *TEST, horizon=1)
+        pipeline(ols(PREDICTORS + ["observed"]), engine="off").run(
+            df, *TEST, horizon=1
+        )  # `_fit_predict`: the model path
     assert warned_by_then and min(warned_by_then) == 1
 
 
@@ -744,6 +746,8 @@ def test_level_none_adds_nothing_to_the_manifest(df, tmp_path):
         "training_cut",
         "record_schema",
         "scikit_learn",  # OLS's scikit-learn release, provenance like record_schema
+        "fit_path",  # OLS is fitted from shared sums by default (engine group), which its manifest records
+        "engine",  # that run's provenance
     }
     ModelPipeline().add_model(ols()).run(df, *TEST, horizon=1, save_dir=str(tmp_path / "plain"))
     plain = json.loads(manifest_path(tmp_path / "plain" / "m.jsonl").read_text())

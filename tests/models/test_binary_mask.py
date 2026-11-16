@@ -561,7 +561,7 @@ def test_validation_and_test_are_one_plain_run_over_both():
     data = market("1h", "2023-01-20", 85, shift(test[0], -2))
 
     def windowed(rule):
-        pipeline = ModelPipeline()
+        pipeline = ModelPipeline(engine="off")  # compared bit for bit with model.run below
         pipeline.add_model(ols(name="m", binary_mask=rule))
         records = pipeline.run(data, validation=validation, test=test, horizon=2).refs["m"]._results
         return {

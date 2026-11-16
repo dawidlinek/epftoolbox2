@@ -165,19 +165,22 @@ class TestModelPipeline:
         with pytest.raises(ValueError, match="At least one model is required"):
             pipeline.run(sample_data, "2024-01-05", "2024-01-10")
 
+    # engine="off": the models are MagicMocks that only the model path (model.run) calls.
     def test_run_calls_model_run(self, sample_data, mock_model):
-        pipeline = ModelPipeline().add_model(mock_model).add_evaluator(MAEEvaluator())
+        pipeline = ModelPipeline(engine="off").add_model(mock_model).add_evaluator(MAEEvaluator())
         pipeline.run(sample_data, "2024-01-05", "2024-01-10")
         mock_model.run.assert_called_once()
 
     def test_run_returns_evaluation_report(self, sample_data, mock_model):
-        pipeline = ModelPipeline().add_model(mock_model).add_evaluator(MAEEvaluator())
+        pipeline = ModelPipeline(engine="off").add_model(mock_model).add_evaluator(MAEEvaluator())
         report = pipeline.run(sample_data, "2024-01-05", "2024-01-10")
         assert isinstance(report, EvaluationReport)
 
     def test_run_calls_exporters(self, sample_data, mock_model):
         exporter = MagicMock()
-        pipeline = ModelPipeline().add_model(mock_model).add_evaluator(MAEEvaluator()).add_exporter(exporter)
+        pipeline = (
+            ModelPipeline(engine="off").add_model(mock_model).add_evaluator(MAEEvaluator()).add_exporter(exporter)
+        )
         report = pipeline.run(sample_data, "2024-01-05", "2024-01-10")
         exporter.export.assert_called_once_with(report)
 
@@ -195,7 +198,7 @@ class TestModelPipeline:
                 {"prediction": 11, "actual": 12, "hour": 0, "horizon": 1, "target_date": "2024-01-01"},
             ],
         )
-        pipeline = ModelPipeline().add_model(mock_model).add_model(model2).add_evaluator(MAEEvaluator())
+        pipeline = ModelPipeline(engine="off").add_model(mock_model).add_model(model2).add_evaluator(MAEEvaluator())
         report = pipeline.run(sample_data, "2024-01-05", "2024-01-10")
         assert "MockModel" in report.refs
         assert "MockModel2" in report.refs

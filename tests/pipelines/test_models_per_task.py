@@ -51,13 +51,14 @@ def frame_csv(tmp_path_factory):
     return path
 
 
-def write_experiment(directory, frame_csv, *, windows=True, **environment):
+def write_experiment(directory, frame_csv, *, windows=True, engine=None, **environment):
     """A workflow YAML with five models, an average and a `top=1` ensemble, and evaluators and an exporter that need them all."""
     model_pipeline = {
         **({"validation": list(V), "test": list(T)} if windows else {"test": list(T)}),
         "target": "price",
         "horizon": 1,
         "save_dir": "results",
+        **({"engine": engine} if engine else {}),
         "models": [
             {"class": "OLSModel", "params": {"predictors": predictors, "training_window": 14, "name": name}}
             for name, predictors in MODELS.items()
@@ -93,7 +94,10 @@ def write_experiment(directory, frame_csv, *, windows=True, **environment):
 
 def manifest_without_timestamps(path):
     return {
-        key: value for key, value in json.loads(path.read_text()).items() if key not in ("created_at", "updated_at")
+        key: value
+        for key, value in json.loads(path.read_text()).items()
+        # `engine` is the last run's provenance (its fit count: a resume fits fewer), never compared by the code either.
+        if key not in ("created_at", "updated_at", "engine")
     }
 
 
@@ -188,7 +192,8 @@ def test_a_task_runs_its_block_and_no_other_model(tmp_path, frame_csv, k, monkey
     monkeypatch.setattr(BaseModel, "run", lambda model, *args, **kwargs: ran.append(model.name))
     monkeypatch.setattr("epftoolbox2.pipelines.model_pipeline.EvaluationReport", lambda *args, **kwargs: None)
     for index, block in enumerate(BLOCKS[k]):
-        workflow_with(tmp_path, frame_csv, model_index=index, models_per_task=k).run()
+        # engine="off": the test replaces `BaseModel.run`, which only the model path calls.
+        Workflow.load(write_experiment(tmp_path, frame_csv, engine="off", model_index=index, models_per_task=k)).run()
         assert ran[-len(block) :] == block
     assert ran == NAMES
 

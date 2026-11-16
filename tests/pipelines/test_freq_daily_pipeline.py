@@ -82,7 +82,8 @@ def file_records(path):
 
 
 def pipeline(*models, information_set=None):
-    out = ModelPipeline(information_set=information_set)
+    # engine="off": the CLI and in-process runs below are compared bit for bit with OLSModel.run (the model path).
+    out = ModelPipeline(information_set=information_set, engine="off")
     for name, predictors in models or [("ols", INPUTS)]:
         out.add_model(OLSModel(predictors, training_window=WINDOW, name=name))
     return out
@@ -226,6 +227,7 @@ def test_a_workflow_keeps_freq_1d_through_yaml_and_runs_a_daily_csv(frames, tmp_
             "test": list(TEST),
             "horizon": 2,
             "freq": "1D",
+            "engine": "off",  # compared bit for bit with OLSModel.run below
             "save_dir": "results",
             "models": [{"class": "OLSModel", "params": {"predictors": PREDICTORS, "training_window": WINDOW}}],
         },

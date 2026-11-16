@@ -750,7 +750,9 @@ def test_the_probes_run_a_refit_model_over_the_rest_of_its_block(market, monkeyp
     def model():
         return ols("7D")
 
-    pipeline = ModelPipeline(information_set=INFO)
+    pipeline = ModelPipeline(
+        information_set=INFO, engine="off"
+    )  # the leak below is injected in the model path's `_fit_unit`
     pipeline.add_model(ols("7D", name="weekly"))
     assert not leakage_probe(model, market, monday, INFO, horizon=2, check_target_boundary=True).changed
     pipeline.verify(market, monday, monday, horizon=2, days=1).assert_ok()
@@ -923,7 +925,7 @@ def test_issue_days_horizons_and_a_daily_frame_keep_each_forecast(market):
 
 def test_validation_and_test_windows_give_each_window_s_plain_run(market):
     validation, test = ("2023-03-22", "2023-03-30"), ("2023-04-02", "2023-04-12")
-    pipeline = ModelPipeline()
+    pipeline = ModelPipeline(engine="off")  # compared bit for bit with the model's own `run` below
     pipeline.add_model(ols("7D", PREDICTORS + ["flag"], name="m"))
     records = pipeline.run(market, validation=validation, test=test, horizon=2).refs["m"]._results
     for window, (start, end) in (("validation", validation), ("test", test)):

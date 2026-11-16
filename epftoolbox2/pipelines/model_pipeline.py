@@ -29,6 +29,7 @@ from ..models._worker import pool_native_threads
 from ..models._engine import (
     ENGINE_CHECK,
     ENGINE_OFF,
+    ENGINE_ON,
     check_engine,
     engine_from_yaml,
     engine_groups,
@@ -365,16 +366,19 @@ class ModelPipeline:
             information set. "warn" and "raise" need an issue time. The level doesn't change a forecast, unless a
             predictor function catches the error a late `ctx.value()` raises at "raise" and chooses another list, which it
             must not do. Changing the level alone resumes a run.
-        engine: "off" (the default) runs each model on its own, one after another. "on" runs the models that can be
-            fitted from shared statistics (OLS, Ridge, LassoCV and LEAR, `BaseModel._engine_capable`) in engine groups: the
+        engine: "on" runs the models that can be fitted from shared statistics (OLS, Ridge, LassoCV and LEAR, `BaseModel._engine_capable`) in engine groups: the
             models of one refit rule share one read of the data and one pool of processes, which cuts the fixed cost of each
             model in a study of thousands. NaiveModel, a `train_on="matching"` list, a subclass that fits without its own
             `_fit_stats` and a `forecast_only` run go through their own run as with "off". The fits of OLS, Ridge, LassoCV
             and LEAR (`solver="lars"`) with `StandardScaler` or a VST come from exact sums shared in the group: the same bits
             in any group, within the engine's tolerances of "off" (see the docs page on forecasting). "check" is "on" with
             one fit in about 50 also run as "off" runs it, its gaps in the manifest (`engine_check`) and a warning about a
-            model over its class's tolerance. `ENGINE_MAX_MODELS` (20,000) and `ENGINE_MAX_COLUMNS` (4,096) bound how many
-            models and columns a group reads at once. `verify` runs each model through the engine as well.
+            model over its class's tolerance. "off" runs each model on its own, one after another, as every run did up to
+            2.3. None, the default, is "on", except that a model whose results in `save_dir` were written on the model path
+            (a manifest without `fit_path`: engine off, or written up to 2.3) resumes on the model path, with a log line, so
+            those folders keep resuming; an explicit `engine` applies to every model, and a resume whose `fit_path` differs
+            refuses. `ENGINE_MAX_MODELS` (20,000) and `ENGINE_MAX_COLUMNS` (4,096) bound how many models and columns a group
+            reads at once. `verify` runs each model through the engine as well.
         checks: Checks before export (`epftoolbox2.results.checks.ForecastChecks`), applied to every model's forecasts of each
             (issue day, horizon) in every run, backtests included: a day failing one has none, each key a `check_failed` skip
             record with the failing checks in `detail`, counted in `forecast_counts()`, so a `FallbackEnsemble` serves that day
@@ -397,7 +401,7 @@ class ModelPipeline:
         issue_time: Optional[str] = None,
         issue_timezone: str = "Europe/Brussels",
         availability: Optional[str] = None,
-        engine: str = ENGINE_OFF,
+        engine: Optional[str] = None,
         checks: Optional[ForecastChecks] = None,
     ):
         if issue_time is not None:
@@ -417,12 +421,33 @@ class ModelPipeline:
 
     @property
     def engine(self) -> str:
-        """ "off", "on" or "check": whether engine-capable models run in engine groups (see the class docstring)."""
-        return self._engine
+        """ "off", "on" or "check": whether engine-capable models run in engine groups (see the class docstring). "on" when
+        none was given, where a model whose results were written on the model path still resumes there
+        (`_resumes_on_the_model_path`)."""
+        return ENGINE_ON if self._engine is None else self._engine
 
     @engine.setter
-    def engine(self, engine: str) -> None:
-        self._engine = check_engine(engine)
+    def engine(self, engine: Optional[str]) -> None:
+        self._engine = None if engine is None else check_engine(engine)
+
+    def _resumes_on_the_model_path(self, model: BaseModel, save_dir: Optional[Union[str, Path]]) -> bool:
+        """Whether `model` runs on the model path although the engine is on: `engine` was left unset and its results in
+        `save_dir` have a manifest without `fit_path`, written on the model path (engine off, or up to 2.3). Such a folder
+        keeps resuming as it was written; an explicit `engine="on"` refuses it on `fit_path` instead."""
+        if self._engine is not None or not save_dir:
+            return False
+        path = manifest_path(self.results_path(save_dir, model))
+        try:
+            recorded = json.loads(path.read_text())
+        except (OSError, ValueError):
+            return False  # no manifest, or one the resume itself will report
+        if not isinstance(recorded, dict) or recorded.get("fit_path") is not None:
+            return False
+        logger.info(
+            f"{model.name}: its results in {path.parent} were written on the model path (no fit_path in {path.name}), so it "
+            "resumes there; pass engine='on' to refuse them, or use a new save_dir to run it in the engine"
+        )
+        return True
 
     @property
     def checks(self) -> Optional[ForecastChecks]:
@@ -710,7 +735,10 @@ class ModelPipeline:
             if self.engine != ENGINE_OFF:
                 # The engine groups first, each in one go (models/_engine.py), then the rest in list order, as with "off".
                 capable = [
-                    model for model in self.models if model._engine_capable(plans.get(model.name), forecast_only)
+                    model
+                    for model in self.models
+                    if model._engine_capable(plans.get(model.name), forecast_only)
+                    and not self._resumes_on_the_model_path(model, save_dir)
                 ]
                 for group in engine_groups(capable):
                     columns = {model.name: checks[model.name].used_predictors for model in group}
@@ -1026,7 +1054,12 @@ class ModelPipeline:
             frame = frames[zone]
             with _zone_errors(zone):
                 if self.engine != ENGINE_OFF:
-                    capable = [m for m in plain if m._engine_capable(plans.get((zone, m.name)), forecast_only)]
+                    capable = [
+                        m
+                        for m in plain
+                        if m._engine_capable(plans.get((zone, m.name)), forecast_only)
+                        and not self._resumes_on_the_model_path(m, dirs[zone] if save_dir else None)
+                    ]
                     for group in engine_groups(capable):
                         columns = {model.name: checks[(zone, model.name)].used_predictors for model in group}
                         group_arguments = {
@@ -2565,8 +2598,10 @@ class ModelPipeline:
             out["information_set"] = self.information_set.to_dict()
         if self._availability is not None:  # what was asked for; left out, a load takes the default again
             out["availability"] = self._availability
-        if self.engine != ENGINE_OFF:  # written only when set, so files saved before it existed don't move
-            out["engine"] = self.engine
+        if (
+            self._engine is not None
+        ):  # written only when given, so a file without it takes the default, as one saved before
+            out["engine"] = self._engine
         if self.checks is not None:  # written only when set (step 8f)
             out["checks"] = self._serialize_component(self.checks)
         return out
@@ -2615,7 +2650,7 @@ class ModelPipeline:
         pipeline = cls(
             information_set=InformationSet.from_dict(info) if info else None,
             availability=config.get("availability"),
-            engine=engine_from_yaml(config.get("engine", ENGINE_OFF)),  # `engine: on` unquoted reads as True
+            engine=engine_from_yaml(config.get("engine")),  # `engine: on` unquoted reads as True; none: the default
             checks=cls._load_component("checks", config["checks"]) if config.get("checks") else None,
         )
         for c in config.get("models", []):

@@ -27,7 +27,7 @@ from threadpoolctl import threadpool_limits
 from epftoolbox2.information_set import Availability, InformationSet
 from epftoolbox2.models import LassoCVModel, LEARModel, NaiveModel, OLSModel, RidgeModel
 from epftoolbox2.models import _engine, _engine_worker, _stats
-from epftoolbox2.pipelines import ModelPipeline
+from epftoolbox2.pipelines import ModelPipeline, model_pipeline
 from epftoolbox2.results.manifest import ManifestMismatchError
 from epftoolbox2.results.store import iter_file_records
 from tests.models.test_engine_groups import (
@@ -1087,6 +1087,48 @@ def test_switching_the_engine_refuses_a_resume(spring, tmp_path):
             spring, *days, horizon=1, save_dir=str(save)
         )
         assert len(lines(save / "lasso.jsonl")) == full
+
+
+def test_the_default_is_on_and_a_model_path_folder_resumes_on_it(spring, tmp_path, monkeypatch):
+    """`engine` left out is "on": a fresh folder's OLS records `fit_path` "engine-2", as with `engine="on"`, to the bit. A folder
+    written on the model path (`engine="off"`, as every folder up to 2.3: no `fit_path`) resumes there under the default, a log
+    line saying so, and its file is the off run's, to the bit; `engine="on"` given explicitly refuses it. The YAML writes
+    `engine` only when it was given, and a file without it loads the default."""
+    days = ("2023-03-24", "2023-03-26")
+
+    def run(save, **engine):
+        ModelPipeline(**engine).add_model(OLSModel(PREDICTORS, 28, name="ols")).run(
+            spring, *days, horizon=1, save_dir=str(save)
+        )
+        return json.loads((save / "ols.manifest.json").read_text()), lines(save / "ols.jsonl")
+
+    assert ModelPipeline().engine == "on"
+    default, explicit = run(tmp_path / "default"), run(tmp_path / "on", engine="on")
+    assert default[0]["fit_path"] == "engine-2" and default[1] == explicit[1]
+    off = run(tmp_path / "off", engine="off")
+    assert "fit_path" not in off[0]
+    keep_first_day(tmp_path / "off" / "ols.jsonl")
+    said = []
+    monkeypatch.setattr(model_pipeline.logger, "info", said.append)
+    resumed = run(tmp_path / "off")
+    assert len(said) == 1 and "were written on the model path" in said[0]
+    assert "fit_path" not in resumed[0] and resumed[1] == off[1]
+    keep_first_day(tmp_path / "off" / "ols.jsonl")
+    with pytest.raises(ManifestMismatchError, match="fit_path"):
+        run(tmp_path / "off", engine="on")
+    # A default folder resumes under the default in the engine, and an explicit "off" refuses it.
+    keep_first_day(tmp_path / "default" / "ols.jsonl")
+    assert run(tmp_path / "default")[1] == default[1]
+    with pytest.raises(ManifestMismatchError, match="fit_path"):
+        run(tmp_path / "default", engine="off")
+
+    assert "engine" not in ModelPipeline().to_dict()
+    assert ModelPipeline(engine="off").to_dict()["engine"] == "off"
+    for given in (None, "off", "on", "check"):
+        path = tmp_path / f"{given}.yaml"
+        ModelPipeline(**({} if given is None else {"engine": given})).save(path)
+        loaded = ModelPipeline.load(path)
+        assert (loaded.engine, loaded._engine) == (given or "on", given)
 
 
 def test_the_manifest_counts_the_last_runs_fits(spring, tmp_path):

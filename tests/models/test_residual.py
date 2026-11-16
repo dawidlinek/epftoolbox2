@@ -637,17 +637,22 @@ def test_base_prediction_is_the_pipeline_s_own_base_records_where_no_mask_reads_
     """The base copy starts at the warm-up, so a base that reads its binary-column masks on its run's first day
     (`binary_mask="first_day"`, the default up to 2.3) can give other forecasts than the same model run beside it: such a base
     warns. A refit base, one with `binary_mask="fit"` and one with the default give `base_prediction` equal to the pipeline's own
-    base records on every shared key."""
-    for settings in ({"refit": "7D"}, {"binary_mask": "fit"}, {}):
+    base records on every shared key, to the bit with `engine="off"`; with the engine on (the default) the pipeline's OLS is fitted
+    from shared sums while the base runs on the model path, so they agree within OLS's engine tolerance."""
+    for settings, engine in (({"refit": "7D"}, "off"), ({"binary_mask": "fit"}, "off"), ({}, "off"), ({}, None)):
         pipeline = (
-            ModelPipeline().add_model(base(**settings)).add_model(ResidualModel("ols", PooledLS(), training_window=28))
+            ModelPipeline(engine=engine)
+            .add_model(base(**settings))
+            .add_model(ResidualModel("ols", PooledLS(), training_window=28))
         )
         with warnings.catch_warnings():
             warnings.simplefilter("error", UserWarning)  # no warning about the base's masks
             report = pipeline.run(market, *TEST, horizon=2)
         own = keyed(report.refs["ols"]._results)
         corrected = keyed(report.refs["residual"]._results)
-        assert corrected and all(r["base_prediction"] == own[key]["prediction"] for key, r in corrected.items())
+        assert corrected and own.keys() >= corrected.keys()
+        gaps = [abs(r["base_prediction"] - own[key]["prediction"]) for key, r in corrected.items()]
+        assert max(gaps) == 0.0 if engine == "off" else max(gaps) <= 1e-8, (settings, engine, max(gaps))
     with pytest.warns(UserWarning, match="has binary_mask='first_day'"):
         run(residual(base_model=base(binary_mask="first_day")), market)
 

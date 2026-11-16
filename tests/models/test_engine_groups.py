@@ -323,16 +323,20 @@ def test_engine_is_checked_and_saved_only_when_on(tmp_path):
     with pytest.raises(ValueError, match="engine must be one of"):
         ModelPipeline(engine="yes")
     pipeline = ModelPipeline().add_model(OLSModel(PREDICTORS, 28, name="ols"))
+    assert pipeline.engine == "on" and pipeline._engine is None  # none given: the default, which is on
     assert "engine" not in pipeline.to_dict()
-    for engine in ("check", "on"):  # "check": step 5j's
+    for engine in ("check", "on", "off"):  # "check": step 5j's; an explicit word is written, "on" and "off" alike
         pipeline.engine = engine
         assert pipeline.to_dict()["engine"] == engine
         pipeline.save(tmp_path / "pipeline.yaml")
         assert ModelPipeline.load(tmp_path / "pipeline.yaml").engine == engine
-    off = ModelPipeline().add_model(OLSModel(PREDICTORS, 28, name="ols"))
-    off.save(tmp_path / "off.yaml")
-    assert "engine" not in yaml.safe_load((tmp_path / "off.yaml").read_text())
-    assert ModelPipeline.load(tmp_path / "off.yaml").engine == "off"
+    given = ModelPipeline(engine="off").add_model(OLSModel(PREDICTORS, 28, name="ols"))
+    assert given.engine == "off" and given.to_dict()["engine"] == "off"
+    unset = ModelPipeline().add_model(OLSModel(PREDICTORS, 28, name="ols"))
+    unset.save(tmp_path / "unset.yaml")
+    assert "engine" not in yaml.safe_load((tmp_path / "unset.yaml").read_text())
+    loaded = ModelPipeline.load(tmp_path / "unset.yaml")
+    assert loaded.engine == "on" and loaded._engine is None  # a YAML without it loads the default
 
 
 @pytest.mark.parametrize(
@@ -369,11 +373,19 @@ def test_a_workflow_overrides_the_pipeline_engine(tmp_path):
     loaded = Workflow.load(tmp_path / "experiment.yaml")
     assert loaded._build_model_pipeline().engine == "on"
     assert loaded.to_dict()["model_pipeline"]["engine"] == "on"
+    ModelPipeline(engine="off").add_model(OLSModel(PREDICTORS, 28, name="ols")).save(tmp_path / "pipeline.yaml")
+    assert (
+        Workflow.load(tmp_path / "experiment.yaml")._build_model_pipeline().engine == "on"
+    )  # the workflow's word wins
+    pipeline.save(tmp_path / "pipeline.yaml")  # the default again
     workflow["model_pipeline"]["engine"] = "sometimes"
     (tmp_path / "experiment.yaml").write_text(yaml.safe_dump(workflow))
     with pytest.raises(ValueError, match="engine must be one of"):
         Workflow.load(tmp_path / "experiment.yaml")._build_model_pipeline()
     workflow["model_pipeline"].pop("engine")
+    (tmp_path / "experiment.yaml").write_text(yaml.safe_dump(workflow))
+    assert Workflow.load(tmp_path / "experiment.yaml")._build_model_pipeline().engine == "on"  # the default
+    workflow["model_pipeline"]["engine"] = "off"
     (tmp_path / "experiment.yaml").write_text(yaml.safe_dump(workflow))
     assert Workflow.load(tmp_path / "experiment.yaml")._build_model_pipeline().engine == "off"
 

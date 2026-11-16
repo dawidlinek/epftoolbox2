@@ -194,7 +194,8 @@ def snapshot(directory):
     for path in sorted(Path(directory).iterdir()):
         if path.name.endswith(".manifest.json"):
             manifest = json.loads(path.read_text())
-            out[path.name] = {key: value for key, value in manifest.items() if key not in TIMESTAMPS}
+            # `engine` is the last run's provenance (a resume makes fewer fits), which the code never compares either.
+            out[path.name] = {key: value for key, value in manifest.items() if key not in (*TIMESTAMPS, "engine")}
         else:
             out[path.name] = sorted(line for line in path.read_text().splitlines() if line)
     return out
@@ -578,7 +579,10 @@ def test_epf_model_with_horizons_gives_the_in_process_forecasts(tmp_path, spring
     from epftoolbox2._frame_csv import save_frame_csv
 
     predictors = PREDICTORS + ["price_d-1"]
-    ModelPipeline().add_model(OLSModel(predictors, training_window=WINDOW, name="OLS")).save(tmp_path / "mp.yaml")
+    # engine="off": compared bit for bit with `OLSModel.run` (the model path) below.
+    ModelPipeline(engine="off").add_model(OLSModel(predictors, training_window=WINDOW, name="OLS")).save(
+        tmp_path / "mp.yaml"
+    )
     data = spring_data[["price", "load", "wind", "is_weekend", "is_weekday", "price_d-1"]].join(
         spring_data[[f"{name}_d+{h}" for h in (1, 3) for name in ("load", "wind", "is_weekend", "is_weekday")]]
     )
