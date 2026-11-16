@@ -820,7 +820,8 @@ def _built_in_rules() -> Dict[str, Availability]:
         ),
         # The EXAA auction (EntsoeSource(price_exaa=True), AT and DE_LU): see `_EXAA_RULE`.
         "price_exaa": _EXAA_RULE_VIENNA,
-        # Prefixed, as AT and DE_LU need to be told apart (`de_price_exaa`): a bare InformationSet has no source rules.
+        # Prefixed, as AT and DE_LU need to be told apart (`de_price_exaa`): a bare InformationSet has no source rules. It also
+        # matches an ArchiveSource's `archive_price_exaa`, which only `with_source_rules` gives the archive's own rule.
         "*_price_exaa": _EXAA_RULE_VIENNA,
         # ENTSO-E keeps the newest value of these only: A65 was revised after the gate on 22 of 42 days measured.
         "load_actual": Availability.realised(
@@ -889,6 +890,7 @@ def _capacity_rule(zone: str) -> Availability:
 def source_rules(sources: Iterable[Any]) -> Dict[str, Availability]:
     """Rules for the columns a DataPipeline's sources emit, following their prefixes and column choices; and of a
     `SolarGeometryTransformer` among them, its own column names (prefixed ones included), which `Workflow` passes too."""
+    from .data.sources.archive import ArchiveSource
     from .data.sources.benchmark import DATASETS, EpftoolboxBenchmarkSource
     from .data.sources.calendar import CalendarSource
     from .data.sources.energy_charts import EnergyChartsSource
@@ -945,6 +947,12 @@ def source_rules(sources: Iterable[Any]) -> Dict[str, Availability]:
             # data zone (`day_zone`), whatever the zone of the frame they are read on. A day statistic of them (`agg`) is of
             # that date too, every slot of which is known at that instant.
             rules[source.output_column] = source.availability()
+        elif isinstance(source, ArchiveSource):
+            # A downloads archive replayed as fetched by `known_at` on the day `days_before` before each delivery day: the
+            # rule its values were chosen by, which `resolve` puts before every layer (`archive_columns`).
+            rule = source.availability()
+            for name in source.column_names():
+                rules[name] = rule
         elif isinstance(source, EpftoolboxBenchmarkSource):
             # The files are local wall-clock time, and `index_timezone` only labels that clock (one hour off the true
             # instants in summer). So a row's delivery day is the day on that same clock: the file's 23:00 on D is
@@ -1023,6 +1031,19 @@ def chained_sources(sources: Iterable[Any]) -> Dict[str, ChainedInput]:
     for source in sources:
         if isinstance(source, ForecastSource):
             out[source.output_column] = source.chained_input()
+    return out
+
+
+def archive_columns(sources: Iterable[Any]) -> Dict[str, str]:
+    """Column -> what replays it, for the `ArchiveSource`s among `sources`: columns whose values were chosen by their source's
+    rule, so no other rule may describe them."""
+    from .data.sources.archive import ArchiveSource
+
+    out: Dict[str, str] = {}
+    for source in sources:
+        if isinstance(source, ArchiveSource):
+            for name in source.column_names():
+                out[name] = f"ArchiveSource({source.source!r}) of {source.path}"
     return out
 
 
@@ -1363,6 +1384,8 @@ class InformationSet:
         self._source_rules: Dict[str, Rule] = {}
         self._source_zones: Dict[str, str] = {}
         self._chained: Dict[str, ChainedInput] = {}
+        # Column -> the archive replay whose rule chose its values (`archive_columns`).
+        self._pinned: Dict[str, str] = {}
 
     # -- configuration --------------------------------------------------------
 
@@ -1375,8 +1398,54 @@ class InformationSet:
         out._source_rules = {**self._source_rules, **{k: _as_rule(v) for k, v in source_rules(sources).items()}}
         out._source_zones = {**self._source_zones, **_source_market_zones(sources)}
         out._chained = {**self._chained, **chained_sources(sources)}
+        out._pinned = {**self._pinned, **archive_columns(sources)}
         out.refuse_rules_on_chained_columns()
+        out.refuse_rules_on_archive_columns()
+        out._warn_of_patterns_on_archive_columns()
         return out
+
+    def _warn_of_patterns_on_archive_columns(self) -> None:
+        """A warning for each pattern in `rules` that matches a column an `ArchiveSource` replays: the archive's rule comes
+        first, so the pattern says nothing about that column, also where it is stricter."""
+        for key in self.rules:
+            if not any(ch in key for ch in "*?["):
+                continue
+            matched = sorted(column for column in self._pinned if fnmatch.fnmatchcase(column, key))
+            if matched:
+                warnings.warn(
+                    f"rules={{{key!r}: ...}} matches {matched}, replayed by an ArchiveSource: their rule is the archive's, "
+                    "which comes first, so the pattern is ignored for them (ArchiveSource(known_at=, days_before=) states "
+                    "another time)",
+                    UserWarning,
+                    stacklevel=3,
+                )
+
+    def refuse_rules_on_archive_columns(self) -> None:
+        """`InformationSetError` for a rule in `rules` that names a column an `ArchiveSource` replays, through its shifts,
+        profiles and day aggregates: its values are the archive's as fetched by its source's rule, which `resolve` puts above
+        every rule, assumption and pattern, so such a rule would be silently ignored. A pattern that matches one is left alone."""
+        for key in self.rules:
+            if any(ch in key for ch in "*?["):
+                continue
+            pinned = self._pinned_of(key)
+            if pinned is not None:
+                raise InformationSetError(
+                    f"rules={{{key!r}: ...}} names {pinned!r} (or a column built from it), replayed by {self._pinned[pinned]}: "
+                    f"its values were chosen by the source's rule ({self._source_rules[pinned].describe()}), and nothing "
+                    "replaces it. Remove the rule; ArchiveSource(known_at=, days_before=) states another time."
+                )
+
+    def _pinned_of(self, name: str) -> Optional[str]:
+        """The column an `ArchiveSource` replays that a predictor name reads, through its shifts and what it was built from; None
+        for any other column."""
+        if not self._pinned:
+            return None
+        chain = parse_predictor(name)
+        for candidate, _ in chain:
+            if candidate in self._pinned:
+                return candidate
+        built = _built_from_name(chain[-1][0])
+        return None if built is None else self._pinned_of(built)
 
     def refuse_rules_on_chained_columns(self) -> None:
         """`InformationSetError` for a rule in `rules` that names a chained column, through its shifts, profiles and day aggregates
@@ -1424,6 +1493,7 @@ class InformationSet:
         out._source_rules = dict(self._source_rules)
         out._source_zones = dict(self._source_zones)
         out._chained = dict(self._chained)
+        out._pinned = dict(self._pinned)
         return out
 
     def in_data_zone(self, index: pd.DatetimeIndex) -> "InformationSet":
@@ -1469,7 +1539,8 @@ class InformationSet:
 
         A column read from another pipeline's forecasts (`chained_inputs`), shifted or built from, takes its source's rule
         before any layer: its availability is its upstream's issue time, which no rule, assumption or pattern can replace
-        (`refuse_rules_on_chained_columns` refuses a rule that names one).
+        (`refuse_rules_on_chained_columns` refuses a rule that names one). So does a column an `ArchiveSource` replays
+        (`archive_columns`): its values were chosen by its source's rule (`refuse_rules_on_archive_columns`).
 
         A DailyProfileTransformer, DailyStatsTransformer, PeriodStatsTransformer or RollingStatsTransformer column first looks
         for a user's rule on its own name, which describes the series it was built from; otherwise it takes the whole
@@ -1491,8 +1562,8 @@ class InformationSet:
                 if found is not None:
                     return found
             return ResolvedColumn(name, base, shifts, None)
-        if self._chained and self.chained_of(column) is not None:
-            # A profile or day aggregate of a chained column: its source's rule, read at its slot; no rule of its own.
+        if (self._chained and self.chained_of(column) is not None) or self._pinned_of(column) is not None:
+            # A profile or day aggregate of a chained or archive column: its source's rule, read at its slot; no rule of its own.
             source = self.resolve(column)
             return ResolvedColumn(name, base, shifts, source.rule, source.key, source.layer, source)
         user = _find_rule(name, chain, self.rules, "rules")
@@ -1503,11 +1574,12 @@ class InformationSet:
         return ResolvedColumn(name, base, shifts, ruling.rule, ruling.key, ruling.layer, source)
 
     def _chained_rule(self, name: str, chain: List[Tuple[str, Tuple[Shift, ...]]]) -> Optional[ResolvedColumn]:
-        """The source rule of the chained column `name` reads through its shifts (the full name down to the base), or None."""
-        if not self._chained:
+        """The source rule of the chained (or archive, `_pinned`) column `name` reads through its shifts (the full name down to
+        the base), or None."""
+        if not self._chained and not self._pinned:
             return None
         for candidate, shifts in chain:
-            if candidate in self._chained and candidate in self._source_rules:
+            if (candidate in self._chained or candidate in self._pinned) and candidate in self._source_rules:
                 return ResolvedColumn(name, candidate, shifts, self._source_rules[candidate], candidate, "sources")
         return None
 

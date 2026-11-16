@@ -85,6 +85,8 @@ def check(
     whose lists hold a predictor, or of every period (`every_period`: a model of day or pooled units, whose fit reads them all).
     `kept` (horizon -> a mask of the frame's rows) leaves out of the coverage the rows a model drops at that horizon whatever
     the upstream holds (a `ShapeModel`'s rows whose target date isn't native); None counts every row its fits read."""
+    if information_set is not None:
+        information_set.refuse_rules_on_archive_columns()  # a rule added after `with_source_rules` would be ignored
     if information_set is None or not information_set.chained_inputs():
         return ChainedCheck()
     information_set.refuse_rules_on_chained_columns()  # a rule added after `with_source_rules` would be ignored

@@ -275,8 +275,10 @@ def package_files():
 
 # The timed waits the package makes on real time: the results store's writer thread idles between its batches, and the
 # device worker (`models/_device_worker.py`) waits on another process: its child watches for the parent's death, and the
-# parent gives a child it stops ten seconds to exit. Other processes run on real time whatever clock this one is on.
+# parent gives a child it stops ten seconds to exit. A snapshot archive's `record` waits for another recording's catalog lock
+# (`SnapshotArchive.LOCK_TIMEOUT`). Other processes run on real time whatever clock this one is on.
 REAL_TIME_WAITS = {
+    ("data/archive.py", "timed wait: lock.acquire(timeout=self.LOCK_TIMEOUT)"),
     ("results/store.py", "timed wait: self._write_queue.get(timeout=0.1)"),
     ("results/store.py", "timed wait: self._cond.wait(_TICK_SECONDS)"),
     ("models/_device_worker.py", "timed wait: idle.wait(1.0)"),

@@ -272,6 +272,20 @@ an issue day it didn't sample.
   deadline is recorded. Backtest records, readers, manifests and Parquet parts are bit for bit as before (the live columns are in
   live parts alone). A JSONL store now writes records saved after its `flush()` (they were dropped; no backtest saves any), and
   saving into a closed store raises. See [Live records](/epftoolbox2/model-pipeline/caching/#live-records).
+- **Snapshot archives and `ArchiveSource`: what the sources returned, when, replayed as an honest vintage** (step 8j).
+  `SnapshotArchive(path).record(data_pipeline, days_back=3, days_ahead=2)`, run by a job you schedule (cron, a systemd timer, SLURM:
+  the library schedules nothing), fetches every source over the whole local days around today, bypassing every cache, and stores
+  each frame as returned with a catalog line: when its answer was in hand on the clock, the range, rows, sha256 and the source's
+  cache config, never a secret (a frame or line holding the source's or the environment's key is refused). `first_seen(column)`
+  gives each cell's first fetch with a value, `rewrites(column)` each change between fetches. `ArchiveSource(path, source,
+  known_at="11:45", days_before=1, timezone="Europe/Brussels", columns=None, prefix="archive")` gives each delivery day the values
+  of the newest fetch by `known_at` on the day `days_before` before it, with the rule `published(known_at, days_before, timezone,
+  vintage="snapshot")`, which `with_source_rules` puts before every other rule (one naming its columns raises, a pattern matching one warns;
+  a name with a built-in rule of the live API warns when read). A fetch with no rows or fewer columns exits `EXIT_WARNING` (4).
+  `record_snapshot()`
+  records a pipeline YAML for a scheduled job; `record`'s `budget`, `deadline`, `timeout` and `retries` wait for the refresh budget
+  (step 8b) and raise until then. Nothing that doesn't read an archive moves. See
+  [Snapshot Archives](/epftoolbox2/operations/snapshots/) and [ArchiveSource](/epftoolbox2/data-sources/archive/).
 - **`FallbackEnsemble`: a ladder of forecasts for the mornings an input is late.** `FallbackEnsemble(members, per="day", name=...)`
   takes each (issue day, horizon, target day) whole from the first member whose forecasts of every planned key of that day exist
   with a finite prediction (the clock's keys: 23 hours on a spring day), so a delivered day is never stitched from two models;

@@ -1,0 +1,233 @@
+---
+title: Snapshot Archives
+description: Recording what every source returned, when, on a schedule of your own; the catalog, first-seen times and rewrites; scheduling with cron, a systemd timer or SLURM
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+The APIs a data pipeline reads give the newest values: a load forecast revised after the gate, a corrected actual, a price
+republished. What was out at an issue time, and when each value first appeared, can't be asked of them later. A
+`SnapshotArchive` keeps it: a job you schedule downloads every source of a data pipeline over the days around today, again and
+again, and the archive stores each answer as it came, with the instant it came. From it you can read
+
+- when each value was first seen (`first_seen`), a publication time measured instead of assumed;
+- which values were rewritten, and when (`rewrites`);
+- each delivery day as it was known at a stated time, as a data source of a backtest ([`ArchiveSource`](/epftoolbox2/data-sources/archive/)).
+
+The library schedules nothing and never edits a crontab: whoever runs an operations pipeline schedules the recording (see
+[Scheduling](#scheduling)). An archive can only start today, so the sooner it runs, the longer the honest backtest it allows.
+
+## Recording
+
+```python
+from epftoolbox2.data.archive import SnapshotArchive
+from epftoolbox2.pipelines import DataPipeline
+
+data = DataPipeline.load("data_pipeline.yaml")  # ${ENTSOE_API_KEY} is read from the environment
+result = SnapshotArchive("archive/be").record(data, days_back=3, days_ahead=2)
+print(result.summary())
+```
+
+One call of `record(data_pipeline, days_back=3, days_ahead=2)`:
+
+- **fetches every source** of the pipeline over the whole local days from `days_back` days before today to `days_ahead` days
+  after it: `[now − days_back, now + days_ahead)` widened to midnights of the pipeline's `timezone` (or, without one, of the zone
+  a source stamps its daily values at, else UTC), so a source never stamps a daily value in the middle of a day. With the defaults
+  at 09:00 on the 24th that is the 21st 00:00 to the 27th 00:00. `days_back` decides how long the archive keeps watching a day
+  for rewrites, `days_ahead` how far ahead it looks for early publications;
+- **bypasses every cache**: it calls each source's `fetch` directly, never the per-source cache of `DataPipeline.run(cache=True)`,
+  and a source with a response cache of its own (`EnergyChartsSource(use_cache=True)`) is fetched through a copy without it;
+- **stores each frame as returned**, its index in UTC and its `attrs` dropped, in `<source key>/<fetched_at>.parquet`, then
+  appends its catalog line. The file is written in full (fsync, then renamed into place) before its line, so a line never names a
+  part of a file, and a crash leaves at most a file without a line, which nothing reads;
+- **skips** a source without a cache config (a CSV file, another pipeline's stored forecasts): there is nothing to download. A
+  source whose fetch raises, whose frame holds a secret or the same instant twice (refused: no one value of such a cell could be
+  read back), or whose file or line can't be written (a full disk, a config with NaN in it) gets a `failed` line with the error,
+  and the other sources still run;
+- **warns** about a fetch that returned no rows (an outage answered as "no data": a replay then reads every day of its range as
+  missing) and about one with fewer columns than that source's newest fetch with rows. Both are written, with `warnings` on
+  their line.
+
+`record` returns a `RecordResult`: `lines` (each source's line, in the pipeline's order), `ok`, `failed`, `skipped`, `warned`,
+`summary()` and `exit_code`, for the scheduler to alert on: 1 when a fetch failed, else `EXIT_WARNING` (4) when one was written
+with warnings, else 0. The transformers and validators of the pipeline don't
+run: the archive holds what the sources returned, before anything was made of it.
+
+`record` also takes `budget`, `deadline`, `timeout` and `retries`, the refresh budget of `DataPipeline.run` that is still to come
+(step 8b). Until it lands, setting any of them raises `NotImplementedError`, and each source retries as it always does.
+
+### Source keys
+
+A source's key is its class name and a hash of its class and its cache config, such as `EntsoeSource-3f2a9c41d07e5b18`
+(`archive_key(source)`). Another configuration, or a new version of the library that parses the source differently (its
+`schema_version`), is another key: the fetches that `first_seen` and `rewrites` compare were all parsed alike, so a change of
+parsing never shows as a rewrite. `catalog()` shows each key's config.
+
+### The catalog
+
+`catalog.jsonl` has one line per fetch, appended under `catalog.lock`, so two recordings at once (a slow run overlapping the
+next) don't interleave. `record` waits at most `SnapshotArchive.LOCK_TIMEOUT` seconds (600) for the lock and then raises
+`ArchiveLockedError` naming the lock file: where the file system has no `flock`, a process that died holding it leaves the file
+behind, to be removed by hand when no recording runs. A torn last line (a crash or a failed write while appending) is skipped by
+every reader and cut off by the next append; a whole last line without its newline is read, and gets the newline. A line that
+reached the catalog whole before an error (an fsync that failed) stays the only line of its fetch, the error a warning:
+
+```json
+{"format": 1, "source": "EntsoeSource-3f2a9c41d07e5b18", "class": "epftoolbox2.data.sources.entsoe.EntsoeSource",
+ "status": "ok", "started_at": "2026-10-24T07:00:00+00:00", "fetched_at": "2026-10-24T07:00:03+00:00",
+ "start": "2026-10-20T22:00:00+00:00", "end": "2026-10-26T23:00:00+00:00", "day_zone": "Europe/Brussels",
+ "rows": 145, "columns": ["load_forecast"], "file": "EntsoeSource-3f2a9c41d07e5b18/20261024T070003000000Z.parquet",
+ "sha256": "…", "settled_until": null,
+ "config": {"source_type": "entsoe", "area_code": "10YBE----------2", "types": ["load"], "prefer_15min": false,
+            "schema_version": 3, "daily_zone": "Europe/Brussels"}, "epftoolbox2": "2.3.0"}
+```
+
+`fetched_at` is the instant the answer was in hand, on the library's clock (`epftoolbox2.clock`), so a value counts as seen only
+from when it was. `started_at` is when the request began; `start` and `end` the range asked for. A `failed` line has `error`
+instead of `rows`, `file` and `sha256`, and its `config` only when that can be written. Every reader checks a file's bytes
+against its `sha256`. `warnings` lists what an ok fetch asks a look for.
+
+<Aside type="caution" title="Secrets">
+Nothing secret is written. A source's cache config never holds its API key, and any entry whose name says secret is dropped from
+the line anyway; errors are redacted. A name says secret by a whole word (`token`, `password`, `secret`, `auth`, `authorization`,
+`credentials`, ...) or a pair (`api_key`, `apiKey`, `access_key`): `author`, `sort_key` and `tokenizer` don't. Before a frame or a
+line is written, the frame's data (its values and labels) and the line's bytes are searched for the source's secrets (every
+string under such a name, also inside dicts, lists and tuples, and a URL's credentials) and for every environment variable whose
+name ends in `API_KEY`, `TOKEN`, `SECRET` or `PASSWORD`, each also URL-encoded, 8 characters or more; a frame or line that holds
+one is not written and its source gets a `failed` line. Keep the key in the environment, as a pipeline YAML's `${ENTSOE_API_KEY}` reference reads it.
+</Aside>
+
+## Reading
+
+```python
+from epftoolbox2.data.archive import SnapshotArchive
+
+archive = SnapshotArchive("archive/be")
+archive.keys()                            # the source keys it holds
+archive.catalog()                         # one row per fetch: status, fetched_at, range, rows, file, config
+first = archive.first_seen("load_forecast")
+first.index - first["fetched_at"]         # how long before each cell its forecast was first seen
+changes = archive.rewrites("load_forecast")
+```
+
+- `observations(column, source=None)` is every value a cell had in a fetch: one row per cell and fetch, with `instant` (the cell,
+  UTC), `fetched_at` and `value`. Only rows inside the range a fetch asked for count, as a `DataPipeline` keeps only those; a fetch
+  that asked for a cell and has no value there saw nothing of it.
+- `first_seen(column, source=None)` is each cell's first fetch with a value: indexed by `instant`, with `fetched_at` and `value`.
+  A cell no fetch had a value for isn't there.
+- `rewrites(column, source=None)` is each change of a cell's value between fetches, compared exactly: indexed by `instant`, with
+  `before_fetched_at`, `before`, `after_fetched_at` and `after`. A fetch without a value for the cell is no change, and a cell
+  revised twice has two rows.
+- `source=` names the source (a key, or a class name with one key) when several hold the column; `fetches(source)` and
+  `read(fetch)` give the fetches and their frames.
+
+A first-seen time is as sharp as the schedule: with a recording every 15 minutes a value first seen at 10:15 was published
+between 10:00 and 10:15.
+
+## Replaying
+
+[`ArchiveSource`](/epftoolbox2/data-sources/archive/) reads one source of the archive back as a data source: each delivery day
+from the newest fetch by a stated time, with the rule that says so. That page has the details.
+
+## Scheduling
+
+Write the job as a short script that the scheduler runs. `record_snapshot(config, archive)` loads a `DataPipeline` YAML (or a
+`Workflow` YAML's `data_pipeline`) and records it; its exit code is the result's:
+
+```python
+# snapshot.py
+from epftoolbox2.data.archive import record_snapshot
+
+result = record_snapshot("/srv/epf/data_pipeline.yaml", "/srv/epf/archive/be", days_back=3, days_ahead=2)
+print(result.summary())
+raise SystemExit(result.exit_code)
+```
+
+How often: as often as the first-seen times need to be sharp, and at least once before and once after each publication you care
+about (an auction's result, a TSO's day-ahead forecast, the gate). Every 15 minutes is a good default. A fetch of one source over
+the six default days is a few kB to a few tens of kB (four 15-minute columns: about 23 kB), so every 15 minutes is about 2 MB
+a day per source.
+
+The `epf snapshot data_pipeline.yaml --archive archive/be` command calls the same function; it comes with the live CLI (step 8i).
+
+### cron
+
+Put the key in a file only you can read (`chmod 600`), not in the crontab:
+
+```bash
+# ~/.config/epf/env
+ENTSOE_API_KEY=your-key
+```
+
+```bash
+# crontab -e: every 15 minutes
+*/15 * * * * set -a; . "$HOME/.config/epf/env"; set +a; /srv/epf/.venv/bin/python /srv/epf/snapshot.py >> /srv/epf/snapshot.log 2>&1
+```
+
+### systemd timer
+
+```ini
+# ~/.config/systemd/user/epf-snapshot.service
+[Unit]
+Description=epftoolbox2 snapshot archive
+
+[Service]
+Type=oneshot
+EnvironmentFile=%h/.config/epf/env
+ExecStart=/srv/epf/.venv/bin/python /srv/epf/snapshot.py
+```
+
+```ini
+# ~/.config/systemd/user/epf-snapshot.timer
+[Unit]
+Description=epftoolbox2 snapshot archive every 15 minutes
+
+[Timer]
+OnCalendar=*:0/15
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+```
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now epf-snapshot.timer
+loginctl enable-linger "$USER"   # keep user timers running after you log out
+```
+
+A run that overruns the next one isn't started twice: a `oneshot` service runs one at a time.
+
+### SLURM
+
+Where a cluster offers `scrontab` (SLURM 20.11 and later), it runs the job as a cron-like batch job on a compute node:
+
+```bash
+# scrontab -e
+#SCRON --time=00:10:00
+#SCRON --cpus-per-task=1
+#SCRON --mem=1G
+*/15 * * * * set -a; . "$HOME/.config/epf/env"; set +a; /path/to/venv/bin/python /path/to/snapshot.py
+```
+
+Without `scrontab`, a job can resubmit itself before it records, so a failed recording doesn't end the chain (inside a job `$0`
+is SLURM's copy of the script, so name the file itself):
+
+```bash
+#!/bin/bash
+# /path/to/snapshot.sbatch
+#SBATCH --time=00:10:00
+#SBATCH --cpus-per-task=1
+#SBATCH --mem=1G
+sbatch --begin=now+15minutes /path/to/snapshot.sbatch
+set -a; . "$HOME/.config/epf/env"; set +a
+/path/to/venv/bin/python /path/to/snapshot.py
+```
+
+Both need network access from the compute nodes and an account that allows long chains of small jobs; ask the site first.
+
+## What It Doesn't Do
+
+- It doesn't thin or compact the archive: every fetch stays, also when it equals the one before.
+- It doesn't fill the past: an archive starts on the day of its first recording.
+- It doesn't run the pipeline's transformers or validators, or write the per-source cache.

@@ -88,6 +88,10 @@ export default defineConfig({
                     ],
                 },
                 {
+                    label: 'Operations',
+                    autogenerate: { directory: 'operations' },
+                },
+                {
                     label: 'Models',
                     autogenerate: { directory: 'models' },
                 },
