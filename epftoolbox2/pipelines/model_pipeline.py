@@ -80,6 +80,7 @@ from ..results.manifest import (
     rows_unverified,
 )
 from ..results.live import LiveStore, refuse_live_directory
+from ..results.forecast_result import ForecastResult
 from ..models._fits import RefitResult, Served, refit_models, serve
 from ..models._engine_worker import fit_path_of
 from ..results.matching import rows_of_refs, warn_about_thin
@@ -2285,6 +2286,105 @@ class ModelPipeline:
             )
         with store.hold(create=not dry_run):
             return store.mark_delivered(issue, revision, receipt, dry_run=dry_run)
+
+    # -- live forecasts (step 8e, `pipelines._live`) --------------------------------------------------------------------------
+
+    def forecast(
+        self,
+        data: Any,
+        issue: Any = "today",
+        save_dir: Optional[Union[str, Path]] = None,
+        *,
+        wait_for: Any = None,
+        deadline: Any = None,
+        ensure: bool = False,
+        refresh: str = "auto",
+        budget: Any = None,
+        timeout: Any = None,
+        retries: Optional[int] = None,
+        on_failure: str = "raise",
+        cache: Any = True,
+        poll: Any = "5min",
+        grace: Any = "30min",
+        fit_missing: str = "previous",
+        deliver: Optional[str] = None,
+        dry_run: bool = False,
+        target: str = "price",
+        horizon: Optional[int] = None,
+        horizons: Optional[Sequence[int]] = None,
+        freq: str = "1h",
+        issue_days: Optional[Sequence[str]] = None,
+        save_format: str = DEFAULT_SAVE_FORMAT,
+        span: Optional[Tuple[Any, Any]] = None,
+    ) -> "ForecastResult":
+        """Issue the forecasts of one day live: refresh the data, wait for late inputs, serve every model from its stored fits
+        (or fit it inline), check, compute the ensembles and commit a revision into the live directory `save_dir` (see the docs
+        page Live Forecasts, and `pipelines._live` for the call flow). Returns a `ForecastResult` (`status`, `exit_code`,
+        `revision`, `unchanged`, `noop`, `frame()`, `export(path, format, grid)`).
+
+        A forecast served is the backtest's record of the same pipeline over the same frame, to the bit (but its `day_in_test`
+        and the live keys): the same rows, cut, lists, masks and fits, through the backtest's own lines. Only which fit (stored
+        or inline) and which frame differ.
+
+        Args:
+            data: A `DataPipeline`, refreshed here (over `span`, by default from the oldest row a fit of the issue day reads to
+                its last target day), or a DataFrame, used as given.
+            issue: The issue day: "today" in the issue zone on the clock (`epftoolbox2.clock`), or a date.
+            save_dir: The live directory (made on the first call; a backtest's is refused). None writes nothing and serves
+                from inline fits alone.
+            wait_for: {column: "HH:MM"}: before planning, poll while the column lacks a value on a row of the issue day,
+                giving up at that time of the issue day; `"rules"` waits for every column a model may read until its rule's
+                publication time plus `grace`. Needs a DataPipeline.
+            deadline: "HH:MM" of the issue day in the issue zone, or an aware instant: no revision is committed after it (status
+                `late`, exit 30). A "HH:MM" one is recorded in `live.json` for the readers' cut-off.
+            ensure: A no-op when the issue already has a committed revision with status ok or fallback by the deadline.
+            refresh: "auto", or "never": the data pipeline's caches only, no request.
+            budget, timeout, retries, on_failure, cache: Each refresh's limits (`DataPipeline.run`); `budget` and `timeout` as
+                seconds or text ("120s").
+            poll, grace: How long to sleep between polls, and past a rule's publication time to wait ("5min", "30min").
+            fit_missing: A refit model without a stored fit of its anchor: "previous" serves the newest older one (its age
+                recorded), "fit" fits it inline, "skip" leaves its forecasts as `no_stored_fit` skips (`refit()` first).
+            deliver: The model or ensemble whose forecasts decide the status, `frame()` and `export()`: the last ensemble by
+                default, else the last model.
+            dry_run: Do everything and write nothing anywhere: the status and exit code the call would give.
+            target, horizon, horizons, freq, issue_days, save_format: As for `run`.
+            span: (start, end) of the data pipeline's run, in place of the one computed from the models (needed for an
+                "expanding" training window).
+
+        The statuses: `ok` (0), `fallback` (10: complete, a target day from a lower rung of a `FallbackEnsemble`), `skipped`
+        (20: a planned key of the delivered model has no forecast), `late` (30), `busy` (75: another call holds `live.lock`;
+        nothing written). A call whose forecasts equal the latest committed revision's writes no revision (`unchanged`, that
+        revision's status). An exception writes an `error` call line and is raised. `top=` ensembles must be frozen first
+        (`frozen()`)."""
+        from ._live import forecast as live_forecast
+
+        return live_forecast(
+            self,
+            data,
+            issue,
+            save_dir,
+            wait_for=wait_for,
+            deadline=deadline,
+            ensure=ensure,
+            refresh=refresh,
+            budget=budget,
+            timeout=timeout,
+            retries=retries,
+            on_failure=on_failure,
+            cache=cache,
+            poll=poll,
+            grace=grace,
+            fit_missing=fit_missing,
+            deliver=deliver,
+            dry_run=dry_run,
+            target=target,
+            horizon=horizon,
+            horizons=horizons,
+            freq=freq,
+            issue_days=issue_days,
+            save_format=save_format,
+            span=span,
+        )
 
     # -- stored fits (step 8d, `models._fits`) -----------------------------------------------------------------------------
 
