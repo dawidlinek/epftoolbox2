@@ -68,6 +68,7 @@ from .._date_utils import shift_calendar_days
 from ..evaluators._compare import LossPanel
 from ..models._contract import period_index
 from .live import POLICIES, LiveStore, _warn_dropped, local_instant
+from .checks import CHECK_FAILED
 from .store import OK_ONLY, LiveDirectoryError, read_records
 
 # What a record is read for.
@@ -893,6 +894,7 @@ def monitor(
     if cutoff is not None and policy != "delivered":
         _warn_dropped(store.save_dir, store, policy, cutoff, visible[policy], None)
     keys = {m.name: _read_keys(m, visible[policy]) for m in members}
+    failed = {m.name: _read_keys(m, visible[policy], (CHECK_FAILED,)) for m in members}
     freqs = {name: _frequency(frame) for name, frame in keys.items() if len(frame)}
     if len(set(freqs.values())) > 1:
         raise ValueError(f"monitor() needs one frequency, but these members' results have several: {freqs}")
@@ -935,6 +937,9 @@ def monitor(
                     row.update(_backtest_ratio(panel, bt_panel, mine, name, bench))
             row.update(stats)
             row["unscored"] = int(len(raw) - stats["forecasts"])
+            lost = failed[name][failed[name]["run_date_text"].isin(in_window)]
+            row["check_failed"] = len(lost)
+            row["check_failed_days"] = int(lost["run_date_text"].nunique())
             row["issue_days"] = len(in_window)
             row["committed_days"] = committed
             row["participation"] = committed / len(in_window) if in_window else math.nan
@@ -946,6 +951,21 @@ def monitor(
             row["quality_days"] = problems
             table_rows.append(row)
     tables = pd.DataFrame(table_rows)
+    in_largest = set(_window_days(days, through, max(windows)))
+    lost_keys = {
+        name: int(frame["run_date_text"].isin(in_largest).sum()) for name, frame in failed.items() if len(frame)
+    }
+    lost_keys = {name: count for name, count in lost_keys.items() if count}
+    if lost_keys:
+        tables.attrs["check_failed"] = lost_keys
+        warnings.warn(
+            f"Members had forecasts turned into check_failed skips by checks before export: {lost_keys} (keys, in the largest "
+            "window). Those days are out of their keys and of the common keys, so every score here is conditional on passing the "
+            "checks, and a member's worst days can drop out of its own score; `check_failed` and `check_failed_days` in the table "
+            "count them per window. To judge the delivered forecast, score the FallbackEnsemble (monitored.rungs()).",
+            UserWarning,
+            stacklevel=3,
+        )
     if len(tables):
         lead = ["window", "member"]
         prefixes = (

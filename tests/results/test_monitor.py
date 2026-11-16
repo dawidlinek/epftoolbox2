@@ -28,6 +28,7 @@ from epftoolbox2.ensembles import FallbackEnsemble
 from epftoolbox2.information_set import Availability, InformationSet
 from epftoolbox2.models import NaiveModel, OLSModel
 from epftoolbox2.pipelines import ModelPipeline
+from epftoolbox2.results.checks import check_failed_record
 from epftoolbox2.results.live import LiveStore
 from epftoolbox2.results.monitor import MonitorReport, load_alerts
 from epftoolbox2.results.store import LiveDirectoryError, with_status
@@ -154,7 +155,9 @@ def record(member: str, day: str, revision: int, horizon: int, hour: int) -> dic
     return with_status(out, "ok", list_hash="abc", refit_anchor=day)
 
 
-def write_live(directory, *, receipts=True, save_format="jsonl") -> None:
+def write_live(directory, *, receipts=True, save_format="jsonl", failed=(), absent=()) -> None:
+    """`failed`: (member, day) pairs whose forecasts the checks turned into `check_failed` skip records, `absent`: pairs a member
+    wrote no record of at all."""
     store = LiveStore(directory)
     store.init(mode="live", issue_timezone=ZONE, deadline=DEADLINE)
     for member in ("lear", "naive", "best"):  # what a run's manifest says of the data the forecasts were made from
@@ -170,9 +173,13 @@ def write_live(directory, *, receipts=True, save_format="jsonl") -> None:
                     out = rev.open(member, "jsonl" if member == "best" else save_format)  # an ensemble is JSONL
                     for hour in HOURS:
                         for horizon in HORIZONS:
-                            if (member, day, number, hour) in GAPS:
+                            if (member, day, number, hour) in GAPS or (member, day) in absent:
                                 continue
-                            out.save({**record(member, day, number, horizon, hour), "revision": 1})
+                            made = {**record(member, day, number, horizon, hour), "revision": 1}
+                            if (member, day) in failed:
+                                out.save_skip(check_failed_record(made, "range: above 400"))
+                            else:
+                                out.save(made)
                 if commits:
                     on_time = local(day, at) <= local(
                         day, DEADLINE
@@ -1198,3 +1205,40 @@ def test_data_in_the_wrong_zone_is_refused_when_it_cannot_be_converted(live, tmp
     (mixed / "naive.manifest.json").write_text(json.dumps({"mode": "live", "data_timezone": "Europe/Warsaw"}))
     with pytest.raises(ValueError, match="different time zones"), use_clock(FakeClock(NOW)):
         pipeline().monitor(DATA, mixed, benchmarks=["naive"])
+
+
+BAD_DAY = DAYS[1]
+
+
+def test_check_failed_days_are_counted_and_warned_about(tmp_path):
+    """A member's day the checks before export turned into skip records is out of its keys, so out of the common ones: its skill
+    would improve by it. It is counted per window, and the table says its scores are conditional on passing."""
+    directory = tmp_path / "live"
+    write_live(directory, failed={("lear", BAD_DAY)})
+    clean = tmp_path / "clean"
+    write_live(clean)
+    with pytest.warns(UserWarning, match="check_failed"):
+        report = run_monitor(directory, windows=(3, 10))
+    table = report.tables().set_index(["window", "member"])
+    assert table.loc[(10, "lear"), "check_failed"] == len(HORIZONS) * len(HOURS)
+    assert table.loc[(10, "lear"), "check_failed_days"] == 1
+    assert table.loc[(3, "lear"), "check_failed"] == 0  # the failed day is outside the 3-day window
+    assert table.loc[(10, "naive"), "check_failed"] == 0 and table.loc[(10, "best"), "check_failed"] == 0
+    assert report.tables().attrs["check_failed"] == {"lear": len(HORIZONS) * len(HOURS)}
+    # the failed day is out of lear's forecasts and of the common keys
+    other = run_monitor(clean, windows=(10,)).tables().set_index("member")
+    assert other.loc["lear", "forecasts"] - table.loc[(10, "lear"), "forecasts"] > 0
+    assert (
+        other.loc["lear", "check_failed"] == 0
+        and "check_failed" not in run_monitor(clean, windows=(10,)).tables().attrs
+    )
+    assert table.loc[(10, "lear"), "member_days"] == other.loc["lear", "member_days"] - 1
+
+
+def test_check_failed_is_read_under_the_policy_s_revision(tmp_path):
+    directory = tmp_path / "live"
+    write_live(directory, failed={("naive", DAYS[2])})  # every revision of day 2
+    for policy in ("latest", "first"):
+        with pytest.warns(UserWarning, match="check_failed"):
+            table = run_monitor(directory, windows=(10,), policy=policy).tables().set_index("member")
+        assert table.loc["naive", "check_failed_days"] == 1
