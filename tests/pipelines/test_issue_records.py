@@ -265,10 +265,9 @@ def test_quality_counts_missing_and_imputed_cells_on_the_issue_rows():
         "missing": 0,
         "imputed": 3,
         "flag": "load_d+1_imputed",
-        "last_valid": imputed.index[imputed.index <= issued].max().isoformat(),  # 11:00, cut at the issue time
+        "last_valid": "2026-10-25T10:00:00+01:00",  # the 11:00 row isn't over at 11:45
         "vintage": "unknown",
     }
-    assert columns["load_d+1"]["last_valid"] == "2026-10-25T11:00:00+01:00"
     assert columns["exaa_d+1"]["missing"] == 2 and columns["exaa_d+1"]["imputed"] is None
     assert columns["exaa_d+1"]["vintage"] == "snapshot"
     assert columns["wind_d+1"]["last_valid"] == "2026-10-25T08:00:00+01:00"  # the three hours before 11:45 empty
@@ -278,7 +277,7 @@ def test_quality_counts_missing_and_imputed_cells_on_the_issue_rows():
         plain["columns"]["load_d+1"]["last_valid"] == "2026-10-25T23:00:00+01:00"
     )  # no rules: the end of the issue day
     later = quality(imputed, None, None, ISSUE, zone=ZONE, columns=["load_d+1"], issued_at="2026-10-26 05:00+01:00")
-    assert later["columns"]["load_d+1"]["last_valid"] == "2026-10-26T05:00:00+01:00"
+    assert later["columns"]["load_d+1"]["last_valid"] == "2026-10-26T04:00:00+01:00"
     utc = quality(imputed.tz_convert("UTC"), None, None, ISSUE, zone=ZONE, columns=["load_d+1"])
     assert utc["columns"]["load_d+1"]["issue_rows"] == 25  # the issue zone's date, whatever the index's zone
     json.dumps(found, allow_nan=False)  # plain JSON
@@ -439,3 +438,17 @@ def test_files_are_synced_through_a_writable_descriptor_and_a_failed_write_leave
         write_json(tmp_path, CHECKS_FILE, {"failed": []})
     assert sorted(path.name for path in tmp_path.iterdir()) == [SNAPSHOT_FILE, QUALITY_FILE]
     assert read_snapshot(tmp_path / SNAPSHOT_FILE).hash == snap.hash  # the earlier file, untouched
+
+
+@pytest.mark.parametrize("freq, last", [("1h", "10:00"), ("15min", "11:30")])
+def test_a_row_is_known_once_its_period_is_over(freq, last):
+    """Rows are stamped at their period's start: at an issue time on a row's stamp (11:45 at 15 minutes, 11:00 hourly) that row
+    isn't over, and the one before it is."""
+    frame = live_frame(freq=freq)
+    issued = pd.Timestamp(f"{ISSUE} {'11:00' if freq == '1h' else '11:45'}").tz_localize(ZONE)
+    found = quality(frame, None, None, ISSUE, zone=ZONE, columns=["load_d+1"], issued_at=issued)
+    assert found["columns"]["load_d+1"]["last_valid"] == pd.Timestamp(f"{ISSUE} {last}").tz_localize(ZONE).isoformat()
+    step = pd.Timedelta(freq)
+    assert pd.Timestamp(found["columns"]["load_d+1"]["last_valid"]) + step == issued  # the one before the boundary row
+    one_more = quality(frame, None, None, ISSUE, zone=ZONE, columns=["load_d+1"], issued_at=issued + step)
+    assert pd.Timestamp(one_more["columns"]["load_d+1"]["last_valid"]) == issued  # over once its period is

@@ -285,6 +285,18 @@ def _step_minutes(index: pd.DatetimeIndex) -> int:
     return 15 if step == 15 else 60
 
 
+def _row_length(index: pd.DatetimeIndex) -> pd.Timedelta:
+    """How long a row's period lasts, from the spacing of the frame's UTC instants (in ns, whatever the index's unit and order):
+    a row is stamped at its period's start, so its value is complete at the stamp plus this. A daily frame's row (a spacing of
+    a day or more) stands for the time of day it is stamped at, when its value is known, so it lasts nothing here; so does the
+    row of a frame of one row."""
+    instants = np.unique(index.as_unit("ns").asi8)
+    if len(instants) < 2:
+        return pd.Timedelta(0)
+    spacing = pd.Timedelta(int(np.median(np.diff(instants))), "ns")
+    return pd.Timedelta(0) if spacing >= pd.Timedelta(days=1) else spacing
+
+
 def is_imputed_flag(column: str) -> bool:
     """Whether a column is an `ImputeTransformer(flag=True)` flag, `x_imputed`, or one shifted with its column, `x_imputed_d+1`."""
     if column.endswith(_IMPUTED):
@@ -296,7 +308,7 @@ def is_imputed_flag(column: str) -> bool:
 def issue_instant(issue: Any, zone: str, rules: Any = None) -> pd.Timestamp:
     """When issue day D is issued: `rules`' issue time (an `InformationSet`'s `issue_time` in its `issue_timezone`, `zone` for
     "data"; a repeated time at its second occurrence, a skipped one shifted forward, as the rules read a clock time), or without
-    rules the last instant of D in `zone`."""
+    rules the end of D in `zone` (the midnight after it), by which every row of D is over."""
     day = _day(issue)
     if rules is not None and getattr(rules, "issue_time", None):
         tz = getattr(rules, "issue_timezone", None) or zone
@@ -304,8 +316,7 @@ def issue_instant(issue: Any, zone: str, rules: Any = None) -> pd.Timestamp:
         return pd.Timestamp(f"{day.isoformat()} {rules.issue_time}").tz_localize(
             tz, ambiguous=False, nonexistent="shift_forward"
         )
-    end = pd.Timestamp(day + datetime.timedelta(days=1)).tz_localize(zone, ambiguous=True, nonexistent="shift_forward")
-    return end - pd.Timedelta(1, "ns")
+    return pd.Timestamp(day + datetime.timedelta(days=1)).tz_localize(zone, ambiguous=True, nonexistent="shift_forward")
 
 
 def _vintage(rules: Any, column: str, step: int) -> Optional[str]:
@@ -333,9 +344,10 @@ def quality(
       its status and each column's last valid timestamp; None without a refresh record (a frame used as given).
     - `columns`: per input column (`columns`, else every column of the frame but the imputation flags, shifted ones too)
       `issue_rows` (rows dated D in `zone`), `missing` (of those, cells without a value), `imputed` (of those, cells its flag
-      marks; None without a flag column) and `flag` (that column), `last_valid` (the latest row stamped at or before
-      `issued_at` with a value, None for none, whatever the order of the rows) and `vintage` (its rule's class in `rules`, an
-      `InformationSet`; None without one). A naive index raises.
+      marks; None without a flag column) and `flag` (that column), `last_valid` (the stamp of the latest row with a value
+      whose period is over by `issued_at`: rows are stamped at their period's start, so the row of 11:00 on an hourly frame is
+      complete at 12:00 and not known at an issue time of 11:45; by instants, whatever the order of the rows; None for none)
+      and `vintage` (its rule's class in `rules`, an `InformationSet`; None without one). A naive index raises.
 
     A cell the frame holds is never judged: no value is called implausible or turned into a missing one (validators stay
     advisory, step 8's decision 17)."""
@@ -350,7 +362,7 @@ def quality(
     cut = issue_instant(issue, zone, rules) if issued_at is None else pd.Timestamp(issued_at)
     if cut.tzinfo is None:
         raise ValueError(f"issued_at is an instant: give it a zone, got {issued_at!r}")
-    known = np.asarray(index <= cut)
+    known = np.asarray(index + _row_length(index) <= cut)  # a row's period over by the issue time
     out: Dict[str, Dict[str, Any]] = {}
     for column in columns:
         values = frame[column]
