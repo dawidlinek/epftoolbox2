@@ -616,29 +616,40 @@ def _frequency(frame: pd.DataFrame) -> str:
     return str(known.iloc[0]) if len(known) else "1h"
 
 
-def _served_days(frame: pd.DataFrame, through: Optional[str]) -> pd.DataFrame:
-    """A fallback ensemble's issue days up to the newest due one, one row each (`run_date_text`, `run_date`, `rung`): the highest
-    rung that served a key of the day, from every key read, scored or not (a fallback is known the day it is issued)."""
+SKIPPED = float("inf")  # the rung of a day no rung served: worse than any
+
+
+def _served_days(frame: pd.DataFrame, planned: Sequence[str], horizons: Sequence[int]) -> pd.DataFrame:
+    """A fallback ensemble's planned issue days (the due days with a committed revision), one row each (`run_date_text`, `run_date`,
+    `rung`): the highest rung that served a key of the day, from every key read, scored or not (a fallback is known the day it
+    is issued), or `SKIPPED` when a horizon planned (any member's, in the directory) has no forecast of it, a day no rung served."""
     columns = ["run_date_text", "run_date", "rung"]
-    if not len(frame) or through is None:
-        return pd.DataFrame(columns=columns)
-    frame = frame[frame["run_date_text"] <= through]
-    served = frame.groupby("run_date_text", sort=True).agg(run_date=("run_date", "first"), rung=("rung", "max"))
-    return served.reset_index()[columns]
+    served = frame.groupby(["run_date_text", "horizon"])["rung"].max() if len(frame) else pd.Series(dtype=float)
+    held = {(d, int(h)): rung for (d, h), rung in served.items()}
+    rows = []
+    for day in planned:
+        rungs = [held.get((day, int(h))) for h in horizons]
+        rows.append(
+            (day, pd.Timestamp(day), SKIPPED if any(r is None for r in rungs) or not rungs else float(np.nanmax(rungs)))
+        )
+    return pd.DataFrame(rows, columns=columns)
 
 
 def _fallback(
     panel: LossPanel, rows: np.ndarray, name: str, served: Optional[pd.DataFrame], in_window: Sequence[str]
-) -> Tuple[int, float]:
-    """(the issue days of the window a rung above 0 served, the MAE of the keys it served that have a known actual)."""
+) -> Tuple[int, int, float]:
+    """(the issue days of the window a rung above 0 served, the days no rung served, the MAE of the keys a rung above 0 served
+    that have a known actual)."""
     if served is None:
-        return 0, math.nan
-    days = served[served["run_date_text"].isin(in_window) & (served["rung"] > 0)]
+        return 0, 0, math.nan
+    mine = served[served["run_date_text"].isin(in_window)]
+    fallback = int(((mine["rung"] > 0) & (mine["rung"] < SKIPPED)).sum())
+    skipped = int((mine["rung"] == SKIPPED).sum())
     channel = panel.column(name + RUNG_CHANNEL)
     own = panel.errors[rows, panel.column(name)]
     rung = panel.errors[rows, channel]
     chosen = np.isfinite(own) & np.isfinite(rung) & (rung > 0)
-    return len(days), float(own[chosen].mean()) if chosen.any() else math.nan
+    return fallback, skipped, float(own[chosen].mean()) if chosen.any() else math.nan
 
 
 def _backtest_panel(backtest: Any, names: Sequence[str], freq: str) -> LossPanel:
@@ -713,6 +724,7 @@ def _rungs(
     windows: Sequence[int],
     days: Sequence[str],
     through: Optional[str],
+    horizons: Sequence[int],
     freq: str,
 ) -> pd.DataFrame:
     """The rung table (`MonitorReport.rungs`): each fallback ensemble read under every policy."""
@@ -721,6 +733,8 @@ def _rungs(
     for member in ladders:
         for policy in POLICIES:
             frame = _read_keys(member, visible[policy])
+            committed = [d for d in days if visible[policy].get(d)]
+            served_days = _served_days(frame, committed, horizons)
             actual, known = actuals.lookup(frame)
             panel, _ = _panel(
                 {member.name: _signed(frame, actual, known)}, {member.name: _rung_frame(frame, known)}, freq
@@ -732,7 +746,7 @@ def _rungs(
             for window in windows:
                 in_window = _window_days(days, through, window)
                 raw = frame[frame["run_date_text"].isin(in_window)]
-                every = raw["run_date_text"].unique()
+                planned_days = [d for d in in_window if d in set(committed)]
                 mine = rows[np.isin(run_days, _day_numbers(in_window))]
                 for number, ladder_member in enumerate(member.ladder or ()):
                     served = raw[raw["rung"] == number]
@@ -747,11 +761,26 @@ def _rungs(
                             rung_member=ladder_member,
                             days=count,
                             forecasts=len(served),
-                            share=count / len(every) if len(every) else math.nan,
+                            share=count / len(planned_days) if planned_days else math.nan,
                             scored=len(chosen),
                             mae=float(own[chosen].mean()) if len(chosen) else math.nan,
                         )
                     )
+                lost = served_days[served_days["run_date_text"].isin(planned_days) & (served_days["rung"] == SKIPPED)]
+                out.append(  # a planned key with no forecast from any rung: the day no rung served
+                    dict(
+                        policy=policy,
+                        window=window,
+                        member=member.name,
+                        rung=-1,
+                        rung_member="skipped",
+                        days=len(lost),
+                        forecasts=0,
+                        share=len(lost) / len(planned_days) if planned_days else math.nan,
+                        scored=0,
+                        mae=math.nan,
+                    )
+                )
     return pd.DataFrame(out, columns=columns)
 
 
@@ -837,14 +866,15 @@ def _evaluate(
                 rungs = served[name].set_index("run_date_text")["rung"]
                 tail = _streak(days, run, report.through)
                 if tail and all(d in rungs.index and rungs[d] >= threshold for d in tail):
-                    worst = int(max(rungs[d] for d in tail))
+                    top, bottom = max(rungs[d] for d in tail), min(rungs[d] for d in tail)
+                    where = "no rung (a skipped day)" if top == SKIPPED else f"rung {int(top)}"
                     fired.append(
                         Alert(
                             rule,
-                            f"{name}: served by rung {worst} (at least {int(threshold)}) on each of the last {run} issue "
-                            f"days, through {tail[-1]}",
+                            f"{name}: served by {where} (at least {int(threshold)} is the alert) on each of the last {run} "
+                            f"issue days, through {tail[-1]}",
                             member=name,
-                            value=float(min(rungs[d] for d in tail)),
+                            value=None if bottom == SKIPPED else float(bottom),
                             threshold=float(threshold),
                             through=tail[-1],
                         )
@@ -943,7 +973,9 @@ def monitor(
     committed_days, delivered, revisions = visible["latest"], visible["delivered"], visible[policy]
     quality = _quality(store, revisions, days)
     bt_panel = _backtest_panel(backtest, names, freq) if backtest is not None else None
-    served = {m.name: _served_days(keys[m.name], through) for m in ladders}
+    horizons = sorted({int(h) for frame in keys.values() for h in frame["horizon"].unique()})
+    planned = [d for d in days if revisions.get(d)]
+    served = {m.name: _served_days(keys[m.name], planned, horizons) for m in ladders}
 
     daily = _daily(panel, names, benchmarks)
     skill_days = {(m, b): _skill_days(panel, m, b) for m in names for b in benchmarks if m != b}
@@ -981,7 +1013,9 @@ def monitor(
             row["delivered_days"] = handed
             row["delivered"] = handed / len(in_window) if in_window else math.nan
             row["member_days"] = int(raw["run_date_text"].nunique())
-            row["fallback_days"], row["fallback_mae"] = _fallback(panel, mine, name, served.get(name), in_window)
+            row["fallback_days"], row["skipped_days"], row["fallback_mae"] = _fallback(
+                panel, mine, name, served.get(name), in_window
+            )
             row["quality_records"] = len(recorded)
             row["quality_days"] = problems
             table_rows.append(row)
@@ -1030,7 +1064,7 @@ def monitor(
         now=now,
         _tables=tables,
         _daily=daily,
-        _rungs=_rungs(ladders, visible, actuals, windows, days, through, freq),
+        _rungs=_rungs(ladders, visible, actuals, windows, days, through, horizons, freq),
         _quality=quality_table,
     )
     report.alerts = _evaluate(rules, report, skill_days, served, quality, store, committed_days, delivered, days)

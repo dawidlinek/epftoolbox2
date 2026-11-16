@@ -1286,3 +1286,30 @@ def test_no_benchmark_is_said(live):
     with use_clock(FakeClock(NOW)), pytest.warns(UserWarning, match="no benchmark"):
         table = pipe.monitor(DATA, live, windows=(7,)).tables()
     assert not [c for c in table.columns if c.startswith("skill_")]
+
+
+def test_a_day_no_rung_served_is_a_skipped_day_worse_than_any_rung(tmp_path):
+    """The delivered ensemble wrote no forecast of day 8, which was committed (its status is `skipped`): it is counted, shown in
+    `rungs()` and read by `rung_at_least` as worse than any rung."""
+    directory = tmp_path / "live"
+    write_live(directory, absent={("best", DAYS[8])})
+    report = run_monitor(directory, windows=(10, 3))
+    table = report.tables().set_index(["window", "member"])
+    assert table.loc[(10, "best"), "skipped_days"] == 1 and table.loc[(3, "best"), "skipped_days"] == 1
+    assert table.loc[(10, "best"), "fallback_days"] == 1  # the fallback day, not the skipped one
+    assert table.loc[(10, "lear"), "skipped_days"] == 0
+    rungs = report.rungs()
+    lost = rungs[(rungs["policy"] == "latest") & (rungs["window"] == 10) & (rungs["rung"] == -1)].iloc[0]
+    assert lost["rung_member"] == "skipped" and lost["days"] == 1 and lost["share"] == pytest.approx(1 / 8)
+    served = rungs[(rungs["policy"] == "latest") & (rungs["window"] == 10) & (rungs["rung"] >= 0)]
+    assert served["days"].sum() == 7 and served["share"].sum() + lost["share"] == pytest.approx(1.0)
+    # as of the 26th (day 8 the newest due day) a rung at least 3, on a ladder of 2, fires: a skipped day is worse than any
+    now = pd.Timestamp(f"{DAYS[8]}T14:00", tz=ZONE)
+    on_it = run_monitor(directory, windows=(10,), now=now, alerts=[{"rung_at_least": 3}])
+    assert [(a.rule, a.member, a.through) for a in on_it.alerts] == [("rung_at_least", "best", DAYS[8])]
+    # the day after it, served by rung 0, it doesn't
+    assert run_monitor(directory, windows=(10,), alerts=[{"rung_at_least": 3}]).alerts == []
+    # the plain directory has none skipped
+    plain = tmp_path / "plain"
+    write_live(plain)
+    assert run_monitor(plain, windows=(10,)).tables()["skipped_days"].eq(0).all()
