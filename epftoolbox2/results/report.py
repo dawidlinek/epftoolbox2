@@ -1270,11 +1270,12 @@ class EvaluationReport:
         )
 
     def _flag_relative_check_failed(self, table: pd.DataFrame, models: Sequence[str], stacklevel: int = 2) -> None:
-        """`_flag_check_failed` for a table with a column on the keys each model shares with a benchmark (`rMAEEvaluator`,
-        `DMEvaluator`): each model with the benchmark."""
+        """`_flag_check_failed` for a table with a column on common keys: those each model shares with a benchmark
+        (`rMAEEvaluator`, `DMEvaluator`: each model with the benchmark), or those all its models share (a set evaluator,
+        `MCSEvaluator`: every model of the table)."""
         benchmarks = [getattr(e, "benchmark", getattr(e, "base_model", None)) for e in self.evaluators]
         benchmarks = [name for name in benchmarks if isinstance(name, str)]
-        if benchmarks:
+        if benchmarks or any(isinstance(e, SetEvaluator) for e in self.evaluators):
             self._flag_check_failed(table, [*models, *benchmarks], stacklevel=stacklevel + 1)
 
     def _flag_dm_vintages(self, table: pd.DataFrame, models: Sequence[str], stacklevel: int = 2) -> None:

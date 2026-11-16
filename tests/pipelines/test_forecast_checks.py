@@ -542,3 +542,19 @@ def test_an_aggregated_report_keeps_the_check_failed_counts_and_counts_no_day_tw
     plain = reports["off"].aggregate("1D", "mean")
     table, warned = flagged(lambda: plain.summary())
     assert not warned and "check_failed" not in table.attrs and CHECK_FAILED not in plain.forecast_counts().columns
+
+
+def test_a_table_with_an_mcs_column_flags_check_failed_days_too(tmp_path):
+    """`MCSEvaluator` reads the keys every model of the table holds, so `summary()` and `by_hour()` with it flag the failed days
+    of every model; with `MAEEvaluator` alone, a model's own score, they don't."""
+    from epftoolbox2.evaluators import MAEEvaluator, MCSEvaluator
+
+    reports = selection_reports(tmp_path, MAEEvaluator(), MCSEvaluator(reps=200, seed=1))
+    for call in (lambda: reports["on"].summary(), lambda: reports["on"].by_hour()):
+        table, warned = flagged(call)
+        assert warned and table.attrs["check_failed"] == {"ols": 48, "naive": 23}
+    table, warned = flagged(lambda: reports["off"].summary())
+    assert not warned and "check_failed" not in table.attrs
+    alone = selection_reports(tmp_path / "mae", MAEEvaluator())["on"]
+    table, warned = flagged(lambda: alone.summary())
+    assert not warned and "check_failed" not in table.attrs
