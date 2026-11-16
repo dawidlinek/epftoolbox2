@@ -67,8 +67,8 @@ from .._clock import current_clock
 from .._date_utils import shift_calendar_days
 from ..evaluators._compare import LossPanel
 from ..models._contract import period_index
-from .live import POLICIES, LiveStore, local_instant
-from .store import LiveDirectoryError
+from .live import POLICIES, LiveStore, _warn_dropped, local_instant
+from .store import OK_ONLY, LiveDirectoryError, read_records
 
 # What a record is read for.
 _COLUMNS = ["run_date", "target_date", "hour", "horizon", "prediction", "freq", "revision", "rung", "member"]
@@ -238,28 +238,47 @@ class _Actuals:
         return out[unique.get_indexer(instants)]
 
 
-def _read_keys(member: MonitorMember, policy: str, cutoff: Any) -> pd.DataFrame:
-    """The forecasts of one member under `policy` and `cutoff` (one per key, status ok): `run_date`, `target_date`, `hour`,
-    `horizon`, `prediction`, `revision`, `rung` (NaN where the member has none)."""
-    from .ref import ModelResultRef
-
+def _read_keys(
+    member: MonitorMember, committed: Mapping[str, Mapping[int, Any]], statuses: Optional[Iterable[str]] = OK_ONLY
+) -> pd.DataFrame:
+    """The forecasts of one member among the revisions `committed` lets through (`LiveStore.visible`'s shape; one per key, the
+    highest of the day's revisions with a record): `run_date`, `target_date`, `hour`, `horizon`, `prediction`, `revision`, `rung`
+    (NaN where the member has none). `statuses` other than ok read the keys whose chosen record has one (`check_failed`)."""
     columns = ["run_date", "target_date", "hour", "horizon", "prediction", "freq", "revision", "rung"]
-    ref = ModelResultRef(
-        member.name, member.path, 0, "", "", 0, policy=policy, cutoff=cutoff
-    )  # no dates: every key of the directory
-    rows = [{c: r.get(c) for c in columns} for r in ref.iter_records(cols=columns)]
+    rows = [
+        {c: r.get(c) for c in columns}
+        for r in read_records(member.path, statuses, lambda record: record, columns=columns, committed=committed)
+    ]
     frame = pd.DataFrame(rows, columns=columns)
     if not len(frame):
         frame["freq"] = frame["freq"].astype(object)
-    frame = frame[frame["prediction"].notna()].reset_index(drop=True)
+    if statuses is OK_ONLY:
+        frame = frame[frame["prediction"].notna()].reset_index(drop=True)
     frame["run_date_text"] = frame["run_date"].astype(str)
     frame["run_date"] = pd.to_datetime(frame["run_date"]).astype("datetime64[ns]")
     frame["target_date"] = pd.to_datetime(frame["target_date"]).astype("datetime64[ns]")
     for name in ("hour", "horizon"):
         frame[name] = frame[name].astype(np.int64)
-    frame["prediction"] = frame["prediction"].astype(float)
+    frame["prediction"] = pd.to_numeric(frame["prediction"], errors="coerce").astype(float)
     frame["rung"] = pd.to_numeric(frame["rung"], errors="coerce").astype(float)
     return frame
+
+
+def _delivered_view(latest: Mapping[str, Mapping[int, Any]], store: LiveStore) -> Dict[str, Dict[int, Any]]:
+    """What `policy="delivered"` reads here: of each issue day's revisions committed by the cut-off (`latest`), those up to the newest
+    one recorded as delivered, **whenever its delivery was recorded**. A delivery happens between the forecast deadline and the
+    market's gate, or is marked later from a receipt, so the time of the line doesn't matter: the revision had to be committed by
+    the deadline. (`LiveStore.visible("delivered", cutoff)`, the as-of view live readers need, also asks the delivery to be
+    recorded by the cut-off.)"""
+    heads: Dict[str, int] = {}
+    for line in store.deliveries():
+        day, revision = str(line.get("issue")), line.get("revision")
+        if revision in latest.get(day, {}):
+            heads[day] = revision
+    return {
+        day: {revision: commit for revision, commit in latest[day].items() if revision <= head}
+        for day, head in heads.items()
+    }
 
 
 def _signed(frame: pd.DataFrame, actual: np.ndarray, known: np.ndarray) -> pd.DataFrame:
@@ -436,16 +455,17 @@ def _calendar(store: LiveStore, now: pd.Timestamp) -> Tuple[List[str], Optional[
     return [d.date().isoformat() for d in pd.date_range(first, last, freq="D")], last
 
 
-def _quality(store: LiveStore, policy: str, cutoff: Any, days: Sequence[str]) -> Dict[str, Optional[Dict[str, Any]]]:
-    """Issue day -> its `quality.json` (of the revision the policy reads that day), None for a day without a committed revision or
-    a record."""
-    visible = store.visible(policy, cutoff)
+def _quality(
+    store: LiveStore, revisions: Mapping[str, Mapping[int, Any]], days: Sequence[str]
+) -> Dict[str, Optional[Dict[str, Any]]]:
+    """Issue day -> its `quality.json` (of the highest of the day's `revisions` the policy reads), None for a day without a
+    committed revision or a record."""
     out: Dict[str, Optional[Dict[str, Any]]] = {}
     for day in days:
-        revisions = visible.get(day)
-        if not revisions:
+        shown = revisions.get(day)
+        if not shown:
             continue
-        path = store.revision_dir(day, max(revisions)) / QUALITY_FILE
+        path = store.revision_dir(day, max(shown)) / QUALITY_FILE
         try:
             record = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
@@ -649,12 +669,11 @@ def _backtest_ratio(
 
 def _rungs(
     ladders: Sequence[MonitorMember],
-    store: LiveStore,
+    visible: Mapping[str, Mapping[str, Mapping[int, Any]]],
     actuals: _Actuals,
     windows: Sequence[int],
     days: Sequence[str],
     through: Optional[str],
-    cutoff: Any,
     freq: str,
 ) -> pd.DataFrame:
     """The rung table (`MonitorReport.rungs`): each fallback ensemble read under every policy."""
@@ -662,9 +681,7 @@ def _rungs(
     out = []
     for member in ladders:
         for policy in POLICIES:
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
-                frame = _read_keys(member, policy, cutoff)
+            frame = _read_keys(member, visible[policy])
             actual, known = actuals.lookup(frame)
             panel, _ = _panel(
                 {member.name: _signed(frame, actual, known)}, {member.name: _rung_frame(frame, known)}, freq
@@ -846,7 +863,11 @@ def monitor(
     now = current_clock().now()
     days, through = _calendar(store, now)
 
-    keys = {m.name: _read_keys(m, policy, cutoff) for m in members}
+    visible = {"latest": store.visible("latest", cutoff), "first": store.visible("first", cutoff)}
+    visible["delivered"] = _delivered_view(visible["latest"], store)
+    if cutoff is not None and policy != "delivered":
+        _warn_dropped(store.save_dir, store, policy, cutoff, visible[policy], None)
+    keys = {m.name: _read_keys(m, visible[policy]) for m in members}
     freqs = {name: _frequency(frame) for name, frame in keys.items() if len(frame)}
     if len(set(freqs.values())) > 1:
         raise ValueError(f"monitor() needs one frequency, but these members' results have several: {freqs}")
@@ -858,10 +879,8 @@ def monitor(
     rung_frames = {m.name: _rung_frame(keys[m.name], looked[m.name][1]) for m in ladders}
     panel, _ = _panel(signed, rung_frames, freq)
 
-    visible = store.visible("latest", cutoff)
-    delivered = store.visible("delivered", cutoff)
-    revisions = store.visible(policy, cutoff)
-    quality = _quality(store, policy, cutoff, days)
+    committed_days, delivered, revisions = visible["latest"], visible["delivered"], visible[policy]
+    quality = _quality(store, revisions, days)
     bt_panel = _backtest_panel(backtest, names, freq) if backtest is not None else None
     served = {m.name: _served_days(keys[m.name], through) for m in ladders}
 
@@ -872,7 +891,7 @@ def monitor(
     for window in windows:
         in_window = _window_days(days, through, window)
         mine = rows[np.isin(run_days, _day_numbers(in_window))]
-        committed = sum(1 for d in in_window if visible.get(d))
+        committed = sum(1 for d in in_window if committed_days.get(d))
         handed = sum(1 for d in in_window if delivered.get(d))
         recorded = [d for d in in_window if quality.get(d) is not None]
         problems = sum(1 for d in recorded if _quality_row(d, 0, quality[d])["problem"])
@@ -922,10 +941,10 @@ def monitor(
         now=now,
         _tables=tables,
         _daily=daily,
-        _rungs=_rungs(ladders, store, actuals, windows, days, through, cutoff, freq),
+        _rungs=_rungs(ladders, visible, actuals, windows, days, through, freq),
         _quality=quality_table,
     )
-    report.alerts = _evaluate(rules, report, served, quality, store, visible, delivered, days)
+    report.alerts = _evaluate(rules, report, served, quality, store, committed_days, delivered, days)
     return report
 
 

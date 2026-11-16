@@ -1090,3 +1090,33 @@ def test_whether_a_daily_key_is_known_does_not_depend_on_its_batch():
         )
         assert look(alone)[1][0] == look(batch)[1][0] == look(batch)[1][1]  # the same target: one answer
         assert look(batch.iloc[::-1])[1].tolist() == look(batch)[1].tolist()[::-1]  # whatever the order
+
+
+@pytest.mark.parametrize("at", ["11:00", "11:58", "13:30"])
+def test_a_delivery_recorded_after_the_forecast_deadline_still_counts(tmp_path, monkeypatch, at):
+    """The revision must have been committed by the deadline (11:55); when its delivery was recorded doesn't matter: deliveries
+    happen between that deadline and the gate, or are marked later from a receipt."""
+    monkeypatch.setitem(globals(), "DELIVERIES", [(DAYS[9], 1, at)])
+    directory = tmp_path / "live"
+    write_live(directory)
+    got = run_monitor(directory, windows=(1,), policy="delivered")
+    assert row(got, 1, "lear")["delivered"] == 1.0 and row(got, 1, "lear")["delivered_days"] == 1
+    assert row(got, 1, "lear")["forecasts"] > 0 and row(got, 1, "lear")["member_days"] == 1
+    # the as-of reader of 8c, which live readers need, still asks the delivery to be recorded by the cut-off
+    visible = LiveStore(directory).visible("delivered", "deadline")
+    assert (DAYS[9] in visible) == (at == "11:00")
+
+
+def test_a_delivered_revision_must_still_have_been_committed_by_the_deadline(tmp_path, monkeypatch):
+    # day 3's second revision was committed after the deadline: delivering it makes it neither visible nor delivered
+    monkeypatch.setitem(globals(), "DELIVERIES", [(DAYS[3], 2, "12:40")])
+    directory = tmp_path / "live"
+    LiveStore(directory)
+    write_live(directory, receipts=False)
+    store = LiveStore(directory)
+    receipt = directory / "r.json"
+    receipt.write_text("{}")
+    with store.hold():
+        store.mark_delivered(DAYS[3], 2, receipt, delivered_at=local(DAYS[3], "12:40"))
+    got = run_monitor(directory, windows=(10,), policy="delivered")
+    assert got.tables()["delivered_days"].iloc[0] == 0 and got.tables()["forecasts"].iloc[0] == 0
