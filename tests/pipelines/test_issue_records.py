@@ -69,6 +69,15 @@ PLAN = {
 }
 
 
+def with_payload_nan(frame, row, column):
+    """`frame` with a NaN of another payload than numpy's at (row, column), set through the array so pandas keeps its bits."""
+    values = frame.to_numpy(dtype=np.float64, copy=True)
+    values.view(np.uint64)[row, column] = 0x7FF8000000000001
+    out = pd.DataFrame(values, index=frame.index, columns=frame.columns)
+    assert out.to_numpy()[row, column].tobytes() != np.float64(np.nan).tobytes()
+    return out
+
+
 def oracle_hash(frame, columns, issue):
     """The definition, written out: the rows dated `issue` in the frame's zone, their UTC instants, then each column by name."""
     wall = frame.index.tz_localize(None)
@@ -126,9 +135,9 @@ def test_the_hash_is_the_same_for_the_same_values_whatever_the_column_order():
     negative["exaa_d+1"] = -0.0
     assert snapshot(zeros, ["lear"], PLAN, ISSUE).hash == snapshot(negative, ["lear"], PLAN, ISSUE).hash
     nans = frame.copy()
-    nans.iloc[110, 2] = np.nan
-    payload = frame.copy()
-    payload.iloc[110, 2] = np.frombuffer(np.uint64(0x7FF8000000000001).tobytes(), dtype=np.float64)[0]
+    at = int(np.flatnonzero(issue_rows(frame, ISSUE))[10])  # a cell the snapshot holds
+    nans.iloc[at, 2] = np.nan
+    payload = with_payload_nan(frame, at, 2)
     assert snapshot(nans, ["lear"], PLAN, ISSUE).hash == snapshot(payload, ["lear"], PLAN, ISSUE).hash
     as_ints = frame.copy()
     as_ints["exaa_d+1"] = np.round(as_ints["exaa_d+1"])
@@ -330,3 +339,15 @@ def test_refresh_and_waits_records_are_plain_json(tmp_path):
     path = write_json(tmp_path, QUALITY_FILE, {"issue": ISSUE, "missing": float("inf")})
     assert json.loads(path.read_text()) == {"issue": ISSUE, "missing": None}
     assert not list(tmp_path.glob(".*"))
+
+
+def test_snapshot_hash_itself_sorts_columns_and_rows_and_reads_one_nan():
+    """`snapshot_hash` on inputs in any column and row order, as a later check may build them, and NaNs of any payload."""
+    inputs = snapshot(live_frame(), ["lear"], PLAN, ISSUE).inputs
+    first = snapshot_hash(inputs)
+    assert snapshot_hash(inputs[list(reversed(inputs.columns))]) == first
+    assert snapshot_hash(inputs.iloc[::-1]) == first
+    nan = inputs.copy()
+    nan.iloc[3, 0] = np.nan
+    payload = with_payload_nan(inputs, 3, 0)
+    assert snapshot_hash(nan) == snapshot_hash(payload) != first
