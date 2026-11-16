@@ -2307,3 +2307,24 @@ def test_issue_timezone_data_refuses_a_frame_in_utc_or_at_a_fixed_offset():
     named = InformationSet("10:00", "data", rules={"load": Availability.published("12:00", 0)})
     with pytest.raises(InformationSetError, match=r"\(10:00 Europe/Warsaw on the issue day D\)"):
         named.check({(0, 1): ["load"]}, "price", "1h", frame.index, "2023-05-25", "2023-05-25", check_target=False)
+
+
+def test_an_untold_slot_name_on_an_hourly_model_that_takes_a_rule_warns_once(monkeypatch):
+    """Read as a quarter-hour, which is the wrong time for a 30-minute profile: the user is told, once per column, to pass the
+    transformer. Told, on 15-minute data, and with no rule of its own (where it has none) it doesn't warn."""
+    monkeypatch.setattr("epftoolbox2.information_set._WARNED_SLOTS", set())
+    _, _, transformer, _ = _half_hour_profile()
+    own = InformationSet("11:45", "Europe/Brussels", rules={"load_actual_s*": Availability.realised("1h")})
+    with pytest.warns(UserWarning, match=r"load_actual_s30.*read as a quarter-hour.*with_source_rules") as caught:
+        own._resolve_for("load_actual_s30", 60)
+        own._resolve_for("load_actual_s30_d-1", 60)
+    assert len(caught) == 1
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        own._resolve_for("load_actual_s30", 60)  # once
+        own.with_source_rules([transformer])._resolve_for("load_actual_s31", 60)  # told
+        monkeypatch.setattr("epftoolbox2.information_set._WARNED_SLOTS", set())
+        own._resolve_for("load_actual_s30", 15)  # a quarter-hour on 15-minute data
+        InformationSet("11:45", "Europe/Brussels")._resolve_for(
+            "load_actual_s30", 60
+        )  # no rule of its own: a column without one

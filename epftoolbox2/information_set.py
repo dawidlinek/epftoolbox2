@@ -1267,6 +1267,25 @@ def _profile_slot(base: str, slot_length: Optional[int] = None) -> Optional[Tupl
     return (start, length) if start < 1440 else None
 
 
+_WARNED_SLOTS: set = set()
+
+
+def _warn_untold_slot(base: str) -> None:
+    """Once per column name: an `_sNN` column on a model whose period isn't 15 minutes takes a user's rule while its slot length
+    is untold, so it is read as a quarter-hour, which is the wrong time for a profile of another length."""
+    if base in _WARNED_SLOTS:
+        return
+    _WARNED_SLOTS.add(base)
+    warnings.warn(
+        f"{base}: an `_sNN` slot name doesn't say its length, and this information set wasn't told it, so the column is read as "
+        "a quarter-hour. For a DailyProfileTransformer of another slot length (freq='30min') that is the wrong time, and the "
+        "check can accept a value that isn't known yet. Pass the transformer: "
+        "information_set.with_source_rules([*data_pipeline.sources, *data_pipeline.transformers]) (a Workflow does).",
+        UserWarning,
+        stacklevel=2,
+    )
+
+
 def _profile_slot_lengths(sources: Iterable[Any]) -> Dict[str, int]:
     """Column -> slot length in minutes of each DailyProfileTransformer among `sources` that names its slots `_sNN` (every length
     but an hour), so that the information set reads `_s05` of a 30-minute profile at 02:30."""
@@ -1630,13 +1649,10 @@ class InformationSet:
         link = col
         while step != 15 and link.built_from is not None:
             own = _find_rule(link.name, parse_predictor(link.name), self.rules, "rules")
-            if (
-                link.slot is not None
-                and link.slot_length is None
-                and link.slot[1] == _SLOT_MINUTES["s"]
-                and own is None
-            ):
-                return ResolvedColumn(name, col.base, col.shifts, None)
+            if link.slot is not None and link.slot_length is None and link.slot[1] == _SLOT_MINUTES["s"]:
+                if own is None:
+                    return ResolvedColumn(name, col.base, col.shifts, None)
+                _warn_untold_slot(link.base)
             link = link.built_from
         return col
 
