@@ -1131,6 +1131,26 @@ def test_the_default_is_on_and_a_model_path_folder_resumes_on_it(spring, tmp_pat
         assert (loaded.engine, loaded._engine) == (given or "on", given)
 
 
+def test_a_model_the_engine_fits_on_the_model_path_resumes_without_a_word(spring, tmp_path, monkeypatch):
+    """LEAR's coordinate descent is engine-capable, but its fits are the model path's (`fit_path_of` None, no `fit_path` in its
+    manifest), so a folder of it written with the engine off resumes under the default to the bit with no log line saying it
+    follows the folder: there is nothing to follow."""
+    days = ("2023-03-24", "2023-03-25")
+    said = []
+    monkeypatch.setattr(model_pipeline.logger, "info", said.append)
+
+    def run(**engine):
+        model = lear(PREDICTORS, 28, criterion="aic", solver="cd", name="lasso")
+        ModelPipeline(**engine).add_model(model).run(spring, *days, horizon=1, save_dir=str(tmp_path))
+        return lines(tmp_path / "lasso.jsonl")
+
+    full = run(engine="off")
+    keep_first_day(tmp_path / "lasso.jsonl")
+    assert run() == full
+    assert said == []
+    assert "fit_path" not in json.loads((tmp_path / "lasso.manifest.json").read_text())
+
+
 def test_the_manifest_counts_the_last_runs_fits(spring, tmp_path):
     """`engine` provenance: fits and hand-backs by reason (an issue row 10^4 training standard deviations out, forecast on the
     model path, as `far_issue`), the largest distance of an issue row the engine forecast; a resume with nothing to fit leaves

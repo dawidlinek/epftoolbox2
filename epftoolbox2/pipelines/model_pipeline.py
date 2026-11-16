@@ -81,6 +81,7 @@ from ..results.manifest import (
 )
 from ..results.live import LiveStore, refuse_live_directory
 from ..models._fits import RefitResult, Served, refit_models, serve
+from ..models._engine_worker import fit_path_of
 from ..results.matching import rows_of_refs, warn_about_thin
 from ..results.panel import PanelReport
 from ..results.report import EvaluationReport
@@ -433,8 +434,10 @@ class ModelPipeline:
     def _resumes_on_the_model_path(self, model: BaseModel, save_dir: Optional[Union[str, Path]]) -> bool:
         """Whether `model` runs on the model path although the engine is on: `engine` was left unset and its results in
         `save_dir` have a manifest without `fit_path`, written on the model path (engine off, or up to 2.3). Such a folder
-        keeps resuming as it was written; an explicit `engine="on"` refuses it on `fit_path` instead."""
-        if self._engine is not None or not save_dir:
+        keeps resuming as it was written; an explicit `engine="on"` refuses it on `fit_path` instead. False, and no log line,
+        for a model whose fits the engine wouldn't take from shared statistics (`fit_path_of` None, a scaler it can't share):
+        its group runs the model path's fits, the same bits either way."""
+        if self._engine is not None or not save_dir or fit_path_of(model) is None:
             return False
         path = manifest_path(self.results_path(save_dir, model))
         try:
