@@ -177,9 +177,12 @@ jobs:
     # The pretrained families' extras, packages installed and no weights: the in-context models [tabpfn] and [tabicl]
     # (tests/models/test_in_context.py: the real regressors around a fake fit/predict, their settings, the TabPFN version guard,
     # one checkpoint read per process; the adapter suite), the foundation models [t0] and [chronos] (tests/models/test_t0.py,
-    # test_chronos.py: the real backends around package-level fakes), and the rest of the suite with the packages installed.
-    # The test job above installs no extra, so there these tests skip. The free-threaded cell installs [tabicl] alone: tabpfn,
-    # t0 and chronos need safetensors, which has no free-threaded wheels. No job has weights or a GPU (`-m weights` runs where
+    # test_chronos.py: the real backends around package-level fakes), 6j's [timesfm] and [timestral] (the timestral package
+    # itself from its pinned commit, which no extra can install; tests/models/test_foundation_flagged.py), and the rest of the
+    # suite with the packages installed. [patchtst-fm] conflicts with every torch extra (granite-tsfm pins torch < 2.12 and
+    # scikit-learn < 1.8; pyproject's [tool.uv] conflicts), so it has a cell of its own on 3.13 (it needs Python < 3.14). The
+    # test job above installs no extra, so there these tests skip. The free-threaded cell installs [tabicl] alone: the others
+    # need safetensors, which has no free-threaded wheels. No job has weights or a GPU (`-m weights` runs where
     # EPFTOOLBOX2_WEIGHTS_DIR holds them).
     runs-on: ubuntu-latest
     strategy:
@@ -187,14 +190,19 @@ jobs:
       matrix:
         include:
           - python-version: '3.12'
-            extras: '--extra tabpfn --extra tabicl --extra t0 --extra chronos'
-            modules: "'tabpfn', 'tabicl', 't0', 'chronos', 'torch'"
+            extras: '--extra tabpfn --extra tabicl --extra t0 --extra chronos --extra timesfm --extra timestral'
+            git: 'timestral @ git+https://github.com/mistralai/timestral@a534bdbd244d64f3d9d743f46c7bf6fc330ed4ff'
+            modules: "'tabpfn', 'tabicl', 't0', 'chronos', 'timesfm', 'timestral', 'torch'"
           - python-version: '3.13'
-            extras: '--extra tabpfn --extra tabicl --extra t0 --extra chronos'
-            modules: "'tabpfn', 'tabicl', 't0', 'chronos', 'torch'"
+            extras: '--extra tabpfn --extra tabicl --extra t0 --extra chronos --extra timesfm --extra timestral'
+            git: 'timestral @ git+https://github.com/mistralai/timestral@a534bdbd244d64f3d9d743f46c7bf6fc330ed4ff'
+            modules: "'tabpfn', 'tabicl', 't0', 'chronos', 'timesfm', 'timestral', 'torch'"
           - python-version: '3.14t'
             extras: '--extra tabicl'
             modules: "'tabicl', 'torch'"
+          - python-version: '3.13'
+            extras: '--extra patchtst-fm'
+            modules: "'tsfm_public', 'torch'"
 
     steps:
     - name: Checkout code
@@ -208,11 +216,15 @@ jobs:
     - name: Install dependencies with the families' extras
       run: uv sync --locked --extra dev ${{ matrix.extras }}
 
+    - name: Install the packages no extra can (timestral from its pinned commit)
+      if: matrix.git
+      run: uv pip install --no-deps "${{ matrix.git }}"
+
     - name: Check that the packages import (their tests would skip without them)
-      run: uv run python -c "import importlib, importlib.metadata as m; d = m.packages_distributions(); [print(n, m.version(d.get(n, [n])[0]), importlib.import_module(n).__name__) for n in (${{ matrix.modules }})]"
+      run: uv run --no-sync python -c "import importlib, importlib.metadata as m; d = m.packages_distributions(); [print(n, m.version(d.get(n, [n])[0]), importlib.import_module(n).__name__) for n in (${{ matrix.modules }})]"
 
     - name: Run tests
-      run: uv run pytest -m "not integration" -n auto --dist worksteal -q
+      run: uv run --no-sync pytest -m "not integration" -n auto --dist worksteal -q
 
   tune-extra:
     # The [tune] extra (Optuna): tune.BayesSearch's tests (tests/test_tune.py: the cut before the first trial, the same table
