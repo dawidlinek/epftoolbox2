@@ -44,6 +44,7 @@ hash differs from the module's warns: the forecasts will differ from the saved r
 Importing this module imports no torch: the extra is needed to fit, not to build, save or load the model.
 """
 
+import datetime
 import contextlib
 import functools
 import hashlib
@@ -451,6 +452,7 @@ class TorchModel(BaseModel):
         normalise_by: Optional[str] = None,
         bounds: Optional[Tuple[Optional[float], Optional[float]]] = None,
         zero_when: Optional[str] = None,
+        refit_from: Union[str, datetime.date, None] = None,
     ):
         where = f"TorchModel({name!r})"
         flat = self._flatten(predictors, inputs, where)
@@ -479,6 +481,7 @@ class TorchModel(BaseModel):
             normalise_by=normalise_by,
             bounds=bounds,
             zero_when=zero_when,
+            refit_from=refit_from,
         )
         self.output = output
         self.inputs = None if inputs is None else {str(block): list(names) for block, names in inputs.items()}

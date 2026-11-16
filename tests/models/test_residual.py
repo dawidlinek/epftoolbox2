@@ -553,6 +553,7 @@ def test_the_adapter_suite(market, tmp_path, monkeypatch, registered):
     suite.check_resume(make, market, tmp_path / "resume", TEST, horizon=2)
     suite.check_engine(make, market, TEST, horizon=2)
     suite.check_preflight_without_extra(make, monkeypatch, market, TEST)
+    suite.check_repeated_predict(make, market, TEST, 2, monkeypatch)
 
 
 @pytest.mark.filterwarnings("ignore:overflow encountered in sinh")  # the control's noise, mapped back by sinh

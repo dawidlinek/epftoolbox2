@@ -1321,3 +1321,19 @@ def test_rung_seeds_replace_a_torch_models_seeds(df, monkeypatch):
     models = result.best(1, seeds=3)
     assert models[0].seeds == 3 and models[0].name == "mlp_bayes_00"
     assert result.best(1)[0].seeds == 5  # the model as make builds it
+
+
+def test_a_fingerprint_of_public_attributes_leaves_refit_from_out_at_its_default():
+    """A model whose settings can't be saved (a predictor function of the script) is fingerprinted from its public
+    attributes: `refit_from`, added later, is left out while None, so a fingerprint stored before it existed still matches,
+    and counts once set."""
+
+    def lists(ctx):
+        return ["load_d+{horizon}"]
+
+    model = OLSModel(lists, training_window=28, refit="7D", name="ols")
+    before = OLSModel(lists, training_window=28, refit="7D", name="ols")
+    del before.__dict__["refit_from"]  # what the model was before the setting existed
+    assert bayes.model_fingerprint(model) == bayes.model_fingerprint(before)
+    model.refit_from = "2024-01-01"
+    assert bayes.model_fingerprint(model) != bayes.model_fingerprint(before)

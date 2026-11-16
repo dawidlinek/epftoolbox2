@@ -173,7 +173,16 @@ def test_every_setting_reaches_the_workers(cls):
     (and `weights`, there only when set) must be in it, or a worker would fit with its default."""
     import inspect
 
-    parent_side = {"predictors", "training_window", "refit", "name", "scaler", "newest_target", "binary_mask"}
+    parent_side = {
+        "predictors",
+        "training_window",
+        "refit",
+        "refit_from",
+        "name",
+        "scaler",
+        "newest_target",
+        "binary_mask",
+    }
     parent_side |= {"normalise_by", "bounds", "zero_when", "block_predict", "weights"}
     assert set(cls(INPUTS)._model_kwargs) == set(inspect.signature(cls).parameters) - parent_side
     again = cls(
@@ -295,6 +304,7 @@ def test_the_adapter_suite(faked, market, tmp_path, monkeypatch):
     suite.check_resume(make, market, tmp_path / "resume", TEST, horizon=1)
     suite.check_engine(make, market, TEST, horizon=1)
     suite.check_provenance(make, market, tmp_path / "provenance", TEST)
+    suite.check_repeated_predict(make, market, TEST, 1, monkeypatch)
     # A block's first, middle and last day, the day before the switch and the switch day.
     suite.check_verify(
         make, market, INFO, ["2023-03-13", "2023-03-16", "2023-03-19", "2023-03-25", "2023-03-26"], items=6
@@ -837,11 +847,12 @@ def test_the_real_regressor_gets_the_research_s_settings(packaged, market):
     assert len(seen["fits"]) == 24 and set(seen["fit_offline"]) == {"1"}, "every fit runs offline"
 
 
-def test_the_adapter_suite_with_the_real_package(packaged, market, tmp_path):
+def test_the_adapter_suite_with_the_real_package(packaged, market, tmp_path, monkeypatch):
     _, make, _ = packaged
     suite.check_yaml_round_trip(make, market, tmp_path, TEST, horizon=1)
     suite.check_resume(make, market, tmp_path / "resume", TEST, horizon=1)
     suite.check_provenance(make, market, tmp_path / "provenance", TEST)
+    suite.check_repeated_predict(make, market, TEST, 1, monkeypatch)
     suite.check_verify(make, market, INFO, ["2023-03-13", "2023-03-26"], items=6)
 
 

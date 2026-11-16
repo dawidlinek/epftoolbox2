@@ -228,6 +228,16 @@ an issue day it didn't sample.
 
 ### New
 
+- **`refit_from=` and `refit="once"`: train once and keep the fit for a whole period.** Every model that takes `refit` takes
+  `refit_from`, a local date (`"2024-01-01"` or a `datetime.date`) that the refit calendar counts from instead of Monday
+  1970-01-05: `"7D"` refits on its weekday, a `"kMS"` rule (from the first of a month) every k months from it. `refit="once"` needs
+  it: each unit is fitted once on that date, on the rows of a forecast issued then (up to the day before it with
+  `newest_target="d-1"`, the newest targets out by its issue time with `"published"`), and every forecast issued on it or later is
+  predicted from that one fit, a network's weights included; its records are those of a `"kD"` block from the same date that covers
+  the test, bit for bit. A forecast issued before it raises `ValueError` before anything is written. A model that predicts a block
+  in one call predicts 7-day stretches from the date, each from the one fit. The manifest's `training_cut.refit_epoch` is the date,
+  so a resume with another refuses; YAML writes it only when set; stored fits keep the one fit under the date. Nothing moves without
+  it. See [Time and Calendars](/epftoolbox2/model-pipeline/time-and-calendars/#refit_from-and-refitonce).
 - **Stored fits: `ModelPipeline.refit(data, save_dir, issue="today", if_due=True)`.** Fits each model's units for an issue day
   ahead of time, on the backtest's rows and cut, and stores them in the live directory as `fits/<model>/<anchor>/units.npz` (arrays
   only, read without pickle) and `fit.json` (the configuration digest, the units, the hash of the rows read, the sha256 of

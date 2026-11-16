@@ -83,6 +83,7 @@ Both classes take, in this order, `predictors`, `training_window`, `refit`, `n_e
 | `predictors` | list | Required | Full names, `{horizon}` allowed, saved verbatim; the context's columns, raw |
 | `training_window` | int | `728` | Days of context (364 was 3 to 5 % worse in the research, 1,092 gave nothing) |
 | `refit` | str | `"7D"` | How often the context is refreshed, on the fixed calendar: `"7D"` Mondays, `"1D"` every day, `"1MS"` monthly |
+| `refit_from` | str, date or None | `None` | The local date the refit calendar counts from instead of the epoch (`"kMS"` from a first of a month); `refit="once"` needs it and fits each unit once on that date for every forecast issued on it or later: [`refit_from=` and `refit="once"`](/epftoolbox2/model-pipeline/time-and-calendars/#refit_from-and-refitonce) |
 | `n_estimators` | int | `4` (TabPFN), `8` (TabICL) | Ensemble members of one call: preprocessed views of the context (TabPFN 8 gave 19.56 against 4's 19.58, not significant) |
 | `random_state` | int | `0` | The seed of every fit's preprocessing, the same for each |
 | `device` | str | `"auto"` | `"auto"` (CUDA if a matmul runs on it, else the CPU), `"cpu"`, `"cuda"` or `"cuda:N"` |

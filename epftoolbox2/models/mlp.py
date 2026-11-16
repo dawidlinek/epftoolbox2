@@ -11,6 +11,7 @@ hash of `epftoolbox2/nets.py` and the library's version as `module_hash`, compar
 torch.
 """
 
+import datetime
 from typing import Callable, List, Optional, Sequence, Tuple, Union
 
 from .torch_model import TorchModel
@@ -125,6 +126,7 @@ class MLPHourlyModel(_MLPPreset):
         normalise_by: Optional[str] = None,
         bounds: Optional[Tuple[Optional[float], Optional[float]]] = None,
         zero_when: Optional[str] = None,
+        refit_from: Union[str, datetime.date, None] = None,
     ):
         super().__init__(
             predictors,
@@ -154,6 +156,7 @@ class MLPHourlyModel(_MLPPreset):
             normalise_by=normalise_by,
             bounds=bounds,
             zero_when=zero_when,
+            refit_from=refit_from,
         )
 
 
@@ -199,6 +202,7 @@ class MLPDailyModel(_MLPPreset):
         scaler="standard",
         name: str = "mlp_daily",
         module_hash: Optional[str] = None,
+        refit_from: Union[str, datetime.date, None] = None,
     ):
         super().__init__(
             predictors,
@@ -225,4 +229,5 @@ class MLPDailyModel(_MLPPreset):
             newest_target=newest_target,
             binary_mask=binary_mask,
             scaler=scaler,
+            refit_from=refit_from,
         )

@@ -30,6 +30,7 @@ with no spread and a single row, predicts a constant there (`_degenerate`), as L
 to the CPU (no visible GPU, a build without CUDA) raises, so a manifest never records "cuda" for CPU forecasts.
 """
 
+import datetime
 import contextlib
 import functools
 import importlib
@@ -347,6 +348,7 @@ class LightGBMModel(_BoostedTrees):
         normalise_by: Optional[str] = None,
         bounds: Optional[Tuple[Optional[float], Optional[float]]] = None,
         zero_when: Optional[str] = None,
+        refit_from: Union[str, datetime.date, None] = None,
     ):
         super().__init__(
             predictors,
@@ -359,6 +361,7 @@ class LightGBMModel(_BoostedTrees):
             normalise_by=normalise_by,
             bounds=bounds,
             zero_when=zero_when,
+            refit_from=refit_from,
         )
         self.periods = periods
         self.target_transform = target_transform
@@ -456,6 +459,7 @@ class XGBoostModel(_BoostedTrees):
         normalise_by: Optional[str] = None,
         bounds: Optional[Tuple[Optional[float], Optional[float]]] = None,
         zero_when: Optional[str] = None,
+        refit_from: Union[str, datetime.date, None] = None,
     ):
         super().__init__(
             predictors,
@@ -468,6 +472,7 @@ class XGBoostModel(_BoostedTrees):
             normalise_by=normalise_by,
             bounds=bounds,
             zero_when=zero_when,
+            refit_from=refit_from,
         )
         self.periods = periods
         self.target_transform = target_transform
@@ -586,6 +591,7 @@ class CatBoostModel(_BoostedTrees):
         normalise_by: Optional[str] = None,
         bounds: Optional[Tuple[Optional[float], Optional[float]]] = None,
         zero_when: Optional[str] = None,
+        refit_from: Union[str, datetime.date, None] = None,
     ):
         super().__init__(
             predictors,
@@ -598,6 +604,7 @@ class CatBoostModel(_BoostedTrees):
             normalise_by=normalise_by,
             bounds=bounds,
             zero_when=zero_when,
+            refit_from=refit_from,
         )
         self.periods = periods
         self.target_transform = target_transform

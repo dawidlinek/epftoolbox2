@@ -23,7 +23,7 @@ ShapeModel in a 15-minute run then:
 
 The learner is any model that fits, of period or pooled units, with a list of predictor names (the shape regressors: the hourly
 ramp from the chained base by hour lags, within-hour deviations of 15-minute forecasts from `PeriodStatsTransformer`). Its
-`training_window`, `refit`, `scaler`, `newest_target` and `binary_mask` are the ShapeModel's: properties that read the learner. A
+`training_window`, `refit`, `refit_from`, `scaler`, `newest_target` and `binary_mask` are the ShapeModel's: properties that read the learner. A
 learner with no predictors and an intercept forecasts the per-slot mean deviation over its window (B24_static); `LEARModel([],
 scaler="standard")` is one (LEAR forecasts the training mean of a fit of no column).
 
@@ -212,6 +212,7 @@ class ShapeModel(BaseModel):
             newest_target=learner.newest_target,
             refit=learner.refit,
             binary_mask=learner.binary_mask,
+            refit_from=learner.refit_from,
         )
 
     @property
@@ -320,6 +321,15 @@ class ShapeModel(BaseModel):
     @refit.setter
     def refit(self, value: Optional[str]) -> None:
         self._same_as_learner("refit", value, self.learner.refit)
+
+    @property
+    def refit_from(self) -> Optional[str]:
+        """The date the learner's refit calendar counts from."""
+        return self.learner.refit_from
+
+    @refit_from.setter
+    def refit_from(self, value: Optional[str]) -> None:
+        self._same_as_learner("refit_from", value, self.learner.refit_from)
 
     @property
     def scaler(self) -> Any:

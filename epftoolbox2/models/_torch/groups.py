@@ -8,7 +8,7 @@ the other models; a model whose key no other model of the run has runs alone, as
 GPU: a loop's arithmetic is not a stack's, so a CPU's default loop runs alone), that reads its period frames and fits as
 `TorchModel` does (no method of its own or of its instance in `_KEPT`), in a run that isn't `forecast_only`. The key: the
 module's import path (or a session class's token key) and hash, `module_params` without `dropout` (the class's defaults
-filled in), `output`, the training window(s), `refit`, the loss, batch size, epochs, patience, early-stopping share, weight
+filled in), `output`, the training window(s), `refit` and `refit_from`, the loss, batch size, epochs, patience, early-stopping share, weight
 decay, the device, `tf32`, the stack size (`pad_to`) and the named blocks' sizes.
 
 **What runs together.** A group runs like an engine group (`models/_engine.py`): chunks of `ENGINE_MAX_MODELS` models and
@@ -216,6 +216,7 @@ def stack_key(model: BaseModel, forecast_only: bool = False) -> Optional[tuple]:
         model.output,
         _canonical(model.training_window),
         model.refit,
+        model.refit_from,
         model.loss,
         model.batch_size,
         model.max_epochs,

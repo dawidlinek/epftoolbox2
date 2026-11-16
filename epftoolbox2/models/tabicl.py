@@ -10,6 +10,7 @@ precision for contexts of 1,024 rows or more, or 60 columns or more (`use_amp="a
 forecasts differ by more than rounding, and the device type is compared on resume.
 """
 
+import datetime
 from datetime import date
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -167,6 +168,7 @@ class TabICLModel(InContextModel):
         normalise_by: Optional[str] = None,
         bounds: Optional[Tuple[Optional[float], Optional[float]]] = None,
         zero_when: Optional[str] = None,
+        refit_from: Union[str, datetime.date, None] = None,
     ):
         super().__init__(
             predictors,
@@ -179,6 +181,7 @@ class TabICLModel(InContextModel):
             normalise_by=normalise_by,
             bounds=bounds,
             zero_when=zero_when,
+            refit_from=refit_from,
         )
         self.n_estimators = n_estimators
         self._setup(refit, random_state, device, weights, block_predict)

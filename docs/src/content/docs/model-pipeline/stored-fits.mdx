@@ -33,7 +33,9 @@ makes `save_dir` a live directory if it isn't one; a directory holding a backtes
 
 A unit is what a backtest fits once: with `refit` (`"7D"`, `"1MS"`, `"auto"`, see Time and Calendars) one period, horizon, list and
 training window fitted on the rows of a forecast issued on its anchor; with `refit=None` the same for one forecast, whose anchor is
-its issue day, so a fit for tomorrow can be made tonight. `refit` runs the backtest's own selection of rows, filters, binary-column
+its issue day, so a fit for tomorrow can be made tonight. With `refit="once"` every issue day's anchor is `refit_from`: the first
+`refit` on or after it stores the one fit, every later issue day finds it stored (not due) and is served from it, and an issue day
+before it raises `ValueError`. `refit` runs the backtest's own selection of rows, filters, binary-column
 mask and scaler, and `_fit_model`. Under `ModelPipeline(engine="on")` a unit also keeps its fit from shared statistics, and whether
 an issue row is too far out for it stays the row's own decision, as in the backtest.
 

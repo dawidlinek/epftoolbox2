@@ -1,6 +1,7 @@
 """LEAR, the Lasso-estimated autoregressive model of Lago, Marcjasz, De Schutter & Weron (2021), Applied Energy 293: one Lasso per
 period, its penalty chosen on every fit by an information criterion on the LARS path, or by blocked cross-validation."""
 
+import datetime
 from typing import Optional, Sequence, Tuple, Union
 
 import numpy as np
@@ -64,6 +65,7 @@ class LEARModel(BaseModel):
         normalise_by: Optional[str] = None,
         bounds: Optional[Tuple[Optional[float], Optional[float]]] = None,
         zero_when: Optional[str] = None,
+        refit_from: Union[str, datetime.date, None] = None,
     ):
         """LEAR: per period a Lasso whose penalty is chosen on every fit in two stages, from the centred sums of the scaled
         training rows alone (`models._lars.lear_fit`, scikit-learn 0.24.2's rules, which Lago et al. ran).
@@ -107,6 +109,7 @@ class LEARModel(BaseModel):
             normalise_by=normalise_by,
             bounds=bounds,
             zero_when=zero_when,
+            refit_from=refit_from,
         )
         self.criterion = criterion  # checked in __setattr__
         self.solver = solver

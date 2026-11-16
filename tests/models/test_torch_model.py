@@ -686,6 +686,8 @@ def test_the_adapter_suite(market, tmp_path, monkeypatch, registered, kind):
     suite.check_engine(make, market, test, horizon=horizon)
     suite.check_preflight_without_extra(make, monkeypatch, market, test)
     suite.check_provenance(make, market, tmp_path / "provenance", test)
+    if kind != "hourly":  # a period network predicts one row at a time: no block call
+        suite.check_repeated_predict(make, market, test, horizon, monkeypatch)
 
 
 @pytest.mark.filterwarnings("ignore:overflow encountered in sinh")  # the control's 1e6 noise, mapped back by sinh

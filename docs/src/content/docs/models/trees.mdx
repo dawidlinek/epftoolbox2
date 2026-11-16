@@ -76,6 +76,7 @@ settings, then `random_state`, `threads` (and XGBoost's `device`) and `name`; `s
 | `predictors` | list | Required | Full names, `{horizon}` allowed, saved verbatim. A ResidualModel learner's list may name the base's forecasts |
 | `training_window` | int or `"expanding"` | `"expanding"` | Days of rows, or every row from the frame's first date (validation picked the wrong window for LightGBM in 15 of 16 cases) |
 | `refit` | str | `"7D"` | The refit calendar: `"7D"` on Mondays, `"1D"` every day, `"1MS"` monthly. A pooled fit needs one |
+| `refit_from` | str, date or None | `None` | The local date the refit calendar counts from instead of the epoch (`"kMS"` from a first of a month); `refit="once"` needs it and fits each unit once on that date for every forecast issued on it or later: [`refit_from=` and `refit="once"`](/epftoolbox2/model-pipeline/time-and-calendars/#refit_from-and-refitonce) |
 | `periods` | str | `"pooled"` | `"pooled"`: one fit over the (date, period) rows of every period, its targets transformed by `target_transform`; `"each"`: one fit per period. Fixed once the model is made |
 | `objective` | str | `"l1"` | `"l1"` (absolute error) or `"l2"` (squared error): LightGBM's `l1`/`l2`, XGBoost's `reg:absoluteerror`/`reg:squarederror`, CatBoost's `MAE`/`RMSE` |
 | `random_state` | int | `0` | The seed of every fit (row and column samples), the same in each, so a forecast doesn't depend on which other fits a run makes |

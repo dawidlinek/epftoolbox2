@@ -71,6 +71,7 @@ from ._calendar import (
     check_issue_days_in,
     check_newest_target,
     check_refit,
+    check_refit_from,
     every_horizon,
     listed_days,
     mask_members,
@@ -82,6 +83,7 @@ from ._calendar import (
     resolve_horizons,
     resolve_issue_days,
     resolve_training_window,
+    rule_name,
     training_span,
 )
 from .context import (
@@ -506,6 +508,7 @@ class BaseModel(ABC):
         "normalise_by": None,
         "bounds": None,
         "zero_when": None,
+        "refit_from": None,
     }
     # True for a model that fits nothing and forecasts a column's value on the issue row (`NaiveModel`): its tasks read that row
     # alone (`_worker._row_value`), with no training rows, scaler or fit.
@@ -576,6 +579,7 @@ class BaseModel(ABC):
         normalise_by: Optional[str] = None,
         bounds: Optional[Tuple[Optional[float], Optional[float]]] = None,
         zero_when: Optional[str] = None,
+        refit_from: Union[str, datetime.date, None] = None,
     ):
         """`newest_target` is the newest target a forecast issued on D trains on: `"d-1"` the target of D-1, whatever the
         information set says, and `"published"` every target its rule says is known by the issue time on D, per period
@@ -588,6 +592,13 @@ class BaseModel(ABC):
         newest target as of a's issue time, so nothing after a trains, and each forecast predicted on its own from that fit. Only
         a model with `_fit_model` and `_predict_fitted` (OLS, LassoCV, Ridge, LEAR) can. `"auto"` gives each training window its
         own rule (`_calendar.member_rules`): `"1D"` up to 84 days, `"7D"` for a longer one or `"expanding"`.
+
+        `refit_from` (a local date, `"YYYY-MM-DD"` or a `datetime.date`; it needs `refit`) counts the refit calendar from that date
+        instead of the epoch: `"7D"` refits on its weekday, `"kMS"` (from the first of a month) every k months from it, before
+        and after it alike. `refit="once"` needs it: one fit on `refit_from`, trained as a forecast issued on it would be (rows up
+        to the day before it, or the newest targets `"published"` calls known by its issue time), serves every forecast issued
+        on that date or later, and a forecast issued before it raises (there is no fit made by then). A forecast still depends on
+        its issue day and the configuration alone.
 
         `training_window` is how many days of rows a forecast trains on (`_calendar.training_span`), `"expanding"` every row from
         the frame's first local date, or a list of them, such as `[56, 84, 728, "expanding"]`: each member is fitted on its own
@@ -635,6 +646,8 @@ class BaseModel(ABC):
         self.normalise_by = normalise_by  # validated in __setattr__, as the two below
         self.bounds = bounds
         self.zero_when = zero_when
+        # Validated in __setattr__, and with refit when a run resolves the rules (`_refit_rules`).
+        self.refit_from = refit_from
 
         self._data: Optional[pd.DataFrame] = None
         self._hour_data: Dict[int, pd.DataFrame] = {}
@@ -674,6 +687,8 @@ class BaseModel(ABC):
             value = _row_target.check_bounds(value)
         elif key == "binary_mask":
             value = check_binary_mask(value, getattr(self, "refit", None))
+        elif key == "refit_from":
+            value = check_refit_from(value)
         elif key == "refit":
             value = check_refit(value)
             check_binary_mask(getattr(self, "binary_mask", None), value)  # whichever of the two is set second raises
@@ -767,8 +782,9 @@ class BaseModel(ABC):
     @property
     def _refit_rules(self) -> Tuple[Optional[str], ...]:
         """The refit rule of each training window, in member order (`_calendar.member_rules`): `refit` for each, or with `"auto"`
-        each window's own. All None without `refit`."""
-        return member_rules(self._members, self.refit)
+        each window's own, each counted from `refit_from` when set (`"7D@2024-01-03"`). All None without `refit`; a ValueError
+        where `refit` and `refit_from` don't go together (`_calendar.check_refit_pair`)."""
+        return member_rules(self._members, self.refit, getattr(self, "refit_from", None))
 
     @property
     def _refit_block(self) -> Optional[str]:
@@ -1443,11 +1459,11 @@ class BaseModel(ABC):
             # Where an expanding window's rows start: the frame's first local date, day id 0 (the data hash covers it too).
             cut["expanding_from"] = datetime.date.fromordinal(self._first_ordinal).isoformat()
         if self.refit is not None:
-            # Which fit a forecast uses: its anchor depends on the rule and the epoch, and nothing else.
-            cut.update(refit=self.refit, refit_epoch=REFIT_EPOCH)
+            # Which fit a forecast uses: its anchor depends on the rule and the epoch (`refit_from` where given), and nothing else.
+            cut.update(refit=self.refit, refit_epoch=self.refit_from or REFIT_EPOCH)
             if self.refit == REFIT_AUTO:
                 # The rule each member resolved to, in member order: what the code made of "auto", which decides numbers.
-                cut["refit_rules"] = list(self._refit_rules)
+                cut["refit_rules"] = [rule_name(rule) for rule in self._refit_rules]
         elif self.binary_mask == MASK_FIT:
             # Which rows decide a fit's binary columns: its own, not the window's first day's.
             cut["binary_mask"] = MASK_FIT

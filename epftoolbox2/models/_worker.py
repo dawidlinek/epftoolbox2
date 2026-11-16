@@ -1,5 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any, Dict, List, NamedTuple, Optional, Tuple, Union
+from typing import Any, Dict, Iterable, List, NamedTuple, Optional, Tuple, Union
 import contextlib
 import contextvars
 import datetime
@@ -20,11 +20,13 @@ from ..scalers.registry import make_scaler
 from ..scalers.standard import StandardScaler
 from ._calendar import (
     MASK_FIT,
+    REFIT_ONCE,
     FitUnit,
     block_days,
     member_window,
     nominal_block_length,
     refit_anchor,
+    rule_name,
     training_span,
 )
 from ._row_target import (
@@ -1234,16 +1236,39 @@ def block_calls(model) -> bool:
     return len(owners) == 1 and bool(getattr(model, "block_predict", False))
 
 
-def block_rows(cfg: Dict, unit: FitUnit, days: np.ndarray, x: np.ndarray, col_idx: List[int]) -> List[int]:
+def unit_calls(cfg: Dict, unit: FitUnit, tasks: Iterable[tuple]) -> List[List[datetime.date]]:
+    """The block calls of a unit that hold its tasks, each as its days in date order (`block_days`): the one of its block, or
+    under `refit="once"`, whose one block has no end, each stretch of `ONCE_CALL_DAYS` days from `refit_from` that holds one of
+    `tasks`, in date order. A call holds every day of its stretch the frame has, the run's tasks or not, so which calls a run
+    makes depends on its tasks and a call's rows don't."""
+    rule = cfg["refit"]["rules"][unit.member]
+    if rule_name(rule) != REFIT_ONCE:
+        return [block_days(unit.anchor, rule)]
+    first_ordinal = cfg["refit"]["first_ordinal"]
+    calls: Dict[datetime.date, List[datetime.date]] = {}
+    for task in tasks:
+        days = block_days(datetime.date.fromordinal(cfg["offset"] + task[2] + first_ordinal), rule)
+        calls.setdefault(days[0], days)
+    return [calls[first] for first in sorted(calls)]
+
+
+def block_rows(
+    cfg: Dict,
+    unit: FitUnit,
+    days: np.ndarray,
+    x: np.ndarray,
+    col_idx: List[int],
+    call: Optional[List[datetime.date]] = None,
+) -> List[int]:
     """The rows of a unit's block call before padding, in a period whose rows are on `days` with values `x`: the issue row
-    (`issue_row`, so the second of a repeated autumn hour) of each day of the unit's block under its member's rule
-    (`block_days`) that the period has a row on with every input of `col_idx` finite, in date order. Every such day, whichever
-    of them the run forecasts: a call holds the same rows alone, in the full block, after a resume and whatever `test_start`
-    or `issue_days`, and only the frame's end or a missing input leaves a day out. Its inputs only: no target of the block's
-    days enters a call."""
+    (`issue_row`, so the second of a repeated autumn hour) of each day of the call (`call`, one of `unit_calls`; the unit's
+    block under its member's rule, `block_days`, if None) that the period has a row on with every input of `col_idx` finite,
+    in date order. Every such day, whichever of them the run forecasts: a call holds the same rows alone, in the full block,
+    after a resume and whatever `test_start` or `issue_days`, and only the frame's end or a missing input leaves a day out. Its
+    inputs only: no target of the block's days enters a call."""
     refit = cfg["refit"]
     rows = []
-    for day in block_days(unit.anchor, refit["rules"][unit.member]):
+    for day in block_days(unit.anchor, refit["rules"][unit.member]) if call is None else call:
         row = issue_row(days, day.toordinal() - refit["first_ordinal"])
         if row is not None and np.isfinite(x[row, col_idx]).all():
             rows.append(row)
@@ -1265,19 +1290,23 @@ def _block_forecasts(
     """(prediction in target units, coefficients) of each of `forecast`'s (task, issue row), in its order, from one fit of the
     unit (`_fit_model`) and one call of `model._predict_block` over its block's rows (`block_rows`), padded to the rule's nominal
     length (`nominal_block_length`) with copies of the first, never another day's row: one shape for every call of the rule,
-    whatever the frame, the run or a resume holds. The scaler is fitted on the training rows and transforms the call's rows
-    together, value by value, as one at a time. A fit that raises ValueError is a `fit_error` reason, returned for every task."""
-    rows = block_rows(cfg, unit, arrays["days"], arrays["x"], col_idx)
+    whatever the frame, the run or a resume holds. Under `refit="once"` the one fit makes a call per stretch that holds one of
+    `forecast` (`unit_calls`). The scaler is fitted on the training rows and transforms every call's rows together, value by
+    value, as one at a time. A fit that raises ValueError is a `fit_error` reason, returned for every task."""
     length = nominal_block_length(cfg["refit"]["rules"][unit.member])
-    if not rows or len(rows) > length:
-        raise RuntimeError(f"a block call of {len(rows)} rows for a nominal length of {length}")
-    call = rows + [rows[0]] * (length - len(rows))
-    place = {row: i for i, row in enumerate(rows)}
+    place: Dict[int, Tuple[int, int]] = {}  # issue row -> (its call, its place in the call)
+    calls = []
+    for call_days in unit_calls(cfg, unit, [task for task, _ in forecast]):
+        rows = block_rows(cfg, unit, arrays["days"], arrays["x"], col_idx, call_days)
+        if not rows or len(rows) > length:
+            raise RuntimeError(f"a block call of {len(rows)} rows for a nominal length of {length}")
+        place.update((row, (len(calls), i)) for i, row in enumerate(rows))
+        calls.append(rows + [rows[0]] * (length - len(rows)))
     scaler = make_scaler(cfg.get("scaler", "standard"))
-    train_x, train_y, call_x = scaler.fit_transform(
+    train_x, train_y, calls_x = scaler.fit_transform(
         train_x.copy(),
         train_y.copy(),
-        arrays["x"][call][:, col_idx],
+        arrays["x"][[row for call in calls for row in call]][:, col_idx],
         scalable_mask=scalable_mask,
         columns=predictors,
     )
@@ -1286,20 +1315,22 @@ def _block_forecasts(
             fitted = model._fit_model(train_x, train_y)
     except ValueError as exc:
         return f"{SKIP_FIT_ERROR}: {exc}"
-    predictions, coefficients = model._predict_block(fitted, call_x)
-    predictions = np.asarray(predictions, dtype=np.float64)
-    if predictions.shape != (length,) or len(coefficients) != length:
-        raise RuntimeError(
-            f"{type(model).__name__}._predict_block returned {predictions.shape} predictions and {len(coefficients)} "
-            f"coefficient lists for a call of {length} rows: one of each per row"
-        )
-    return [
-        (
-            scaler.inverse(float(predictions[place[test]])),
-            flat_coefficients(coefficients[place[test]], model, "_predict_block"),
-        )
-        for _, test in forecast
-    ]
+    predicted = []
+    for at in range(len(calls)):
+        predictions, coefficients = model._predict_block(fitted, calls_x[at * length : (at + 1) * length])
+        predictions = np.asarray(predictions, dtype=np.float64)
+        if predictions.shape != (length,) or len(coefficients) != length:
+            raise RuntimeError(
+                f"{type(model).__name__}._predict_block returned {predictions.shape} predictions and {len(coefficients)} "
+                f"coefficient lists for a call of {length} rows: one of each per row"
+            )
+        predicted.append((predictions, coefficients))
+    out = []
+    for _, test in forecast:
+        at, i = place[test]
+        predictions, coefficients = predicted[at]
+        out.append((scaler.inverse(float(predictions[i])), flat_coefficients(coefficients[i], model, "_predict_block")))
+    return out
 
 
 _REAL = (int, float, np.integer, np.floating)
@@ -1578,33 +1609,51 @@ def _fit_day_unit(
     trained = valid.any(axis=0)
 
     rule = refit["rules"][unit.member]
-    block = block_days(unit.anchor, rule)
-    block_first = block[0].toordinal() - first_ordinal
-    has_day, block_x, _ = day_arrays(inputs.hour_arrays, periods, predictors, block_first, block_first + len(block) - 1)
-    in_call = has_day & (np.isfinite(block_x).all(axis=1) if block_x.shape[1] else True)
+    # Each call's (first day id, its days' values, which of them are in it): the block's one, or one per stretch under "once".
+    calls = []
+    for block in unit_calls(cfg, unit, [task for task, _ in issued]):
+        block_first = block[0].toordinal() - first_ordinal
+        has_day, block_x, _ = day_arrays(
+            inputs.hour_arrays, periods, predictors, block_first, block_first + len(block) - 1
+        )
+        calls.append(
+            (
+                block_first,
+                len(block),
+                block_x,
+                has_day & (np.isfinite(block_x).all(axis=1) if block_x.shape[1] else True),
+            )
+        )
 
     forecast = []
     for task, test in issued:
-        place = cfg["offset"] + task[2] - block_first
+        day_id = cfg["offset"] + task[2]
+        at = next(at for at, (first_id, days, _, _) in enumerate(calls) if first_id <= day_id < first_id + days)
+        place = day_id - calls[at][0]
         if not trained[task[0]]:
             outcomes.append((task, SKIP_NO_FINITE_TRAINING_ROWS))
-        elif not in_call[place]:
+        elif not calls[at][3][place]:
             outcomes.append((task, SKIP_MISSING_TEST_PREDICTORS))
         else:
-            forecast.append((task, test, place))
+            forecast.append((task, test, (at, place)))
     if not forecast:
         return outcomes
 
-    rows = [int(day) for day in np.flatnonzero(in_call)]
     length = nominal_block_length(rule)
-    if len(rows) > length:
-        raise RuntimeError(f"a block call of {len(rows)} days for a nominal length of {length}")
-    call = rows + [rows[0]] * (length - len(rows))
-    position = {row: i for i, row in enumerate(rows)}
+    position: Dict[Tuple[int, int], int] = {}  # (call, day in it) -> its row in the calls' rows
+    taken = []  # each call that holds a forecast: its rows, padded
+    for at, (_, _, block_x, in_call) in enumerate(calls):
+        rows = [int(day) for day in np.flatnonzero(in_call)]
+        if len(rows) > length:
+            raise RuntimeError(f"a block call of {len(rows)} days for a nominal length of {length}")
+        if not any(where[0] == at for _, _, where in forecast):
+            continue  # a stretch whose days all skip makes no call
+        position.update(((at, row), len(taken) * length + i) for i, row in enumerate(rows))
+        taken.append(block_x[rows + [rows[0]] * (length - len(rows))])
     scaler = make_scaler(cfg.get("scaler", "standard"))
     # The scaler's inputs only: the targets go through each period's Invariant below.
-    fit_x, _, call_x = scaler.fit_transform(
-        train_x.copy(), np.zeros(len(train_x)), block_x[call].copy(), scalable_mask=scalable_mask, columns=predictors
+    fit_x, _, calls_x = scaler.fit_transform(
+        train_x.copy(), np.zeros(len(train_x)), np.concatenate(taken), scalable_mask=scalable_mask, columns=predictors
     )
     target = target_of(cfg["units"]["target_transform"]).fit(train_y, valid)
     fit_y = np.where(valid, target.transform(train_y), np.nan)
@@ -1614,20 +1663,25 @@ def _fit_day_unit(
             fitted = model._fit_days(fit_x, fit_y, valid.copy())
     except ValueError as exc:
         return outcomes + [(task, f"{SKIP_FIT_ERROR}: {exc}") for task, _, _ in forecast]
-    predicted = np.asarray(model._predict_days(fitted, call_x), dtype=np.float64)
-    # (rows, P), or (members, rows, P) for a fit of several members (seeds) whose forecast is their mean in target units.
-    if predicted.shape[-2:] != (length, periods) or predicted.ndim not in (2, 3) or not predicted.shape[0]:
-        raise RuntimeError(
-            f"{type(model).__name__}._predict_days returned an array of shape {predicted.shape} for a call of {length} rows "
-            f"and {periods} periods: one row of {periods} per row of the call (and per member, before them)"
-        )
+    each = []
+    for at in range(len(taken)):
+        predicted = np.asarray(model._predict_days(fitted, calls_x[at * length : (at + 1) * length]), dtype=np.float64)
+        # (rows, P), or (members, rows, P) for a fit of several members (seeds) whose forecast is their mean in target units.
+        if predicted.shape[-2:] != (length, periods) or predicted.ndim not in (2, 3) or not predicted.shape[0]:
+            raise RuntimeError(
+                f"{type(model).__name__}._predict_days returned an array of shape {predicted.shape} for a call of {length} "
+                f"rows and {periods} periods: one row of {periods} per row of the call (and per member, before them)"
+            )
+        each.append(predicted)
     for task, test, place in forecast:
         period = task[0]
+        at, row = divmod(position[place], length)
+        predicted = each[at]
         if predicted.ndim == 3:
             # Each member mapped back with the period's Invariant, then their mean, exactly rounded (`_combined`'s rule).
-            prediction = member_mean(target.inverse(predicted[:, position[place], period], period))
+            prediction = member_mean(target.inverse(predicted[:, row, period], period))
         else:
-            prediction = float(target.inverse(predicted[position[place], period], period))
+            prediction = float(target.inverse(predicted[row, period], period))
         outcomes.append((task, _unit_record(inputs, unit, task, test, prediction, [], newest)))
     return outcomes
 
@@ -1733,21 +1787,26 @@ def _fit_pooled_unit(
     trained = np.isin(np.arange(periods), groups)
 
     rule = refit["rules"][unit.member]
-    call_rows: List[Tuple[int, int]] = []  # (period, issue row) of each block day's period the frame has, inputs finite
-    values: List[np.ndarray] = []
-    for day in block_days(unit.anchor, rule):
-        day_id = day.toordinal() - first_ordinal
-        for period in range(periods):
-            arrays = inputs.hour_arrays[period]
-            row = issue_row(arrays["days"], day_id)
-            if row is None:
-                continue
-            found = pooled_values(arrays, predictors, [row], period)
-            if np.isfinite(found).all():
-                call_rows.append((period, row))
-                values.append(found)
+    # Each call's rows: (period, issue row) of each of its days' periods the frame has, inputs finite, and their values. The
+    # block's one call, or under "once" one per stretch that holds a task (`unit_calls`).
+    calls: List[Tuple[List[Tuple[int, int]], List[np.ndarray]]] = []
+    for block in unit_calls(cfg, unit, [task for task, _ in issued]):
+        call_rows: List[Tuple[int, int]] = []
+        values: List[np.ndarray] = []
+        for day in block:
+            day_id = day.toordinal() - first_ordinal
+            for period in range(periods):
+                arrays = inputs.hour_arrays[period]
+                row = issue_row(arrays["days"], day_id)
+                if row is None:
+                    continue
+                found = pooled_values(arrays, predictors, [row], period)
+                if np.isfinite(found).all():
+                    call_rows.append((period, row))
+                    values.append(found)
+        calls.append((call_rows, values))
 
-    place = {key: i for i, key in enumerate(call_rows)}
+    place = {key: (at, i) for at, (call_rows, _) in enumerate(calls) for i, key in enumerate(call_rows)}
     forecast = []
     scales = {}  # (period, issue row) -> its scale, with `normalise_by`
     offsets = {}  # (period, issue row) -> its offset, with one
@@ -1785,12 +1844,19 @@ def _fit_pooled_unit(
         return outcomes
 
     length = nominal_block_length(rule) * periods
-    if len(call_rows) > length:
-        raise RuntimeError(f"a block call of {len(call_rows)} rows for a nominal length of {length}")
-    call = np.vstack(values + [values[0]] * (length - len(values)))
+    # The calls that hold a forecast, in date order: one under every rule but "once".
+    used = sorted({place[(task[0], test)][0] for task, test in forecast})
+    taken = {at: i for i, at in enumerate(used)}
+    stacked = []
+    for at in used:
+        call_rows, values = calls[at]
+        if len(call_rows) > length:
+            raise RuntimeError(f"a block call of {len(call_rows)} rows for a nominal length of {length}")
+        stacked.extend(values + [values[0]] * (length - len(values)))
+    call = np.vstack(stacked)
     scaler = make_scaler(cfg.get("scaler", "standard"))
     # Every scaler copies its input, which isn't read again: let go of it as soon as the scaled copy exists.
-    fit_x, _, call_x = scaler.fit_transform(
+    fit_x, _, calls_x = scaler.fit_transform(
         train_x, np.zeros(len(train_x)), call, scalable_mask=scalable_mask, columns=predictors
     )
     del train_x
@@ -1801,15 +1867,19 @@ def _fit_pooled_unit(
             fitted = model._fit_model(fit_x, target.transform(train_y, target_groups))
     except ValueError as exc:
         return outcomes + [(task, f"{SKIP_FIT_ERROR}: {exc}") for task, _ in forecast]
-    predictions, coefficients = model._predict_block(fitted, call_x)
-    predictions = np.asarray(predictions, dtype=np.float64)
-    if predictions.shape != (length,) or len(coefficients) != length:
-        raise RuntimeError(
-            f"{type(model).__name__}._predict_block returned {predictions.shape} predictions and {len(coefficients)} "
-            f"coefficient lists for a call of {length} rows: one of each per row"
-        )
+    each = []
+    for i in range(len(used)):
+        predictions, coefficients = model._predict_block(fitted, calls_x[i * length : (i + 1) * length])
+        predictions = np.asarray(predictions, dtype=np.float64)
+        if predictions.shape != (length,) or len(coefficients) != length:
+            raise RuntimeError(
+                f"{type(model).__name__}._predict_block returned {predictions.shape} predictions and {len(coefficients)} "
+                f"coefficient lists for a call of {length} rows: one of each per row"
+            )
+        each.append((predictions, coefficients))
     for task, test in forecast:
-        i = place[(task[0], test)]
+        at, i = place[(task[0], test)]
+        predictions, coefficients = each[taken[at]]
         prediction = float(target.inverse(predictions[i], task[0] if per_period else 0))
         if row_target is not None:
             prediction = scaled_back(row_target, prediction, scales.get((task[0], test)), offsets.get((task[0], test)))

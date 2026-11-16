@@ -249,7 +249,16 @@ def test_every_setting_reaches_the_workers(cls):
     its default."""
     import inspect
 
-    parent_side = {"predictors", "training_window", "refit", "name", "scaler", "newest_target", "binary_mask"}
+    parent_side = {
+        "predictors",
+        "training_window",
+        "refit",
+        "refit_from",
+        "name",
+        "scaler",
+        "newest_target",
+        "binary_mask",
+    }
     parent_side |= {"normalise_by", "bounds", "zero_when"}  # a per-row target: the worker reads them from its config
     parent_side |= {"target_transform"}  # a pooled unit's: the worker reads it from its config (`config["units"]`)
     assert set(cls(INPUTS)._model_kwargs) == set(inspect.signature(cls).parameters) - parent_side
@@ -841,6 +850,7 @@ def test_the_adapter_suite(family, market, tmp_path, monkeypatch):
     suite.check_resume(named, market, tmp_path / "resume", TEST, horizon=1)
     suite.check_engine(named, market, TEST, horizon=1)
     suite.check_provenance(named, market, tmp_path / "provenance", TEST)
+    suite.check_repeated_predict(named, market, TEST, 1, monkeypatch)
     # More trees than the other checks, so that the control's noise moves every forecast out of its leaf.
     more = {
         "lightgbm": {"n_estimators": 60},
