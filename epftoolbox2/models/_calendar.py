@@ -306,6 +306,14 @@ def check_refit_from(value: Any) -> Optional[str]:
             parsed = None
         if parsed is not None and parsed.isoformat() == value:
             return value
+    if isinstance(value, (datetime.datetime, np.datetime64)):
+        # A time stamp (pd.Timestamp is a datetime) names an instant, and a tz-aware one's local date depends on the zone.
+        raise ValueError(
+            f"refit_from must be None, a datetime.date or a 'YYYY-MM-DD' text, got the time stamp {value!r}: it is a local "
+            "date, and a stamp's date depends on its zone. Pass the local date you mean, such as ts.date() or "
+            "str(ts.date()) for a datetime or pd.Timestamp ts in the frame's zone (ts.tz_convert(zone).date() for one in "
+            "another), or str(value)[:10] for a numpy datetime64"
+        )
     raise ValueError(
         f"refit_from must be None, a datetime.date or a 'YYYY-MM-DD' text, got {value!r}: the local date the refit blocks "
         "count from, such as '2024-01-01'"

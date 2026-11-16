@@ -238,6 +238,21 @@ def test_refit_from_is_a_local_date(bad):
     assert model.refit_from is None
 
 
+@pytest.mark.parametrize(
+    "stamp",
+    [
+        datetime.datetime(2024, 1, 3),
+        pd.Timestamp("2024-01-03"),
+        pd.Timestamp("2024-01-03", tz="Europe/Warsaw"),
+        np.datetime64("2024-01-03"),
+    ],
+)
+def test_a_time_stamp_is_refused_with_how_to_pass_its_date(stamp):
+    """A stamp names an instant, and a tz-aware one's local date depends on the zone: refused, with the way to give the date."""
+    with pytest.raises(ValueError, match=r"time stamp .*ts\.date\(\) or str\(ts\.date\(\)\)"):
+        check_refit_from(stamp)
+
+
 def test_refit_from_is_kept_as_its_iso_date():
     assert check_refit("once") == "once"
     assert check_refit_from(datetime.date(2024, 1, 3)) == "2024-01-03" == check_refit_from("2024-01-03")
