@@ -853,3 +853,59 @@ def test_waits_snapshot_and_quality_read_the_issue_rows_the_models_read_in_the_f
     assert (str(inputs.min()), len(inputs)) == ("2023-03-07 00:00:00+02:00", 24)
     commit = LiveStore(live).committed()[ISSUE][1].line
     assert (commit["issue_timezone"], commit["data_timezone"]) == ("Europe/Warsaw", "Europe/Helsinki")
+
+
+def test_the_export_writes_every_planned_target_day_even_one_without_records():
+    """A missing input on one issue row fails `a`'s horizon-2 day (`periods`), so the average has no record of that target day
+    at all: its 24 products are still written, with status "missing", as the skipped status says."""
+    gappy = DATA.copy()
+    row = gappy.index[gappy.index.normalize() == pd.Timestamp(ISSUE, tz="Europe/Warsaw")][7]
+    gappy.loc[row, "wind_d+2"] = np.nan
+    p = pipeline(
+        ols("a"),
+        NaiveModel(["price_d-1"], name="naive"),
+        ensembles=[AverageEnsemble(["a", "naive"], name="avg")],
+        checks=ForecastChecks(),
+    )
+    result = p.forecast(gappy, ISSUE, None, horizon=2)
+    assert (result.status, result.missing, result.planned) == ("skipped", 24, 48)
+    assert not [r for r in result.records["avg"] if r["target_date"] == "2023-03-09"]
+    products = result.table("products")
+    assert len(products) == 48 and sorted(products["target_date"].unique()) == ["2023-03-08", "2023-03-09"]
+    assert (products[products["target_date"] == "2023-03-09"]["status"] == "missing").all()
+    periods = result.table("periods")
+    assert len(periods) == 48 and periods["prediction"].isna().sum() == 24
+
+
+@pytest.mark.parametrize(
+    "freq, days, issue, horizons, products, periods",
+    [
+        (
+            "1h",
+            75,
+            "2023-03-25",
+            [1],
+            23,
+            23,
+        ),  # the spring day: 23 hours, the skipped one neither a product nor a period
+        ("1h", 60, ISSUE, [1, 2, 3], 72, 72),  # hourly, several horizons: each target day's 24 products
+        ("1D", 60, ISSUE, [1, 2], 2, 2),  # one product a day, from its local midnight
+    ],
+    ids=["spring-1h", "hourly-three-horizons", "daily"],
+)
+def test_the_export_grids_on_each_clock(freq, days, issue, horizons, products, periods):
+    data = make_market_data(start="2023-01-20", days=days, horizon=3, noise=2.0)
+    if freq == "1D":
+        data = data.at_time("12:00")
+    result = pipeline(ols(window=14)).forecast(data, issue, None, horizons=horizons, freq=freq)
+    table = result.table("products")
+    assert (len(table), len(result.table("periods"))) == (products, periods)
+    assert (table["status"] == "ok").all() and table["occurrence"].eq(1).all()
+    for horizon, day in table.groupby("horizon"):
+        assert day["start_utc"].is_unique
+        target = datetime.date.fromisoformat(issue) + datetime.timedelta(days=int(horizon))
+        assert (day["target_date"] == target.isoformat()).all()
+        first = pd.Timestamp(day["start_utc"].iloc[0]).tz_convert("Europe/Warsaw")
+        assert (first.date(), first.hour, first.minute) == (target, 0, 0)
+    if freq == "1h" and issue == "2023-03-25":
+        assert 2 not in set(table["slot"])

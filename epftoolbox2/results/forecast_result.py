@@ -128,6 +128,8 @@ class ForecastResult:
     planned: Optional[int] = None
     missing: Optional[int] = None
     rungs: Dict[str, int] = field(default_factory=dict, repr=False)
+    # (period, horizon) of every key the issue plans (`IssueCalendar`): the export writes each, with or without a record.
+    planned_keys: Optional[List[Tuple[int, int]]] = field(default=None, repr=False)
     freq: str = "1h"
     zone: Any = None
     call: Optional[Dict[str, Any]] = field(default=None, repr=False)
@@ -167,7 +169,7 @@ class ForecastResult:
         `"products"` (one row per market product: `target_date`, `slot`, `occurrence`, `start_utc`, `horizon`, `prediction`,
         `status`, so the repeated autumn hour's forecast is written for both of its occurrences: 100 quarter-hours that day) or
         `"periods"` (one row per period, as the records hold them). A key without a forecast is written with an empty
-        prediction and its status. Returns the path. Writing is the user's: nothing is delivered (decision 1)."""
+        prediction and its status, a planned key without any record with status "missing". Returns the path. Writing is the user's: nothing is delivered (decision 1)."""
         if format not in FORMATS:
             raise ValueError(f"format must be one of {list(FORMATS)}, got {format!r}")
         if grid not in GRIDS:
@@ -182,9 +184,34 @@ class ForecastResult:
             path.write_text(json.dumps(rows, indent=1, default=str) + "\n", encoding="utf-8")
         return path
 
+    def _target_date(self, horizon: int) -> str:
+        return (datetime.date.fromisoformat(self.issue) + datetime.timedelta(days=int(horizon))).isoformat()
+
+    def _planned_frame(self, periods: pd.DataFrame) -> pd.DataFrame:
+        """`periods` with a row (no prediction, status "missing") for each planned key without a record."""
+        if self.planned_keys is None:
+            return periods
+        held = {(int(row.hour), int(row.horizon)) for row in periods.itertuples(index=False)}
+        lacking = [
+            {
+                "run_date": self.issue,
+                "target_date": self._target_date(h),
+                "hour": int(p),
+                "horizon": int(h),
+                "prediction": None,
+                "status": "missing",
+            }
+            for p, h in self.planned_keys
+            if (int(p), int(h)) not in held
+        ]
+        if not lacking:
+            return periods
+        out = pd.concat([periods, pd.DataFrame(lacking)], ignore_index=True) if len(periods) else pd.DataFrame(lacking)
+        return out.sort_values(["horizon", "target_date", "hour"], kind="stable").reset_index(drop=True)
+
     def table(self, grid: str = "products", model: Optional[str] = None) -> pd.DataFrame:
         """What `export` writes, as a DataFrame."""
-        periods = self.frame(model)
+        periods = self._planned_frame(self.frame(model))
         if grid == "periods":
             return periods.rename(columns={"hour": "period"})
         if grid != "products":
@@ -193,6 +220,8 @@ class ForecastResult:
             (str(row.target_date), int(row.horizon), int(row.hour)): row for row in periods.itertuples(index=False)
         }
         days = sorted({(str(row.target_date), int(row.horizon)) for row in periods.itertuples(index=False)})
+        if self.planned_keys is not None:  # every planned target day, whether or not a record of it was made
+            days = sorted({*days, *((self._target_date(h), int(h)) for _, h in self.planned_keys)})
         extra = [column for column in ("rung", "member") if column in periods.columns]
         rows = []
         for target_date, horizon in days:

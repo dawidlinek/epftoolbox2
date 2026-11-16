@@ -973,6 +973,7 @@ def _issue(
             planned=len(planned),
             missing=missing,
             rungs=rungs,
+            planned_keys=planned,
             zone=data_zone,
         )
 
