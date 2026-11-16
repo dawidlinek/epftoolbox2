@@ -47,6 +47,7 @@ model = TorchModel(module=MLP, module_params={"hidden": [256, 128], "dropout": 0
 | `output` | `"day"` | `"day"`: one network per (horizon, refit day) with an output for every period of the target day, day-level predictors only; `"period"`: one network per (period, horizon, refit day) with one output |
 | `training_window` | `728` | Days of rows per fit, `"expanding"`, or a list of them averaged in EUR/MWh, as for every model |
 | `refit` | `"7D"` | The fixed refit calendar: `"7D"` on Mondays, `"1MS"`, `"1D"`, `"auto"`; `None` fits every forecast (`output="period"` only) |
+| `refit_from` | `None` | The local date the refit calendar counts from instead of the epoch; with `refit="once"` each network is trained once on that date and its weights forecast every issue day from then on: [`refit_from=` and `refit="once"`](/epftoolbox2/model-pipeline/time-and-calendars/#refit_from-and-refitonce) |
 | `seeds` | `4` | Networks per fit, each with its own seed; a forecast is their mean in EUR/MWh |
 | `loss` | `"l1"` | `"l1"`, `"mse"` or an elementwise function `(prediction, target) -> loss` as `"package.module:function"`, in the scaled target space; the library masks missing slots and averages |
 | `lr` | `3e-4` | Adam's learning rate |

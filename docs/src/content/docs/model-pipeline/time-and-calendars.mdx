@@ -120,6 +120,8 @@ calendar, and forecasts the issue days in between from the last fit:
   July or October, and `"12MS"` 1 January.
 - **`"auto"`**: a rule per [training window](/epftoolbox2/model-pipeline/training-windows/), `"1D"` for a window of up to 84 days
   and `"7D"` for a longer one or `"expanding"`. See [`refit="auto"`](#refitauto) below.
+- **`"once"`**, with `refit_from`: one fit on that date for every forecast issued on it or later. See
+  [`refit_from=` and `refit="once"`](#refit_from-and-refitonce) below, which also counts the other rules from a date of your choice.
 
 Anything else raises `ValueError` when the model is built, such as `"7d"`, `"0D"`, `7` or `"Auto"`. Only
 [`OLSModel`](/epftoolbox2/models/ols/), [`LassoCVModel`](/epftoolbox2/models/lasso/), [`RidgeModel`](/epftoolbox2/models/ridge/) and [`LEARModel`](/epftoolbox2/models/lear/) take it.
@@ -233,6 +235,50 @@ lose 0.39 and 0.24 % of their MAE, and the average moves from 3.6224 to 3.6252 E
 `None` is better). It makes 57 % of the fits, exactly (2 + 2/7) / 4 since two windows of four still refit daily, at about 40 % of
 the compute (one run of each on a shared machine; the short windows are about a third of a fit's cost here, not the fifth they were in
 the study). Forecasts issued on a Monday are those of `refit=None`, bit for bit.
+
+### `refit_from=` and `refit="once"`
+
+`refit_from`, a local date (`"2024-01-03"` or a `datetime.date`, in the frame's zone as an issue day is), counts the calendar from
+that date instead of the epoch, before it as after it. `"7D"` from Wednesday 2024-01-03 refits on Wednesdays (2023-12-27, 2024-01-03,
+2024-01-10, ...); a `"kMS"` rule needs the first of a month and refits every k months from it, so `"12MS"` from `"2024-07-01"` refits
+on every 1 July; under `"auto"` the weekly windows count from it. A `refit_from` on the epoch's own days (`"7D"` from any Monday)
+gives the anchors and the records of no `refit_from`, bit for bit; only the manifest differs. Without it nothing changes.
+
+`refit="once"` needs `refit_from` F: each unit (period, horizon, list, training window) is fitted once, on F, on the rows of a
+forecast issued on F (dated F-W-h to F-1-h with `newest_target="d-1"`; with `"published"` up to the newest targets its rule says are
+known at the issue time on F, never a row dated F or later), and every forecast issued on F or later is predicted from that fit, each
+on its own row. That is how to train a network once and keep its weights for a whole test period:
+
+```python
+from epftoolbox2.models import LEARModel
+from epftoolbox2.pipelines import ModelPipeline
+
+pipeline = ModelPipeline()
+pipeline.add_model(
+    LEARModel(["load_d+{horizon}", "wind_d+{horizon}"], training_window=728, refit="once", refit_from="2024-01-01", name="LEAR once")
+)
+```
+
+- **A forecast still depends on its issue day and the configuration alone.** F is part of the configuration, so a forecast is the
+  same in a run that starts or ends elsewhere, after a resume, or served from a stored fit.
+- **Before F there is no fit.** A forecast issued before F would need a fit trained on rows after its issue day, so a run, a
+  validation window, a probe or `ModelPipeline.refit` with an issue day before F raises `ValueError` naming both dates, before anything
+  is written. Start the test (and every validation window) on F or later, or give an earlier F.
+- **It is one long block.** `"once"` is the block of `"kD"` from F with k past the test's end: their records are the same bit for bit,
+  `refit_anchor` F in each, on the model path and in an [engine group](/epftoolbox2/model-pipeline/engine/). The frame must reach back
+  W+h days from F (see above), whatever the test's first day.
+- **Block calls.** A model that predicts a block in one call ([TabPFN, TabICL](/epftoolbox2/models/in-context/), the
+  [tree models](/epftoolbox2/models/trees/), day and pooled units such as `MLPDailyModel`) predicts under `"once"` a stretch of 7 days
+  from F per call, padded to 7 days as a `"7D"` block's call is, all from the one fit. So the first week's forecasts are those of
+  `"7D"` from F, and a forecast doesn't depend on which other days the run holds.
+- **Processes.** The test is one block, so one worker runs it, with `THREADS_PER_PROCESS` units at once: the run makes far fewer fits,
+  but doesn't spread them over processes.
+- **Manifest, resume and YAML.** With `refit_from` the manifest's `training_cut.refit_epoch` is that date (`"1970-01-05"` without
+  it), and `"once"` is its `refit`, so a resume with another `refit` or `refit_from` refuses with `ManifestMismatchError`. YAML writes
+  `refit_from` only when it is set.
+- **Stored fits.** [`ModelPipeline.refit`](/epftoolbox2/model-pipeline/stored-fits/) stores the one fit under F on the first issue day
+  it is asked for, every later issue day finds it stored (not due) and is served from it, and an issue day before F raises.
+- Foundation models fine-tune on their own calendar (`fine_tune_every`) and take no `refit_from`.
 
 ## Binary columns and `test_start`
 

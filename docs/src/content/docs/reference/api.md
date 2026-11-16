@@ -718,28 +718,32 @@ class OLSModel(BaseModel):
                  fit_intercept: bool = False, name: str = "Model", scaler: ScalerSpec = "standard",
                  newest_target: str = "d-1", refit: Optional[str] = None,
                  binary_mask: Optional[str] = None, normalise_by: Optional[str] = None,
-                 bounds: Optional[Tuple[Optional[float], Optional[float]]] = None, zero_when: Optional[str] = None): ...
+                 bounds: Optional[Tuple[Optional[float], Optional[float]]] = None, zero_when: Optional[str] = None,
+                 refit_from: Union[str, datetime.date, None] = None): ...
 
 class LassoCVModel(BaseModel):
     def __init__(self, predictors: Union[List, Callable], training_window: int = 365,
                  cv: int = 5, max_iter: int = 10000, *, fit_intercept: bool = True,
                  name: str = "Model", scaler: ScalerSpec = "standard", newest_target: str = "d-1",
                  refit: Optional[str] = None, binary_mask: Optional[str] = None, normalise_by: Optional[str] = None,
-                 bounds: Optional[Tuple[Optional[float], Optional[float]]] = None, zero_when: Optional[str] = None): ...
+                 bounds: Optional[Tuple[Optional[float], Optional[float]]] = None, zero_when: Optional[str] = None,
+                 refit_from: Union[str, datetime.date, None] = None): ...
 
 class RidgeModel(BaseModel):                # penalty chosen by leave-one-out (RidgeCV, cv=None)
     def __init__(self, predictors: Union[List, Callable], training_window: int = 365,
                  alphas: Optional[Sequence[float]] = None, *, fit_intercept: bool = True,
                  name: str = "Model", scaler: ScalerSpec = "standard", newest_target: str = "d-1",
                  refit: Optional[str] = None, binary_mask: Optional[str] = None, normalise_by: Optional[str] = None,
-                 bounds: Optional[Tuple[Optional[float], Optional[float]]] = None, zero_when: Optional[str] = None): ...
+                 bounds: Optional[Tuple[Optional[float], Optional[float]]] = None, zero_when: Optional[str] = None,
+                 refit_from: Union[str, datetime.date, None] = None): ...
 
 class LEARModel(BaseModel):                 # Lasso, penalty by AIC/BIC on the LARS path + Lago's refit, or blocked CV
     def __init__(self, predictors: Union[List, Callable], training_window=(56, 84, 728, "expanding"),
                  criterion: str = "bic", solver: str = "lars", *, scaler: ScalerSpec = "asinh",
                  name: str = "LEAR", newest_target: str = "d-1", refit: Optional[str] = None,
                  binary_mask: Optional[str] = None, normalise_by: Optional[str] = None,
-                 bounds: Optional[Tuple[Optional[float], Optional[float]]] = None, zero_when: Optional[str] = None): ...
+                 bounds: Optional[Tuple[Optional[float], Optional[float]]] = None, zero_when: Optional[str] = None,
+                 refit_from: Union[str, datetime.date, None] = None): ...
 
     @classmethod
     def lago(cls, exogenous: Sequence[str], *, price: str = "price", calendar_prefix: str = "",
@@ -761,7 +765,8 @@ class HistGBModel(BaseModel):               # scikit-learn's HistGradientBoostin
                  l2_regularization: float = 1.0, max_features: float = 0.5, random_state: int = 0,
                  name: str = "hgb", *, scaler: Any = INVARIANT_TARGET, target_transform: str = "per_period",
                  newest_target: str = "d-1", binary_mask: Optional[str] = None, normalise_by: Optional[str] = None,
-                 bounds: Optional[Tuple[Optional[float], Optional[float]]] = None, zero_when: Optional[str] = None): ...
+                 bounds: Optional[Tuple[Optional[float], Optional[float]]] = None, zero_when: Optional[str] = None,
+                 refit_from: Union[str, datetime.date, None] = None): ...
 
 class LightGBMModel(BaseModel):             # LightGBM's LGBMRegressor, pooled over periods by default ([lightgbm])
     def __init__(self, predictors: List[str], training_window: Union[int, str] = "expanding",
@@ -771,7 +776,8 @@ class LightGBMModel(BaseModel):             # LightGBM's LGBMRegressor, pooled o
                  reg_lambda: float = 1.0, random_state: int = 0, threads: int = 1, name: str = "lgbm", *,
                  scaler: Any = INVARIANT_TARGET, target_transform: str = "per_period", newest_target: str = "d-1",
                  binary_mask: Optional[str] = None, normalise_by: Optional[str] = None,
-                 bounds: Optional[Tuple[Optional[float], Optional[float]]] = None, zero_when: Optional[str] = None): ...
+                 bounds: Optional[Tuple[Optional[float], Optional[float]]] = None, zero_when: Optional[str] = None,
+                 refit_from: Union[str, datetime.date, None] = None): ...
 
 class XGBoostModel(BaseModel):              # XGBoost's XGBRegressor (tree_method="hist") ([xgboost])
     def __init__(self, predictors: List[str], training_window: Union[int, str] = "expanding",
@@ -781,7 +787,8 @@ class XGBoostModel(BaseModel):              # XGBoost's XGBRegressor (tree_metho
                  random_state: int = 0, threads: int = 1, device: str = "cpu", name: str = "xgb", *,
                  scaler: Any = INVARIANT_TARGET, target_transform: str = "per_period", newest_target: str = "d-1",
                  binary_mask: Optional[str] = None, normalise_by: Optional[str] = None,
-                 bounds: Optional[Tuple[Optional[float], Optional[float]]] = None, zero_when: Optional[str] = None): ...
+                 bounds: Optional[Tuple[Optional[float], Optional[float]]] = None, zero_when: Optional[str] = None,
+                 refit_from: Union[str, datetime.date, None] = None): ...
 
 class CatBoostModel(BaseModel):             # CatBoost's CatBoostRegressor ([catboost])
     def __init__(self, predictors: List[str], training_window: Union[int, str] = "expanding",
@@ -790,12 +797,14 @@ class CatBoostModel(BaseModel):             # CatBoost's CatBoostRegressor ([cat
                  threads: int = 1, name: str = "catboost", *, scaler: Any = INVARIANT_TARGET,
                  target_transform: str = "per_period", newest_target: str = "d-1",
                  binary_mask: Optional[str] = None, normalise_by: Optional[str] = None,
-                 bounds: Optional[Tuple[Optional[float], Optional[float]]] = None, zero_when: Optional[str] = None): ...
+                 bounds: Optional[Tuple[Optional[float], Optional[float]]] = None, zero_when: Optional[str] = None,
+                 refit_from: Union[str, datetime.date, None] = None): ...
 
 class ResidualModel(BaseModel):             # a base's out-of-sample forecasts + a learner fitted on their residuals
     def __init__(self, base: Union[BaseModel, str], learner: BaseModel,
                  training_window: Union[int, str] = "expanding", refit: Optional[str] = "7D",
-                 warmup: Optional[int] = None, name: str = "residual"): ...
+                 warmup: Optional[int] = None, name: str = "residual",
+                 refit_from: Union[str, datetime.date, None] = None): ...
 
 class ShapeModel(BaseModel):                # a chained hourly forecast + a learner of each quarter-hour's deviation (15min)
     def __init__(self, base: str, learner: BaseModel, *, period: str = "1h",
@@ -811,7 +820,8 @@ class TorchModel(BaseModel):                # a torch.nn.Module class of your ow
                  pad_to: Optional[int] = None, device: str = "auto", tf32: bool = False, random_state: int = 0,
                  newest_target: str = "d-1", binary_mask: Optional[str] = None, scaler: ScalerSpec = "standard",
                  name: str = "torch", module_hash: Optional[str] = None, normalise_by: Optional[str] = None,
-                 bounds: Optional[Tuple[Optional[float], Optional[float]]] = None, zero_when: Optional[str] = None): ...
+                 bounds: Optional[Tuple[Optional[float], Optional[float]]] = None, zero_when: Optional[str] = None,
+                 refit_from: Union[str, datetime.date, None] = None): ...
 
 class MLPHourlyModel(TorchModel):           # nets.MLP, output="period": one network per (period, horizon, refit day)
     def __init__(self, predictors: Union[List, Callable], hidden: Sequence[int] = (64,), dropout: float = 0.0,
@@ -821,7 +831,8 @@ class MLPHourlyModel(TorchModel):           # nets.MLP, output="period": one net
                  pad_to: Optional[int] = None, device: str = "auto", tf32: bool = False, random_state: int = 0,
                  newest_target: str = "d-1", binary_mask: Optional[str] = None, scaler="standard",
                  name: str = "mlp_hourly", module_hash: Optional[str] = None, normalise_by: Optional[str] = None,
-                 bounds: Optional[Tuple[Optional[float], Optional[float]]] = None, zero_when: Optional[str] = None): ...
+                 bounds: Optional[Tuple[Optional[float], Optional[float]]] = None, zero_when: Optional[str] = None,
+                 refit_from: Union[str, datetime.date, None] = None): ...
 
 class MLPDailyModel(TorchModel):            # nets.MLP, output="day": one network per (horizon, refit day), P outputs
     def __init__(self, predictors: Union[List, Callable], hidden: Sequence[int] = (256, 128), dropout: float = 0.1,
@@ -830,7 +841,8 @@ class MLPDailyModel(TorchModel):            # nets.MLP, output="day": one networ
                  early_stopping: float = 0.2, weight_decay: float = 0.0, stack: str = "auto",
                  pad_to: Optional[int] = None, device: str = "auto", tf32: bool = False, random_state: int = 0,
                  newest_target: str = "d-1", binary_mask: Optional[str] = None, scaler="standard",
-                 name: str = "mlp_daily", module_hash: Optional[str] = None): ...
+                 name: str = "mlp_daily", module_hash: Optional[str] = None,
+                 refit_from: Union[str, datetime.date, None] = None): ...
 
 class FoundationModel(BaseModel):           # the base of the pretrained sequence models (a family defines its backend)
     def __init__(self, context: int = 364, known_ahead: Sequence[str] = (), past: Sequence[str] = (),
@@ -872,7 +884,7 @@ in a module file, a hash of that file and its package's version; for one from a 
 `session-` and a token of the class object, so a run of it resumes only within its session), compared with a warning on load and
 in the manifest on resume; `save()` raises for a class from `__main__` or a function. See [Neural Networks](/epftoolbox2/models/neural-networks/).
 
-With `ModelPipeline(engine="on")` these four run in engine groups (`BaseModel._engine_capable()`) and `NaiveModel` on its own: OLS, Ridge, LassoCV and LEAR with `scaler="standard"` or a variance-stabilising scaler (LEAR with `solver="lars"`; LassoCV and LEAR `"cv"` from the KFold blocks of their rows) fitted from shared exact sums, within 1e-8 (OLS, LassoCV, LEAR) and 1e-9 (Ridge) of `engine="off"`; an issue row far outside its training values (more than 30 training standard deviations along the eigenvectors of the fit's Gram for OLS and 10 for LEAR and LassoCV; for OLS, refined by one step of iterative refinement, also where the error estimated to remain in the forecast is above 5e-9 EUR/MWh; for Ridge, which has no distance bound, where scikit-learn's own rounding at the row exceeds its budget; with a variance-stabilising scaler also a forecast where its inverse is more than three times as steep as the median of its slopes at the training targets), a LEAR whose chosen columns' Gram has a condition number above 1e6, a LassoCV or LEAR with two near-copy inputs (1 − |correlation| at most 1e-5) and every other fit the sums can't give to those digits fitted as with `"off"` (worst gaps measured within the bounds: 4.8e-9 OLS, 4.6e-9 LassoCV, 6.1e-10 Ridge, 1.1e-9 LEAR), LEAR's `solver="cd"` with the same numbers; `engine="check"` also fits a sample of one fit in about 50 as `"off"` does and records the gaps in the manifest (`engine_check`, with gaps that aren't finite and fits `"off"` can't fit counted), warning about a model over its class's tolerance (see [The Engine](/epftoolbox2/model-pipeline/engine/)). `training_window` of `OLSModel`, `LassoCVModel`, `RidgeModel` and `LEARModel` is days from 1 (an int, default `365`; `LEARModel`'s `[56, 84, 728, "expanding"]`), `"expanding"`, or a list of them such as `[56, 84, 728, "expanding"]` whose windows are fitted separately and averaged inside the model; anything else raises (see [Training Windows](/epftoolbox2/model-pipeline/training-windows/)). `ScalerSpec` is a scaler name (`"standard"`, `"asinh"`, `"npit"`), a `{"name": ..., "params": {...}}` dict or a scaler instance. `fit_intercept` is keyword-only and scikit-learn's; a set value is saved and compared on resume, the default isn't written, so results and files made before it keep their manifests. `RidgeModel`'s `alphas` is the grid of penalties (`None`: `np.logspace(-3, 4, 36)`); its manifest holds the resolved grid, its YAML writes `alphas` only when set, a penalty below 1e-6 raises, and a fit needs at least 3 training rows. `LEARModel`'s `criterion` is `"bic"`, `"aic"` or `"cv"` (old `LassoLarsCV`, five blocked folds, the path's coefficients with no refit) and its `solver` `"lars"` (the exact Lasso at the chosen penalty) or `"cd"` (Lago's coordinate descent, at most 2500 sweeps), `"cv"` with `"lars"` only; both are always written to YAML and the manifest, which also records the kernels' backend as provenance (`kernels`); `LEARModel.lago(exogenous)` takes the exogenous series in the order of the dataset's file (see [LEARModel](/epftoolbox2/models/lear/)). `NaiveModel` takes a list of one name (or a function of `ctx` returning one), forecasts its value on the row of the issue day and has no coefficients; with `known_only` and an information set a value its rule puts after the issue time is no forecast, counted as `not_published` (see [Week-ahead forecasting](/epftoolbox2/model-pipeline/week-ahead/)). It has no `training_window`, `scaler`, `newest_target`, `refit` or `binary_mask`: setting `training_window`, `newest_target`, `refit` or `binary_mask` raises. `binary_mask` of the other four says which training rows decide the binary 0/1 columns a scaler leaves unscaled: `None` (the default) the window's first day without `refit` and each unit's rows with it, `"first_day"` the first by name (it raises with `refit`), `"fit"` each fit's own rows, so that no forecast depends on `test_start`; `"fit"` without `refit` is recorded in the manifest's `training_cut`, and YAML writes it only when set (see [Time and Calendars](/epftoolbox2/model-pipeline/time-and-calendars/#binary-columns-and-test_start)). `normalise_by`,
+With `ModelPipeline(engine="on")` these four run in engine groups (`BaseModel._engine_capable()`) and `NaiveModel` on its own: OLS, Ridge, LassoCV and LEAR with `scaler="standard"` or a variance-stabilising scaler (LEAR with `solver="lars"`; LassoCV and LEAR `"cv"` from the KFold blocks of their rows) fitted from shared exact sums, within 1e-8 (OLS, LassoCV, LEAR) and 1e-9 (Ridge) of `engine="off"`; an issue row far outside its training values (more than 30 training standard deviations along the eigenvectors of the fit's Gram for OLS and 10 for LEAR and LassoCV; for OLS, refined by one step of iterative refinement, also where the error estimated to remain in the forecast is above 5e-9 EUR/MWh; for Ridge, which has no distance bound, where scikit-learn's own rounding at the row exceeds its budget; with a variance-stabilising scaler also a forecast where its inverse is more than three times as steep as the median of its slopes at the training targets), a LEAR whose chosen columns' Gram has a condition number above 1e6, a LassoCV or LEAR with two near-copy inputs (1 − |correlation| at most 1e-5) and every other fit the sums can't give to those digits fitted as with `"off"` (worst gaps measured within the bounds: 4.8e-9 OLS, 4.6e-9 LassoCV, 6.1e-10 Ridge, 1.1e-9 LEAR), LEAR's `solver="cd"` with the same numbers; `engine="check"` also fits a sample of one fit in about 50 as `"off"` does and records the gaps in the manifest (`engine_check`, with gaps that aren't finite and fits `"off"` can't fit counted), warning about a model over its class's tolerance (see [The Engine](/epftoolbox2/model-pipeline/engine/)). `training_window` of `OLSModel`, `LassoCVModel`, `RidgeModel` and `LEARModel` is days from 1 (an int, default `365`; `LEARModel`'s `[56, 84, 728, "expanding"]`), `"expanding"`, or a list of them such as `[56, 84, 728, "expanding"]` whose windows are fitted separately and averaged inside the model; anything else raises (see [Training Windows](/epftoolbox2/model-pipeline/training-windows/)). `ScalerSpec` is a scaler name (`"standard"`, `"asinh"`, `"npit"`), a `{"name": ..., "params": {...}}` dict or a scaler instance. `fit_intercept` is keyword-only and scikit-learn's; a set value is saved and compared on resume, the default isn't written, so results and files made before it keep their manifests. `RidgeModel`'s `alphas` is the grid of penalties (`None`: `np.logspace(-3, 4, 36)`); its manifest holds the resolved grid, its YAML writes `alphas` only when set, a penalty below 1e-6 raises, and a fit needs at least 3 training rows. `LEARModel`'s `criterion` is `"bic"`, `"aic"` or `"cv"` (old `LassoLarsCV`, five blocked folds, the path's coefficients with no refit) and its `solver` `"lars"` (the exact Lasso at the chosen penalty) or `"cd"` (Lago's coordinate descent, at most 2500 sweeps), `"cv"` with `"lars"` only; both are always written to YAML and the manifest, which also records the kernels' backend as provenance (`kernels`); `LEARModel.lago(exogenous)` takes the exogenous series in the order of the dataset's file (see [LEARModel](/epftoolbox2/models/lear/)). `NaiveModel` takes a list of one name (or a function of `ctx` returning one), forecasts its value on the row of the issue day and has no coefficients; with `known_only` and an information set a value its rule puts after the issue time is no forecast, counted as `not_published` (see [Week-ahead forecasting](/epftoolbox2/model-pipeline/week-ahead/)). It has no `training_window`, `scaler`, `newest_target`, `refit` or `binary_mask`: setting `training_window`, `newest_target`, `refit` or `binary_mask` raises. `refit_from` (every model that takes `refit`; a local date, `"YYYY-MM-DD"` or a `datetime.date`) counts the refit calendar from that date instead of Monday 1970-01-05 (a `"kMS"` rule needs the first of a month), and `refit="once"`, which needs it, fits each unit once on that date, on the rows a forecast issued then trains on, for every forecast issued on it or later; a forecast issued before it raises `ValueError` before anything is written. It is `None` by default, written to YAML only when set, and recorded as the manifest's `training_cut.refit_epoch`, so a resume with another value refuses (see [Time and Calendars](/epftoolbox2/model-pipeline/time-and-calendars/#refit_from-and-refitonce)). `binary_mask` of the other four says which training rows decide the binary 0/1 columns a scaler leaves unscaled: `None` (the default) the window's first day without `refit` and each unit's rows with it, `"first_day"` the first by name (it raises with `refit`), `"fit"` each fit's own rows, so that no forecast depends on `test_start`; `"fit"` without `refit` is recorded in the manifest's `training_cut`, and YAML writes it only when set (see [Time and Calendars](/epftoolbox2/model-pipeline/time-and-calendars/#binary-columns-and-test_start)). `normalise_by`,
 `bounds` and `zero_when` are a per-row target, `None` by default and written to YAML and the manifest's `model_params` only when
 set (compared on resume): `normalise_by` divides each training row's target by its value of that column and multiplies the
 forecast by the issue row's, `bounds=(low, high)` clips the forecast after that (in multiples of the scale with `normalise_by`,

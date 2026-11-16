@@ -49,6 +49,7 @@ records to the bit (see [The base's forecasts](#the-bases-forecasts-and-the-base
 | `learner` | model | Required | The model fitted on the residuals: a pooled or per-period model with `_fit_model` (`HistGBModel`), whose predictors (a list of names, `{horizon}` allowed, which may name the base's forecasts), scaler, newest target and estimator settings are used. Its own `training_window`, `refit` and `name` are not, nor saved: a warning says so where they were set to other than their class's defaults |
 | `training_window` | int or `"expanding"` | `"expanding"` | The learner's days of rows: every row with a base forecast, or the last W days. Not a list |
 | `refit` | str | `"7D"` | The learner's refit calendar (`"7D"`, Mondays; `"1D"`, every day; `"1MS"`, monthly). Required: `None` raises |
+| `refit_from` | str, date or None | `None` | The date the learner's refit calendar counts from; `refit="once"` needs it (one learner fit on that date for every later forecast): [`refit_from=` and `refit="once"`](/epftoolbox2/model-pipeline/time-and-calendars/#refit_from-and-refitonce) |
 | `warmup` | str, int or None | `None` | Where the base's forecasts start: a date, `"2024-10-01"` (recommended: no forecast then depends on the first issue day), or days before the first issue day. `None` works it out (see [Warm-up](#warm-up)) |
 | `name` | str | `"residual"` | The model's name; its base's results are `<name>.base` |
 
@@ -61,6 +62,7 @@ with the research's defaults (`ztree.py`):
 | `predictors` | list | Required | Full names, `{horizon}` allowed. With `periods="pooled"` each is read on the row's own period, so one list serves every period, and `"period"` (0 to 23 hourly) is a feature where listed. `presets.tree_predictors` gives the research's 183 |
 | `training_window` | int or `"expanding"` | `"expanding"` | Days of rows, or every row from the frame's first date |
 | `refit` | str | `"7D"` | The refit calendar; a pooled fit needs one |
+| `refit_from` | str, date or None | `None` | The local date the refit calendar counts from instead of the epoch (`"kMS"` from a first of a month); `refit="once"` needs it and fits each unit once on that date for every forecast issued on it or later: [`refit_from=` and `refit="once"`](/epftoolbox2/model-pipeline/time-and-calendars/#refit_from-and-refitonce) |
 | `periods` | str | `"pooled"` | `"pooled"`: one fit over the (date, period) rows of every period, its targets transformed by `target_transform`; `"each"`: one fit per period, as the linear models do |
 | `loss` | str | `"l1"` | `"l1"` (absolute error) or `"l2"` (squared error) |
 | `max_iter`, `learning_rate`, `max_leaf_nodes`, `min_samples_leaf`, `l2_regularization`, `max_features` | | `500`, `0.05`, `31`, `20`, `1.0`, `0.5` | scikit-learn's. `early_stopping` is always off, so every row of the window trains |
