@@ -314,14 +314,24 @@ class Oracle:
         b = self.keys(bench, self.window(n), policy).set_index(["day", "horizon", "hour"])
         both = a.index.intersection(b.index)
         a, b = a.loc[both], b.loc[both]
-        day_a = a["error"].abs().groupby(level=["day", "horizon"]).mean()
-        day_b = b["error"].abs().groupby(level=["day", "horizon"]).mean()
+        day_a = a["error"].abs().groupby(level=["day", "horizon"]).mean().groupby(level="day").mean()
+        day_b = b["error"].abs().groupby(level=["day", "horizon"]).mean().groupby(level="day").mean()
         return dict(
             skill=a["error"].abs().mean() / b["error"].abs().mean(),
             common=len(both),
             days=len(day_a),
             wins=int((day_a < day_b).sum()),
         )
+
+    def skill_days(self, member, bench):
+        """The skill on each issue day (run date): the mean over its horizons of each horizon's MAE, member over benchmark, on the
+        keys both hold, of every issue day with a scored key."""
+        a = self.keys(member, DAYS).set_index(["day", "horizon", "hour"])
+        b = self.keys(bench, DAYS).set_index(["day", "horizon", "hour"])
+        both = a.index.intersection(b.index)
+        day_a = a.loc[both, "error"].abs().groupby(level=["day", "horizon"]).mean().groupby(level="day").mean()
+        day_b = b.loc[both, "error"].abs().groupby(level=["day", "horizon"]).mean().groupby(level="day").mean()
+        return day_a / day_b
 
 
 def row(report, window, member):
@@ -653,7 +663,7 @@ def test_the_fallback_day_and_its_score(live):
     table = run_monitor(live, windows=(10,)).tables().set_index("member")
     oracle = Oracle()
     frame = oracle.keys("best", [FALLBACK_DAY])
-    assert table.loc["best", "fallback_days"] == len(HORIZONS)  # (run date, horizon) days
+    assert table.loc["best", "fallback_days"] == 1  # issue days, not (issue day, horizon) pairs
     assert table.loc["best", "fallback_mae"] == pytest.approx(frame["error"].abs().mean(), rel=1e-12)
     assert table.loc["lear", "fallback_days"] == 0 and math.isnan(table.loc["lear", "fallback_mae"])
 
@@ -666,8 +676,8 @@ def test_rung_counts_per_policy(live):
         shown = rungs[(rungs["policy"] == policy) & (rungs["window"] == 10)].set_index("rung")
         days = [d for d in DAYS if oracle.revision(d, policy) is not None]
         served = [d for d in days if d != FALLBACK_DAY]
-        assert shown.loc[0, "days"] == len(served) * len(HORIZONS) and shown.loc[0, "forecasts"] == len(served) * 48
-        assert shown.loc[1, "days"] == (len(HORIZONS) if FALLBACK_DAY in days else 0)
+        assert shown.loc[0, "days"] == len(served) and shown.loc[0, "forecasts"] == len(served) * 48
+        assert shown.loc[1, "days"] == (1 if FALLBACK_DAY in days else 0)
         assert shown.loc[1, "forecasts"] == (48 if FALLBACK_DAY in days else 0)
         assert shown.loc[0, "rung_member"] == "lear" and shown.loc[1, "rung_member"] == "naive"
         both = shown["days"].sum()
@@ -855,47 +865,32 @@ def test_backtest_days_outside_the_window_or_keys_live_lacks_move_nothing(live):
 # --- alerts ----------------------------------------------------------------------------------------------------------------------
 
 
-def daily_skill(report, member="lear", bench="naive"):
-    daily = report.daily()
-    return (
-        daily[(daily["member"] == member)]
-        .dropna(subset=[f"skill_{bench}"])
-        .sort_values(["run_date", "horizon"])[f"skill_{bench}"]
-        .to_numpy()
-    )
-
-
 def fired(report, rule):
     return [alert for alert in report.alerts if alert.rule == rule]
 
 
-def test_skill_above_fires_exactly_when_the_last_n_days_all_exceed_it(live):
-    """lear's last three issue days are planted worse than the benchmark's relative scale, the one before them better."""
-    skill = daily_skill(run_monitor(live, windows=(10,)))
-    # the last scored days, in order (day 9's horizon 1 and day 8's two horizons...): take n = 3 and n = 4 from the tail
-    for n in (1, 2, 3, 4):
-        tail = skill[-n:]
-        weakest = tail.min()
+def test_skill_above_fires_exactly_when_the_last_n_due_days_all_exceed_it(live):
+    """lear's last two scored issue days (8 and 9) are planted worse; the day before them (7) was late and has no forecast, so a
+    run of three consecutive due days is broken by it, whatever the threshold."""
+    series = Oracle().skill_days("lear", "naive")
+    assert list(series.index[-3:]) == [DAYS[5], DAYS[8], DAYS[9]]  # the days 6 and 7 are missing
+    for n in (1, 2):
+        weakest = series.iloc[-n:].min()
         report = run_monitor(
             live, windows=(10,), alerts=[{"skill_above": float(weakest) - 1e-9, "for_days": n, "member": "lear"}]
         )
         assert len(fired(report, "skill_above")) == 1, n
-        assert fired(report, "skill_above")[0].value == pytest.approx(weakest)
-        none = run_monitor(
-            live, windows=(10,), alerts=[{"skill_above": float(weakest) + 1e-9, "for_days": n, "member": "lear"}]
-        )
-        assert fired(none, "skill_above") == [], n
-        equal = run_monitor(
-            live, windows=(10,), alerts=[{"skill_above": float(weakest), "for_days": n, "member": "lear"}]
-        )
-        assert fired(equal, "skill_above") == [], n  # above is strict
-    # a window longer than the days with a score doesn't fire; and by default every non-benchmark member is checked
-    assert (
-        fired(
-            run_monitor(live, windows=(10,), alerts=[{"skill_above": 0.0, "for_days": len(skill) + 1}]), "skill_above"
-        )
-        == []
-    )
+        alert = fired(report, "skill_above")[0]
+        assert alert.value == pytest.approx(weakest) and alert.through == DAYS[9] and DAYS[9] in alert.message
+        for threshold in (float(weakest) + 1e-9, float(weakest)):  # above is strict
+            none = run_monitor(
+                live, windows=(10,), alerts=[{"skill_above": threshold, "for_days": n, "member": "lear"}]
+            )
+            assert fired(none, "skill_above") == [], n
+    # consecutive: three days ending on the 27th reach the late 25th, which has no score
+    gap = run_monitor(live, windows=(10,), alerts=[{"skill_above": 0.0, "for_days": 3, "member": "lear"}])
+    assert fired(gap, "skill_above") == []
+    # by default every non-benchmark member is checked against every benchmark
     both = run_monitor(live, windows=(10,), alerts=[{"skill_above": 0.0, "for_days": 1}])
     assert {a.member for a in fired(both, "skill_above")} == {"lear", "best"}
     assert all(a.benchmark == "naive" for a in both.alerts)
@@ -928,8 +923,8 @@ def test_a_rung_alert_fires_on_the_fallback_days_alone(tmp_path):
         alerts=[{"rung_at_least": 1}, {"rung_at_least": 1, "for_days": 5}, {"rung_at_least": 2, "for_days": 10}],
     )
     assert report.alerts == []
-    # as of the fallback day itself (the last due day then) it fires: a day is an issue day at one horizon, and the fallback day
-    # has two of them, the day before it none
+    # as of the fallback day itself (the last due day then) it fires for one day, not for two: the day before it was served by
+    # rung 0
     for_day = run_monitor(
         directory,
         windows=(10,),
@@ -937,12 +932,11 @@ def test_a_rung_alert_fires_on_the_fallback_days_alone(tmp_path):
         alerts=[
             {"rung_at_least": 1, "for_days": 1},
             {"rung_at_least": 1, "for_days": 2},
-            {"rung_at_least": 1, "for_days": 3},
         ],
     )
     alerts = fired(for_day, "rung_at_least")
-    assert [a.message[-10:] for a in alerts] == [FALLBACK_DAY] * 2 and {a.member for a in alerts} == {"best"}
-    assert [a.through for a in alerts] == [FALLBACK_DAY] * 2
+    assert [a.message[-10:] for a in alerts] == [FALLBACK_DAY] and {a.member for a in alerts} == {"best"}
+    assert [a.through for a in alerts] == [FALLBACK_DAY]
     assert (
         fired(
             run_monitor(
@@ -982,9 +976,9 @@ def test_stale_input_fires_on_the_column_s_last_valid_stamp(with_quality):
 
 def test_each_rule_fires_on_its_planted_condition_alone(with_quality):
     """All five rules over one directory: the thresholds are set just beyond what was planted, and nothing else fires."""
-    skill = daily_skill(run_monitor(with_quality, windows=(10,)))
+    skill = Oracle().skill_days("lear", "naive")
     rules = [
-        {"skill_above": float(skill[-3:].min()) - 1e-9, "for_days": 3, "member": "lear", "benchmark": "naive"},
+        {"skill_above": float(skill.iloc[-2:].min()) - 1e-9, "for_days": 2, "member": "lear", "benchmark": "naive"},
         {"participation_below": 0.81},
         {"delivered_below": 0.31},
         {"rung_at_least": 3},
@@ -1263,3 +1257,32 @@ def test_a_fridays_only_pipeline_is_not_missing_the_other_six_days(tmp_path):
     assert run_monitor(directory, windows=(10,)).tables().iloc[0]["issue_days"] == len(fridays)
     with pytest.raises(ValueError, match="weekday"):
         run_monitor(directory, windows=(10,), issue_days=["fri"])
+
+
+def test_days_and_wins_count_issue_days_not_issue_day_horizon_pairs(live):
+    """Two horizons a day: `days_` and `wins_` are issue days (run dates), as `LossPanel.daily` and the report's wins count them,
+    and a day's loss is the mean over its horizons of their MAEs."""
+    got = row(run_monitor(live, windows=(10,)), 10, "lear")
+    oracle = Oracle()
+    series = oracle.skill_days("lear", "naive")
+    assert got["days_naive"] == len(series) <= got["issue_days"]
+    assert got["wins_naive"] == int((series < 1.0).sum()) == oracle.skill("lear", "naive", 10)["wins"]
+
+
+def test_without_a_deadline_a_day_is_due_once_it_has_ended(tmp_path):
+    directory = tmp_path / "live"
+    write_live(directory)
+    meta = json.loads((directory / "live.json").read_text())
+    del meta["deadline"]
+    (directory / "live.json").write_text(json.dumps(meta))
+    during = run_monitor(directory, windows=(10,), now=pd.Timestamp("2026-10-27T23:59", tz=ZONE), cutoff=None)
+    after = run_monitor(directory, windows=(10,), now=pd.Timestamp("2026-10-28T00:01", tz=ZONE), cutoff=None)
+    assert during.through == DAYS[8] and after.through == DAYS[9]  # today never counts
+
+
+def test_no_benchmark_is_said(live):
+    pipe = ModelPipeline(information_set=pipeline().information_set)
+    pipe.add_model(OLSModel(["price_d-1"], name="lear"))
+    with use_clock(FakeClock(NOW)), pytest.warns(UserWarning, match="no benchmark"):
+        table = pipe.monitor(DATA, live, windows=(7,)).tables()
+    assert not [c for c in table.columns if c.startswith("skill_")]

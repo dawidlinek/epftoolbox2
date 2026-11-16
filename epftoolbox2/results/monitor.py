@@ -387,24 +387,36 @@ def _stats(panel: LossPanel, rows: np.ndarray, name: str) -> Dict[str, float]:
 
 
 def _skill(panel: LossPanel, rows: np.ndarray, member: str, benchmark: str) -> Dict[str, float]:
-    """`member`'s MAE over `benchmark`'s on the keys of `rows` both hold, how many, and on how many days the member's day MAE is
-    the lower."""
+    """`member`'s MAE over `benchmark`'s on the keys of `rows` both hold, how many, and on how many issue days the member's loss
+    is the lower: a day is a run date, as in `LossPanel.daily` and the report's wins (the mean over its horizons of each
+    horizon's MAE)."""
     common = panel.common(rows, [member, benchmark])
     n = len(common)
     if not n:
         return dict(skill=math.nan, common=0, days=0, wins=0)
     mine = panel.errors[common, panel.column(member)]
     theirs = panel.errors[common, panel.column(benchmark)]
-    ids, inverse, count = _per_day(panel.day_ids(common), mine)
-    day_mine = np.bincount(inverse, weights=mine, minlength=len(ids)) / count
-    day_theirs = np.bincount(inverse, weights=theirs, minlength=len(ids)) / count
+    daily = panel.daily(common, [member, benchmark])
     bench = float(theirs.mean())
     return dict(
         skill=float(mine.mean()) / bench if bench > 0 else math.nan,
         common=n,
-        days=len(ids),
-        wins=int((day_mine < day_theirs).sum()),
+        days=daily.n_days,
+        wins=int((daily.losses[:, 0] < daily.losses[:, 1]).sum()),
     )
+
+
+def _skill_days(panel: LossPanel, member: str, benchmark: str) -> pd.Series:
+    """The skill of `member` against `benchmark` on each issue day (run date, ISO text -> the ratio of the two day losses of
+    `LossPanel.daily` on the keys both hold; NaN where the benchmark's is zero), for the alerts."""
+    common = panel.common(panel.rows(), [member, benchmark])
+    if not len(common):
+        return pd.Series(dtype=float)
+    daily = panel.daily(common, [member, benchmark])
+    run_dates = pd.to_datetime(np.unique(panel.run_days(common)), unit="D").strftime("%Y-%m-%d")
+    with np.errstate(divide="ignore", invalid="ignore"):
+        ratio = np.where(daily.losses[:, 1] > 0, daily.losses[:, 0] / daily.losses[:, 1], math.nan)
+    return pd.Series(ratio, index=run_dates)
 
 
 def _daily(panel: LossPanel, members: Sequence[str], benchmarks: Sequence[str]) -> pd.DataFrame:
@@ -605,27 +617,20 @@ def _frequency(frame: pd.DataFrame) -> str:
 
 
 def _served_days(frame: pd.DataFrame, through: Optional[str]) -> pd.DataFrame:
-    """A fallback ensemble's days (issue day, horizon) up to the newest due issue day, with the highest rung that served a key of
-    each, from every key read, scored or not: a fallback is known the day it is issued."""
-    columns = ["run_date_text", "run_date", "horizon", "rung"]
+    """A fallback ensemble's issue days up to the newest due one, one row each (`run_date_text`, `run_date`, `rung`): the highest
+    rung that served a key of the day, from every key read, scored or not (a fallback is known the day it is issued)."""
+    columns = ["run_date_text", "run_date", "rung"]
     if not len(frame) or through is None:
         return pd.DataFrame(columns=columns)
     frame = frame[frame["run_date_text"] <= through]
-    served = frame.groupby(["run_date_text", "horizon"], sort=True).agg(
-        run_date=("run_date", "first"), rung=("rung", "max")
-    )
+    served = frame.groupby("run_date_text", sort=True).agg(run_date=("run_date", "first"), rung=("rung", "max"))
     return served.reset_index()[columns]
 
 
 def _fallback(
-    panel: LossPanel,
-    rows: np.ndarray,
-    name: str,
-    served: Optional[pd.DataFrame],
-    in_window: Sequence[str],
-    raw: pd.DataFrame,
+    panel: LossPanel, rows: np.ndarray, name: str, served: Optional[pd.DataFrame], in_window: Sequence[str]
 ) -> Tuple[int, float]:
-    """(the days of the window a rung above 0 served, the MAE of the keys it served that have a known actual)."""
+    """(the issue days of the window a rung above 0 served, the MAE of the keys it served that have a known actual)."""
     if served is None:
         return 0, math.nan
     days = served[served["run_date_text"].isin(in_window) & (served["rung"] > 0)]
@@ -727,11 +732,11 @@ def _rungs(
             for window in windows:
                 in_window = _window_days(days, through, window)
                 raw = frame[frame["run_date_text"].isin(in_window)]
-                every = raw[["run_date_text", "horizon"]].drop_duplicates()
+                every = raw["run_date_text"].unique()
                 mine = rows[np.isin(run_days, _day_numbers(in_window))]
                 for number, ladder_member in enumerate(member.ladder or ()):
                     served = raw[raw["rung"] == number]
-                    count = len(served[["run_date_text", "horizon"]].drop_duplicates())
+                    count = served["run_date_text"].nunique()
                     chosen = mine[np.isfinite(own[mine]) & (rung[mine] == number)]
                     out.append(
                         dict(
@@ -750,9 +755,18 @@ def _rungs(
     return pd.DataFrame(out, columns=columns)
 
 
+def _streak(days: Sequence[str], run: int, end: Optional[str] = None) -> List[str]:
+    """The `run` consecutive due issue days ending at `end` (the newest due one by default), [] when there are fewer."""
+    if not days:
+        return []
+    last = len(days) - 1 if end is None else days.index(end)
+    return list(days[last - run + 1 : last + 1]) if last - run + 1 >= 0 else []
+
+
 def _evaluate(
     rules: Sequence[Dict[str, Any]],
     report: MonitorReport,
+    skill_days: Mapping[Tuple[str, str], pd.Series],
     served: Mapping[str, pd.DataFrame],
     quality: Mapping[str, Optional[Dict[str, Any]]],
     store: LiveStore,
@@ -760,36 +774,39 @@ def _evaluate(
     delivered: Mapping[str, Any],
     days: Sequence[str],
 ) -> List[Alert]:
-    """The alerts of `rules` that fire on the report (module docstring)."""
+    """The alerts of `rules` that fire on the report (module docstring). `for_days` is a run of consecutive due issue days: a day
+    the pipeline missed, or one that has no score or record, breaks it."""
     fired: List[Alert] = []
-    daily = report._daily
     for spec in rules:
         rule = next(key for key in spec if key in ALERT_RULES)
         threshold = spec[rule]
+        run = int(spec.get("for_days", 1))
         if rule == "skill_above":
             wanted = spec.get("member")
             chosen = [spec["benchmark"]] if "benchmark" in spec else list(report.benchmarks)
             _require(wanted, report.members, "member")
             _require(spec.get("benchmark"), report.benchmarks, "benchmark")
-            run = int(spec.get("for_days", 1))
             for name in [wanted] if wanted else [m for m in report.members if m not in report.benchmarks]:
                 for bench in chosen:
-                    column = f"skill_{bench}"
-                    if bench == name or not len(daily) or column not in daily:
+                    series = skill_days.get((name, bench))
+                    if bench == name or series is None:
                         continue
-                    mine = daily[(daily["member"] == name) & daily[column].notna()].sort_values(["run_date", "horizon"])
-                    last = mine.tail(run)
-                    if len(last) == run and (last[column] > threshold).all():
+                    scored = [d for d in days if d in series.index and math.isfinite(series[d])]
+                    if not scored:
+                        continue
+                    tail = _streak(days, run, scored[-1])
+                    if tail and all(d in series.index and series[d] > threshold for d in tail):
+                        weakest = float(min(series[d] for d in tail))
                         fired.append(
                             Alert(
                                 rule,
-                                f"{name}: skill against {bench} above {threshold} on each of the last {run} days "
-                                f"(weakest {float(last[column].min()):.3f}, through {last['run_date'].iloc[-1]:%Y-%m-%d})",
+                                f"{name}: skill against {bench} above {threshold} on each of the last {run} issue days "
+                                f"(weakest {weakest:.3f}, through {tail[-1]})",
                                 member=name,
                                 benchmark=bench,
-                                value=float(last[column].min()),
+                                value=weakest,
                                 threshold=float(threshold),
-                                through=f"{last['run_date'].iloc[-1]:%Y-%m-%d}",
+                                through=tail[-1],
                             )
                         )
         elif rule in ("participation_below", "delivered_below"):
@@ -806,56 +823,57 @@ def _evaluate(
                 fired.append(
                     Alert(
                         rule,
-                        f"only {share:.0%} of the last {len(in_window)} issue days {what} (below {threshold:.0%})",
+                        f"only {share:.0%} of the last {len(in_window)} issue days {what} (below {threshold:.0%}, "
+                        f"through {report.through})",
                         value=share,
                         threshold=float(threshold),
                         through=report.through,
                     )
                 )
         elif rule == "rung_at_least":
-            run = int(spec.get("for_days", 1))
             wanted = spec.get("member")
             _require(wanted, list(served), "member")
             for name in [wanted] if wanted else list(served):
-                last = served[name].sort_values(["run_date", "horizon"]).tail(run)
-                if len(last) == run and (last["rung"] >= threshold).all():
+                rungs = served[name].set_index("run_date_text")["rung"]
+                tail = _streak(days, run, report.through)
+                if tail and all(d in rungs.index and rungs[d] >= threshold for d in tail):
+                    worst = int(max(rungs[d] for d in tail))
                     fired.append(
                         Alert(
                             rule,
-                            f"{name}: served by rung {int(last['rung'].max())} (at least {int(threshold)}) on each of the last "
-                            f"{run} days, through {last['run_date'].iloc[-1]:%Y-%m-%d}",
+                            f"{name}: served by rung {worst} (at least {int(threshold)}) on each of the last {run} issue "
+                            f"days, through {tail[-1]}",
                             member=name,
-                            value=float(last["rung"].min()),
+                            value=float(min(rungs[d] for d in tail)),
                             threshold=float(threshold),
-                            through=f"{last['run_date'].iloc[-1]:%Y-%m-%d}",
+                            through=tail[-1],
                         )
                     )
         else:  # stale_input
-            column, age, run = threshold, float(spec.get("age", 1)), int(spec.get("for_days", 1))
+            column, age = threshold, float(spec.get("age", 1))
             zone = store.zone()
-            usable = []
-            for day in sorted(d for d, record in quality.items() if record is not None):
-                held = (quality[day].get("columns") or {}).get(column)
+            gaps = {}
+            for day in days:
+                held = ((quality.get(day) or {}).get("columns") or {}).get(column)
                 if held is None:
                     continue  # the record doesn't say: no information, never a verdict
                 last_valid = held.get("last_valid")
-                gap = (
+                gaps[day] = (
                     math.inf
                     if last_valid is None
                     else (pd.Timestamp(day, tz=zone) - pd.Timestamp(last_valid)).total_seconds() / 86400.0
                 )
-                usable.append((day, gap))
-            tail = usable[-run:]
-            if len(tail) == run and all(gap > age for _, gap in tail):
-                weakest = min(gap for _, gap in tail)
+            tail = _streak(days, run, report.through)
+            if tail and all(d in gaps and gaps[d] > age for d in tail):
+                weakest = min(gaps[d] for d in tail)
                 fired.append(
                     Alert(
                         rule,
                         f"input {column!r}: its last valid value is more than {age:g} days before the issue day on each of the "
-                        f"last {run} days with a quality record (through {tail[-1][0]})",
+                        f"last {run} issue days (through {tail[-1]})",
                         value=None if math.isinf(weakest) else weakest,
                         threshold=age,
-                        through=tail[-1][0],
+                        through=tail[-1],
                     )
                 )
     return fired
@@ -895,6 +913,13 @@ def monitor(
     unknown = [b for b in benchmarks if b not in names]
     if unknown:
         raise ValueError(f"benchmarks {unknown} have no results in {store.save_dir}; its members are {names}")
+    if not benchmarks:
+        warnings.warn(
+            "monitor() has no benchmark (the pipeline has no NaiveModel with results and benchmarks= is not given), so the tables "
+            "have no skill columns, wins or skill alerts: pass benchmarks=[...] with the name of a member",
+            UserWarning,
+            stacklevel=3,
+        )
     now = current_clock().now()
     days, through = _calendar(store, now, issue_days)
 
@@ -921,6 +946,7 @@ def monitor(
     served = {m.name: _served_days(keys[m.name], through) for m in ladders}
 
     daily = _daily(panel, names, benchmarks)
+    skill_days = {(m, b): _skill_days(panel, m, b) for m in names for b in benchmarks if m != b}
     rows = panel.rows()
     run_days = panel.run_days(rows)
     table_rows = []
@@ -955,7 +981,7 @@ def monitor(
             row["delivered_days"] = handed
             row["delivered"] = handed / len(in_window) if in_window else math.nan
             row["member_days"] = int(raw["run_date_text"].nunique())
-            row["fallback_days"], row["fallback_mae"] = _fallback(panel, mine, name, served.get(name), in_window, raw)
+            row["fallback_days"], row["fallback_mae"] = _fallback(panel, mine, name, served.get(name), in_window)
             row["quality_records"] = len(recorded)
             row["quality_days"] = problems
             table_rows.append(row)
@@ -1007,7 +1033,7 @@ def monitor(
         _rungs=_rungs(ladders, visible, actuals, windows, days, through, freq),
         _quality=quality_table,
     )
-    report.alerts = _evaluate(rules, report, served, quality, store, committed_days, delivered, days)
+    report.alerts = _evaluate(rules, report, skill_days, served, quality, store, committed_days, delivered, days)
     return report
 
 
