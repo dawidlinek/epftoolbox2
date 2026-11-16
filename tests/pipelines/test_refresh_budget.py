@@ -528,11 +528,13 @@ def test_a_failure_is_warned_about(clock, logs):
 class Ramp(DataSource):
     """Hourly columns, `short` ending three days before `end` and `empty` without a value, from a source that reads no network."""
 
-    def __init__(self, name="ramp"):
+    def __init__(self, name="ramp", margin_days=0):
         self.name = name
+        self.margin_days = margin_days  # rows outside [start, end) too, as ENTSO-E's load and Open-Meteo return them
 
     def fetch(self, start, end):
-        hours = pd.date_range(start, end, freq="1h", inclusive="left")
+        margin = pd.Timedelta(days=self.margin_days)
+        hours = pd.date_range(start - margin, end + margin, freq="1h", inclusive="left")
         values = np.arange(len(hours), dtype=float)
         return pd.DataFrame(
             {
@@ -547,7 +549,13 @@ class Ramp(DataSource):
         return True
 
     def get_cache_config(self):
-        return {"source_type": self.name, "schema_version": 1}
+        return {"source_type": self.name, "schema_version": 1, "margin_days": self.margin_days}
+
+
+def test_the_record_counts_the_rows_inside_the_range_only(clock):
+    pipeline = DataPipeline(sources=[Ramp(margin_days=1)])
+    df = pipeline.run(START, END)
+    assert pipeline.last_refresh["Ramp #1"].rows == len(df) == 22 * 24
 
 
 @pytest.mark.parametrize("cache", [False, True])
@@ -705,3 +713,15 @@ def test_a_full_hit_whose_file_cannot_be_read_fetches_its_range_again(clock, tmp
     df = DataPipeline(sources=[entsoe(server)]).run(START, "2026-10-15", cache=True)
     assert len(server.calls) == 1
     pd.testing.assert_frame_equal(df, healthy[healthy.index < utc("2026-10-16")], check_freq=False)
+
+
+def test_waits_stay_within_each_sources_cap_also_with_more_retries():
+    """A Retry-After longer than ENTSO-E's cap waits the cap (120 s), and Open-Meteo's backoff stops at 60 s, also when the
+    run asks for more retries than the source's own."""
+    entsoe_session = Broken(answer("Too many", 429, {"Retry-After": "600"}))
+    with use_clock(FakeClock(NOW)) as clock, _http.limits(retries=1), pytest.raises(EntsoeApiError):
+        _entsoe_request(entsoe_session)()
+    assert clock.sleeps == [EntsoeSource.MAX_RETRY_WAIT_SECONDS]
+    with use_clock(FakeClock(NOW)) as clock, _http.limits(retries=7), pytest.raises(requests.ConnectionError):
+        _open_meteo_request(Broken(requests.ConnectionError("reset")))()
+    assert clock.sleeps == [2.0, 4.0, 8.0, 16.0, 32.0, 60.0, 60.0]
