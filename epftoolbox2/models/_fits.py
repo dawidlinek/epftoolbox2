@@ -56,7 +56,7 @@ from ._lars import LearFit
 from ._stats import IssueMetric, LinearFit, SolveError, StandardParams
 
 # The version of the files' layout and of what a unit holds: in every configuration digest, so a later format refits.
-FORMAT = 1
+FORMAT = 2  # 2: fit.json records the rows read from their first date (`rows.from`), `incomplete` and `notes`
 FITS_DIR = "fits"
 UNITS_FILE = "units.npz"
 FIT_FILE = "fit.json"
