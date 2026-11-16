@@ -6,6 +6,7 @@ import sys
 import numpy as np
 import pandas as pd
 import pytest
+import yaml
 
 from epftoolbox2 import cli
 from epftoolbox2._frame_csv import load_frame_csv, save_frame_csv
@@ -38,10 +39,11 @@ def local_data():
     return df
 
 
-def model_args(tmp_path, data_path, **overrides):
+def model_args(tmp_path, data_path, engine="off", **overrides):
+    """`epf model`'s arguments over a pipeline YAML of one OLS. `engine="off"` by default: `in_process` runs `OLSModel.run`
+    (the model path) and is compared bit for bit with the CLI's records; None leaves it out of the YAML, the default."""
     yaml_path = tmp_path / "mp.yaml"
-    # engine="off": `in_process` runs `OLSModel.run` (the model path) and is compared bit for bit with the CLI's records.
-    ModelPipeline(engine="off").add_model(OLSModel(MODEL_PREDICTORS, training_window=45, name="OLS")).save(yaml_path)
+    ModelPipeline(engine=engine).add_model(OLSModel(MODEL_PREDICTORS, training_window=45, name="OLS")).save(yaml_path)
     parser = cli.build_parser()
     argv = ["model", str(yaml_path), "--data", str(data_path), "--test-start", "2023-03-24", "--test-end"]
     argv += ["2023-03-27", "--horizon", "2", "--save-dir", str(tmp_path / "out")]
@@ -102,6 +104,27 @@ def test_cli_round_trip_equals_the_in_process_run(tmp_path, local_data):
     expected = in_process(local_data)
     assert len(expected) > 180  # the window spans the spring DST switch, where a few inputs are missing
     assert from_cli(tmp_path) == expected
+
+
+def test_cli_on_the_default_engine_equals_the_in_process_pipeline(tmp_path, local_data):
+    """A pipeline YAML without `engine` runs the default, the engine, through `epf model` too: its records are those of
+    `ModelPipeline()` run in process, to the bit, its manifest says `fit_path: "engine-2"`, and they are within OLS's engine
+    tolerance (1e-8) of the model path's."""
+    path = tmp_path / "data.csv"
+    save_frame_csv(local_data, path)
+    args = model_args(tmp_path, path, engine=None)
+    assert "engine" not in yaml.safe_load((tmp_path / "mp.yaml").read_text())
+
+    cli.cmd_model(args)
+
+    pipeline = ModelPipeline().add_model(OLSModel(MODEL_PREDICTORS, training_window=45, name="OLS"))
+    report = pipeline.run(local_data, test_start="2023-03-24", test_end="2023-03-27", horizon=2)
+    expected = keyed(report.refs["OLS"]._results)
+    assert len(expected) > 180 and from_cli(tmp_path) == expected
+    assert json.loads((tmp_path / "out" / "ols.manifest.json").read_text())["fit_path"] == "engine-2"
+    model_path = in_process(local_data)
+    assert model_path.keys() == expected.keys()
+    assert max(abs(expected[key][0] - model_path[key][0]) for key in expected) <= 1e-8
 
 
 def test_cmd_data_writes_the_zone(tmp_path, local_data, monkeypatch):
