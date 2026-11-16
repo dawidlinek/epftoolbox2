@@ -439,3 +439,34 @@ def test_files_are_synced_through_a_writable_descriptor_and_a_failed_write_leave
         write_json(tmp_path, CHECKS_FILE, {"failed": []})
     assert sorted(path.name for path in tmp_path.iterdir()) == [SNAPSHOT_FILE, QUALITY_FILE]
     assert read_snapshot(tmp_path / SNAPSHOT_FILE).hash == snap.hash  # the earlier file, untouched
+
+
+def test_quality_and_refresh_record_read_a_real_refresh_record():
+    from epftoolbox2.data.refresh import RefreshRecord, SourceRefresh
+
+    start = pd.Timestamp("2026-10-20", tz="UTC")
+    refresh = RefreshRecord(
+        start=start,
+        end=start + pd.Timedelta(days=7),
+        started=start + pd.Timedelta(days=6, hours=9),
+        deadline=None,
+        budget=None,
+        timeout=None,
+        retries=None,
+        on_failure="cache",
+        cache="sources",
+        seconds=3.0,
+        sources=(
+            SourceRefresh(
+                name="EntsoeSource #1", status="ok", last_valid={"load_d+1": pd.Timestamp("2026-10-26 22:00", tz="UTC")}
+            ),
+            SourceRefresh(name="ExaaSource #2", status="timeout"),
+        ),
+    )
+    found = quality(live_frame(freq="1h"), refresh, None, ISSUE, zone=ZONE, columns=["load_d+1"])
+    assert found["sources"] == {
+        "EntsoeSource #1": {"status": "ok", "last_valid": {"load_d+1": "2026-10-26T22:00:00+00:00"}},
+        "ExaaSource #2": {"status": "timeout", "last_valid": {}},
+    }
+    json.dumps(found, allow_nan=False)
+    json.dumps(refresh_record(refresh), allow_nan=False)
