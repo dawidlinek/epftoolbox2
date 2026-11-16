@@ -1,0 +1,140 @@
+---
+title: Live Forecasts
+description: One live call of an issue day with ModelPipeline.forecast(); the live directory, revisions, waits, deadlines, fallbacks, statuses and exit codes, and the export grids
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+A backtest answers "how good would this pipeline have been". A live call issues today's forecast with the same pipeline: it
+refreshes the data, waits for late inputs, serves every model from fits made before (or fits it now), checks the forecasts,
+falls back where a model can't deliver, and commits the result as a numbered **revision** into a live directory, with a record
+of what it read. `ModelPipeline.forecast()` is that call.
+
+**The pipeline that was backtested is the one that runs.** A forecast served live is the backtest's record of the same pipeline
+over the same frame, to the bit (but its `day_in_test`, its place in a run): the same rows, cut, lists, masks and fits, through
+the backtest's own lines. Only which fit (stored or made inline) and which frame differ.
+
+<Aside type="caution">
+This page is being completed (step 8l of the forecasting layer): the CLI (`epf forecast`, `epf refit`, `epf mark-delivered`,
+`epf status`) and a worked example of a simulated week come next.
+</Aside>
+
+## One call
+
+```python
+from epftoolbox2.ensembles import FallbackEnsemble
+from epftoolbox2.models import NaiveModel, OLSModel
+from epftoolbox2.pipelines import DataPipeline, ModelPipeline
+
+data = DataPipeline.load("data_pipeline.yaml")  # ${ENTSOE_API_KEY} from the environment
+predictors = ["load_d+{horizon}", "wind_d+{horizon}", "price_d-1"]
+
+pipeline = ModelPipeline(issue_time="11:45", issue_timezone="Europe/Berlin")
+pipeline.add_model(OLSModel(predictors, training_window=364, refit="7D", name="ols"))
+pipeline.add_model(NaiveModel(["price_d-7"], name="naive"))
+pipeline.add_ensemble(FallbackEnsemble(["ols", "naive"], name="delivered"))
+
+pipeline.refit(data.run("2024-01-01", "2026-12-31"), "live/de_price", issue="today")  # the stored fits, once a block
+result = pipeline.forecast(
+    data,
+    issue="today",
+    save_dir="live/de_price",
+    wait_for={"load_d+1": "10:45"},
+    deadline="11:55",
+    budget="120s",
+    poll="5min",
+    horizon=1,
+)
+print(result.status, result.exit_code, result.revision, result.unchanged)
+result.export("out/today.csv", format="csv", grid="products")
+```
+
+What the call does, in order:
+
+1. **The lock.** It takes the directory's `live.lock` without waiting. Held by another call (a forecast, `refit` or
+   `mark_delivered`): status `busy`, exit 75, nothing written.
+2. **The issue day** is resolved in the issue zone on the clock (`epftoolbox2.clock`), so a run after midnight on a UTC host
+   labels the market's day. `ensure=True` makes the call a no-op (`noop`) when the day already has a revision with status ok or
+   fallback, committed by the deadline.
+3. **Refresh and wait.** A `DataPipeline` is run over the range the fits read (each refresh within `budget`, `timeout`,
+   `retries`, `on_failure`, and never past the deadline; see [Caching](/epftoolbox2/data-pipeline/caching/)); a DataFrame is
+   used as given. `wait_for={column: "HH:MM"}` polls: while the column lacks a value on a row of the issue day and its give-up
+   time hasn't passed, the call sleeps `poll` on the clock and refreshes again. `wait_for="rules"` waits for every column a model
+   may read until its rule's publication time plus `grace` (a column out only after the issue time is never waited for: no list
+   may use it). Every poll goes into `waits.json`.
+4. **Plan.** Each model's issue day is planned as a backtest of that day alone. A predictor function's `ctx.published(c)` is
+   true when the information set says `c` is known by the issue time **and** the refreshed frame holds a value now: a revision made
+   before an input is out uses the list without it, the last one the list the backtest used, and no list ever uses a column the
+   backtest couldn't (a value that came early but whose rule says after the issue time stays unused).
+5. **Serve.** OLS, Ridge, LassoCV and LEAR are served from their [stored fits](/epftoolbox2/model-pipeline/stored-fits/) (a
+   refit model's anchor; without it `fit_missing="previous"` takes the newest older fit and records its age, `"fit"` fits it now,
+   `"skip"` leaves its forecasts as `no_stored_fit` skips; a `refit=None` model fits inline, as the backtest does). Every other
+   model runs as a backtest of the issue day alone. An issue row with a missing input is a `missing_test_predictors` skip, never a
+   NaN into a model, whatever the family.
+6. **Checks, then ensembles.** The [checks before export](/epftoolbox2/model-pipeline/checks/), if the pipeline has them, turn a
+   failing member-day into `check_failed` skips; then every ensemble, a [`FallbackEnsemble`](/epftoolbox2/model-pipeline/fallback/)
+   among them, is computed from the records as a backtest computes it. A `top=` ensemble chooses on validation, which a live call
+   can't: freeze it first (`pipeline.frozen(study_dir)`).
+7. **Commit.** Past the deadline by the clock: status `late`, exit 30, a call line and nothing else. Forecasts equal to the latest
+   committed revision's (every model's and ensemble's predictions and statuses): no revision, `unchanged`, that revision's status.
+   Otherwise the next revision is written: every model's and ensemble's records, the issue's files, the live manifests, then the
+   commit line that makes it visible.
+
+An exception writes an `error` call line (exit 1) when it can and is raised: a late `ctx.value()` under `availability="raise"`
+raises live as in a backtest. `dry_run=True` does everything but write: the status and exit code the call would give, nothing in
+the directory (not even the lock file or the call line).
+
+## Statuses and exit codes
+
+| Exit | `status` | Meaning |
+|---|---|---|
+| 0 | `ok` | every target day of the delivered model from rung 0; also an `ensure` no-op on such an issue and an unchanged rerun of it |
+| 10 | `fallback` | complete, some target day from a lower rung of a `FallbackEnsemble` |
+| 20 | `skipped` | a planned key of the delivered model has no forecast |
+| 30 | `late` | the deadline passed before a revision could be committed; nothing written but the call line |
+| 75 | `busy` | another call holds `live.lock` (EX_TEMPFAIL) |
+| 1 | error | an exception; the call line says so when it could be written |
+
+The **delivered** model is `deliver=` if given, else the pipeline's last ensemble, else its last model. Its planned keys are
+those the clock gives the issue day (`IssueCalendar`: 23 or 25 hours, 92 or 100 quarter-hours on switch days).
+
+## The live directory
+
+```text
+live/de_price/
+  live.json                      mode "live", issue_timezone, deadline ("HH:MM", for readers), frozen choices
+  live.lock                      held by every forecast, refit and mark-delivered call
+  <model>.jsonl | .parquet       every revision's records (ensembles' are JSONL)
+  <model>.manifest.json          mode "live": the configuration, compared on every call
+  issues.jsonl                   one line per call: started, finished, status, exit_code, revision, committed
+  delivered.jsonl                one line per mark_delivered
+  fits/<model>/<anchor>/         stored fits (refit)
+  issues/<issue>/r<n>/           inputs.parquet, quality.json, checks.json, refresh.json, waits.json, fits.json
+```
+
+A revision's files say what it was made from: `inputs.parquet` holds every column a model read on the issue rows, with each key's
+list hash, and its hash is the `snapshot` every record of the revision carries; `quality.json` each source's refresh status and
+each input's missing and imputed cells and last valid timestamp; `fits.json` per model and anchor the fit used, its age, and its
+identity (a stored fit's `fit.json` sha256 and digest, an inline fit's rows and their hash). Read revisions with
+`ModelResultRef(path, ..., policy="latest" | "first" | "delivered")` (see [Caching](/epftoolbox2/model-pipeline/caching/)); a
+backtest's `run()` into a live directory, and `forecast()` into a backtest's, both raise.
+
+## Exports
+
+`result.export(path, format="csv" | "json", grid="products" | "periods")` writes the delivered model's forecasts.
+`"products"` writes one row per market product: `target_date`, `slot` (the period), `occurrence` (2 for the second occurrence
+of the repeated autumn hour), `start_utc`, `horizon`, `prediction`, `status`. So on the autumn day at 15 minutes it writes 100
+rows, the repeated hour's four quarter-hours twice, nobody forward-fills it by hand. `"periods"` writes the 96 period forecasts
+as the records hold them. A key without a forecast is a row with an empty prediction and its status. Delivering the file is
+yours (`mark_delivered` stores the platform's receipt).
+
+## Checking the live path
+
+`pipeline.verify(data, start, end, through="serve")` runs the leakage probe and its positive control with every forecast made by
+the live serve path (each issue day planned and fitted inline as `forecast()` fits it), so a leak in what a live call runs is
+caught as in a backtest ([Verifying a Pipeline](/epftoolbox2/model-pipeline/verification/)).
+
+## `forecast_only` with a `save_dir`
+
+`run(forecast_only=True, save_dir=...)` raises: a rerun into the same directory resumed the earlier forecast and returned it as
+today's. Use `forecast()` into a live directory, `forecast_only=True` without `save_dir`, or a backtest into `save_dir`.

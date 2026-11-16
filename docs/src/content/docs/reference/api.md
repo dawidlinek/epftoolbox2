@@ -159,6 +159,7 @@ class ModelPipeline:
         device: Optional[str] = None,     # Set on every model with an attribute named device, e.g. "cpu"
         co_batch: Optional[bool] = None,  # Probe over runs holding the other items of a call; None: models that predict together, name them or have a card
         rerun: Optional[bool] = None,     # Run each day twice first, from other seeds; any difference is inconclusive. None: as co_batch
+        through: str = "run",             # "serve": the probes' forecasts through forecast()'s serve path (inline fits)
     ) -> VerifyReport: ...
 
     def explain(                          # What one forecast's predictors hold and when each is known; no side effects
@@ -183,6 +184,35 @@ class ModelPipeline:
         receipt: Union[str, Path],        # The platform's answer, saved as a file
         dry_run: bool = False,            # Check everything, write nothing
     ) -> Dict[str, Any]: ...              # The delivered line; LiveBusyError while another call holds live.lock
+
+    def forecast(                         # One live call of an issue day into a live directory (Live Forecasts page)
+        self,
+        data: Any,                        # A DataPipeline (refreshed here) or a DataFrame (used as given)
+        issue: Any = "today",             # "today" in the issue zone on the clock, or a date
+        save_dir: Optional[Union[str, Path]] = None,  # The live directory; None writes nothing, inline fits only
+        *,
+        wait_for: Any = None,             # {column: "HH:MM"} give-up times, or "rules"; needs a DataPipeline
+        deadline: Any = None,             # "HH:MM" of the issue day, or an aware instant: no commit after it (late, 30)
+        ensure: bool = False,             # A no-op when an ok/fallback revision was committed by the deadline
+        refresh: str = "auto",            # "never": the sources' caches only, no request
+        budget: Any = None,               # Seconds (or "120s") each refresh may take
+        timeout: Any = None,              # Seconds each HTTP request may take
+        retries: Optional[int] = None,    # Retries of a failed request
+        on_failure: str = "raise",        # "cache": a failed source gives its cached settled rows
+        cache: Any = True,                # The data pipeline's cache (True: per source)
+        poll: Any = "5min",               # Sleep between polls of wait_for, on the clock
+        grace: Any = "30min",             # wait_for="rules": past each rule's publication time
+        fit_missing: str = "previous",    # A refit model without its anchor's stored fit: "previous", "fit" or "skip"
+        deliver: Optional[str] = None,    # The model or ensemble that decides the status; the last ensemble by default
+        dry_run: bool = False,            # Everything but writing: the status and exit code the call would give
+        target: str = "price",
+        horizon: Optional[int] = None,
+        horizons: Optional[Sequence[int]] = None,
+        freq: str = "1h",
+        issue_days: Optional[Sequence[str]] = None,
+        save_format: str = "jsonl",
+        span: Optional[Tuple[Any, Any]] = None,  # (start, end) of the data pipeline's run; computed from the models if None
+    ) -> ForecastResult: ...              # status ok/fallback/skipped/late/busy, exit_code 0/10/20/30/75, revision, unchanged, noop
 
     def frozen(self, save_dir: Union[str, Path]) -> "ModelPipeline": ...  # Each top= ensemble as a plain average of its newest segment's choice
 
@@ -218,6 +248,39 @@ class VerifyReport:
     def table(self) -> pd.DataFrame: ...        # model, days, forecasts, changed, max change, control moved, rerun, co_batch, status
     def problems(self) -> List[str]: ...        # One line for each thing that keeps a model from "ok"
     def assert_ok(self) -> None: ...            # Raises AssertionError naming them
+```
+
+---
+
+## ForecastResult
+
+Returned by `ModelPipeline.forecast()`, see [Live Forecasts](/epftoolbox2/operations/live/).
+
+```python
+from epftoolbox2.results import ForecastResult
+
+class ForecastResult:
+    issue: str                            # The issue day (ISO date) in the issue zone
+    status: str                           # "ok", "fallback", "skipped", "late" or "busy"
+    exit_code: int                        # 0, 10, 20, 30 or 75
+    revision: Optional[int]               # Committed (or stood for by unchanged/noop; a dry run's would-be number)
+    unchanged: bool                       # Equal to the latest committed revision: none written
+    noop: bool                            # ensure=True found the issue done
+    dry_run: bool
+    delivered: Optional[str]              # The model or ensemble whose forecasts decide the status
+    records: Dict[str, List[Dict]]        # Each model's and ensemble's records of the issue, skips included
+    models: Dict[str, Dict]               # How each model's forecasts were made: source, fits (age, identity), notes, counts
+    refresh: Any                          # The data pipeline's RefreshRecord, None for a frame used as given
+    waits: List[Dict]                     # Every poll of wait_for
+    checks: Optional[Dict]                # checks.json of the issue, None without checks
+    snapshot: Optional[str]               # The sha256 of the issue's inputs, in every record of the revision
+    planned: Optional[int]                # Keys of the delivered model; missing: those without a forecast
+    rungs: Dict[str, int]                 # A FallbackEnsemble delivered: each target day's rung
+
+    def frame(self, model: Optional[str] = None) -> pd.DataFrame: ...  # One row per key of the delivered model (or model)
+    def table(self, grid: str = "products", model: Optional[str] = None) -> pd.DataFrame: ...  # What export writes
+    def export(self, path, format: str = "csv", grid: str = "products", model: Optional[str] = None) -> Path: ...
+    # grid "products": one row per market product (UTC start, slot, occurrence: the repeated autumn hour twice); "periods"
 ```
 
 ---

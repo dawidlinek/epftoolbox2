@@ -273,6 +273,24 @@ model is `inconclusive`. If it really is known in advance, for example a column 
 
 ---
 
+## The live path: `through="serve"`
+
+`verify(..., through="serve")` makes every forecast of the probe and its control through the serve path of
+[`forecast()`](/epftoolbox2/operations/live/): each issue day planned as a backtest of that day alone and fitted inline, as a
+live call fits it without a stored fit, by the backtest's own lines. A leak in what a live call runs (its planning, its rows, its
+fits) shows as in a backtest. A model whose fits aren't stored (the step-6 families, `NaiveModel`) runs through its own run either
+way, as `forecast()` runs it. One frame only, not a run over zones.
+
+```python
+from epftoolbox2.models import OLSModel
+from epftoolbox2.pipelines import ModelPipeline
+
+pipeline = ModelPipeline(issue_time="11:45", issue_timezone="Europe/Warsaw")
+pipeline.add_model(OLSModel(["load_d+{horizon}", "price_d-1"], training_window=364, refit="7D", name="ols"))
+checked = pipeline.verify(df, "2024-01-01", "2024-03-31", horizon=1, through="serve")
+checked.assert_ok()
+```
+
 ## Limits
 
 - **It checks the horizons you ask for.** `horizon` defaults to 1 and `run()` to 7, so pass the horizon you run, or `horizons=` with
