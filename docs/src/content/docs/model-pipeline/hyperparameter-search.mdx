@@ -219,7 +219,9 @@ same itself.
   reads it back; `best()` of a loaded result needs `make`, and raises if `make` builds another model from a trial's settings than
   the one the search scored (each trial records a fingerprint of it: the class, its settings as a pipeline saves them, and a
   predictor function's source with its code, constants and default arguments; a global list the function reads in its body but
-  doesn't define is not part of it, so edit the function, not such a list, or start a new journal). A
+  doesn't define is not part of it, so edit the function, not such a list, or start a new journal; a fitting model without
+  `refit` hashes `binary_mask=None` as `"fit"`, the rule it means now, so a journal scored up to 2.3, when None read the
+  binary columns on the test's first day, refuses to resume unless `make` builds its models with `binary_mask="first_day"`). A
   `best()` after `save()` adds its choice to the file; a loaded result's `best()` leaves the file as it is.
 
 <Aside type="caution">

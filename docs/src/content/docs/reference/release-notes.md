@@ -135,7 +135,9 @@ an issue day it didn't sample.
     pooled units, `NaiveModel` and the networks (all refit) don't move. The golden metrics don't move.
   - **Resuming.** A manifest of the default now holds `"binary_mask": "fit"` in `training_cut` (without `refit`), and one written
     up to 2.3 holds nothing, so resuming old results of a model without `refit` raises `ManifestMismatchError` on `training_cut`,
-    with a note that says how: nothing is mixed. Refit results resume as before.
+    with a note that says how: nothing is mixed. Refit results resume as before. A `BayesSearch` journal whose trials were
+    scored with such a model refuses too (a default model's fingerprint now names the rule), saying to build the models
+    with `binary_mask="first_day"` in `make` to resume it.
   - **The old behaviour.** `binary_mask="first_day"` is the old default's rule, record for record and manifest for manifest: pass
     it (in Python, or `binary_mask: first_day` in YAML) to resume results written before or to reproduce their numbers. A YAML
     file without `binary_mask` runs the new default. A `ResidualModel` warns about a base with `"first_day"` instead of one with

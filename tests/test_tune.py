@@ -791,6 +791,45 @@ def test_the_engine_is_the_pipeline_s_default_and_a_journal_keeps_its_own(df, mo
         fake_search(n_trials=5, storage=old).run(df, horizon=1, validation=V, engine="on")
 
 
+def test_a_journal_scored_under_the_old_mask_default_is_refused_with_the_way_back(df, monkeypatch, tmp_path):
+    """`binary_mask=None` read a fit's binary columns on the test's first day up to 2.3 and reads them from its own rows now,
+    and a pipeline file leaves None out: the fingerprint of a default model must change, or a journal resumed across the
+    change would rank trials scored under the two rules together. A default model hashes as `binary_mask="fit"` (the same
+    rule), refit models and `"first_day"` as before, and trials of the old fingerprint refuse with the way back, which then
+    resumes."""
+    from epftoolbox2.models import LassoCVModel
+    from epftoolbox2.tune.bayes import model_fingerprint
+
+    names = ["load_d+{horizon}"]
+    assert model_fingerprint(OLSModel(names, training_window=21)) != "4300a12278913673"  # the default's up to 2.3
+    assert model_fingerprint(LassoCVModel(names, training_window=21)) != "0fc97b9537d4ab87"
+    assert model_fingerprint(OLSModel(names, training_window=21)) == model_fingerprint(
+        OLSModel(names, training_window=21, binary_mask="fit")
+    )
+    assert model_fingerprint(OLSModel(names, training_window=21), _old_default=True) == "4300a12278913673"
+    weekly = OLSModel(names, training_window=21, refit="7D")
+    assert model_fingerprint(weekly) == model_fingerprint(weekly, _old_default=True)  # a refit's rule never changed
+
+    def old_trials(self, values, r, run):  # scored before the change: the fingerprint a trial then stored
+        return bayes._Score(
+            values["window"] / 100, 10, 10, model=model_fingerprint(self.make(dict(values)), _old_default=True)
+        )
+
+    def first_day(params):
+        model = make(params)
+        model.binary_mask = "first_day"
+        return model
+
+    journal = tmp_path / "s.journal"
+    monkeypatch.setattr(BayesSearch, "_score", old_trials)
+    BayesSearch(make, SPACE, n_trials=4, seed=0, storage=journal, sampler="random").run(df, horizon=1, validation=V)
+    with pytest.raises(ValueError, match="Build the models with binary_mask='first_day' in make"):
+        BayesSearch(make, SPACE, n_trials=4, seed=0, storage=journal, sampler="random").run(df, horizon=1, validation=V)
+    BayesSearch(first_day, SPACE, n_trials=4, seed=0, storage=journal, sampler="random").run(
+        df, horizon=1, validation=V
+    )
+
+
 def test_several_workers_need_a_storage(df, monkeypatch):
     monkeypatch.setenv(bayes.ENV_WORKERS, "2")
     with pytest.raises(ValueError, match="storage="):
