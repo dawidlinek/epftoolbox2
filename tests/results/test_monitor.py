@@ -760,10 +760,10 @@ def backtest_of(scale_lear, scale_naive, days):
     return frames
 
 
-def test_the_live_over_backtest_skill_ratio_on_matched_target_days(live):
+def test_the_live_over_backtest_skill_ratio_on_matched_keys(live):
     days = [
         plus(DAYS[0], i) for i in range(-3, 6)
-    ]  # the backtest covers 10-15 to 10-23: overlapping the live days in part
+    ]  # the backtest covers issue days 10-15 to 10-23: overlapping the live days in part
     frames = backtest_of(4.0, 10.0, days)
     report = run_monitor(live, windows=(10,), backtest=frames)
     got = row(report, 10, "lear")
@@ -771,12 +771,12 @@ def test_the_live_over_backtest_skill_ratio_on_matched_target_days(live):
     live_lear = oracle.keys("lear", DAYS).set_index(["day", "horizon", "hour"])
     live_naive = oracle.keys("naive", DAYS).set_index(["day", "horizon", "hour"])
     both = live_lear.index.intersection(live_naive.index)
-    target = lambda idx: [plus(d, h) for d, h, _ in idx]  # noqa: E731
-    bt_days = set(plus(r.run_date.date().isoformat(), r.horizon) for r in frames["lear"].itertuples())
-    matched = sorted(set(target(both)) & bt_days)
-    assert matched and got["matched_days_naive"] == len(matched)
-    live_sel = [k for k in both if plus(k[0], k[1]) in matched]
-    live_skill = live_lear.loc[live_sel, "error"].abs().mean() / live_naive.loc[live_sel, "error"].abs().mean()
+    matched = [
+        k for k in both if k[0] in days
+    ]  # the keys the backtest holds too: its issue days, every hour and horizon
+    assert matched and got["matched_keys_naive"] == len(matched)
+    assert got["matched_days_naive"] == len({k[0] for k in matched})
+    live_skill = live_lear.loc[matched, "error"].abs().mean() / live_naive.loc[matched, "error"].abs().mean()
     assert got["backtest_skill_naive"] == pytest.approx(4.0 / 10.0, rel=1e-9)
     assert got["live_vs_backtest_naive"] == pytest.approx(live_skill / (4.0 / 10.0), rel=1e-9)
     # a backtest with no day in common matches nothing
@@ -785,6 +785,62 @@ def test_the_live_over_backtest_skill_ratio_on_matched_target_days(live):
         row(none, 10, "lear")["live_vs_backtest_naive"]
     )
     assert "backtest_skill_naive" not in run_monitor(live, windows=(10,)).tables()
+
+
+def live_as_backtest(extra_days=()):
+    """A backtest equal to the live forecasts key for key (and a perfect or terrible forecast on `extra_days`, issue days the live
+    window doesn't hold)."""
+    oracle = Oracle()
+    frames = {}
+    for member in ("lear", "naive"):
+        keys = oracle.keys(member, DAYS)
+        frames[member] = pd.DataFrame(
+            dict(
+                run_date=pd.to_datetime(keys["day"]),
+                target_date=pd.to_datetime([plus(d, h) for d, h in zip(keys["day"], keys["horizon"])]),
+                hour=keys["hour"],
+                horizon=keys["horizon"],
+                prediction=keys["prediction"],
+                actual=keys["actual"],
+            )
+        )
+    for member, error in (("lear", 50.0), ("naive", 1.0)):
+        rows = []
+        for day in extra_days:
+            for horizon in HORIZONS:
+                for hour in HOURS:
+                    actual = actual_of(plus(day, horizon), hour)
+                    if not math.isnan(actual):
+                        rows.append(
+                            dict(
+                                run_date=pd.Timestamp(day),
+                                target_date=pd.Timestamp(plus(day, horizon)),
+                                hour=hour,
+                                horizon=horizon,
+                                prediction=actual + error,
+                                actual=actual,
+                            )
+                        )
+        frames[member] = pd.concat([frames[member], pd.DataFrame(rows)], ignore_index=True)
+    return frames
+
+
+def test_a_backtest_equal_to_live_gives_a_ratio_of_exactly_one_in_every_window(live):
+    report = run_monitor(live, windows=(1, 3, 4, 5, 10), backtest=live_as_backtest())
+    for window in (1, 3, 4, 5, 10):
+        got = row(report, window, "lear")
+        assert got["live_vs_backtest_naive"] == 1.0, window
+        assert got["backtest_skill_naive"] == got["skill_naive"], window
+        assert got["matched_keys_naive"] == got["common_naive"] > 0, window
+
+
+def test_backtest_days_outside_the_window_or_keys_live_lacks_move_nothing(live):
+    """An extra backtest issue day before the window, a perfect naive on it and a terrible lear, matches no live key."""
+    plain = run_monitor(live, windows=(3, 10), backtest=live_as_backtest())
+    extra = run_monitor(live, windows=(3, 10), backtest=live_as_backtest(extra_days=[plus(DAYS[0], -1)]))
+    for window in (3, 10):
+        assert row(extra, window, "lear")["live_vs_backtest_naive"] == 1.0
+    pd.testing.assert_frame_equal(plain.tables(), extra.tables())
 
 
 # --- alerts ----------------------------------------------------------------------------------------------------------------------

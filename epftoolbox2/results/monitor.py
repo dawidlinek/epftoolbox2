@@ -629,27 +629,30 @@ def _backtest_panel(backtest: Any, names: Sequence[str], freq: str) -> LossPanel
     return _panel(out, {}, freq)[0]
 
 
-def _target_days(panel: LossPanel, rows: np.ndarray) -> np.ndarray:
-    return panel.run_days(rows) + panel.horizon[rows]
+def _key_codes(panel: LossPanel, rows: np.ndarray) -> np.ndarray:
+    """One integer per forecast key (run date, horizon, hour) of `rows`, to match keys of two panels."""
+    return (panel.run_days(rows) * 1000 + panel.horizon[rows]) * 1000 + panel.hour[rows]
 
 
 def _backtest_ratio(
-    panel: LossPanel, backtest: LossPanel, rows: np.ndarray, member: str, benchmark: str, live: Dict[str, float]
+    panel: LossPanel, backtest: LossPanel, rows: np.ndarray, member: str, benchmark: str
 ) -> Dict[str, float]:
-    """The live skill over the backtest's, both on the target days where the live forecasts of the window and the backtest's, of
-    the member and the benchmark both, exist."""
+    """The live skill over the backtest's, both on the forecast keys (run date, target date, hour, horizon) where the live window and
+    the backtest both have the member and the benchmark: one sample, however far the backtest reaches beyond the window."""
     out = {
         f"backtest_skill_{benchmark}": math.nan,
         f"live_vs_backtest_{benchmark}": math.nan,
         f"matched_days_{benchmark}": 0,
+        f"matched_keys_{benchmark}": 0,
     }
     if member == benchmark or member not in backtest or benchmark not in backtest:
         return out
     live_rows = panel.common(rows, [member, benchmark])
     past_rows = backtest.common(backtest.rows(), [member, benchmark])
-    live_days, past_days = _target_days(panel, live_rows), _target_days(backtest, past_rows)
-    matched = np.intersect1d(live_days, past_days)
-    out[f"matched_days_{benchmark}"] = int(len(matched))
+    live_codes, past_codes = _key_codes(panel, live_rows), _key_codes(backtest, past_rows)
+    matched, in_live, in_past = np.intersect1d(live_codes, past_codes, return_indices=True)
+    out[f"matched_keys_{benchmark}"] = int(len(matched))
+    out[f"matched_days_{benchmark}"] = int(len(np.unique(matched // 1_000_000)))
     if not len(matched):
         return out
 
@@ -658,8 +661,8 @@ def _backtest_ratio(
         theirs = source.errors[chosen, source.column(benchmark)].mean()
         return float(mine / theirs) if theirs > 0 else math.nan
 
-    then = ratio(backtest, past_rows[np.isin(past_days, matched)])
-    now = ratio(panel, live_rows[np.isin(live_days, matched)])
+    then = ratio(backtest, past_rows[in_past])
+    now = ratio(panel, live_rows[in_live])
     out[f"backtest_skill_{benchmark}"] = then
     out[f"live_vs_backtest_{benchmark}"] = (
         now / then if then and math.isfinite(then) and math.isfinite(now) else math.nan
@@ -907,7 +910,7 @@ def monitor(
                 )
                 row.update({f"{key}_{bench}": value for key, value in skill.items()})
                 if bt_panel is not None:
-                    row.update(_backtest_ratio(panel, bt_panel, mine, name, bench, skill))
+                    row.update(_backtest_ratio(panel, bt_panel, mine, name, bench))
             row.update(stats)
             row["unscored"] = int(len(raw) - stats["forecasts"])
             row["issue_days"] = len(in_window)
@@ -923,7 +926,16 @@ def monitor(
     tables = pd.DataFrame(table_rows)
     if len(tables):
         lead = ["window", "member"]
-        prefixes = ("skill_", "common_", "days_", "wins_", "backtest_skill_", "live_vs_backtest_", "matched_days_")
+        prefixes = (
+            "skill_",
+            "common_",
+            "days_",
+            "wins_",
+            "backtest_skill_",
+            "live_vs_backtest_",
+            "matched_days_",
+            "matched_keys_",
+        )
         skills = [c for c in tables.columns if c.startswith(prefixes)]
         tables = tables[lead + skills + [c for c in tables.columns if c not in lead + skills]]
     quality_table = pd.DataFrame(
