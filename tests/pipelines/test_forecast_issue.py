@@ -990,3 +990,16 @@ def test_a_file_cache_read_without_writes_makes_nothing(tmp_path):
     again = data.run("2023-02-01", "2023-03-01", cache=str(path), cache_writes=False)
     assert len(source.fetches) == 2 and snapshot_of(tmp_path / "cache") == written
     pd.testing.assert_frame_equal(fresh, again, check_freq=False)
+
+
+def test_live_json_says_on_which_days_and_in_which_zone_the_directory_issues(tmp_path):
+    live = tmp_path / "live"
+    simple().forecast(DATA, ISSUE, live, horizon=2)
+    identity = json.loads((live / "live.json").read_text())
+    assert identity["issue_timezone"] == "Europe/Warsaw"
+    assert identity["issue_days"] == ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+    with pytest.raises(LiveDirectoryError, match="issue_days"):
+        simple().forecast(DATA, ISSUE, live, horizon=2, issue_days=["tuesday"], dry_run=True)
+    weekly = tmp_path / "weekly"
+    simple().forecast(DATA, ISSUE, weekly, horizon=2, issue_days=["Tuesday"])
+    assert json.loads((weekly / "live.json").read_text())["issue_days"] == ["tuesday"]

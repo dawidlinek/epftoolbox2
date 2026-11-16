@@ -46,6 +46,7 @@ from .._clock import current_clock
 from .._date_utils import resolve_date
 from ..information_set import DATA_ZONE, InformationSet
 from ..models._calendar import (
+    WEEKDAYS,
     EXPANDING,
     IssueCalendar,
     horizon_arguments,
@@ -911,7 +912,12 @@ def _issue(
         if store is not None:
             # What the directory is: compared on every call, a dry run's too. A deadline is each call's own (its call line
             # and its revision's commit line hold it), never the directory's.
-            identity: Dict[str, Any] = {"issue_timezone": zone}
+            # `issue_days` (weekday names, all seven for every day) and `issue_timezone` tell a reader of the directory
+            # (`monitor()`) which days were due and in which zone.
+            identity: Dict[str, Any] = {
+                "issue_timezone": zone,
+                "issue_days": list(WEEKDAYS) if settings["day_names"] is None else list(settings["day_names"]),
+            }
             if pipeline.frozen_choices:
                 identity["frozen_choices"] = pipeline.frozen_choices
             if writes:
