@@ -472,6 +472,19 @@ def serve_models(
     if run_models:
         from .model_pipeline import ModelPipeline
 
+        for model in run_models:  # decision 5, as the stored fits' path checks every fit it makes now
+            refuse_too_early(
+                model,
+                frame,
+                day,
+                target=target,
+                horizons=horizons,
+                freq=freq,
+                info=info,
+                availability=pipeline.availability,
+                issue_days=issue_days,
+            )
+
         sub = ModelPipeline(information_set=pipeline.information_set, engine=pipeline._engine)
         sub._availability = pipeline._availability
         sub._bases_from_the_whole_list = True  # a ResidualModel's named base is bound already, to the pipeline's model
@@ -501,6 +514,73 @@ def serve_models(
         made[name]["forecasts"] = sum(1 for record in held if record.get("status", STATUS_OK) == STATUS_OK)
         made[name]["skipped"] = _skip_counts(held)
     return ordered, {name: made[name] for name in ordered}, lists, manifests
+
+
+def refuse_too_early(
+    model: Any,
+    frame: pd.DataFrame,
+    day: datetime.date,
+    *,
+    target: str,
+    horizons: Sequence[int],
+    freq: str,
+    info: Any,
+    availability: str,
+    issue_days: Optional[Sequence[str]],
+) -> None:
+    """Decision 5 for a model that fits at serve time through its own run: refuse (`FitTooEarlyError`) a call made before a
+    training target, or an input of the newest training row, that its fits of D read is out by its rule at the clock's now.
+    The issue day is planned as the stored fits' path plans it (`plan_issue`) and judged by its check (`check_published`) for
+    every anchor, since every fit is made now. A model that path can't plan (a day or pooled unit, a foundation model) is held
+    to the target of D - 1 being out, the newest any `newest_target="d-1"` fit of D reads."""
+    from ..information_set import _STEP_MINUTES
+    from ..models._fits import FitTooEarlyError, check_published, plan_issue
+
+    if getattr(model, "_fits_nothing", False):
+        return  # a NaiveModel trains on nothing
+    now = current_clock().now()
+    try:
+        plan = plan_issue(
+            model,
+            frame,
+            day,
+            target=target,
+            horizon=max(horizons),
+            horizons=horizons,
+            freq=freq,
+            information_set=info,
+            availability=availability,
+            issue_days=issue_days,
+            engine=False,
+        )
+    except Exception:  # its run reports what is wrong with it; here only when its targets are out is asked
+        plan = None
+    if plan is not None:
+        check_published(plan, list(plan.items), now, frame)
+        return
+    step = _STEP_MINUTES[freq]
+    rule = info._resolve_for(target, step)
+    if rule.rule is None:
+        return
+    clock = info._issue_clock(pd.DatetimeIndex([pd.Timestamp(day)]), frame.index, freq)
+    from ..models._calendar import periods_per_day
+
+    periods = np.arange(periods_per_day(freq), dtype=np.int64)
+    # D - 1's targets; with newest_target="published" also D's that the rule puts out by the issue time.
+    days = (-1, 0) if getattr(model, "newest_target", "d-1") == "published" else (-1,)
+    for offset in days:
+        minutes = np.asarray(clock.available(rule, periods, step, row_day=offset)[:, 0], dtype=float)
+        minutes = minutes[np.isfinite(minutes) & ((offset < 0) | (minutes <= float(np.ravel(clock.issue)[0])))]
+        if not minutes.size:
+            continue
+        out = clock.ctx.origin + pd.Timedelta(minutes=float(minutes.max()))
+        if out > now:
+            raise FitTooEarlyError(
+                f"{model.name}: its fits of {day} train on '{target}' of {day + datetime.timedelta(days=offset)}, which its "
+                f"rule publishes at {out.tz_convert('UTC'):%Y-%m-%d %H:%M} UTC, after the clock's now "
+                f"({now:%Y-%m-%d %H:%M} UTC): a fit made now would train on fewer targets than the backtest's. Forecast once it "
+                "is out."
+            )
 
 
 def compute_ensembles(

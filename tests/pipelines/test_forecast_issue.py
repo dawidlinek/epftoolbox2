@@ -25,6 +25,7 @@ from epftoolbox2.ensembles import AverageEnsemble, FallbackEnsemble
 from epftoolbox2.information_set import Availability, InformationSet, InformationSetError
 from epftoolbox2.models import HistGBModel, LEARModel, NaiveModel, OLSModel
 from epftoolbox2.models import _engine_worker
+from epftoolbox2.models._fits import FitTooEarlyError
 from epftoolbox2.models.context import Use
 from epftoolbox2.models.residual import ResidualModel
 from epftoolbox2.models._worker import _worker_init
@@ -786,3 +787,36 @@ def test_a_residual_model_with_a_dated_warmup_is_its_backtest_s_record_live(name
     assert keyed(result.records["res"]) == keyed(lines(folder / "res.jsonl"), ISSUE)
     start, _ = _live.data_span(make().models, datetime.date(2023, 3, 7), [1, 2])
     assert start <= "2022-12-23"  # 15 January less the base's window and horizon
+
+
+EARLY_FITS = {
+    "hgb": lambda: HistGBModel(
+        PREDICTORS, training_window=21, refit="1D", max_iter=20, name="g"
+    ),  # pooled periods, own run
+    "ols": lambda: OLSModel(PREDICTORS, training_window=21, name="g"),  # the stored fits' path, fitted inline
+}
+
+
+def too_early_frame():
+    early = DATA.copy()
+    early.loc[early.index >= pd.Timestamp("2023-03-07", tz="Europe/Warsaw"), "price"] = np.nan
+    return early
+
+
+@pytest.mark.parametrize("family", sorted(EARLY_FITS))
+def test_a_call_before_the_newest_training_target_is_out_is_refused_whatever_the_path(family, tmp_path):
+    """Issue 8 March, called at 11:00 on 6 March (Warsaw): the price of 7 March, the newest target a fit of the 8th trains on,
+    is out at 13:00 that day. A fit made now would train on one target less than the backtest's: refused, nothing committed."""
+    live = tmp_path / "live"
+    with use_clock(FakeClock(pd.Timestamp("2023-03-06 10:00", tz="UTC"))):
+        with pytest.raises(FitTooEarlyError, match="2023-03-07"):
+            pipeline(EARLY_FITS[family]()).forecast(too_early_frame(), "2023-03-08", live, horizon=2)
+    assert LiveStore(live).committed() == {}
+
+
+def test_a_model_that_fits_nothing_has_no_training_target_to_wait_for(tmp_path):
+    with use_clock(FakeClock(pd.Timestamp("2023-03-06 10:00", tz="UTC"))):
+        result = pipeline(NaiveModel(["load_d+{horizon}"], name="g")).forecast(
+            too_early_frame(), "2023-03-08", None, horizon=2
+        )
+    assert result.status == "ok"
