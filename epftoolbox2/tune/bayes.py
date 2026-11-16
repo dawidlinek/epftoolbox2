@@ -445,11 +445,17 @@ def _described(value: Any) -> Any:
     return repr(value)
 
 
-def model_fingerprint(model: Any) -> str:
+def model_fingerprint(model: Any, *, _old_default: bool = False) -> str:
     """What a search compares to know that `make` builds the model it scored: a hash of the model's class and its settings as
     a pipeline saves them (`ModelPipeline.to_dict`), or its public attributes where a setting can't be saved (a predictor
     function defined in the script), and of the code of its predictor function (its source, which a pipeline saves only by
-    import path). An edit inside the function changes it; a global list the function reads but doesn't define does not."""
+    import path). An edit inside the function changes it; a global list the function reads but doesn't define does not.
+
+    A fitting model without `refit` whose `binary_mask` is None hashes as `binary_mask="fit"`, the rule None means now
+    (`BaseModel._mask_rule`): a pipeline file leaves None out, and so did the fingerprints of trials scored up to 2.3 under the
+    first-day rule, which therefore refuse to resume (`_check_models`, with the way back) rather than rank with these.
+    `_old_default=True` gives the fingerprint a model of its rule had as the default up to 2.3, without `binary_mask`: a
+    default model's (now refused) and a `"first_day"` model's (accepted, the same rule)."""
     from ..pipelines.model_pipeline import ModelPipeline
 
     try:
@@ -458,6 +464,12 @@ def model_fingerprint(model: Any) -> str:
         params = {key: value for key, value in vars(model).items() if not key.startswith("_")}
         if params.get("refit_from", 0) is None:
             del params["refit_from"]  # added later: left out at its default, so the hashes made before it don't move
+    if _old_default:
+        # As a default model's was up to 2.3: no binary_mask, which was the first-day rule then.
+        if params.get("binary_mask") == "first_day" or _default_mask_is_fit(model):
+            params.pop("binary_mask", None)
+    elif _default_mask_is_fit(model):
+        params["binary_mask"] = "fit"
     for attribute in ("_ctx_fn", "_predictors_fn"):  # a function of ctx, or of (horizon) / (horizon, hour)
         function = getattr(model, attribute, None)
         if function is not None:
@@ -468,6 +480,32 @@ def model_fingerprint(model: Any) -> str:
         default=_described,
     )
     return hashlib.sha256(text.encode()).hexdigest()[:16]
+
+
+def _default_mask_is_fit(model: Any) -> bool:
+    """Whether `model` leaves `binary_mask` None where the rule decides its numbers: no `refit` (whose units always read their
+    own rows) and a model that fits something. Its rule is then "fit", which was "first_day" up to 2.3."""
+    return (
+        hasattr(model, "_mask_rule")
+        and getattr(model, "binary_mask", "") is None
+        and getattr(model, "refit", "") is None
+        and model._mask_rule == "fit"
+    )
+
+
+def _first_day_fingerprint(model: Any) -> Optional[str]:
+    """The fingerprint `model` had up to 2.3, when `binary_mask=None` read its masks on the first day, or None where the
+    default's rule didn't change for it."""
+    return model_fingerprint(model, _old_default=True) if _default_mask_is_fit(model) else None
+
+
+def _accepted_fingerprints(model: Any) -> Tuple[str, ...]:
+    """The stored fingerprints that are `model` under the same mask rule: its own, and for `binary_mask="first_day"` without
+    `refit` also the old default's, which was that rule and hashed without the parameter."""
+    own = model_fingerprint(model)
+    if getattr(model, "binary_mask", None) == "first_day" and getattr(model, "refit", "") is None:
+        return own, model_fingerprint(model, _old_default=True)
+    return (own,)
 
 
 def _set_seeds(model: Any, seeds: int, where: str) -> None:
@@ -615,13 +653,16 @@ class BayesSearch:
         issue_time: Optional[str] = None,
         issue_timezone: str = "Europe/Brussels",
         availability: Optional[str] = None,
-        engine: str = "off",
+        engine: Optional[str] = None,
         test: Any = None,
     ) -> "SearchResult":
         """Run the search on the validation period and return its result.
 
         `target`, `horizon`/`horizons`, `freq` and `validation=(start, end)` are as in `ModelPipeline.run`; `information_set`
-        (or `issue_time` and `issue_timezone`), `availability` and `engine` as in `ModelPipeline(...)`. Each trial runs one
+        (or `issue_time` and `issue_timezone`), `availability` and `engine` as in `ModelPipeline(...)`: `engine` None, the
+        default, is "on" for a new search and, for a search resumed from its storage, the engine it recorded (a journal written
+        before the default changed records "off" and keeps it); an explicit `engine` other than the recorded one refuses, as
+        any other setting does. Each trial runs one
         model through a `ModelPipeline` of these on the frame cut after the validation end, and is scored on the forecasts for
         days up to it.
         `test=` raises: a search chooses on validation, and the test period is never read (`validation="previous_year"` too:
@@ -663,6 +704,9 @@ class BayesSearch:
         optuna = _optuna()
         with _quiet_optuna():
             storage = run.storage = self._storage()
+            if engine is None:
+                # As `ModelPipeline` follows a results folder: a resumed search keeps the engine it was made with.
+                run.pipeline["engine"] = self._recorded_engine(storage) or "on"
             settings = self._settings(run)
             study = self._open(storage, STUDY, optuna.samplers.RandomSampler(seed=self.seed), settings, warm=True)
             self._check_models(storage)
@@ -672,6 +716,16 @@ class BayesSearch:
                 self._work_rung(storage, r, run)
             self._wait_for_rung(storage, len(self._rungs) - 1)
             return SearchResult(self._record(storage, settings), make=self.make)
+
+    def _recorded_engine(self, storage: Any) -> Optional[str]:
+        """The engine the search in `storage` recorded in its settings, once its creator set it up; None for a new one."""
+        optuna = _optuna()
+        try:
+            study = optuna.load_study(study_name=STUDY, storage=storage)
+        except KeyError:  # no such study yet: this run creates it
+            return None
+        self._wait_for_setup(study, STUDY)
+        return (study.user_attrs.get(_SETTINGS) or {}).get("engine")
 
     def _storage(self) -> Any:
         optuna = _optuna()
@@ -904,8 +958,16 @@ class BayesSearch:
                 values = self._space.decode(t.params)
                 key = _canonical(values)
                 if key not in built:
-                    built[key] = model_fingerprint(self.make(dict(values)))
-                if built[key] != stored:
+                    model = self.make(dict(values))
+                    built[key] = (_accepted_fingerprints(model), _first_day_fingerprint(model))
+                if stored not in built[key][0]:
+                    if built[key][1] == stored:
+                        raise ValueError(
+                            f"Trial {t.number} of {name!r} in {self.storage} was scored with binary_mask=None when it read each "
+                            "forecast's binary columns on the test's first day (up to 2.3); None now reads them from each fit's "
+                            "own rows. Build the models with binary_mask='first_day' in make to resume this search as it was "
+                            "scored, or use another storage file."
+                        )
                     raise ValueError(
                         f"Trial {t.number} of {name!r} in {self.storage} was scored with another model than make builds now "
                         f"from its settings {values}: make was changed since. Use another storage file for this search."

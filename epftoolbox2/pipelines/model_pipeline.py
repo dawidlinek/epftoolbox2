@@ -81,6 +81,7 @@ from ..results.manifest import (
 )
 from ..results.live import LiveStore, refuse_live_directory
 from ..models._fits import RefitResult, Served, refit_models, serve
+from ..models._engine_worker import fit_path_of
 from ..results.matching import rows_of_refs, warn_about_thin
 from ..results.panel import PanelReport
 from ..results.report import EvaluationReport
@@ -366,8 +367,8 @@ class ModelPipeline:
             information set. "warn" and "raise" need an issue time. The level doesn't change a forecast, unless a
             predictor function catches the error a late `ctx.value()` raises at "raise" and chooses another list, which it
             must not do. Changing the level alone resumes a run.
-        engine: "on" runs the models that can be fitted from shared statistics (OLS, Ridge, LassoCV and LEAR, `BaseModel._engine_capable`) in engine groups: the
-            models of one refit rule share one read of the data and one pool of processes, which cuts the fixed cost of each
+        engine: "on" runs the models that can be fitted from shared statistics (OLS, Ridge, LassoCV and LEAR,
+            `BaseModel._engine_capable`) in engine groups: the models of one refit rule share one read of the data and one pool of processes, which cuts the fixed cost of each
             model in a study of thousands. NaiveModel, a `train_on="matching"` list, a subclass that fits without its own
             `_fit_stats` and a `forecast_only` run go through their own run as with "off". The fits of OLS, Ridge, LassoCV
             and LEAR (`solver="lars"`) with `StandardScaler` or a VST come from exact sums shared in the group: the same bits
@@ -433,8 +434,10 @@ class ModelPipeline:
     def _resumes_on_the_model_path(self, model: BaseModel, save_dir: Optional[Union[str, Path]]) -> bool:
         """Whether `model` runs on the model path although the engine is on: `engine` was left unset and its results in
         `save_dir` have a manifest without `fit_path`, written on the model path (engine off, or up to 2.3). Such a folder
-        keeps resuming as it was written; an explicit `engine="on"` refuses it on `fit_path` instead."""
-        if self._engine is not None or not save_dir:
+        keeps resuming as it was written; an explicit `engine="on"` refuses it on `fit_path` instead. False, and no log line,
+        for a model whose fits the engine wouldn't take from shared statistics (`fit_path_of` None, a scaler it can't share):
+        its group runs the model path's fits, the same bits either way."""
+        if self._engine is not None or not save_dir or fit_path_of(model) is None:
             return False
         path = manifest_path(self.results_path(save_dir, model))
         try:
@@ -2602,9 +2605,8 @@ class ModelPipeline:
             out["information_set"] = self.information_set.to_dict()
         if self._availability is not None:  # what was asked for; left out, a load takes the default again
             out["availability"] = self._availability
-        if (
-            self._engine is not None
-        ):  # written only when given, so a file without it takes the default, as one saved before
+        # Written only when given, so a file without it takes the default, as one saved before.
+        if self._engine is not None:
             out["engine"] = self._engine
         if self.checks is not None:  # written only when set (step 8f)
             out["checks"] = self._serialize_component(self.checks)

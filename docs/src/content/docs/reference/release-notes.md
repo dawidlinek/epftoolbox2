@@ -135,7 +135,9 @@ an issue day it didn't sample.
     pooled units, `NaiveModel` and the networks (all refit) don't move. The golden metrics don't move.
   - **Resuming.** A manifest of the default now holds `"binary_mask": "fit"` in `training_cut` (without `refit`), and one written
     up to 2.3 holds nothing, so resuming old results of a model without `refit` raises `ManifestMismatchError` on `training_cut`,
-    with a note that says how: nothing is mixed. Refit results resume as before.
+    with a note that says how: nothing is mixed. Refit results resume as before. A `BayesSearch` journal whose trials were
+    scored with such a model refuses too (a default model's fingerprint now names the rule), saying to build the models
+    with `binary_mask="first_day"` in `make` to resume it.
   - **The old behaviour.** `binary_mask="first_day"` is the old default's rule, record for record and manifest for manifest: pass
     it (in Python, or `binary_mask: first_day` in YAML) to resume results written before or to reproduce their numbers. A YAML
     file without `binary_mask` runs the new default. A `ResidualModel` warns about a base with `"first_day"` instead of one with
@@ -156,7 +158,8 @@ an issue day it didn't sample.
     and a folder written the other way refuses with `ManifestMismatchError` on `fit_path`. Nothing is mixed.
   - **The old behaviour.** `ModelPipeline(engine="off")`, or `engine: off` in the pipeline's YAML or `model_pipeline.engine: off`
     in a workflow. YAML writes `engine` only when it was given, so a file saved up to 2.3 (without it) runs the new default.
-    `BayesSearch.run(engine="off")` keeps its own default.
+    `BayesSearch.run` follows the pipeline: `engine` left out is "on" for a new search, and a journal resumes on the engine it
+    recorded, so one written before (`"off"`) keeps resuming on the model path; an explicit other engine refuses.
 - **`MLPDailyModel`'s inputs go through Lago's Invariant by default.** `scaler` defaults to
   `{"name": "asinh", "params": {"standardise": False}}` (`epftoolbox2.models.mlp.INVARIANT_INPUTS`), asinh of each input's median
   and MAD on each fit's rows, binary columns kept, as the research and Lago's DNN scaled them, where it was `"standard"`. On the

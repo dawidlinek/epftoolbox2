@@ -279,6 +279,8 @@ ONE_DAY_CELLS = {
 
 
 def model_of(kind, predictors, window, **kwargs):
+    if kind == "lasso":
+        return LassoCVModel(predictors, training_window=window, **kwargs)
     if kind == "ridge":
         return RidgeModel(predictors, training_window=window, **kwargs)
     if kind == "lear":
@@ -510,45 +512,89 @@ def test_each_member_of_a_window_list_reads_its_own_mask():
 # Independent of test_start
 # ---------------------------------------------------------------------------
 
-# (freq, first issue day S, k, predictors, newest target, issue days, training window, refit, horizon). The second run starts on
-# S + k and ends two days after the first, and `turning` turns on S + k - 2: the default reads a binary column on S and a
-# continuous one on S + k. Both switches, each frequency, Fridays, "published", a list of windows, a function, and a start inside a
-# refit block.
+# (model, engine, freq, first issue day S, k, predictors, newest target, issue days, training window, refit, horizon). The second
+# run starts on S + k and ends two days after the first, and `turning` turns on S + k - 2: `"first_day"` reads a binary column
+# on S and a continuous one on S + k. Both switches, each frequency, Fridays, "published", a list of windows, a function, a
+# start inside a refit block, OLS, LassoCV and LEAR (LARS, its asinh scaler), each run through a ModelPipeline with the
+# engine (None, the default) and without it ("off"); every level of each axis, and the engine with every model and frequency.
 START_CELLS = {
-    "1h-spring-k1": ("1h", "2023-03-24", 1, MASKED, "d-1", None, WINDOW, None, 2),
-    "1h-spring-k3-function": ("1h", "2023-03-22", 3, weekday_lists, "d-1", None, WINDOW, None, 2),
-    "1h-autumn-k17": ("1h", "2023-10-16", 17, MASKED, "d-1", None, WINDOW, None, 2),
-    "15min-spring-k1": ("15min", "2023-03-25", 1, MASKED, "d-1", None, 14, None, 1),
-    "15min-autumn-k3-function": ("15min", "2023-10-26", 3, weekday_lists, "d-1", None, 14, None, 1),
-    "1D-autumn-k17": ("1D", "2023-10-12", 17, MASKED, "d-1", None, WINDOW, None, 2),
-    "1D-spring-k3-window-list": ("1D", "2023-03-20", 3, MASKED, "d-1", None, [14, 28], None, 2),
-    "1h-fridays-k17-function": ("1h", "2023-03-17", 17, weekday_lists, "d-1", ["friday"], WINDOW, None, 2),
-    "1h-autumn-k3-published": ("1h", "2023-10-25", 3, turning_while_aux, "published", None, WINDOW, None, 2),
-    "1h-spring-k1-window-list-function": ("1h", "2023-03-23", 1, weekday_lists, "d-1", None, [14, 28], None, 1),
-    "1h-spring-k3-inside-a-refit-block": ("1h", "2023-03-21", 3, MASKED, "d-1", None, WINDOW, "7D", 2),
+    "1h-spring-k1": ("ols", None, "1h", "2023-03-24", 1, MASKED, "d-1", None, WINDOW, None, 2),
+    "1h-spring-k3-function": ("ols", "off", "1h", "2023-03-22", 3, weekday_lists, "d-1", None, WINDOW, None, 2),
+    "1h-autumn-k17": ("ols", "off", "1h", "2023-10-16", 17, MASKED, "d-1", None, WINDOW, None, 2),
+    "15min-spring-k1": ("ols", None, "15min", "2023-03-25", 1, MASKED, "d-1", None, 14, None, 1),
+    "15min-autumn-k3-function": ("ols", "off", "15min", "2023-10-26", 3, weekday_lists, "d-1", None, 14, None, 1),
+    "1D-autumn-k17": ("ols", None, "1D", "2023-10-12", 17, MASKED, "d-1", None, WINDOW, None, 2),
+    "1D-spring-k3-window-list": ("ols", "off", "1D", "2023-03-20", 3, MASKED, "d-1", None, [14, 28], None, 2),
+    "1h-fridays-k17-function": ("ols", None, "1h", "2023-03-17", 17, weekday_lists, "d-1", ["friday"], WINDOW, None, 2),
+    "1h-autumn-k3-published": (
+        "ols",
+        None,
+        "1h",
+        "2023-10-25",
+        3,
+        turning_while_aux,
+        "published",
+        None,
+        WINDOW,
+        None,
+        2,
+    ),
+    "1h-spring-k1-window-list-function": (
+        "ols",
+        "off",
+        "1h",
+        "2023-03-23",
+        1,
+        weekday_lists,
+        "d-1",
+        None,
+        [14, 28],
+        None,
+        1,
+    ),
+    "1h-spring-k3-inside-a-refit-block": ("ols", None, "1h", "2023-03-21", 3, MASKED, "d-1", None, WINDOW, "7D", 2),
+    "1h-spring-k3-lassocv": ("lasso", None, "1h", "2023-03-22", 3, MASKED, "d-1", None, WINDOW, None, 1),
+    "1D-autumn-k1-lassocv": ("lasso", "off", "1D", "2023-10-25", 1, MASKED, "d-1", None, 28, None, 2),
+    "1h-autumn-k3-lear-window-list": ("lear", None, "1h", "2023-10-25", 3, MASKED, "d-1", None, [14, 28], None, 1),
+    "15min-spring-k1-lear": ("lear", "off", "15min", "2023-03-25", 1, MASKED, "d-1", None, 14, None, 1),
+    "1D-spring-k17-lear-published": (
+        "lear",
+        None,
+        "1D",
+        "2023-03-17",
+        17,
+        turning_while_aux,
+        "published",
+        None,
+        28,
+        None,
+        2,
+    ),
 }
 
 
 @pytest.mark.parametrize("cell", list(START_CELLS))
 def test_a_later_start_moves_no_forecast(cell):
-    """Runs over [S, E] and [S + k, E + 2]: with `"fit"` every forecast they share is the same, bit for bit, `actual` included.
-    `"first_day"` differs on some of them (the case is exercised); with `refit`, whose units always read their own rows, the
-    default is checked instead (`"first_day"` raises there)."""
-    freq, first, k, predictors, newest, issue_days, window, refit, horizon = START_CELLS[cell]
+    """Runs over [S, E] and [S + k, E + 2] through a ModelPipeline: with `"fit"` every forecast they share is the same, bit for
+    bit, `actual` included, with the engine on (the default) or off. `"first_day"` differs on some of them (the case is
+    exercised); with `refit`, whose units always read their own rows, the default is checked instead (`"first_day"` raises
+    there)."""
+    kind, engine, freq, first, k, predictors, newest, issue_days, window, refit, horizon = START_CELLS[cell]
     later = shift(first, k)
     end = shift(later, 6 if issue_days else 3)
     data = market(freq, shift(first, -70), 100, shift(later, -2), horizon=horizon).assign(aux=1.0)
     days = {} if issue_days is None else {"issue_days": issue_days}
 
     def run(start, stop, rule):
-        model = ols(predictors, window, newest_target=newest, refit=refit, binary_mask=rule)
-        result = model.run(data, start, stop, horizon=horizon, freq=freq, information_set=INFO, **days)
-        return keyed(result._results, "day_in_test")
+        model = model_of(kind, predictors, window, newest_target=newest, refit=refit, binary_mask=rule, name="m")
+        pipeline = ModelPipeline(information_set=INFO, engine=engine).add_model(model)
+        report = pipeline.run(data, start, stop, horizon=horizon, freq=freq, **days)
+        return keyed(report.refs["m"]._results, "day_in_test")
 
     for rule in ("fit", "first_day" if refit is None else None):
         whole, part = run(first, end, rule), run(later, shift(end, 2), rule)
         shared = whole.keys() & part.keys()
-        assert {key[0] for key in shared} == {key[0] for key in part if key[0] <= end}
+        assert shared and {key[0] for key in shared} == {key[0] for key in part if key[0] <= end}
         same = all(whole[key] == part[key] for key in shared)
         assert same == (rule != "first_day"), rule
 

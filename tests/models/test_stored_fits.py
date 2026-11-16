@@ -214,6 +214,7 @@ def test_a_real_pool_stores_what_an_in_process_one_does(tmp_path, monkeypatch):
 
 
 def pipeline_of(*models, engine="off", info=INFO):
+    """A pipeline of `models`; `engine=None` is the default ("on")."""
     pipeline = ModelPipeline(information_set=info, engine=engine)
     for model in models:
         pipeline.add_model(model)
@@ -291,6 +292,44 @@ def test_a_fit_needs_the_target_s_rule(tmp_path):
 
 def serve_one(pipeline, data, live, day, horizon=2, **kwargs):
     return pipeline._serve_stored(data, live, issue=day, horizon=horizon, **kwargs)["m"]
+
+
+def test_a_live_directory_from_before_the_engine_flip_refits_once_and_never_mixes_the_two_paths(tmp_path):
+    """Fits stored with the engine off, as every live directory up to 2.3 holds them (`fit_path` None), are of another
+    configuration digest than the default engine's: the default serves none of them, at their own anchor or as an older one,
+    refits each anchor a day needs once, and from then on serves its own fits, the bits of a live directory made under the
+    default from scratch. Every unit of a served fit is of one path; the engine-off pipeline never serves the new fits either."""
+    data = frame(SPRING, "1h")
+    live, fresh = tmp_path / "live", tmp_path / "fresh"
+
+    def weekly(engine=None):
+        model = OLSModel(PREDICTORS, 21, refit="7D", name="m")
+        return pipeline_of(model, engine=engine)
+
+    before = weekly("off")
+    before.refit(data, live, issue="2023-03-17", horizon=2)  # anchor Monday 13 March
+    before.refit(data, live, issue="2023-03-22", horizon=2)  # anchor Monday 20 March
+    meta = json.loads((fit_dir(live, "m", datetime.date(2023, 3, 20)) / FIT_FILE).read_text())
+    assert meta["fit_path"] is None and not any(unit["engine"] for unit in meta["units"])
+
+    after = weekly()
+    assert after.engine == "on"
+    # Neither 20 March's own fit nor 13 March's as an older one: both are of the engine-off digest.
+    missing = serve_one(after, data, live, "2023-03-22")
+    assert missing.fits["2023-03-20"]["source"] == "missing"
+    assert {r["status"] for r in missing.records} == {"no_stored_fit"}
+
+    assert after.refit(data, live, issue="2023-03-22", horizon=2).fitted == {"m": ["2023-03-20"]}
+    assert after.refit(data, live, issue="2023-03-22", horizon=2).noop  # once
+    meta = json.loads((fit_dir(live, "m", datetime.date(2023, 3, 20)) / FIT_FILE).read_text())
+    assert meta["fit_path"] == "engine-2" and all(unit["engine"] for unit in meta["units"])
+    served = serve_one(after, data, live, "2023-03-22")
+    assert served.fits["2023-03-20"]["source"] == "stored"
+    weekly().refit(data, fresh, issue="2023-03-22", horizon=2)
+    assert keyed(served.records) == keyed(serve_one(weekly(), data, fresh, "2023-03-22").records)
+    # The old pipeline finds no fit of its own at 20 March now, and doesn't take the engine's.
+    old = serve_one(before, data, live, "2023-03-22", fit_missing="skip")
+    assert old.fits["2023-03-20"]["source"] == "missing"
 
 
 def test_a_tampered_units_file_raises_and_another_digest_is_never_served(tmp_path):
