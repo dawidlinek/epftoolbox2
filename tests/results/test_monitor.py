@@ -375,12 +375,13 @@ def test_the_revision_a_key_is_read_from_follows_the_policy(live):
     assert daily[key]["bias"].iloc[0] - first[other]["bias"].iloc[0] == pytest.approx(0.75)
 
 
-def test_the_delivered_share_is_reported_whatever_the_policy(live):
-    shares = {
-        p: run_monitor(live, policy=p, windows=(10,)).tables()["delivered"].iloc[0]
-        for p in ("latest", "first", "delivered")
-    }
-    assert set(shares.values()) == {3 / 10}
+def test_the_delivered_share_and_participation_are_reported_whatever_the_policy(live):
+    for column, share in (("delivered", 3 / 10), ("participation", 8 / 10)):
+        shares = {
+            p: run_monitor(live, policy=p, windows=(10,)).tables()[column].iloc[0]
+            for p in ("latest", "first", "delivered")
+        }
+        assert set(shares.values()) == {share}, column
 
 
 def test_participation_counts_the_days_with_a_revision_committed_by_the_deadline(live):
@@ -816,6 +817,10 @@ def test_skill_above_fires_exactly_when_the_last_n_days_all_exceed_it(live):
             live, windows=(10,), alerts=[{"skill_above": float(weakest) + 1e-9, "for_days": n, "member": "lear"}]
         )
         assert fired(none, "skill_above") == [], n
+        equal = run_monitor(
+            live, windows=(10,), alerts=[{"skill_above": float(weakest), "for_days": n, "member": "lear"}]
+        )
+        assert fired(equal, "skill_above") == [], n  # above is strict
     # a window longer than the days with a score doesn't fire; and by default every non-benchmark member is checked
     assert (
         fired(
