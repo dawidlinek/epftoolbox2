@@ -609,3 +609,23 @@ def test_the_torch_stack_key_holds_refit_from_and_an_mlp_fits_once():
     assert keyed(stacked.refs["a"]._results, "day_in_test") == once
     alone = keyed(mlp(name="b", random_state=1).run(data, F, end, horizon=1)._results, "day_in_test")
     assert keyed(stacked.refs["b"]._results, "day_in_test") == alone
+
+
+def test_a_pooled_model_over_one_zone_fits_once_as_the_model_does(tmp_path):
+    from epftoolbox2.models import PooledModel
+    from tests.models.test_pooled import HOURLY_TEST, PREDICTORS as POOLED_PREDICTORS
+    from tests.models.test_pooled import hourly
+
+    frame = hourly("PL")
+    first = HOURLY_TEST[0]
+
+    def model(refit):
+        return OLSModel(POOLED_PREDICTORS, training_window=30, refit=refit, refit_from=first, name="m")
+
+    run = dict(test=HOURLY_TEST, horizon=2, freq="1h", target="price")
+    ModelPipeline().add_model(model("once")).run(frame, save_dir=str(tmp_path / "plain"), **run)
+    ModelPipeline().add_model(PooledModel(model("once"))).run({"PL": frame}, save_dir=str(tmp_path / "once"), **run)
+    ModelPipeline().add_model(PooledModel(model("60D"))).run({"PL": frame}, save_dir=str(tmp_path / "block"), **run)
+    once = lines(tmp_path / "once" / "PL" / "m.jsonl")
+    assert once == lines(tmp_path / "plain" / "m.jsonl") == lines(tmp_path / "block" / "PL" / "m.jsonl")
+    assert {json.loads(line)["refit_anchor"] for line in once} == {first}
