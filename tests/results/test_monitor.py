@@ -1313,3 +1313,61 @@ def test_a_day_no_rung_served_is_a_skipped_day_worse_than_any_rung(tmp_path):
     plain = tmp_path / "plain"
     write_live(plain)
     assert run_monitor(plain, windows=(10,)).tables()["skipped_days"].eq(0).all()
+
+
+def test_days_with_only_part_of_their_periods_are_flagged(tmp_path, monkeypatch):
+    """Six hours of lear's day 0 are missing at both horizons: 18 of 24 periods scored, as `LossPanel` counts a partial day."""
+    monkeypatch.setitem(globals(), "GAPS", {("lear", DAYS[0], 1, hour) for hour in range(6)})
+    directory = tmp_path / "live"
+    write_live(directory)
+    with pytest.warns(UserWarning, match="part of their periods"):
+        report = run_monitor(directory, windows=(10,))
+    table = report.tables().set_index("member")
+    assert table.loc["lear", "partial_days"] == len(HORIZONS)
+    assert table.loc["naive", "partial_days"] == 0 and table.loc["best", "partial_days"] == 0
+    assert report.tables().attrs["partial_days"] == {"lear": len(HORIZONS)}
+    # the switch day's 23 scored hours are a whole day, not a partial one
+    assert "partial_days" not in run_monitor(tmp_path / "live", windows=(3,)).tables().attrs
+
+
+def test_the_actuals_are_looked_up_once_for_every_member_and_policy(live, monkeypatch):
+    from epftoolbox2.results.monitor import _Actuals
+
+    calls = []
+    real = _Actuals.lookup
+    monkeypatch.setattr(_Actuals, "lookup", lambda self, keys: calls.append(len(keys)) or real(self, keys))
+    run_monitor(live, windows=(10,))
+    assert len(calls) == 1
+    # the union of keys, not their sum: three members share them
+    assert calls[0] < 3 * 8 * 48
+
+
+def test_the_alert_arguments_are_checked(live, tmp_path):
+    for age in (-1, float("inf"), float("nan"), "2", True):
+        with pytest.raises(ValueError, match="age"):
+            load_alerts([{"stale_input": "load_forecast", "age": age}])
+    assert load_alerts([{"stale_input": "load_forecast", "age": 0}])
+    with pytest.raises(FileNotFoundError, match="alerts"):
+        load_alerts(tmp_path / "missing.yaml")
+    with pytest.raises(FileNotFoundError, match="alerts.yml"):
+        load_alerts("alerts.yml")
+    with pytest.raises(FileNotFoundError, match="alerts"):
+        run_monitor(live, windows=(10,), alerts=str(tmp_path / "nope.yaml"))
+
+
+def test_daily_of_an_empty_report_has_its_documented_columns(tmp_path):
+    directory = tmp_path / "live"
+    LiveStore(directory).init(mode="live", issue_timezone=ZONE, deadline=DEADLINE)
+    with use_clock(FakeClock(NOW)):
+        empty = pipeline().monitor(DATA, directory).daily()
+    assert empty.empty
+    assert list(empty.columns)[:8] == [
+        "member",
+        "run_date",
+        "horizon",
+        "target_date",
+        "forecasts",
+        "mae",
+        "rmse",
+        "bias",
+    ]

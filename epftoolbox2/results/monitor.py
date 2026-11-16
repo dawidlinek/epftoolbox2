@@ -116,9 +116,15 @@ def load_alerts(alerts: Any) -> List[Dict[str, Any]]:
             try:
                 if Path(alerts).is_file():
                     text = Path(alerts).read_text(encoding="utf-8")
-            except OSError:  # a flow-style list on one line can be longer than a file name may be
-                pass
-        alerts = yaml.safe_load(text)
+                elif isinstance(alerts, Path):
+                    raise FileNotFoundError(f"alerts: no such file {str(alerts)!r}")
+            except OSError as exc:  # a flow-style list on one line can be longer than a file name may be
+                if isinstance(exc, FileNotFoundError):
+                    raise
+        loaded = yaml.safe_load(text)
+        if isinstance(loaded, str):  # a bare name: a file that isn't there, never a list of rules
+            raise FileNotFoundError(f"alerts: {text!r} is no file, and isn't YAML holding a list of rules")
+        alerts = loaded
         if alerts is None:
             return []
     if isinstance(alerts, Mapping):
@@ -143,6 +149,9 @@ def load_alerts(alerts: Any) -> List[Dict[str, Any]]:
         if rule == "stale_input":
             if not isinstance(spec[rule], str):
                 raise ValueError(f"alert 'stale_input' names the column, got {spec[rule]!r}")
+            age = spec.get("age", 1)
+            if isinstance(age, bool) or not isinstance(age, (int, float)) or not math.isfinite(age) or age < 0:
+                raise ValueError(f"alert 'stale_input': age is a finite number of days from 0, got {age!r}")
         elif isinstance(spec[rule], bool) or not isinstance(spec[rule], (int, float)) or not math.isfinite(spec[rule]):
             raise ValueError(f"alert {rule!r} takes a number, got {spec[rule]!r}")
         out.append(spec)
@@ -220,6 +229,24 @@ class _Actuals:
         actual[rows] = value
         known[rows] = self._out(instants, run_dates[rows].min())
         return actual, known
+
+    def lookup_many(self, frames: Sequence[pd.DataFrame]) -> List[Tuple[np.ndarray, np.ndarray]]:
+        """`lookup` of several frames of keys at once: each distinct key (run date, hour, horizon) is looked up one time, however
+        many frames hold it."""
+        cols = ["run_date", "hour", "horizon"]
+        if not any(len(frame) for frame in frames):
+            return [self.lookup(frame) for frame in frames]
+        union = pd.concat([frame[cols] for frame in frames if len(frame)]).drop_duplicates().reset_index(drop=True)
+        actual, known = self.lookup(union)
+        table = pd.DataFrame({"actual": actual, "known": known}, index=pd.MultiIndex.from_frame(union))
+        out = []
+        for frame in frames:
+            if not len(frame):
+                out.append((np.empty(0), np.empty(0, dtype=bool)))
+                continue
+            found = table.reindex(pd.MultiIndex.from_frame(frame[cols]))
+            out.append((found["actual"].to_numpy(dtype=float), found["known"].to_numpy(dtype=bool)))
+        return out
 
     def _out(self, instants: pd.DatetimeIndex, first_day: pd.Timestamp) -> np.ndarray:
         """Whether the value at each of `instants` is out by now under the target's rule."""
@@ -336,9 +363,7 @@ def _rung_frame(frame: pd.DataFrame, known: np.ndarray) -> pd.DataFrame:
     )
 
 
-def _panel(
-    frames: Mapping[str, pd.DataFrame], rungs: Mapping[str, pd.DataFrame], freq: str
-) -> Tuple[LossPanel, List[str]]:
+def _panel(frames: Mapping[str, pd.DataFrame], rungs: Mapping[str, pd.DataFrame], freq: str) -> LossPanel:
     """A `LossPanel` of the members' signed frames and, for each with a rung, its rung channel."""
     every = dict(frames)
     for name, frame in rungs.items():
@@ -346,14 +371,14 @@ def _panel(
     whole = (1,) if freq == "1D" else (23, 24, 25, 92, 96, 100)
     with warnings.catch_warnings():
         warnings.simplefilter("error", UserWarning)  # actuals agree by construction, so this never hides one
-        return LossPanel(every, whole_day_periods=whole), list(frames)
+        return LossPanel(every, whole_day_periods=whole)
 
 
 def _day_numbers(days: Iterable[str]) -> np.ndarray:
     return np.array([(pd.Timestamp(d) - pd.Timestamp("1970-01-01")).days for d in days], dtype=np.int64)
 
 
-def _per_day(day_ids: np.ndarray, values: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+def _per_day(day_ids: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """(the distinct day ids, each key's place among them, each day's count)."""
     ids, inverse = np.unique(day_ids, return_inverse=True)
     inverse = inverse.ravel()
@@ -369,10 +394,17 @@ def _stats(panel: LossPanel, rows: np.ndarray, name: str) -> Dict[str, float]:
     n = len(rows)
     if not n:
         return dict(
-            forecasts=0, mae=math.nan, rmse=math.nan, rmse_daily=math.nan, bias=math.nan, level=math.nan, shape=math.nan
+            forecasts=0,
+            mae=math.nan,
+            rmse=math.nan,
+            rmse_daily=math.nan,
+            bias=math.nan,
+            level=math.nan,
+            shape=math.nan,
+            partial_days=0,
         )
     signed = panel.predictions[rows, j]
-    ids, inverse, count = _per_day(panel.day_ids(rows), signed)
+    ids, inverse, count = _per_day(panel.day_ids(rows))
     mean_signed = np.bincount(inverse, weights=signed, minlength=len(ids)) / count
     mean_square = np.bincount(inverse, weights=absolute**2, minlength=len(ids)) / count
     return dict(
@@ -383,6 +415,8 @@ def _stats(panel: LossPanel, rows: np.ndarray, name: str) -> Dict[str, float]:
         bias=float(signed.mean()),
         level=float(np.abs(mean_signed).mean()),
         shape=float(np.abs(signed - mean_signed[inverse]).mean()),
+        # days (an issue day at a horizon) with only part of their periods scored, as `LossPanel.daily` counts them
+        partial_days=int(np.isin(count, panel.whole_day_periods, invert=True).sum()),
     )
 
 
@@ -429,11 +463,10 @@ def _daily(panel: LossPanel, members: Sequence[str], benchmarks: Sequence[str]) 
         mine = rows[np.isfinite(panel.errors[rows, j])]
         if not len(mine):
             continue
-        ids, inverse, count = _per_day(panel.day_ids(mine), mine)
+        ids, inverse, count = _per_day(panel.day_ids(mine))
         absolute = panel.errors[mine, j]
         signed = panel.predictions[mine, j]
-        first = np.zeros(len(ids), dtype=np.int64)
-        first[inverse[::-1]] = np.arange(len(mine))[::-1]  # the first key of each day
+        first = np.unique(panel.day_ids(mine), return_index=True)[1]  # the first key of each day
         run_day = panel.run_days(mine)[first]
         horizon = panel.horizon[mine][first]
         frame = pd.DataFrame(
@@ -456,7 +489,7 @@ def _daily(panel: LossPanel, members: Sequence[str], benchmarks: Sequence[str]) 
             both = panel.common(mine, [name, bench])
             if not len(both):
                 continue
-            b_ids, b_inverse, b_count = _per_day(panel.day_ids(both), both)
+            b_ids, b_inverse, b_count = _per_day(panel.day_ids(both))
             ratio = np.full(len(ids), math.nan)
             m_sum = np.bincount(b_inverse, weights=panel.errors[both, j], minlength=len(b_ids))
             b_sum = np.bincount(b_inverse, weights=panel.errors[both, panel.column(bench)], minlength=len(b_ids))
@@ -465,7 +498,9 @@ def _daily(panel: LossPanel, members: Sequence[str], benchmarks: Sequence[str]) 
                 ratio[where] = np.where(b_sum > 0, m_sum / b_sum, math.nan)
             frame[col] = ratio
         frames.append(frame)
-    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+    columns = ["member", "run_date", "horizon", "target_date", "forecasts", "mae", "rmse", "bias"]
+    columns += [f"skill_{b}" for b in benchmarks]
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=columns)
 
 
 def _calendar(
@@ -673,7 +708,7 @@ def _backtest_panel(backtest: Any, names: Sequence[str], freq: str) -> LossPanel
                 "actual": np.zeros(len(frame)),
             }
         )
-    return _panel(out, {}, freq)[0]
+    return _panel(out, {}, freq)
 
 
 def _key_codes(panel: LossPanel, rows: np.ndarray) -> np.ndarray:
@@ -720,7 +755,7 @@ def _backtest_ratio(
 def _rungs(
     ladders: Sequence[MonitorMember],
     visible: Mapping[str, Mapping[str, Mapping[int, Any]]],
-    actuals: _Actuals,
+    read: Mapping[Tuple[str, str], Tuple[pd.DataFrame, np.ndarray, np.ndarray]],
     windows: Sequence[int],
     days: Sequence[str],
     through: Optional[str],
@@ -732,13 +767,10 @@ def _rungs(
     out = []
     for member in ladders:
         for policy in POLICIES:
-            frame = _read_keys(member, visible[policy])
+            frame, actual, known = read[(member.name, policy)]
             committed = [d for d in days if visible[policy].get(d)]
             served_days = _served_days(frame, committed, horizons)
-            actual, known = actuals.lookup(frame)
-            panel, _ = _panel(
-                {member.name: _signed(frame, actual, known)}, {member.name: _rung_frame(frame, known)}, freq
-            )
+            panel = _panel({member.name: _signed(frame, actual, known)}, {member.name: _rung_frame(frame, known)}, freq)
             rows = panel.rows()
             run_days = panel.run_days(rows)
             own = panel.errors[:, panel.column(member.name)]
@@ -964,11 +996,19 @@ def monitor(
         raise ValueError(f"monitor() needs one frequency, but these members' results have several: {freqs}")
     freq = next(iter(freqs.values()), "1h")
     actuals = _Actuals(data, target, freq, information_set, now)
-    looked = {name: actuals.lookup(frame) for name, frame in keys.items()}
-    signed = {name: _signed(keys[name], looked[name][0], looked[name][1]) for name in names}
     ladders = [m for m in members if m.ladder]
+    # every frame to score, the ladders' under each policy too, looked up in one pass: a key is looked up once however many hold it
+    ladder_keys = {
+        (m.name, p): keys[m.name] if p == policy else _read_keys(m, visible[p]) for m in ladders for p in POLICIES
+    }
+    frames = [*keys.values(), *(f for key, f in ladder_keys.items() if key[1] != policy)]
+    found = actuals.lookup_many(frames)
+    looked = dict(zip(keys, found))
+    extra = iter(found[len(keys) :])
+    read = {key: (frame, *(looked[key[0]] if key[1] == policy else next(extra))) for key, frame in ladder_keys.items()}
+    signed = {name: _signed(keys[name], looked[name][0], looked[name][1]) for name in names}
     rung_frames = {m.name: _rung_frame(keys[m.name], looked[m.name][1]) for m in ladders}
-    panel, _ = _panel(signed, rung_frames, freq)
+    panel = _panel(signed, rung_frames, freq)
 
     committed_days, delivered, revisions = visible["latest"], visible["delivered"], visible[policy]
     quality = _quality(store, revisions, days)
@@ -1020,6 +1060,17 @@ def monitor(
             row["quality_days"] = problems
             table_rows.append(row)
     tables = pd.DataFrame(table_rows)
+    if len(tables) and tables["partial_days"].any():
+        widest = tables[tables["window"] == max(windows)]
+        partial = {r["member"]: int(r["partial_days"]) for _, r in widest.iterrows() if r["partial_days"]}
+        tables.attrs["partial_days"] = partial
+        warnings.warn(
+            f"Days with only part of their periods scored (member: days, in the largest window): {partial}. `mae` and the rest "
+            "weigh every forecast and `level`, `shape` and `rmse_daily` every day the same, so read them with `forecasts`; "
+            "`unscored` and the members' `check_failed` say where the rest went.",
+            UserWarning,
+            stacklevel=3,
+        )
     in_largest = set(_window_days(days, through, max(windows)))
     lost_keys = {
         name: int(frame["run_date_text"].isin(in_largest).sum()) for name, frame in failed.items() if len(frame)
@@ -1064,7 +1115,7 @@ def monitor(
         now=now,
         _tables=tables,
         _daily=daily,
-        _rungs=_rungs(ladders, visible, actuals, windows, days, through, horizons, freq),
+        _rungs=_rungs(ladders, visible, read, windows, days, through, horizons, freq),
         _quality=quality_table,
     )
     report.alerts = _evaluate(rules, report, skill_days, served, quality, store, committed_days, delivered, days)
