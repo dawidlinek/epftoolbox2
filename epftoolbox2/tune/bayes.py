@@ -455,19 +455,15 @@ def model_fingerprint(model: Any, *, _old_default: bool = False) -> str:
     (`BaseModel._mask_rule`): a pipeline file leaves None out, and so did the fingerprints of trials scored up to 2.3 under the
     first-day rule, which therefore refuse to resume (`_check_models`, with the way back) rather than rank with these.
     `_old_default=True` gives the fingerprint a model of its rule had as the default up to 2.3, without `binary_mask`: a
-    default model's (now refused) and a `"first_day"` model's (accepted, the same rule)."""
+    default model's (now refused) and a `"first_day"` model's (accepted, the same rule). Nested models (`_NESTED_MODELS`: a
+    `ResidualModel`'s base and learner, a `ShapeModel`'s learner, a `PooledModel`'s model) are rewritten the same way."""
     from ..pipelines.model_pipeline import ModelPipeline
 
     try:
         params = ModelPipeline()._serialize_component(model)["params"]
     except (TypeError, ValueError):
         params = {key: value for key, value in vars(model).items() if not key.startswith("_")}
-    if _old_default:
-        # As a default model's was up to 2.3: no binary_mask, which was the first-day rule then.
-        if params.get("binary_mask") == "first_day" or _default_mask_is_fit(model):
-            params.pop("binary_mask", None)
-    elif _default_mask_is_fit(model):
-        params["binary_mask"] = "fit"
+    _rewrite_masks(model, params, _old_default)
     for attribute in ("_ctx_fn", "_predictors_fn"):  # a function of ctx, or of (horizon) / (horizon, hour)
         function = getattr(model, attribute, None)
         if function is not None:
@@ -480,29 +476,81 @@ def model_fingerprint(model: Any, *, _old_default: bool = False) -> str:
     return hashlib.sha256(text.encode()).hexdigest()[:16]
 
 
-def _default_mask_is_fit(model: Any) -> bool:
+_OWN_REFIT = object()  # a model's own `refit`, not its owner's
+
+
+def _default_mask_is_fit(model: Any, refit: Any = _OWN_REFIT) -> bool:
     """Whether `model` leaves `binary_mask` None where the rule decides its numbers: no `refit` (whose units always read their
-    own rows) and a model that fits something. Its rule is then "fit", which was "first_day" up to 2.3."""
+    own rows; `refit` is the owner's where the owner sets it, as a ResidualModel does its learner's) and a model that fits
+    something. Its rule is then "fit", which was "first_day" up to 2.3."""
+    refit = getattr(model, "refit", "") if refit is _OWN_REFIT else refit
     return (
         hasattr(model, "_mask_rule")
         and getattr(model, "binary_mask", "") is None
-        and getattr(model, "refit", "") is None
+        and refit is None
         and model._mask_rule == "fit"
     )
+
+
+def _rewrite_masks(model: Any, params: Dict[str, Any], old_default: bool, refit: Any = _OWN_REFIT) -> None:
+    """`params` of `model` (as `model_fingerprint` hashes them) with its mask rule spelled out, and those of each nested model:
+    `binary_mask="fit"` for a default whose rule is now "fit"; with `old_default`, no `binary_mask` for one of the first-day
+    rule (the default's up to 2.3)."""
+    if old_default:
+        if params.get("binary_mask") == "first_day" or _default_mask_is_fit(model, refit):
+            params.pop("binary_mask", None)
+    elif _default_mask_is_fit(model, refit):
+        params["binary_mask"] = "fit"
+    for key, nested, nested_params, omitted in _nested_of(model, params):
+        _rewrite_masks(
+            nested, nested_params, old_default, getattr(model, "refit", None) if "refit" in omitted else _OWN_REFIT
+        )
+
+
+def _nested_of(model: Any, params: Dict[str, Any]) -> List[Tuple[str, Any, Dict[str, Any], Tuple[str, ...]]]:
+    """(key, nested model, its params, what its owner omits of it) for each model `model` holds that `params` saved as
+    {class, params}: not a base named by a string."""
+    out = []
+    for key in getattr(type(model), "_NESTED_MODELS", ()):
+        nested, saved = getattr(model, key, None), params.get(key)
+        if nested is not None and not isinstance(nested, str) and isinstance(saved, dict) and "params" in saved:
+            out.append((key, nested, saved["params"], tuple(getattr(type(model), "_NESTED_OMIT", {}).get(key, ()))))
+    return out
+
+
+def _changed_rule(
+    model: Any, params: Optional[Dict[str, Any]] = None, refit: Any = _OWN_REFIT, path: str = ""
+) -> List[str]:
+    """Where in `model` the default mask rule changed (`_default_mask_is_fit`): "" for the model itself, "base" for a
+    ResidualModel's base, and so on."""
+    from ..pipelines.model_pipeline import ModelPipeline
+
+    if params is None:
+        try:
+            params = ModelPipeline()._serialize_component(model)["params"]
+        except (TypeError, ValueError):
+            params = {}
+    out = [path] if _default_mask_is_fit(model, refit) else []
+    for key, nested, nested_params, omitted in _nested_of(model, params):
+        owner_refit = getattr(model, "refit", None) if "refit" in omitted else _OWN_REFIT
+        out += _changed_rule(nested, nested_params, owner_refit, f"{path}.{key}" if path else key)
+    return out
 
 
 def _first_day_fingerprint(model: Any) -> Optional[str]:
     """The fingerprint `model` had up to 2.3, when `binary_mask=None` read its masks on the first day, or None where the
     default's rule didn't change for it."""
-    return model_fingerprint(model, _old_default=True) if _default_mask_is_fit(model) else None
+    return model_fingerprint(model, _old_default=True) if _changed_rule(model) else None
 
 
 def _accepted_fingerprints(model: Any) -> Tuple[str, ...]:
     """The stored fingerprints that are `model` under the same mask rule: its own, and for `binary_mask="first_day"` without
     `refit` also the old default's, which was that rule and hashed without the parameter."""
     own = model_fingerprint(model)
-    if getattr(model, "binary_mask", None) == "first_day" and getattr(model, "refit", "") is None:
-        return own, model_fingerprint(model, _old_default=True)
+    if not _changed_rule(model):  # every rule in it is what it was: its old-default spelling is the same model
+        old = model_fingerprint(model, _old_default=True)
+        if old != own:
+            return own, old
     return (own,)
 
 
@@ -945,7 +993,7 @@ class BayesSearch:
         """A ValueError if a trial on file was scored with another model than `make` builds now from its settings (a resume
         after `make` was edited would compare two searches' trials)."""
         optuna = _optuna()
-        built: Dict[str, str] = {}
+        built: Dict[str, Tuple[Any, ...]] = {}
         for name in optuna.get_all_study_names(storage):
             if name != STUDY and not name.startswith(f"{STUDY}:rung"):
                 continue
@@ -957,19 +1005,27 @@ class BayesSearch:
                 key = _canonical(values)
                 if key not in built:
                     model = self.make(dict(values))
-                    built[key] = (_accepted_fingerprints(model), _first_day_fingerprint(model))
-                if stored not in built[key][0]:
-                    if built[key][1] == stored:
-                        raise ValueError(
-                            f"Trial {t.number} of {name!r} in {self.storage} was scored with binary_mask=None when it read each "
-                            "forecast's binary columns on the test's first day (up to 2.3); None now reads them from each fit's "
-                            "own rows. Build the models with binary_mask='first_day' in make to resume this search as it was "
-                            "scored, or use another storage file."
-                        )
-                    raise ValueError(
-                        f"Trial {t.number} of {name!r} in {self.storage} was scored with another model than make builds now "
-                        f"from its settings {values}: make was changed since. Use another storage file for this search."
+                    built[key] = (
+                        _accepted_fingerprints(model),
+                        _first_day_fingerprint(model),
+                        _changed_rule(model),
+                        model,
                     )
+                accepted, first_day, changed, model = built[key]
+                if stored in accepted:
+                    continue
+                if first_day == stored:
+                    where = ", ".join(f"its {path}" if path else "the model" for path in changed)
+                    raise ValueError(
+                        f"Trial {t.number} of {name!r} in {self.storage} was scored with binary_mask=None ({where}) when it read "
+                        "each forecast's binary columns on the test's first day (up to 2.3); None now reads them from each "
+                        f"fit's own rows. Build {where} with binary_mask='first_day' in make to resume this search as it was "
+                        "scored, or use another storage file."
+                    )
+                raise ValueError(
+                    f"Trial {t.number} of {name!r} in {self.storage} was scored with another model than make builds now "
+                    f"from its settings {values}: make was changed since. Use another storage file for this search."
+                )
 
     def _promote(self, storage: Any, r: int) -> List[int]:
         return _promote(storage, r, self.keep)

@@ -823,9 +823,56 @@ def test_a_journal_scored_under_the_old_mask_default_is_refused_with_the_way_bac
     journal = tmp_path / "s.journal"
     monkeypatch.setattr(BayesSearch, "_score", old_trials)
     BayesSearch(make, SPACE, n_trials=4, seed=0, storage=journal, sampler="random").run(df, horizon=1, validation=V)
-    with pytest.raises(ValueError, match="Build the models with binary_mask='first_day' in make"):
+    with pytest.raises(ValueError, match="Build the model with binary_mask='first_day' in make"):
         BayesSearch(make, SPACE, n_trials=4, seed=0, storage=journal, sampler="random").run(df, horizon=1, validation=V)
     BayesSearch(first_day, SPACE, n_trials=4, seed=0, storage=journal, sampler="random").run(
+        df, horizon=1, validation=V
+    )
+
+
+def residual_make(params):
+    """A ResidualModel over an OLS base without refit: the base's default mask rule changed, the residual's own didn't."""
+    from epftoolbox2.models import ResidualModel
+
+    base = OLSModel(
+        [f"{column}_d+{{horizon}}" for column in params["drivers"]] + FIXED, training_window=params["window"]
+    )
+    return ResidualModel(base=base, learner=OLSModel(FIXED), name="ols")
+
+
+def old_journal(make_, fingerprint, journal, df, monkeypatch):
+    """A journal of `make_`'s search whose trials stored `fingerprint(model)`, as trials scored before a default changed did."""
+
+    def scored(self, values, r, run):
+        return bayes._Score(values["window"] / 100, 10, 10, model=fingerprint(self.make(dict(values))))
+
+    monkeypatch.setattr(BayesSearch, "_score", scored)
+    BayesSearch(make_, SPACE, n_trials=4, seed=0, storage=journal, sampler="random").run(df, horizon=1, validation=V)
+
+
+def test_a_residual_journal_whose_base_had_the_old_mask_default_is_refused(df, monkeypatch, tmp_path):
+    """A ResidualModel always refits, but its base without refit read its masks on the first day up to 2.3: the nested base's
+    rule is in the fingerprint too, so its old trials refuse, naming the base, and a base with `binary_mask="first_day"`
+    resumes them. A base with refit, whose rule never changed, hashes as before."""
+    from epftoolbox2.tune.bayes import model_fingerprint
+
+    model = residual_make({"window": 28, "drivers": ["load"]})
+    assert model_fingerprint(model) != model_fingerprint(model, _old_default=True)
+    model.base.refit = "7D"
+    assert model_fingerprint(model) == model_fingerprint(model, _old_default=True)
+
+    def first_day_base(params):
+        model = residual_make(params)
+        model.base.binary_mask = "first_day"
+        return model
+
+    journal = tmp_path / "s.journal"
+    old_journal(residual_make, lambda model: model_fingerprint(model, _old_default=True), journal, df, monkeypatch)
+    with pytest.raises(ValueError, match="Build its base with binary_mask='first_day' in make"):
+        BayesSearch(residual_make, SPACE, n_trials=4, seed=0, storage=journal, sampler="random").run(
+            df, horizon=1, validation=V
+        )
+    BayesSearch(first_day_base, SPACE, n_trials=4, seed=0, storage=journal, sampler="random").run(
         df, horizon=1, validation=V
     )
 
