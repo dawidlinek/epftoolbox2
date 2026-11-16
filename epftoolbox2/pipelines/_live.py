@@ -56,6 +56,7 @@ from ..models._calendar import (
 from ..models._engine import ENGINE_OFF
 from ..models._fits import FIT_MISSING, serve, stores_fits
 from ..models._worker import pool_native_threads
+from ..models.base import empty_runs_kept
 from ..results.checks import check_records, planned_periods
 from ..results.forecast_result import (
     BUSY,
@@ -475,7 +476,7 @@ def serve_models(
         sub._availability = pipeline._availability
         for model in run_models:
             sub.add_model(model)
-        with tempfile.TemporaryDirectory(prefix="epf-forecast-") as scratch:
+        with tempfile.TemporaryDirectory(prefix="epf-forecast-") as scratch, empty_runs_kept():
             sub.run(
                 frame,
                 day.isoformat(),

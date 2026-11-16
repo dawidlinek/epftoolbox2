@@ -22,7 +22,7 @@ from threadpoolctl import threadpool_limits
 from epftoolbox2.clock import FakeClock, use_clock
 from epftoolbox2.ensembles import AverageEnsemble, FallbackEnsemble
 from epftoolbox2.information_set import Availability, InformationSet, InformationSetError
-from epftoolbox2.models import LEARModel, NaiveModel, OLSModel
+from epftoolbox2.models import HistGBModel, LEARModel, NaiveModel, OLSModel
 from epftoolbox2.models import _engine_worker
 from epftoolbox2.models.context import Use
 from epftoolbox2.models._worker import _worker_init
@@ -730,3 +730,24 @@ class _no_stale_warning:
         stale = [str(w.message) for w in self.seen if "holds otherwise" in str(w.message)]
         assert not stale, stale
         return False
+
+
+FIRST_RUNGS = {
+    "ols": lambda: OLSModel([*PREDICTORS, "extra_d+{horizon}"], training_window=21, name="first"),
+    "hgb": lambda: HistGBModel([*PREDICTORS, "extra_d+{horizon}"], training_window=21, max_iter=20, name="first"),
+    "naive": lambda: NaiveModel(["extra_d+{horizon}"], name="first"),
+}
+
+
+@pytest.mark.parametrize("family", sorted(FIRST_RUNGS))
+def test_a_first_rung_with_no_forecast_at_all_falls_back_whatever_its_family(family, tmp_path):
+    """Before EXAA is out every issue row lacks it: the first rung has no forecast, through its stored or inline fits (OLS) or
+    its own run of the day (HistGB, Naive), and the ladder serves the day from the second, never a failed call."""
+    early = DATA.copy()
+    early.loc[early.index.normalize() == pd.Timestamp(ISSUE, tz="Europe/Warsaw"), ["extra_d+1", "extra_d+2"]] = np.nan
+    p = pipeline(FIRST_RUNGS[family](), ols("second"), ensembles=[FallbackEnsemble(["first", "second"], name="fb")])
+    result = p.forecast(early, ISSUE, tmp_path / "live", horizon=2)
+    assert (result.status, result.exit_code, result.revision) == ("fallback", 10, 1)
+    assert result.rungs == {"2023-03-08": 1, "2023-03-09": 1}
+    assert sum(result.models["first"]["skipped"].values()) == 48 and result.models["first"]["forecasts"] == 0
+    assert len(lines(tmp_path / "live" / "first.jsonl")) == 48  # its skip records are the revision's
