@@ -680,7 +680,11 @@ def _training(
     (`no_finite_training_rows`). `scalable_mask` None is read from the span's rows, before any filter."""
     days = arrays["days"]
     col_idx = [arrays["col_index"][c] for c in predictors]
-    train_x = arrays["x"][train][:, col_idx]
+    # A training row may read other columns than the issue row (`ShapeModel(train_ramps="actual")`): `col_idx` stays what the
+    # forecast reads, and only the training rows' values come from the substitutes.
+    swap = (cfg.get("train_columns") or {}).get(hz)
+    train_idx = col_idx if not swap else [arrays["col_index"][swap.get(c, c)] for c in predictors]
+    train_x = arrays["x"][train][:, train_idx]
     train_y = arrays["y"][train][:, hz - 1]
     row_target = cfg.get("row_target")
     if has_offset(row_target):
