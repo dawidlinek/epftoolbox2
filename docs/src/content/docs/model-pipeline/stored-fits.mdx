@@ -47,29 +47,55 @@ live/de_price/fits/LEAR/2026-10-26/
 ## When a fit is due
 
 With `if_due=True` (the default) an anchor is fitted only where no stored fit of it with the current configuration digest holds
-every unit the issue day needs, so a second call is a no-op. The digest covers what a live manifest compares (the model class, the
-lists, target, horizons, freq, training window and its members' refit rules, parameters and scaler, the training cut, the fit path)
-and when the information set says an input is known; a change of any of them refits, and a fit of another configuration is never
-served. `if_due=False` refits anyway.
+every unit the issue day needs, and the rows it read are still the frame's, so a second call is a no-op. The digest covers what a
+live manifest compares (the model class, the lists, target, horizons, freq, training window and its members' refit rules,
+parameters and scaler, the training cut, the fit path), when the information set says an input is known, and the format of the
+files; a change of any of them refits, and a fit of another configuration is never served. A fit made with the other LEAR kernel
+backend (`EPFTOOLBOX2_KERNELS`, whose fits agree within 1e-10, not to the bit) is refitted and never served either, and one made by
+another package version is served with a warning. `fit.json` records the hash of the rows the fits read (the used columns from the
+first training row of any unit to the newest target): where the frame's rows there differ (a value filled in, revised or gone)
+the anchor is refitted whole and `RefitResult.stale` names it. Rows outside that span don't count, so a rolling frame doesn't
+refit. A `fit.json` that can't be read, or is of another format, is refitted with a warning. `if_due=False` refits anyway.
 
-**A fit is refused while a training target it reads isn't out.** `refit` reads the target's rule in the information set: with the
-default `newest_target="d-1"` a forecast issued on D trains on the prices of D-1, published at 13:00 on D-2 under
-`Availability.published("13:00", 1)`; with `"published"` on those of D, out at 13:00 on D-1. Asked earlier, `refit` raises
-`FitTooEarlyError` naming the publication time, and writes nothing: a fit made then would train on fewer targets than the
-backtest's. It needs an information set with a rule for the target.
+**A fit is refused while what it reads isn't out.** `refit` reads the rules in the information set and raises
+`FitTooEarlyError`, naming the publication time, and writes nothing (not even `live.json`):
+
+- while a training target isn't out: with the default `newest_target="d-1"` a forecast issued on D trains on the prices of D-1,
+  published at 13:00 on D-2 under `Availability.published("13:00", 1)`; with `"published"` on those of D, out at 13:00 on D-1.
+  `refit` checks the newest target of each unit and the 31 days before it, and under a rule that changes over time every target
+  the unit reads;
+- while an input of the newest training row isn't out, though its rule puts it out by the issue time: a value read before would
+  be another vintage, or missing. An input late even at the issue time is the configuration's own choice and doesn't refuse.
+
+It needs an information set with a rule for the target. Where the rule says the newest targets are out but the frame doesn't hold
+them all (a late or failed refresh), the fit is made, `fit.json` lists the days under `incomplete`, `RefitResult.incomplete` names
+the anchor and a warning says so; the rows hash refits it once the frame holds them.
 
 ## Serving
 
 The serve path, which the live `forecast()` call uses, reads each anchor's `fit.json`, checks the sha256 of `units.npz` (a changed
-file raises `StoredFitError`) and the configuration digest, and forecasts every planned key through the backtest's own lines: the
-issue row's skips, the scaler's transform of it, the model's forecast of one row, the inverse, the record. Where an anchor has no
-stored fit, a refit model serves the newest stored older fit of the same configuration and records its age (`fit_missing="previous"`,
-the default), fits it inline (`"fit"`), or leaves its forecasts as `no_stored_fit` skips (`"skip"`); a `refit=None` model fits its
-issue day inline, as the backtest does.
+file raises `StoredFitError`), the configuration digest and the kernel backend, and forecasts every planned key through the
+backtest's own lines: the issue row's skips, the scaler's transform of it, the model's forecast of one row, the inverse, the record.
+Where an anchor has no stored fit, a refit model serves the newest stored older fit of the same configuration, at most 31 days
+older than the anchor it stands in for, with a warning (`fit_missing="previous"`, the default; an unreadable older fit is passed
+over), fits it inline (`"fit"`), or leaves its forecasts as `no_stored_fit` skips (`"skip"`); a `refit=None` model fits its issue
+day inline, as the backtest does. Each anchor's entry gives the fit served and `fit_age_days`, the issue day less its anchor. Units
+an anchor's stored fit lacks (a predictor function's list it wasn't fitted for) are fitted inline where the anchor would be, and
+are `no_stored_fit` skips under `"previous"`.
 
 OLS, Ridge, LassoCV and LEAR store their fits. A family that brings no stored format yet (the torch models, the tree families, the
-in-context and foundation models) and `NaiveModel`, which fits nothing, are listed in `not_stored` and fit at serve time.
+in-context and foundation models) and `NaiveModel`, which fits nothing, are listed in `RefitResult.not_stored`; the serve path
+returns them with the status `not_stored` and no forecasts, and `forecast()` runs them through their own run of the issue day.
+
+A served forecast is the backtest of its issue day alone to the bit. Two things can make it differ from a backtest over a longer
+test, and both are recorded in `fit.json` and in the served result's `notes`:
+
+- a `refit=None` model's binary-column mask is read on its issue day, as `run(forecast_only=True)` reads it; a backtest over a
+  longer test reads it on its first day (`binary_mask="fit"` reads each fit's own, the same in both: see Training Windows);
+- with `engine="on"`, a unit whose fit from shared statistics serves its rows but whose model-path fit fails: an issue row too far
+  out for the engine needs the model path, and its `fit_error` is every forecast of the call's, which is one day when serving and
+  a whole block in a backtest.
 
 The serve path plans the issue day as a backtest of that day alone: the frame must hold the history a backtest of it would read.
-A `refit=None` model's binary-column mask is then read on its issue day, as `run(forecast_only=True)` reads it; a backtest over a
-longer test reads it on its first day (see `binary_mask="fit"` on the Training Windows page).
+A write replaces an anchor's directory whole; a crash between its two renames leaves the old fit aside, which serving reads and the
+next `refit` puts back.

@@ -41,6 +41,7 @@ import json
 import os
 import shutil
 import uuid
+import warnings
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -743,26 +744,52 @@ class StoredFit:
     units: Dict[UnitKey, UnitFit] = field(default_factory=dict)
 
 
+class UnreadableFitError(StoredFitError):
+    """An anchor's `fit.json` that can't be read as JSON: what an interrupted copy or a disk error leaves. `refit` refits the
+    anchor; serving treats it as no fit, with a warning."""
+
+
 def read_meta(directory: Path) -> Optional[Dict[str, Any]]:
-    """`fit.json` of an anchor's directory, None where there is none; StoredFitError where it can't be read."""
+    """`fit.json` of an anchor's directory, None where there is none; `UnreadableFitError` where it isn't JSON of an object. Its
+    format isn't judged here: `read_fit` takes another format for another configuration."""
     path = directory / FIT_FILE
     if not path.exists():
         return None
     try:
         meta = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
-        raise StoredFitError(f"{path} can't be read: {exc}") from None
-    if not isinstance(meta, dict) or meta.get("format") != FORMAT:
-        raise StoredFitError(f"{path} is no stored fit of format {FORMAT}")
+        raise UnreadableFitError(f"{path} can't be read: {exc}") from None
+    if not isinstance(meta, dict):
+        raise UnreadableFitError(f"{path} isn't a stored fit's description")
     return meta
 
 
-def read_fit(directory: Path, model: Any, digest: Optional[str] = None) -> Optional[StoredFit]:
-    """The stored fit in `directory`, checked: None where there is none or (with `digest`) it is another configuration's;
-    `StoredFitError` where `units.npz` isn't the file `fit.json` names (its sha256), or a unit's arrays don't build back."""
+_ANY = object()
+
+
+def read_fit(directory: Path, model: Any, digest: Optional[str] = None, kernels: Any = _ANY) -> Optional[StoredFit]:
+    """The stored fit in `directory`, checked: None where there is none, or it is of another format, or (with `digest`) of
+    another configuration, or (with `kernels`) made with another LEAR kernel backend, whose fits agree with this one's within
+    1e-10, not to the bit; `UnreadableFitError` where `fit.json` can't be read; `StoredFitError` where `units.npz` isn't the file
+    `fit.json` names (its sha256), or a unit's arrays don't build back. A fit made by another package version warns: its
+    numbers are the code's of then, which a backtest by this one may not repeat."""
+    from ..results.manifest import _package_version
+
     meta = read_meta(directory)
-    if meta is None or (digest is not None and meta.get("config_digest") != digest):
+    if meta is None or meta.get("format") != FORMAT:
         return None
+    if digest is not None and meta.get("config_digest") != digest:
+        return None
+    if kernels is not _ANY and meta.get("kernels") != kernels:
+        return None
+    version = _package_version()
+    if meta.get("package_version") != version:
+        warnings.warn(
+            f"{directory}: the stored fit was made by epftoolbox2 {meta.get('package_version')}, this is {version}: a backtest "
+            "by this version may not give its forecasts to the bit. Refit it (refit(..., if_due=False)) to be sure.",
+            UserWarning,
+            stacklevel=3,
+        )
     path = directory / UNITS_FILE
     expected = (meta.get("artifacts") or {}).get(UNITS_FILE)
     try:
@@ -790,40 +817,101 @@ def read_fit(directory: Path, model: Any, digest: Optional[str] = None) -> Optio
     return stored
 
 
+def _left_by_a_write(root: Path, anchor: str) -> Optional[Path]:
+    """The old fit of `anchor` that a write stopped between its two renames left (`write_fit`: `.<anchor>.old-<token>`), where
+    the anchor's own directory is gone: the newest such copy with a `fit.json`, else None."""
+    olds = [path for path in root.glob(f".{anchor}.old-*") if (path / FIT_FILE).exists()]
+    return max(olds, key=lambda path: path.stat().st_mtime_ns) if olds else None
+
+
+def anchor_dir(save_dir: Union[str, Path], model_name: str, anchor: datetime.date) -> Path:
+    """Where the anchor's fit is read from: its directory, or where a write stopped between its two renames, the old fit it kept
+    (read as it is: only `sweep`, under the live lock, puts it back)."""
+    directory = fit_dir(save_dir, model_name, anchor)
+    if directory.exists():
+        return directory
+    return _left_by_a_write(directory.parent, anchor.isoformat()) or directory
+
+
+def sweep(root: Path) -> None:
+    """What unfinished writes left in a model's `fits/<model>/`, cleared under the live directory's lock: an old fit whose
+    anchor's directory is gone (a write stopped between its renames) is put back, and every other `.<anchor>.new-*` (a staging
+    directory) and `.<anchor>.old-*` is removed."""
+    if not root.is_dir():
+        return
+    leftovers = [
+        path for path in root.iterdir() if path.name.startswith(".") and (".new-" in path.name or ".old-" in path.name)
+    ]
+    for anchor in sorted({path.name[1:].split(".", 1)[0] for path in leftovers}):
+        if not (root / anchor).exists():
+            old = _left_by_a_write(root, anchor)
+            if old is not None:
+                os.replace(old, root / anchor)
+    for path in leftovers:
+        if path.exists():
+            shutil.rmtree(path, ignore_errors=True)
+    _fsync(root)
+
+
 def stored_anchors(save_dir: Union[str, Path], model_name: str) -> List[datetime.date]:
-    """The anchors with a stored fit of the model in the live directory, in date order."""
+    """The anchors with a stored fit of the model in the live directory (or an old one a stopped write kept), in date order."""
     root = model_dir(save_dir, model_name)
     if not root.is_dir():
         return []
-    out = []
+    out = set()
     for path in root.iterdir():
+        name = path.name[1:].split(".", 1)[0] if path.name.startswith(".") and ".old-" in path.name else path.name
         try:
-            day = datetime.date.fromisoformat(path.name)
+            day = datetime.date.fromisoformat(name)
         except ValueError:
             continue  # a staging directory of an unfinished write
         if (path / FIT_FILE).exists():
-            out.append(day)
+            out.add(day)
     return sorted(out)
 
 
+# How much older than the anchor it stands in for a fit `fit_missing="previous"` serves: one missed month of a "1MS" model, up
+# to four missed weeks of a "7D" one. An older fit isn't served; its forecasts are `no_stored_fit` skips.
+PREVIOUS_MAX_DAYS = 31
+
+
 def find_fit(
-    save_dir: Union[str, Path], name: str, model: Any, anchor: datetime.date, digest: str, previous: bool = True
-) -> Optional[Tuple[StoredFit, int]]:
-    """(the stored fit of the model `name` of `anchor` with this configuration digest, 0), or with `previous` the newest stored
-    older one of the same digest and its age in days (decision 15: a missed refit leaves the last fit in use, its age recorded);
-    None where there is neither. A fit is never taken from an anchor after `anchor`, nor from another configuration. `model`
-    builds the fits back (`_from_state`)."""
-    found = read_fit(fit_dir(save_dir, name, anchor), model, digest)
-    if found is not None:
-        return found, 0
-    if not previous:
-        return None
+    save_dir: Union[str, Path],
+    name: str,
+    model: Any,
+    anchor: datetime.date,
+    digest: str,
+    previous: bool = True,
+    kernels: Any = _ANY,
+) -> Optional[StoredFit]:
+    """The stored fit of the model `name` of `anchor` with this configuration digest (and kernel backend), or with `previous`
+    the newest stored older one of the same, at most `PREVIOUS_MAX_DAYS` older (decision 15: a missed refit leaves the last fit
+    in use, its age recorded, with a warning); None where there is neither. A fit is never taken from an anchor after `anchor`,
+    nor from another configuration. An unreadable `fit.json` is no fit, with a warning; an older anchor's tampered `units.npz`
+    too, while the anchor's own raises `StoredFitError`. `model` builds the fits back (`_from_state`)."""
+    try:
+        found = read_fit(anchor_dir(save_dir, name, anchor), model, digest, kernels)
+    except UnreadableFitError as exc:
+        warnings.warn(f"{name}: no stored fit of {anchor}: {exc}", UserWarning, stacklevel=3)
+        found = None
+    if found is not None or not previous:
+        return found
     for older in reversed(stored_anchors(save_dir, name)):
-        if older >= anchor:
+        if older >= anchor or (anchor - older).days > PREVIOUS_MAX_DAYS:
             continue
-        found = read_fit(fit_dir(save_dir, name, older), model, digest)
+        try:
+            found = read_fit(anchor_dir(save_dir, name, older), model, digest, kernels)
+        except StoredFitError as exc:
+            warnings.warn(f"{name}: the stored fit of {older} is passed over: {exc}", UserWarning, stacklevel=3)
+            continue
         if found is not None:
-            return found, (anchor - older).days
+            warnings.warn(
+                f"{name}: no stored fit of {anchor}; the forecasts are served from the fit of {older}, {(anchor - older).days} "
+                "day(s) older",
+                UserWarning,
+                stacklevel=3,
+            )
+            return found
     return None
 
 
@@ -856,6 +944,9 @@ class IssuePlan:
     hashes: Any
     used_columns: List[str]
     training_cut: Dict[str, Any]
+    # The date of the first row of each unit's span, before any filter (None for an empty span), and the LEAR kernels' backend.
+    first_rows: Dict[Tuple[datetime.date, UnitKey], Optional[datetime.date]] = field(default_factory=dict)
+    kernels: Optional[str] = None
 
 
 def _list_hash(cfg: Dict, expanded: Dict, hour: int, hz: int, list_id: Optional[int]) -> str:
@@ -984,6 +1075,15 @@ def plan_issue(
                 )
                 items.setdefault(unit.anchor, {})[key] = FitItem(unit)
                 newest[(unit.anchor, key)] = unit_rows(config, hour_arrays[unit.period]["days"], unit)[1]
+        first_ordinal = datetime.date.fromisoformat(config["test_start"]).toordinal() - int(config["offset"])
+        first_rows: Dict[Tuple[datetime.date, UnitKey], Optional[datetime.date]] = {}
+        for anchor, units in items.items():
+            for key, item in units.items():
+                rows = _item_rows(item, inputs)[0]
+                days = hour_arrays[key[0]]["days"]
+                first_rows[(anchor, key)] = (
+                    datetime.date.fromordinal(first_ordinal + int(days[rows.start])) if rows.stop > rows.start else None
+                )
         hashes = FrameHashes(data)
         digest = config_digest(model, state, data, information_set, fit_path, hashes)
         used = list(dict.fromkeys([target, *model._used_predictors]))
@@ -1007,15 +1107,24 @@ def plan_issue(
         hashes,
         used,
         training_cut,
+        first_rows,
+        model._kernel_backend,
     )
 
 
 def check_published(plan: IssuePlan, anchors: Iterable[datetime.date], now: pd.Timestamp, data: pd.DataFrame) -> None:
-    """Refuse (`FitTooEarlyError`) a fit of these anchors that reads a training target not yet known at `now` by the target's
-    rule (decision 5 of the step 8 spec): for each unit the cell of its newest target, (anchor + min(k, h - 1), its period), and
-    the 31 days before it, which a rule over time can publish later than a newer one. The message gives the publication time.
+    """Refuse (`FitTooEarlyError`) a fit of these anchors made before what it reads is out at `now` (decision 5 of the step 8
+    spec), the message giving the publication time:
+
+    - a training target not yet known by the target's rule: for each unit the cell of its newest target (anchor + min(k, h - 1),
+      its period) and the 31 days before it, or under a rule over time (`over_time`) every target of its span, which such a rule
+      can publish later than a newer one;
+    - an input of its newest training row that its rule puts out by the anchor's issue time but not yet at `now`: a value read
+      earlier would be another vintage, or missing. An input late even at the issue time is the configuration's own choice
+      (`availability`), and one without a rule can't be judged: neither refuses.
+
     Without an information set, or a rule for the target, nothing tells when a target is out: that raises too."""
-    from ..information_set import _STEP_MINUTES, InformationSetError
+    from ..information_set import _STEP_MINUTES, InformationSetError, over_time
 
     info = plan.information_set
     model = plan.model
@@ -1032,27 +1141,37 @@ def check_published(plan: IssuePlan, anchors: Iterable[datetime.date], now: pd.T
             f"'{plan.target}' has none. Declare one, e.g. InformationSet(rules={{'{plan.target}': "
             "Availability.published('13:00', 1)}})."
         )
+    whole_span = over_time(col.rule)
     zone = info._issue_zone(data.index)
+
+    def when(instant: pd.Timestamp) -> str:
+        return f"{instant.tz_convert(zone):%Y-%m-%d %H:%M} {zone} ({instant.tz_convert('UTC'):%Y-%m-%d %H:%M} UTC)"
+
     for anchor in sorted(set(anchors)):
         units = plan.items.get(anchor, {})
         if not units:
             continue
         reach: Dict[int, int] = {}
+        back: Dict[int, int] = {}
         horizon_of: Dict[int, int] = {}
         for key in units:
             period, hz = key[0], key[1]
             offset = min(int(plan.newest[(anchor, key)]), hz - 1)
             if offset >= reach.get(period, offset):
                 reach[period], horizon_of[period] = offset, hz
+            first = plan.first_rows.get((anchor, key))
+            oldest = offset - 31
+            if whole_span and first is not None:
+                oldest = min(oldest, (first + datetime.timedelta(days=hz) - anchor).days)
+            back[period] = min(back.get(period, oldest), oldest)
         clock = info._issue_clock(pd.DatetimeIndex([pd.Timestamp(anchor)]), data.index, plan.freq)
         periods = np.array(sorted(reach), dtype=np.int64)
         known: Dict[int, np.ndarray] = {}
-        for offset in range(min(reach.values()) - 31, max(reach.values()) + 1):
+        for offset in range(min(back.values()), max(reach.values()) + 1):
             known[offset] = np.asarray(clock.available(col, periods, step, row_day=offset)[:, 0], dtype=float)
         for place, period in enumerate(periods.tolist()):
-            newest = reach[period]
             latest, day = -np.inf, None
-            for offset in range(newest - 31, newest + 1):
+            for offset in range(back[period], reach[period] + 1):
                 minutes = known[offset][place]
                 if np.isfinite(minutes) and minutes >= latest:
                     latest, day = minutes, anchor + datetime.timedelta(days=offset)
@@ -1062,11 +1181,72 @@ def check_published(plan: IssuePlan, anchors: Iterable[datetime.date], now: pd.T
             if out > now:
                 raise FitTooEarlyError(
                     f"{model.name}: the fit anchored on {anchor} trains on '{plan.target}' of {day} (period {period}, horizon "
-                    f"{horizon_of[period]}), which its rule ('{col.rule.describe()}') publishes at "
-                    f"{out.tz_convert(zone):%Y-%m-%d %H:%M} {zone} ({out.tz_convert('UTC'):%Y-%m-%d %H:%M} UTC), after the "
+                    f"{horizon_of[period]}), which its rule ('{col.rule.describe()}') publishes at {when(out)}, after the "
                     f"clock's now ({now.tz_convert('UTC'):%Y-%m-%d %H:%M} UTC). A fit made now would train on fewer targets "
                     "than the backtest's: refit once it is out."
                 )
+        issue = float(clock.issue[0])
+        cells: Dict[Tuple[str, int], set] = {}
+        for key, item in units.items():
+            period, hz = key[0], key[1]
+            row = min(int(plan.newest[(anchor, key)]) - hz, -1)  # the newest training row, relative to the anchor
+            for name in _item_rows(item, plan.inputs)[5]:
+                cells.setdefault((name, row), set()).add(period)
+        for (name, row), wanted in sorted(cells.items()):
+            try:
+                predictor = info._resolve_for(name, step)
+            except InformationSetError:
+                continue
+            if predictor.rule is None:
+                continue
+            ps = np.array(sorted(wanted), dtype=np.int64)
+            minutes = np.asarray(clock.available(predictor, ps, step, row_day=row)[:, 0], dtype=float)
+            for period, value in zip(ps.tolist(), minutes.tolist()):
+                if not np.isfinite(value) or value > issue:
+                    continue
+                out = clock.ctx.origin + pd.Timedelta(minutes=value)
+                if out > now:
+                    raise FitTooEarlyError(
+                        f"{model.name}: the fit anchored on {anchor} reads '{name}' on its newest training row, "
+                        f"{anchor + datetime.timedelta(days=row)} (period {period}), which its rule "
+                        f"('{predictor.rule.describe()}') publishes at {when(out)}, after the clock's now "
+                        f"({now.tz_convert('UTC'):%Y-%m-%d %H:%M} UTC), though by the issue time: a value read now would be "
+                        "another vintage or missing. Refit once it is out."
+                    )
+
+
+def incomplete_days(plan: IssuePlan, anchor: datetime.date, data: pd.DataFrame) -> List[str]:
+    """The newest target days of an anchor's units whose target the frame doesn't hold whole (a slot without a row, or a
+    missing value), though the rule says they are out (`check_published` passed): a fit then trains on fewer rows than the
+    backtest of a complete frame. The fit is still made, marked `incomplete` in `fit.json` with a warning, and its rows hash
+    makes a refit on a frame that holds them due (`refit` reports it `stale`)."""
+    from ._calendar import clock_periods
+
+    days = sorted(
+        {
+            anchor + datetime.timedelta(days=min(int(plan.newest[(anchor, key)]), key[1] - 1))
+            for key in plan.items[anchor]
+        }
+    )
+    local = pd.Series(data[plan.target].to_numpy(), index=pd.Index(data.index.date))
+    out = []
+    for day in days:
+        values = local[local.index == day]
+        expected = 1 if plan.freq == "1D" else len(clock_periods(day, plan.freq, data.index.tz))
+        if len(values) < expected or values.isna().any():
+            out.append(day.isoformat())
+    return out
+
+
+def rows_hash(data: pd.DataFrame, columns: Sequence[str], first: str, through: str) -> Optional[str]:
+    """The hash of what an anchor's fits read (`hash_columns` of `columns` on the rows dated `first` to `through`): another value
+    on those rows, a value filled in or revised, moves it; rows outside them don't, so a rolling frame doesn't. None where a
+    column is missing."""
+    from ..results.manifest import hash_columns
+
+    if any(column not in data.columns for column in columns):
+        return None
+    return hash_columns(data.sort_index().loc[first:through], list(columns))
 
 
 def run_fits(plan: IssuePlan, items: Sequence[FitItem]) -> List[Tuple[Dict[str, Any], Dict[str, np.ndarray]]]:
@@ -1124,12 +1304,62 @@ def _unit_meta(plan: IssuePlan, anchor: datetime.date, key: UnitKey, made: Dict[
     }
 
 
-def anchor_meta(plan: IssuePlan, anchor: datetime.date, units: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
-    """`fit.json` of an anchor, but its units and artifacts: what the fit is of and what it read."""
+MASK_ISSUE_DAY_NOTE = (
+    "mask: a refit=None unit's binary-column mask is read on its issue day, as a backtest of that day alone reads it; a backtest "
+    "over a longer test reads it on the test's first day, and the two differ where a column turns binary or stops being "
+    "binary between them (binary_mask='fit' reads each fit's own)"
+)
+ENGINE_FIT_ERROR_NOTE = (
+    "engine: {n} unit(s) have a fit from shared statistics and a model-path fit_error: an issue row too far out for the engine "
+    "is the fit_error of every forecast served with it in one call, as in a backtest of that call's days; a backtest of a whole "
+    "block gives it to every day of the block"
+)
+
+
+def anchor_notes(plan: IssuePlan, units: Sequence[Dict[str, Any]]) -> List[str]:
+    """Where a forecast served from these units can differ from a backtest over a longer test, though it is a backtest of its
+    issue day to the bit: a refit=None model's mask read on the issue day, and engine units whose model path fails."""
+    notes = []
+    if plan.model.refit is None and plan.model.binary_mask != "fit":
+        notes.append(MASK_ISSUE_DAY_NOTE)
+    failing = sum(1 for unit in units if unit.get("engine") and unit.get("fit_error"))
+    if failing:
+        notes.append(ENGINE_FIT_ERROR_NOTE.format(n=failing))
+    return notes
+
+
+def anchor_rows(plan: IssuePlan, anchor: datetime.date, data: pd.DataFrame) -> Dict[str, Any]:
+    """What an anchor's fits read: the used columns on the rows dated from the first row of any unit's span to the newest target
+    day of any unit, and their hash (`rows_hash`)."""
+    firsts = [day for (a, _), day in plan.first_rows.items() if a == anchor and day is not None]
+    first = min(firsts, default=anchor).isoformat()
+    through = max(
+        (
+            anchor + datetime.timedelta(days=min(int(plan.newest[(anchor, key)]), key[1] - 1))
+            for key in plan.items[anchor]
+        ),
+        default=anchor,
+    ).isoformat()
+    return {
+        "from": first,
+        "through": through,
+        "columns": list(plan.used_columns),
+        "hash": rows_hash(data, plan.used_columns, first, through),
+    }
+
+
+def anchor_meta(
+    plan: IssuePlan,
+    anchor: datetime.date,
+    units: Sequence[Dict[str, Any]],
+    data: pd.DataFrame,
+    incomplete: Sequence[str] = (),
+) -> Dict[str, Any]:
+    """`fit.json` of an anchor, but its units and artifacts: what the fit is of, what it read, which newest target days the
+    frame didn't hold whole (`incomplete`), and where its forecasts can differ from a longer backtest's (`notes`)."""
     from ..results.manifest import _package_version
 
     model = plan.model
-    through = max((unit["newest_target_day"] for unit in units), default=anchor.isoformat())
     return {
         "format": FORMAT,
         "model": model.name,
@@ -1142,15 +1372,22 @@ def anchor_meta(plan: IssuePlan, anchor: datetime.date, units: Sequence[Dict[str
         "training_cut": plan.training_cut,
         "target": plan.target,
         "freq": plan.freq,
-        "kernels": model._kernel_backend,
-        "rows": {
-            "through": through,
-            "columns": plan.used_columns,
-            "hash": plan.hashes.of_columns(through, plan.used_columns),
-        },
+        "kernels": plan.kernels,
+        "rows": anchor_rows(plan, anchor, data),
+        "incomplete": list(incomplete),
+        "notes": anchor_notes(plan, units),
         "package_version": _package_version(),
         "created_at": current_clock().now().isoformat(),
     }
+
+
+def stale_rows(stored: "StoredFit", data: pd.DataFrame) -> bool:
+    """Whether the rows a stored fit read are no longer the frame's: their hash over the same dates and columns moved (a value
+    filled in, revised, or gone), or the fit recorded none."""
+    rows = stored.meta.get("rows") or {}
+    if not {"from", "through", "columns", "hash"} <= set(rows):
+        return True
+    return rows_hash(data, rows["columns"], rows["from"], rows["through"]) != rows["hash"]
 
 
 def fitted_units(
@@ -1181,8 +1418,9 @@ def _stored_entries(stored: StoredFit) -> List[Tuple[Dict, Dict[str, np.ndarray]
 @dataclass
 class RefitResult:
     """What `ModelPipeline.refit` did for one issue day: per model the anchors it fitted and stored (`fitted`), those already
-    stored with this configuration (`not_due`), the units it fitted, and how long each took; `not_stored`, why a model's fits
-    aren't stored (it fits at serve time). `noop` is True when nothing was fitted."""
+    stored with this configuration and these rows (`not_due`), those refitted because the rows their fit read moved (`stale`),
+    those stored from a frame missing a newest target (`incomplete`), the units it fitted, and how long each took;
+    `not_stored`, why a model's fits aren't stored (it fits at serve time). `noop` is True when nothing was fitted."""
 
     issue: str
     fitted: Dict[str, List[str]] = field(default_factory=dict)
@@ -1190,6 +1428,10 @@ class RefitResult:
     not_stored: Dict[str, str] = field(default_factory=dict)
     units: Dict[str, int] = field(default_factory=dict)
     seconds: Dict[str, float] = field(default_factory=dict)
+    # Anchors refitted whole because the rows their stored fit read moved, and anchors stored from a frame missing a newest
+    # target the rule calls out (`incomplete_days`).
+    stale: Dict[str, List[str]] = field(default_factory=dict)
+    incomplete: Dict[str, List[str]] = field(default_factory=dict)
 
     @property
     def noop(self) -> bool:
@@ -1214,10 +1456,13 @@ def refit_models(
     availability: str,
     issue_days: Optional[Sequence[str]],
     engine: bool,
+    before_write: Optional[Any] = None,
 ) -> RefitResult:
     """`ModelPipeline.refit`'s work once the live directory's lock is held: every model's issue-day plan, which anchors are due,
-    the publication check of every due fit before any is made (decision 5), then each model's due units fitted (`run_fits`) and
-    each anchor written (`write_fit`), merged with the units of the same configuration already stored there."""
+    the publication check of every due fit before any is made (decision 5), then `before_write()` (the live directory's
+    identity), each model's due units fitted (`run_fits`) and each anchor written (`write_fit`), merged with the units of the
+    same configuration already stored there where the rows they read are still the frame's, else refitted whole (`stale`). An
+    anchor whose stored fit can't be read, or is of another format, kernel backend or configuration, is refitted whole."""
     import time
 
     result = RefitResult(issue.isoformat())
@@ -1241,14 +1486,19 @@ def refit_models(
             engine=engine,
         )
         due: Dict[datetime.date, Tuple[List[UnitKey], Optional[StoredFit]]] = {}
+        sweep(model_dir(save_dir, model.name))
         for anchor, units in sorted(plan.items.items()):
             directory = fit_dir(save_dir, model.name, anchor)
             try:
-                stored = read_fit(directory, plan.inputs.model, plan.digest)
-            except StoredFitError:
-                if if_due:
-                    raise
-                stored = None  # refitted whole below
+                stored = read_fit(directory, plan.inputs.model, plan.digest, plan.kernels)
+            except StoredFitError as exc:
+                warnings.warn(
+                    f"{model.name}: the stored fit of {anchor} is refitted whole: {exc}", UserWarning, stacklevel=4
+                )
+                stored = None
+            if stored is not None and stale_rows(stored, data):
+                result.stale.setdefault(model.name, []).append(anchor.isoformat())
+                stored = None  # the rows it read moved: refitted whole, nothing of it kept
             held = set() if stored is None else set(stored.units)
             if if_due and set(units) <= held:
                 result.not_due.setdefault(model.name, []).append(anchor.isoformat())
@@ -1259,6 +1509,8 @@ def refit_models(
     now = current_clock().now()
     for plan, due in planned:
         check_published(plan, due, now, data)
+    if before_write is not None:
+        before_write()
     for plan, due in planned:
         name = plan.model.name
         started = time.perf_counter()
@@ -1273,7 +1525,18 @@ def refit_models(
             )
             merged = {**kept, **{tuple(entry["key"]): (entry, arrays) for entry, arrays in entries}}
             ordered = [merged[key] for key in _sorted_keys(merged)]
-            write_fit(fit_dir(save_dir, name, anchor), anchor_meta(plan, anchor, [m for m, _ in ordered]), ordered)
+            incomplete = incomplete_days(plan, anchor, data)
+            if incomplete:
+                result.incomplete.setdefault(name, []).append(anchor.isoformat())
+                warnings.warn(
+                    f"{name}: the frame doesn't hold every '{plan.target}' value of {', '.join(incomplete)}, which its rule says is "
+                    f"out by now: the fit of {anchor} is stored without them, marked incomplete, and a refit on a frame that "
+                    "holds them refits it (stale rows)",
+                    UserWarning,
+                    stacklevel=4,
+                )
+            meta = anchor_meta(plan, anchor, [m for m, _ in ordered], data, incomplete)
+            write_fit(fit_dir(save_dir, name, anchor), meta, ordered)
             result.fitted[name].append(anchor.isoformat())
             result.units[name] += len(keys)
         result.seconds[name] = time.perf_counter() - started
@@ -1289,13 +1552,20 @@ def refit_models(
 class Served:
     """One model's forecasts of an issue day served from stored fits (`serve`): its records, forecasts and skip records as a
     backtest's store holds them (`_worker.forecast_record`, `skip_record`), and per anchor the fit used: `source` "stored" (the
-    anchor's own), "previous" (the newest older one of the same configuration, `fit_age_days` its age), "inline" (fitted by this
-    call) or "missing" (none: its forecasts are `no_stored_fit` skips), and `used`, the anchor of the fit served."""
+    anchor's own), "previous" (the newest older one of the same configuration), "inline" (fitted by this call) or "missing"
+    (none: its forecasts are `no_stored_fit` skips), `used`, the anchor of the fit served, and `fit_age_days`, the issue day
+    less that anchor (`inline_units`: units an anchor's stored fit lacked, fitted by this call). `status` is "served", or
+    "not_stored" for a model whose fits aren't stored (`reason` says why): it has no records here and fits at serve time through
+    its own run of the issue day, which `forecast()` routes it to. `notes` say where a forecast served can differ from a backtest
+    over a longer test, though it is the backtest of its issue day to the bit (`anchor_notes`)."""
 
     model: str
     issue: str
     records: List[Dict[str, Any]]
     fits: Dict[str, Dict[str, Any]]
+    status: str = "served"
+    reason: Optional[str] = None
+    notes: List[str] = field(default_factory=list)
 
 
 def serve(
@@ -1320,8 +1590,10 @@ def serve(
     anchor has no stored fit: `fit_missing="previous"` serves the newest stored older one (a refit model; its age recorded in
     `Served.fits`, the records' `refit_anchor` the fit's own), `"fit"` fits it inline (refused, as `refit`, while a training
     target it reads isn't out), `"skip"` gives its forecasts as `no_stored_fit` skips; a refit=None model fits inline unless
-    `"skip"`, as the backtest does. A model whose fits aren't stored (`stores_fits`) raises: it fits at serve time through its own
-    run."""
+    `"skip"`, as the backtest does. An older fit is served only within `PREVIOUS_MAX_DAYS` of the anchor it stands in for, with a
+    warning. Units a stored fit lacks (a predictor function's list it wasn't fitted for) are fitted inline where the anchor would
+    be; with "previous" they are `no_stored_fit` skips. A model whose fits aren't stored (`stores_fits`) gets `status`
+    "not_stored", no records: it fits at serve time through its own run."""
     from threadpoolctl import threadpool_limits
 
     from ._calendar import refit_anchor
@@ -1340,7 +1612,7 @@ def serve(
         raise ValueError(f"fit_missing must be one of {list(FIT_MISSING)}, got {fit_missing!r}")
     reason = stores_fits(model)
     if reason is not None:
-        raise ValueError(f"{model.name}: {reason}, through its own run of the issue day")
+        return Served(model.name, issue.isoformat(), [], {}, status="not_stored", reason=reason)
     plan = plan_issue(
         model,
         data,
@@ -1357,25 +1629,41 @@ def serve(
     inputs = plan.inputs
     cfg = inputs.config
     previous = fit_missing == "previous" and cfg.get("refit") is not None
+    inline = fit_missing == "fit" or (fit_missing != "skip" and cfg.get("refit") is None)
     lookup: Dict[datetime.date, Optional[Tuple[Dict[UnitKey, UnitFit], datetime.date]]] = {}
     fits: Dict[str, Dict[str, Any]] = {}
+    notes: List[str] = []
     for anchor in sorted(plan.items):
-        found = (
-            None if save_dir is None else find_fit(save_dir, model.name, inputs.model, anchor, plan.digest, previous)
+        stored = (
+            None
+            if save_dir is None
+            else find_fit(save_dir, model.name, inputs.model, anchor, plan.digest, previous, plan.kernels)
         )
-        if found is not None:
-            stored, age = found
-            lookup[anchor] = (stored.units, stored.anchor)
-            fits[anchor.isoformat()] = {
-                "source": "stored" if age == 0 else "previous",
+        if stored is not None:
+            units = dict(stored.units)
+            entry = {
+                "source": "stored" if stored.anchor == anchor else "previous",
                 "used": stored.anchor.isoformat(),
-                "fit_age_days": age,
+                "fit_age_days": (issue - stored.anchor).days,
             }
-        elif fit_missing == "fit" or (fit_missing != "skip" and cfg.get("refit") is None):
+            notes.extend(stored.meta.get("notes", []))
+            missing = _sorted_keys(set(plan.items[anchor]) - set(units)) if stored.anchor == anchor else []
+            if missing and inline:
+                check_published(plan, [anchor], current_clock().now(), data)
+                units.update(fitted_units(plan, anchor, missing)[1])
+                entry["inline_units"] = len(missing)
+            lookup[anchor] = (units, stored.anchor)
+            fits[anchor.isoformat()] = entry
+        elif inline:
             check_published(plan, [anchor], current_clock().now(), data)
-            _, units = fitted_units(plan, anchor, _sorted_keys(plan.items[anchor]))
+            made, units = fitted_units(plan, anchor, _sorted_keys(plan.items[anchor]))
+            notes.extend(anchor_notes(plan, [meta for meta, _ in made]))
             lookup[anchor] = (units, anchor)
-            fits[anchor.isoformat()] = {"source": "inline", "used": anchor.isoformat(), "fit_age_days": 0}
+            fits[anchor.isoformat()] = {
+                "source": "inline",
+                "used": anchor.isoformat(),
+                "fit_age_days": (issue - anchor).days,
+            }
         else:
             lookup[anchor] = None
             fits[anchor.isoformat()] = {"source": "missing", "used": None, "fit_age_days": None}
@@ -1456,4 +1744,4 @@ def serve(
                 anchor.isoformat(),
             )
         )
-    return Served(model.name, issue.isoformat(), records, fits)
+    return Served(model.name, issue.isoformat(), records, fits, notes=list(dict.fromkeys(notes)))

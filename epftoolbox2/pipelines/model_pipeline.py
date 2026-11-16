@@ -2252,9 +2252,8 @@ class ModelPipeline:
         info = self._information_set_for(data)
         day = self._issue_day(issue, info, data)
         store = LiveStore(save_dir)
+        zone = today_zone(info, data.index)
         with store.hold():
-            zone = today_zone(info, data.index)
-            store.init(**({} if zone is None else {"issue_timezone": zone}))
             with pool_native_threads():
                 return refit_models(
                     selected,
@@ -2269,6 +2268,8 @@ class ModelPipeline:
                     availability=self.availability,
                     issue_days=issue_days,
                     engine=self.engine != ENGINE_OFF,
+                    # After every check passed, before the first fit is written: a refused call leaves no live.json behind.
+                    before_write=lambda: store.init(**({} if zone is None else {"issue_timezone": zone})),
                 )
 
     def _serve_stored(
@@ -2286,7 +2287,8 @@ class ModelPipeline:
         issue_days: Optional[Sequence[str]] = None,
     ) -> Dict[str, Served]:
         """Each model's forecasts of `issue` served from its stored fits in `save_dir` (`models._fits.serve`), by name: the serve
-        path `forecast()` (step 8e) builds on. `fit_missing` is "previous", "fit" or "skip" (`models._fits.serve`)."""
+        path `forecast()` (step 8e) builds on. `fit_missing` is "previous", "fit" or "skip" (`models._fits.serve`). A model whose
+        fits aren't stored comes back with `status` "not_stored" and no records, for `forecast()` to run through its own run."""
         _, horizons = resolve_horizons(horizon, horizons, 7)
         info = self._information_set_for(data)
         day = self._issue_day(issue, info, data)
