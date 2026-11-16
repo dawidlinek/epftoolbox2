@@ -243,15 +243,19 @@ def _iso(value: Any) -> Any:
 
 
 def _sources(refresh: Any) -> Optional[Dict[str, Dict[str, Any]]]:
-    """Per source of a refresh record its status and the last valid timestamp of each column. The record is 8b's
-    `RefreshRecord` or a mapping of the same shape, of which only `sources` is read: source key -> an object or mapping with
-    `status` ("ok", "failed", "timeout", "skipped") and `last_valid` (column -> the last timestamp with a value, or None)."""
+    """Per source of a refresh record its status and the last valid timestamp of each column. Only `sources` is read: 8b's
+    `RefreshRecord` holds a tuple of `SourceRefresh`, each keyed here by its `name` ("EntsoeSource #1"); a mapping of source
+    key -> an object or mapping is taken as it is. Each source has `status` ("ok", "failed", "timeout", "skipped") and
+    `last_valid` (column -> the last timestamp with a value, or None)."""
     if refresh is None:
         return None
     sources = _field(refresh, "sources")
+    if isinstance(sources, (list, tuple)) and all(isinstance(_field(source, "name"), str) for source in sources):
+        sources = {_field(source, "name"): source for source in sources}
     if not isinstance(sources, Mapping):
         raise TypeError(
-            "refresh is a RefreshRecord or a mapping with `sources`: source key -> {status, last_valid: {column: timestamp}}"
+            "refresh is a RefreshRecord (sources: a tuple of SourceRefresh) or a mapping with `sources`: source key -> "
+            "{status, last_valid: {column: timestamp}}"
         )
     out = {}
     for key, source in sources.items():
