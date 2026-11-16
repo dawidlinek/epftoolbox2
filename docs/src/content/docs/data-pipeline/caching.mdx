@@ -188,14 +188,16 @@ df = pipeline.run("today_d-30", "today_d+1", cache=True, budget=300, timeout=30,
   a request it really needs runs out of it (`skipped` when it couldn't send one, `timeout` after it sent some). So a source
   that answers 503 forever costs the budget and at most one request's timeout more.
 - Waiting for a cache lock another process holds (it is fetching the same source) counts too: the wait lasts as long as the
-  time left, then the source is `skipped` and its error names the cache lock. That wait is on real time, as the other
-  process is.
+  time left, then the source is `skipped` and its error names the cache lock; the single-file cache's lock is waited for the
+  same way, and the run raises its `SourceTimeout`. That wait is on real time, as the other process is.
 - `timeout` and `retries` replace each source's own for every HTTP request (ENTSO-E and PSE: 60 s and 5 retries,
   Energy-Charts 60 s and 6, Open-Meteo 60 s and 4, OpenHolidays 30 s and 2). They are arguments of the run, not of the sources, so a saved pipeline
   and its cache keys don't change. `retries=0` asks once.
 - A naive `deadline` is a time of the pipeline's `timezone`, as a naive `start` is (UTC without one). A time of day alone,
-  `deadline="11:55"`, is that time on today's date in that zone, read on the clock; once it has passed it leaves no time.
-  Any other string needs a full date (`"2026-10-21 11:55"`): `"noon"` or `"Oct 21"` raise `ValueError`.
+  `deadline="11:55"`, is that time on today's date in that zone, read on the clock: always today's date, never tomorrow's,
+  so once it has passed it leaves no time. A deadline after midnight needs a full date (`"2026-10-22 00:30"`); a run at 23:50
+  given `"00:30"` warns that the deadline is 23 h behind (any time of day more than 12 h past does). Any other string needs a
+  full date: `"noon"` or `"Oct 21"` raise `ValueError`.
 - Budgets and deadlines are read on the clock (`epftoolbox2.clock`), so a test or a simulated week runs them on a
   `FakeClock` without waiting. A Retry-After given as an HTTP date is an instant of real time and is read against the
   machine's clock, and Energy-Charts' rate limit counts real seconds, so a replay on a fake clock against a real server keeps
@@ -209,8 +211,9 @@ df = pipeline.run("today_d-30", "today_d+1", cache=True, budget=300, timeout=30,
 | `"raise"` (default) | Its error is raised, a `SourceTimeout` included, and `last_refresh` ends at it |
 | `"cache"` (needs `cache=True`) | It gives only what its source cache holds, and the run goes on |
 
-Out of reach means out of time (`SourceTimeout`), a network error, or retries that ran out on network errors, 429 or 5xx
-answers. Anything else is raised with either setting: an invalid key or another refused request, a missing file, a bug. A
+Out of reach means out of time (`SourceTimeout`), a network error, retries that ran out on network errors, 429 or 5xx
+answers, or a rate limit a source raises at once rather than wait (Energy-Charts' Retry-After over 15 minutes, Open-Meteo's
+hourly or daily limit). A 4xx answer other than 429 is a refused request whatever its body. Anything else is raised with either setting: an invalid key or another refused request, a missing file, a bug. A
 source out of reach whose cache holds no row of the range leaves its columns out of the frame, with a `RuntimeWarning`
 naming it; when no source gives a row at all, `run` raises `RefreshError` (`epftoolbox2.data.refresh`) naming each one.
 

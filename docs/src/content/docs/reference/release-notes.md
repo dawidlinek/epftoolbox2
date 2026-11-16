@@ -237,8 +237,8 @@ an issue day it didn't sample.
   retries' waits, which follow the current clock). See [Clock](/epftoolbox2/reference/api/#clock).
 - **A refresh with a budget: `DataPipeline.run(..., budget=, deadline=, timeout=, retries=, on_failure=)` and `last_refresh`**
   (step 8b). `budget` (seconds from now, on the clock) and `deadline` (an instant; a naive one in the pipeline's zone) bound the
-  whole refresh, the earlier counting (`deadline="11:55"` is that time today in the pipeline's zone, on the clock; another string
-  needs a full date): the sources are asked one after another, each within what is left, a request only while time is left and
+  whole refresh, the earlier counting (`deadline="11:55"` is that time today in the pipeline's zone, on the clock, never
+  tomorrow, and warns when more than 12 h past; another string needs a full date): the sources are asked one after another, each within what is left, a request only while time is left and
   with its timeout cut to it, and a wait that would end at or after the deadline (a backoff, a Retry-After, Energy-Charts' rate
   limit, another process's cache lock) is never started: the source raises `SourceTimeout` (`epftoolbox2.data.refresh`)
   instead (`skipped` when it couldn't send a request, `timeout` after). Every source is started, so a full cache hit or a
