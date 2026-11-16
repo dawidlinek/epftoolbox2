@@ -211,3 +211,28 @@ def test_a_plain_run_refuses_a_missing_source_column_before_any_fit(tmp_path):
     with pytest.raises(ValueError, match="'capacty'.*nothing was fitted"):
         pipeline.run(data, test=("2023-02-20", "2023-02-22"), horizon=1, save_dir=str(tmp_path / "run"))
     assert not (tmp_path / "run" / "a.jsonl").exists()
+
+
+def test_a_forecast_only_workflow_into_a_save_dir_is_refused_when_loaded_and_runs_in_memory_without_one(
+    tmp_path, experiment, monkeypatch
+):
+    """Decision 12 of step 8: a forecast-only run into a directory resumed the forecast it held and returned it as today's."""
+    from epftoolbox2 import cli
+
+    path = experiment()
+    config = yaml.safe_load(path.read_text())
+    config["model_pipeline"]["forecast_only"] = True
+    path.write_text(yaml.safe_dump(config))
+    with pytest.raises(ValueError, match="forecast_only: true and save_dir"):
+        Workflow.load(path)
+    with pytest.raises(SystemExit) as exit_:
+        cli.cmd_run(cli.build_parser().parse_args(["run", str(path)]))
+    assert exit_.value.code == 1
+    del config["model_pipeline"]["save_dir"]
+    path.write_text(yaml.safe_dump(config))
+    report = Workflow.load(path).run()  # in memory: the forecasts are the report's
+    assert len(report.predictions()) == 2 * 2 * 24 and not (tmp_path / "results").exists()
+    wf = Workflow.load(path)
+    wf.model_save_dir = "results"  # set after loading: refused when it runs
+    with pytest.raises(ValueError, match="forecast_only: true and save_dir"):
+        wf.run()

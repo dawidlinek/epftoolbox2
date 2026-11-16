@@ -18,7 +18,11 @@ console = Console()
 def cmd_run(args: argparse.Namespace) -> None:
     from .pipelines.workflow import Workflow
 
-    wf = Workflow.load(args.yaml)
+    try:
+        wf = Workflow.load(args.yaml)
+    except ValueError as exc:  # a configuration error, such as forecast_only with save_dir
+        console.print(f"[red]{escape(str(exc))}[/red]")
+        sys.exit(1)
 
     # CLI flags override YAML values; set on the Workflow object so _apply_environment()
     # picks them up (rather than setting env vars here and having them overwritten).
@@ -189,6 +193,11 @@ def cmd_model(args: argparse.Namespace) -> None:
     try:
         if args.test_start is None and args.test_end is None and validation is None:
             raise ValueError("No window to forecast: pass --test-start and --test-end, --validation, or both")
+        if args.forecast_only and args.save_dir:
+            raise ValueError(
+                "--forecast-only with --save-dir would resume the forecasts the directory holds and return them as new: drop "
+                "--save-dir to keep them in memory, or --forecast-only to run a backtest of the window into it"
+            )
         test = None
         if args.test_start is not None or args.test_end is not None:
             test = to_period((args.test_start, args.test_end), "test")

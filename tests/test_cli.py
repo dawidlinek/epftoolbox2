@@ -412,3 +412,15 @@ def test_epf_verify_exits_1_without_its_data(monkeypatch, capsys, verify_files):
     argv[argv.index("--data") + 1] = "no_such_file.csv"
     assert exit_code(monkeypatch, argv) == 1
     assert "Data file not found" in capsys.readouterr().out
+
+
+def test_epf_model_refuses_forecast_only_into_a_save_dir(tmp_path, local_data, capsys):
+    data_path = tmp_path / "data.csv"
+    save_frame_csv(local_data, data_path)
+    args = model_args(tmp_path, data_path)
+    args.forecast_only = True
+    with pytest.raises(SystemExit) as exit_:
+        cli.cmd_model(args)
+    assert exit_.value.code == 1
+    assert "--forecast-only with --save-dir" in capsys.readouterr().out
+    assert not (tmp_path / "out").exists()

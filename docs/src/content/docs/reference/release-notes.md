@@ -13,8 +13,9 @@ Notes for changes that need something from you. The full list of changes of a re
   returned the earlier forecast as if it were today's, and its manifest refused the next day's data. Issue live forecasts with
   `ModelPipeline.forecast()` into a live directory (revisions, stored fits, deadlines; see
   [Live Forecasts](/epftoolbox2/operations/live/)), keep a `forecast_only=True` run in memory (no `save_dir`), or run a backtest of
-  the dates you want into `save_dir`: its forecasts are the forecast-only run's. A `Workflow` with `forecast_only: true` and a
-  `save_dir`, and an array task of one, raise too; the wizard's forecast-only run keeps its forecasts in memory.
+  the dates you want into `save_dir`: its forecasts are the forecast-only run's. A `Workflow` YAML with `forecast_only: true` and
+  a `save_dir` (an array task's too) is refused when it is loaded, with `ValueError` naming those three ways, and `epf run` says so
+  and exits 1; so does `epf model --forecast-only --save-dir`. The wizard's forecast-only run keeps its forecasts in memory.
 
 - **`forecast_only`'s "today" is the issue zone's date.** A `forecast_only=True` run without `test_start`/`test_end` issued on
   the host's date: on a host in UTC, a run at 00:30 Warsaw time (22:30 UTC in summer) forecast from the Warsaw day before. With an
