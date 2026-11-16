@@ -238,6 +238,28 @@ class _Actuals:
         return out[unique.get_indexer(instants)]
 
 
+def data_in_results_zone(members: Sequence[MonitorMember], data: pd.DataFrame) -> pd.DataFrame:
+    """`data` in the time zone the members' results were made in (`data_timezone` of their manifests), which is what a record's
+    date and period are read in: a frame in another zone (UTC, say) would put every hour on the wrong period and, near midnight,
+    the wrong date, and score other keys without a word. The same instants are converted (`tz_convert`), so the frame is never
+    refused for its zone alone; members whose manifests name different zones raise, and so does a naive frame for results made
+    in a zone (its instants are unknown). Without a zone in any manifest (a directory written by hand) the frame is used as it is."""
+    from .manifest import manifest_path, read_zone
+
+    zones = {zone for zone in (read_zone(manifest_path(m.path)) for m in members) if zone is not None}
+    if len(zones) > 1:
+        raise ValueError(f"the members' results were made in different time zones: {sorted(zones)}")
+    if not zones:
+        return data
+    (zone,) = zones
+    if not isinstance(data.index, pd.DatetimeIndex) or data.index.tz is None:
+        raise ValueError(
+            f"the results were made on data in {zone}, and the frame has a naive index, whose instants are unknown: localize it "
+            f"(data.tz_localize('{zone}')) first"
+        )
+    return data if str(data.index.tz) == zone else data.tz_convert(zone)
+
+
 def _read_keys(
     member: MonitorMember, committed: Mapping[str, Mapping[int, Any]], statuses: Optional[Iterable[str]] = OK_ONLY
 ) -> pd.DataFrame:
@@ -960,4 +982,4 @@ def monitor(
     return report
 
 
-__all__ = ["Alert", "MonitorReport", "load_alerts", "monitor"]
+__all__ = ["Alert", "MonitorReport", "data_in_results_zone", "load_alerts", "monitor"]

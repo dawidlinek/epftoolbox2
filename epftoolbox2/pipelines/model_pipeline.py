@@ -80,7 +80,7 @@ from ..results.manifest import (
     rows_unverified,
 )
 from ..results.live import LiveStore, refuse_live_directory
-from ..results.monitor import MonitorMember, MonitorReport
+from ..results.monitor import MonitorMember, MonitorReport, data_in_results_zone
 from ..results.monitor import monitor as run_monitor
 from ..models._fits import RefitResult, Served, refit_models, serve
 from ..models._engine_worker import fit_path_of
@@ -2328,6 +2328,7 @@ class ModelPipeline:
             benchmarks = [m.name for m in self.models if isinstance(m, NaiveModel) and m.name in present]
         elif isinstance(benchmarks, str):
             benchmarks = [benchmarks]
+        data = data_in_results_zone(found, data)
         return run_monitor(
             found,
             list(benchmarks),

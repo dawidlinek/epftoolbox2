@@ -157,6 +157,8 @@ def record(member: str, day: str, revision: int, horizon: int, hour: int) -> dic
 def write_live(directory, *, receipts=True, save_format="jsonl") -> None:
     store = LiveStore(directory)
     store.init(mode="live", issue_timezone=ZONE, deadline=DEADLINE)
+    for member in ("lear", "naive", "best"):  # what a run's manifest says of the data the forecasts were made from
+        (directory / f"{member}.manifest.json").write_text(json.dumps({"mode": "live", "data_timezone": ZONE}))
     with store.hold():
         for day in DAYS:
             if day == LATE_DAY:
@@ -1176,3 +1178,23 @@ def test_a_delivered_revision_must_still_have_been_committed_by_the_deadline(tmp
         store.mark_delivered(DAYS[3], 2, receipt, delivered_at=local(DAYS[3], "12:40"))
     got = run_monitor(directory, windows=(10,), policy="delivered")
     assert got.tables()["delivered_days"].iloc[0] == 0 and got.tables()["forecasts"].iloc[0] == 0
+
+
+@pytest.mark.parametrize("zone", ["UTC", "Europe/London", "Asia/Tokyo"])
+def test_the_data_in_another_zone_gives_the_same_report(live, zone):
+    """The records' dates and periods are in the zone of the data they were made on (the manifests' `data_timezone`): the same
+    instants in UTC read as other hours, and on a 25-hour day as other days, so the frame is put back in that zone."""
+    base = run_monitor(live, windows=(7, 10)).tables()
+    with use_clock(FakeClock(NOW)):
+        other = pipeline().monitor(DATA.tz_convert(zone), live, benchmarks=["naive"], windows=(7, 10)).tables()
+    pd.testing.assert_frame_equal(base, other)
+
+
+def test_data_in_the_wrong_zone_is_refused_when_it_cannot_be_converted(live, tmp_path):
+    with pytest.raises(ValueError, match="naive"), use_clock(FakeClock(NOW)):
+        pipeline().monitor(DATA.tz_localize(None), live, benchmarks=["naive"])
+    mixed = tmp_path / "mixed"
+    write_live(mixed)
+    (mixed / "naive.manifest.json").write_text(json.dumps({"mode": "live", "data_timezone": "Europe/Warsaw"}))
+    with pytest.raises(ValueError, match="different time zones"), use_clock(FakeClock(NOW)):
+        pipeline().monitor(DATA, mixed, benchmarks=["naive"])
