@@ -72,9 +72,10 @@ def _aware_index(frame: pd.DataFrame) -> pd.DatetimeIndex:
 
 
 def issue_rows(frame: pd.DataFrame, issue: Any, zone: str) -> np.ndarray:
-    """Which rows of `frame` are dated D, the issue day, by their local date in `zone`, the issue zone (the issue calendar's,
-    whatever zone the index is in): the rows a forecast issued on D is made from, both occurrences of a repeated autumn hour
-    among them. A naive index raises."""
+    """Which rows of `frame` are dated D, the issue day, by their local date in `zone` (whatever zone the index is in): the rows
+    a forecast issued on D is made from, both occurrences of a repeated autumn hour among them, when `zone` is the zone the
+    models read local dates in, the frame's own (`forecast()` passes it; an issue zone of another offset would take other
+    rows). A naive index raises."""
     wall = _aware_index(frame).tz_convert(zone).tz_localize(None)
     return np.asarray(wall.normalize() == pd.Timestamp(_day(issue)))
 
@@ -151,8 +152,9 @@ class Snapshot(NamedTuple):
 
 
 def snapshot(frame: pd.DataFrame, models: Sequence[Any], plan: Mapping[str, Any], issue: Any, *, zone: str) -> Snapshot:
-    """The input snapshot of issue day `issue` (a date or its ISO text) in `zone`, the issue zone (`live.json`'s
-    `issue_timezone`): its rows are those of that local date, whatever zone the frame's index is in, and a naive index raises.
+    """The input snapshot of issue day `issue` (a date or its ISO text) in `zone`, the zone the models read local dates in (the
+    frame's; `forecast()` records it and the issue zone in `quality.json`): its rows are those of that local date, whatever zone
+    the frame's index is in, and a naive index raises.
 
     `models` are the revision's models (names, or models with a `name`), `plan` each one's lists as the issue planned them:
     model name -> {(period, horizon): its columns}, or one list of columns for every key. The inputs are every column of any of
@@ -341,7 +343,7 @@ def quality(
     columns: Optional[Sequence[str]] = None,
     issued_at: Any = None,
 ) -> Dict[str, Any]:
-    """`quality.json` of issue day `issue` in `zone`, the issue zone: what is known of the inputs' quality, read off the frame
+    """`quality.json` of issue day `issue` in `zone`, the zone the models read local dates in (the frame's): what is known of the inputs' quality, read off the frame
     and the refresh record, as of `issued_at` (an instant; by default `issue_instant(issue, zone, rules)`).
 
     - `sources`: per source of `refresh` (8b's `RefreshRecord` or a mapping of its shape; see `_sources` for the two fields read)

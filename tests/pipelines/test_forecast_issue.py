@@ -820,3 +820,36 @@ def test_a_model_that_fits_nothing_has_no_training_target_to_wait_for(tmp_path):
             too_early_frame(), "2023-03-08", None, horizon=2
         )
     assert result.status == "ok"
+
+
+def test_waits_snapshot_and_quality_read_the_issue_rows_the_models_read_in_the_frame_s_zone(tmp_path):
+    """A frame in Helsinki issued in Warsaw: the models take the issue day's rows by Helsinki dates, an hour ahead of Warsaw's.
+    The missing load_d+1 at Helsinki's midnight is an issue row of theirs (Warsaw's 23:00 of the day before): the wait, the
+    quality record and the snapshot count it, and both zones are recorded."""
+    data = make_market_data(start="2023-01-20", days=60, tz="Europe/Helsinki", horizon=2, noise=2.0)
+    info = InformationSet(
+        "11:45", "Europe/Warsaw", rules={k: RULES[k] for k in ("load", "wind", "is_weekend", "is_weekday", "price")}
+    )
+    data.loc[pd.Timestamp(ISSUE + " 00:00", tz="Europe/Helsinki"), "load_d+1"] = np.nan
+
+    class Source:
+        timezone, last_refresh, transformers = "Europe/Helsinki", None, []
+
+        def run(self, start, end, **options):
+            return data
+
+    live = tmp_path / "live"
+    with use_clock(FakeClock(pd.Timestamp(ISSUE + " 08:00", tz="UTC"))):
+        result = pipeline(ols(), info=info).forecast(
+            Source(), ISSUE, live, horizon=2, wait_for={"load_d+1": "10:45"}, poll="20min"
+        )
+    assert result.models["a"]["skipped"] == {"missing_test_predictors": 1}
+    assert result.waits[0]["lacking"] == {"load_d+1": 1} and result.waits[-1]["outcome"] == "gave up"
+    folder = live / "issues" / ISSUE / "r1"
+    quality = json.loads((folder / "quality.json").read_text())
+    assert quality["columns"]["load_d+1"]["missing"] == 1
+    assert (quality["issue_timezone"], quality["data_timezone"]) == ("Europe/Warsaw", "Europe/Helsinki")
+    inputs = read_snapshot(folder / "inputs.parquet").inputs.index.tz_convert("Europe/Helsinki")
+    assert (str(inputs.min()), len(inputs)) == ("2023-03-07 00:00:00+02:00", 24)
+    commit = LiveStore(live).committed()[ISSUE][1].line
+    assert (commit["issue_timezone"], commit["data_timezone"]) == ("Europe/Warsaw", "Europe/Helsinki")

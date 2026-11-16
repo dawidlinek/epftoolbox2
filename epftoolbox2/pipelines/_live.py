@@ -362,7 +362,9 @@ def wait(
             give_ups = columns_of(frame)
             columns_of = None
         now = clock.now()
-        lacking = {column: lacking_cells(frame, column, day, zone) for column in give_ups}
+        # The issue day's rows as the models select them: by local date in the frame's zone, which may differ from the issue's.
+        rows_zone = str(frame.index.tz) if getattr(frame.index, "tz", None) is not None else zone
+        lacking = {column: lacking_cells(frame, column, day, rows_zone) for column in give_ups}
         lacking = {column: count for column, count in lacking.items() if count}
         waiting = sorted(column for column in lacking if now < give_ups[column])
         entry: Dict[str, Any] = {
@@ -953,11 +955,13 @@ def _issue(
         status, missing, rungs = issue_status(every[settings["delivered"]], planned)
 
         # The issue's records: the snapshot of its inputs, their quality, the fits.
-        snap = records_io.snapshot(frame, list(held), lists, day, zone=zone)
+        # The issue day's rows as the models read them: local dates in the frame's zone (the issue zone's may be another day's).
+        snap = records_io.snapshot(frame, list(held), lists, day, zone=data_zone)
         now = clock.now()
         quality = records_io.quality(
-            frame, source.last, run_info, day, zone=zone, columns=list(snap.inputs.columns), issued_at=now
+            frame, source.last, run_info, day, zone=data_zone, columns=list(snap.inputs.columns), issued_at=now
         )
+        quality = {**quality, "issue_timezone": zone, "data_timezone": data_zone}
         fits = {name: entry.get("fits", {}) for name, entry in made.items()}
         outcome = dict(
             records={name: [_strip(record) for record in held_records] for name, held_records in every.items()},
@@ -1028,6 +1032,8 @@ def _issue(
                 delivered=settings["delivered"],
                 planned=len(planned),
                 missing=missing,
+                issue_timezone=zone,
+                data_timezone=data_zone,
             )
         except LiveLateError:
             line = revision.fail(LATE, exit_code(LATE), deadline=deadline_at.isoformat())
