@@ -119,16 +119,22 @@ def stored(path):
     return [json.loads(line) for line in Path(path).read_text().splitlines() if line]
 
 
-def pipeline(*models, info=None, level=None, evaluators=()):
-    built = ModelPipeline(information_set=info, availability=level)
+def pipeline(*models, info=None, level=None, evaluators=(), engine=None):
+    built = ModelPipeline(information_set=info, availability=level, engine=engine)
     for model in models:
         built.add_model(model)
     built.add_evaluator(*evaluators)
     return built
 
 
-def ols(predictors=FIXED, name="m", window=30):
-    return OLSModel(predictors, training_window=window, name=name)
+def ols(predictors=FIXED, name="m", window=30, **kwargs):
+    return OLSModel(predictors, training_window=window, name=name, **kwargs)
+
+
+def first_day_ols(predictors=FIXED, name="m", window=30):
+    """An OLS whose masks are read on a window's first day: the `binary_mask="first_day"` rule, the default up to 2.3. The
+    tests that name it are about those masks (per-window digests, the day a mask is read, refusals on resume)."""
+    return ols(predictors, name, window, binary_mask="first_day")
 
 
 def all_records(report, name="m"):
@@ -231,11 +237,11 @@ def test_lasso_records_are_the_plain_runs_records(switch, freq, horizon, predict
 def test_the_trap_each_window_has_its_own_masks(df):
     """The flag is binary in the training window of the first validation day and isn't in the first test day's. With one
     mask for the run, as one plain run over the whole span has, the test forecasts come out different."""
-    report = pipeline(ols()).run(df, validation=V, test=T, horizon=1)
-    plain = pipeline(ols()).run(df, test=T, horizon=1)
+    report = pipeline(first_day_ols()).run(df, validation=V, test=T, horizon=1)
+    plain = pipeline(first_day_ols()).run(df, test=T, horizon=1)
     assert lines(of_window(all_records(report), "test"), "window") == lines(all_records(plain))
 
-    one_mask = pipeline(ols()).run(df, test=(V[0], T[1]), horizon=1)
+    one_mask = pipeline(first_day_ols()).run(df, test=(V[0], T[1]), horizon=1)
     in_test = [r for r in all_records(one_mask) if r["run_date"] >= T[0]]
     assert sorted(r["prediction"] for r in in_test) != sorted(r["prediction"] for r in all_records(plain))
 
@@ -263,7 +269,7 @@ def test_a_column_read_on_a_later_day_of_the_window_is_read_from_that_window(tmp
 
 
 def test_the_manifest_holds_a_digest_per_window(df, tmp_path):
-    pipeline(ols()).run(df, validation=V, test=T, horizon=1, save_dir=str(tmp_path))
+    pipeline(first_day_ols()).run(df, validation=V, test=T, horizon=1, save_dir=str(tmp_path))
     manifest = json.loads((tmp_path / "m.manifest.json").read_text())
     masks = manifest["binary_masks"]
     assert len(masks) == 2 * 24
@@ -276,7 +282,9 @@ def test_a_function_keeps_a_digest_per_window_under_its_list(df, tmp_path):
     def same_list(ctx):
         return FIXED
 
-    pipeline(ols(same_list), info=INFO, level="raise").run(df, validation=V, test=T, horizon=1, save_dir=str(tmp_path))
+    pipeline(first_day_ols(same_list), info=INFO, level="raise").run(
+        df, validation=V, test=T, horizon=1, save_dir=str(tmp_path)
+    )
     manifest = json.loads((tmp_path / "m.manifest.json").read_text())
     masks = manifest["predictor_lists"][0]["binary_masks"]
     assert masks["5-1"] != masks["validation/5-1"]
@@ -294,7 +302,7 @@ def test_a_plain_ctx_manifest_keeps_its_flat_digests(df, tmp_path):
     def same_list(ctx):
         return FIXED
 
-    pipeline(ols(same_list), info=INFO, level="raise").run(df, test=T, horizon=1, save_dir=str(tmp_path))
+    pipeline(first_day_ols(same_list), info=INFO, level="raise").run(df, test=T, horizon=1, save_dir=str(tmp_path))
     masks = json.loads((tmp_path / "m.manifest.json").read_text())["predictor_lists"][0]["binary_masks"]
     assert set(masks) == {f"{period}-1" for period in range(24)}
 
@@ -881,12 +889,14 @@ def test_aggregate_stays_on_its_window(df):
 
 def manifest_of(path):
     manifest = json.loads(manifest_path(path).read_text())
-    return {k: v for k, v in manifest.items() if k not in ("created_at", "updated_at", "git_sha")}
+    # `engine` is the last run's provenance (how many fits it made: a resume makes fewer), which the code never compares.
+    return {k: v for k, v in manifest.items() if k not in ("created_at", "updated_at", "git_sha", "engine")}
 
 
 def test_validation_first_and_test_later_equals_a_fresh_combined_run(df, tmp_path):
+    # engine="off": the fits are counted through `OLSModel._fit_predict`, which only the model path calls.
     resumed, fresh = tmp_path / "resumed", tmp_path / "fresh"
-    pipeline(ols()).run(df, validation=V, horizon=2, save_dir=str(resumed))
+    pipeline(ols(), engine="off").run(df, validation=V, horizon=2, save_dir=str(resumed))
     before = (resumed / "m.jsonl").read_text()
     calls = []
     fit_predict = OLSModel._fit_predict
@@ -897,11 +907,11 @@ def test_validation_first_and_test_later_equals_a_fresh_combined_run(df, tmp_pat
 
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(OLSModel, "_fit_predict", counted)
-        pipeline(ols()).run(df, validation=V, test=T, horizon=2, save_dir=str(resumed))
+        pipeline(ols(), engine="off").run(df, validation=V, test=T, horizon=2, save_dir=str(resumed))
     assert len(calls) == 3 * 2 * 24  # only the test days
     assert (resumed / "m.jsonl").read_text().startswith(before)
 
-    pipeline(ols()).run(df, validation=V, test=T, horizon=2, save_dir=str(fresh))
+    pipeline(ols(), engine="off").run(df, validation=V, test=T, horizon=2, save_dir=str(fresh))
     assert lines(stored(resumed / "m.jsonl")) == lines(stored(fresh / "m.jsonl"))
 
 
@@ -1077,7 +1087,7 @@ def always_fixed(ctx):
 def test_a_stored_key_whose_mask_would_change_is_refused(tmp_path, predictors):
     """The window's first day moves past the day the flag stops being binary, and a stored forecast's mask with it."""
     info, level = (INFO, "raise") if callable(predictors) else (None, None)
-    make = lambda: pipeline(ols(predictors), info=info, level=level)  # noqa: E731
+    make = lambda: pipeline(first_day_ols(predictors), info=info, level=level)  # noqa: E731
     frame = with_flag(make_market_data(horizon=3, noise=5.0, seed=3), "2023-03-27")
     validation, test = ("2023-03-10", "2023-03-15"), ("2023-03-20", "2023-03-30")
     make().run(frame, validation=validation, test=test, horizon=1, save_dir=str(tmp_path))
@@ -1088,7 +1098,7 @@ def test_a_stored_key_whose_mask_would_change_is_refused(tmp_path, predictors):
 @pytest.mark.parametrize("predictors", [FIXED, always_fixed], ids=["fixed list", "ctx function"])
 def test_a_stored_validation_key_whose_mask_would_change_is_refused(tmp_path, predictors):
     info, level = (INFO, "raise") if callable(predictors) else (None, None)
-    make = lambda: pipeline(ols(predictors), info=info, level=level)  # noqa: E731
+    make = lambda: pipeline(first_day_ols(predictors), info=info, level=level)  # noqa: E731
     frame = with_flag(make_market_data(horizon=3, noise=5.0, seed=3), "2023-03-27")
     make().run(frame, validation=("2023-03-20", "2023-03-30"), horizon=1, save_dir=str(tmp_path))
     with pytest.raises(ManifestMismatchError, match="binary columns"):
@@ -1113,7 +1123,7 @@ def test_a_file_keeps_one_mask_per_key_whatever_days_its_records_are_on(tmp_path
     """A digest says nothing about which records used it. A run on other days with another mask would overwrite it, and the
     older records would pass a later check for what they are not."""
     info, level = (INFO, "raise") if callable(predictors) else (None, None)
-    make = lambda: pipeline(ols(predictors), info=info, level=level)  # noqa: E731
+    make = lambda: pipeline(first_day_ols(predictors), info=info, level=level)  # noqa: E731
     frame = with_flag(make_market_data(horizon=3, noise=5.0, seed=3), "2023-04-03")
     make().run(frame, validation=("2023-04-04", "2023-04-08"), horizon=1, save_dir=str(tmp_path))
     with pytest.raises(ManifestMismatchError, match="binary columns"):
@@ -1261,9 +1271,9 @@ def test_results_issued_past_the_end_of_the_frame_are_refused_saying_so(df, tmp_
 
 def test_plain_results_of_fixed_lists_whose_first_day_moved_are_refused(df, tmp_path):
     """A plain manifest of fixed lists has no digests, only the day their masks were read on."""
-    pipeline(ols()).run(df, test=("2023-04-01", T[1]), save_dir=str(tmp_path), horizon=1)
+    pipeline(first_day_ols()).run(df, test=("2023-04-01", T[1]), save_dir=str(tmp_path), horizon=1)
     with pytest.raises(ManifestMismatchError, match="binary columns"):
-        pipeline(ols()).run(df, validation=V, test=T, save_dir=str(tmp_path), horizon=1)
+        pipeline(first_day_ols()).run(df, validation=V, test=T, save_dir=str(tmp_path), horizon=1)
 
 
 def test_other_data_under_the_stored_forecasts_is_refused(df, tmp_path):

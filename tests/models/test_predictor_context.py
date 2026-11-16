@@ -1016,7 +1016,8 @@ def test_resume_with_another_process_count_is_bitwise_a_fresh_run(df, tmp_path, 
 
 
 def test_the_manifest_records_the_function_and_every_distinct_list(df, tmp_path):
-    OLSModel(by_horizon_period_and_publication, training_window=45).run(
+    """The digests of each list's masks are the `binary_mask="first_day"` rule's (the default up to 2.3)."""
+    OLSModel(by_horizon_period_and_publication, training_window=45, binary_mask="first_day").run(
         df, *TEST, horizon=1, information_set=INFO, save_to=str(tmp_path / "m.jsonl")
     )
     manifest = json.loads((tmp_path / "m.manifest.json").read_text())
@@ -1119,11 +1120,12 @@ def uses_flag_from(ctx):
 
 def test_a_stored_forecast_whose_binary_columns_a_fresh_run_would_change_raises(df, tmp_path, monkeypatch):
     """The function changes on pending days only, so every stored list stays. But the list's first test day moves to a
-    window where `flag` is still binary, which would change how the stored forecasts of that list were scaled."""
+    window where `flag` is still binary, which would change how the stored forecasts of that list were scaled. This is the
+    `binary_mask="first_day"` rule, the default up to 2.3."""
     frame = turns_non_binary(df, "flag", "2023-04-08")
     rules = InformationSet("11:45", "Europe/Warsaw", rules={**RULES, "flag": Availability.static()})
     path = tmp_path / "flag.jsonl"
-    make = lambda: OLSModel(uses_flag_from, training_window=30)  # noqa: E731
+    make = lambda: OLSModel(uses_flag_from, training_window=30, binary_mask="first_day")  # noqa: E731
     make().run(frame, "2023-04-08", "2023-04-13", horizon=1, information_set=rules, save_to=str(path))
     records = [line for line in path.read_text().splitlines() if json.loads(line)["run_date"] >= FIRST_USE]
     path.write_text("\n".join(records) + "\n")
@@ -1142,7 +1144,8 @@ def by_part_of_the_day(ctx):
 
 def test_a_narrower_run_keeps_the_masks_a_later_resume_compares(df, tmp_path):
     """The middle run doesn't use the morning's list at all. If it forgot the masks the morning's stored forecasts used,
-    the third run, whose first test day changes them, would resume over them."""
+    the third run, whose first test day changes them, would resume over them. This is the `binary_mask="first_day"` rule, the
+    default up to 2.3."""
     frame = df.assign(flag=(np.random.default_rng(0).random(len(df)) > 0.5).astype(float))
     turned = frame.index.tz_localize(None) >= pd.Timestamp("2023-04-04")
     frame.loc[turned, "flag"] = frame.loc[turned, "load"]
@@ -1150,7 +1153,7 @@ def test_a_narrower_run_keeps_the_masks_a_later_resume_compares(df, tmp_path):
     path = tmp_path / "chain.jsonl"
 
     def run(start):
-        OLSModel(by_part_of_the_day, training_window=20).run(
+        OLSModel(by_part_of_the_day, training_window=20, binary_mask="first_day").run(
             frame, start, "2023-04-10", horizon=1, information_set=rules, save_to=str(path)
         )
 

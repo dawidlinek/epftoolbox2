@@ -135,7 +135,7 @@ live.save("live_pipeline.yaml")
   that name, in what a resume compares that the model alone decides: its class, its predictors (a fixed list's layout per period
   and horizon, a predictor function's import path), its training window, its parameters, the unit kind and target transform of day
   and pooled models, and of its `training_cut` what the model sets (`refit`, with the rules `"auto"` resolves to,
-  `binary_mask="fit"` without a refit, `newest_target`). A difference raises `ManifestMismatchError`: a choice made on another
+  the `"fit"` mask rule without a refit, `newest_target`). A difference raises `ManifestMismatchError`: a choice made on another
   model's results is no choice of this one. A predictor function's fingerprint (its source and the information set it answers
   through) that differs only warns, since a comment edited in it changes it too. A field a manifest lacks can't be compared, and
   warns. What the data, the information set or the run's dates decide (data hashes, the rules a `training_cut` reads, an

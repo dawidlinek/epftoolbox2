@@ -132,8 +132,8 @@ forecast = report.predictions()
 ## Many Models: the Engine
 
 A backtest of thousands of model variants spends much of its time on what each model's run costs before and after its fits:
-starting a pool of processes, reading the data into its periods, freeing it. `ModelPipeline(engine="on")` runs the models it can
-in **engine groups** instead, one per refit rule: a group reads the data once for all its models, runs one pool whose jobs are one
+starting a pool of processes, reading the data into its periods, freeing it. `ModelPipeline()` runs the models it can in
+**engine groups** instead (the default, `engine="on"`; `engine="off"` runs each on its own, as up to 2.3), one per refit rule: a group reads the data once for all its models, runs one pool whose jobs are one
 issue day (or refit block) and period of every model, and writes each model's results into its own file, as before. OLS, Ridge,
 LassoCV and LEAR (`solver="lars"`) are fitted there from exact sums shared by every model that trains on the same rows: a model's
 forecasts are the same bits alone and in any group, and within 1e-8 EUR/MWh (Ridge 1e-9) of `engine="off"`, with the same penalty
@@ -143,7 +143,7 @@ and kink. `forecast_only=True` runs, as this page's, go through each model's own
 from epftoolbox2.models import OLSModel
 from epftoolbox2.pipelines import ModelPipeline
 
-pipeline = ModelPipeline(engine="on")
+pipeline = ModelPipeline()  # engine on, the default
 for window in range(28, 365, 7):
     pipeline.add_model(OLSModel(["price_d-1", "load_d+{horizon}"], training_window=window, name=f"ols_{window}"))
 ```

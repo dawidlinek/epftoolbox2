@@ -669,16 +669,17 @@ def test_an_unreadable_older_fit_is_passed_over_and_an_old_fit_has_a_maximum_age
 
 
 def test_a_refit_none_model_says_its_mask_is_the_issue_day_s(tmp_path):
+    """Only the `binary_mask="first_day"` rule (the default up to 2.3) says so; the default reads each fit's own rows."""
     data = frame(SPRING, "1h")
     live = tmp_path / "live"
-    plain = pipeline_of(OLSModel(PREDICTORS, 21, name="m"))
+    plain = pipeline_of(OLSModel(PREDICTORS, 21, binary_mask="first_day", name="m"))
     plain.refit(data, live, issue="2023-03-22", horizon=1)
     assert json.loads((fit_dir(live, "m", datetime.date(2023, 3, 22)) / FIT_FILE).read_text())["notes"] == [
         _fits.MASK_ISSUE_DAY_NOTE
     ]
     assert plain._serve_stored(data, live, issue="2023-03-22", horizon=1)["m"].notes == [_fits.MASK_ISSUE_DAY_NOTE]
-    own = pipeline_of(OLSModel(PREDICTORS, 21, binary_mask="fit", name="m"))
-    assert own._serve_stored(data, None, issue="2023-03-22", horizon=1)["m"].notes == []
+    for own in (OLSModel(PREDICTORS, 21, binary_mask="fit", name="m"), OLSModel(PREDICTORS, 21, name="m")):
+        assert pipeline_of(own)._serve_stored(data, None, issue="2023-03-22", horizon=1)["m"].notes == []
     plan = type("Plan", (), {"model": OLSModel(PREDICTORS, 21, refit="7D")})()
     units = [{"engine": True, "fit_error": "fit_error: x"}, {"engine": True, "fit_error": None}]
     assert _fits.anchor_notes(plan, units) == [_fits.ENGINE_FIT_ERROR_NOTE.format(n=1)]

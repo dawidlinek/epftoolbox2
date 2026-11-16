@@ -16,7 +16,7 @@ defaults and says which of them it doesn't take.
 | `scaler` | the model's | How inputs and target are scaled ([Scalers and VSTs](/epftoolbox2/models/scalers/)) |
 | `newest_target` | `"d-1"` | The newest training target ([The newest target](/epftoolbox2/model-pipeline/time-and-calendars/#the-newest-target)) |
 | `refit` | the model's | How often a fit is made ([Refitting on a calendar](/epftoolbox2/model-pipeline/time-and-calendars/#refitting-on-a-calendar)) |
-| `binary_mask` | `None` | Which rows decide the 0/1 columns left unscaled ([Binary columns and `test_start`](/epftoolbox2/model-pipeline/time-and-calendars/#binary-columns-and-test_start)) |
+| `binary_mask` | `None` | Which rows decide the 0/1 columns left unscaled: each fit's own by default, the test's first day with `"first_day"` (the default up to 2.3) ([Binary columns and `test_start`](/epftoolbox2/model-pipeline/time-and-calendars/#binary-columns-and-test_start)) |
 | `normalise_by`, `bounds`, `zero_when` | `None` | A per-row target: see [Generation targets](#generation-targets) below |
 
 ## Generation targets

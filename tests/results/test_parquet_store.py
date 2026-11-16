@@ -29,6 +29,7 @@ from epftoolbox2.ensembles import AverageEnsemble
 from epftoolbox2.evaluators import MAEEvaluator, RMSEEvaluator, rMAEEvaluator
 from epftoolbox2.information_set import Availability, InformationSet
 from epftoolbox2.models import NaiveModel, OLSModel, Use
+from epftoolbox2.models._engine_worker import _engine_load
 from epftoolbox2.models._worker import _worker_init
 from epftoolbox2.pipelines import ModelPipeline, Workflow
 from epftoolbox2.results import parquet_store
@@ -49,7 +50,8 @@ from tests.synthetic import PREDICTORS, make_market_data
 
 class InProcessPool:
     def __init__(self, max_workers=None, mp_context=None, initializer=None, initargs=()):
-        _worker_init(*initargs)
+        # The engine group's pool loads its inputs with `_engine_init` (its `_engine_load`), the model path's with `_worker_init`.
+        (_engine_load if getattr(initializer, "__name__", "") == "_engine_init" else _worker_init)(*initargs)
 
     def __enter__(self):
         return self
@@ -74,6 +76,7 @@ def single_process(monkeypatch):
     monkeypatch.setenv("MAX_PROCESSES", "1")
     monkeypatch.setenv("THREADS_PER_PROCESS", "1")
     monkeypatch.setattr("epftoolbox2.models.base.ProcessPoolExecutor", InProcessPool)
+    monkeypatch.setattr("epftoolbox2.models._engine.ProcessPoolExecutor", InProcessPool)
 
 
 def lines(path):
@@ -735,11 +738,13 @@ os.environ["MAX_PROCESSES"] = "1"
 os.environ["THREADS_PER_PROCESS"] = "1"
 os.environ["PARQUET_ROWS_PER_PART"] = "20"
 sys.path.insert(0, sys.argv[2])
+import epftoolbox2.models._engine as engine
 import epftoolbox2.models.base as base
 from epftoolbox2.results import parquet_store
 from tests.results.test_parquet_store import InProcessPool, run
 
-base.ProcessPoolExecutor = InProcessPool  # no pool worker outliving the kill, holding the pipes open
+# No pool worker outliving the kill, holding the pipes open: the model path's pool and the engine group's (on by default).
+base.ProcessPoolExecutor = engine.ProcessPoolExecutor = InProcessPool
 
 committed = [0]
 original = parquet_store._append_entry

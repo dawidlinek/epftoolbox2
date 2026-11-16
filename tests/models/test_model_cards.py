@@ -117,7 +117,8 @@ def carded(name="carded", **params):
 
 
 def run(data, *models, save_dir=None, **kwargs):
-    pipeline = ModelPipeline()
+    # engine="off": a carded fake runs on the model path, and the pipeline OLS it is compared with bit for bit must too.
+    pipeline = ModelPipeline(engine="off")
     for model in models:
         pipeline.add_model(model)
     return pipeline.run(

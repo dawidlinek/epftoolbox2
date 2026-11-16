@@ -268,6 +268,27 @@ _OLD_RESULTS_NOTE = (
 )
 
 
+def mask_rule_note(theirs: Optional[Dict[str, Any]], mine: Optional[Dict[str, Any]]) -> str:
+    """Why two `training_cut`s whose `binary_mask` differs disagree, for a mismatch message: results without one (and without
+    `refit`) read their binary-column masks on the test's first day, which `binary_mask=None` did up to 2.3 and
+    `binary_mask="first_day"` does now. Empty where the rule isn't what differs."""
+    theirs, mine = theirs or {}, mine or {}
+    if theirs.get("binary_mask") == mine.get("binary_mask") or any(
+        cut.get("refit") is not None for cut in (theirs, mine)
+    ):
+        return ""
+    if theirs.get("binary_mask") is None:
+        return (
+            ". The existing results read each forecast's binary-column mask on the first day of its test (binary_mask=None "
+            "up to 2.3, or 'first_day'), and this run reads it from each fit's own rows (binary_mask=None, the default "
+            "now, or 'fit'). Pass binary_mask='first_day' to resume them as they were written, or use a new save_dir"
+        )
+    return (
+        ". The existing results read each fit's binary-column mask from its own rows (binary_mask=None or 'fit'), and this "
+        "run reads it on the first day of its test (binary_mask='first_day'). Leave binary_mask None to resume them"
+    )
+
+
 class ManifestMismatchError(ValueError):
     """An existing results directory was produced with a different configuration than this run."""
 
@@ -282,6 +303,18 @@ def _session_module_note(theirs: Any, mine: Any) -> str:
         "same, unchanged class object: a cell run again, a class changed in place or a restart makes it another class to a "
         "resume. Define the network in a module file to resume across sessions; pass allow_manifest_mismatch=True only if you "
         "know the class is unchanged)"
+    )
+
+
+def _mlp_daily_scaler_note(model_class: Any, theirs: Any, mine: Any) -> str:
+    """Why an `MLPDailyModel` of the default scaler refuses results written with standardised inputs, the default up to 2.3,
+    or ""."""
+    scalers = [params.get("scaler") if isinstance(params, dict) else None for params in (theirs, mine)]
+    if model_class != "MLPDailyModel" or scalers[0] != "standard" or scalers[1] in (None, "standard"):
+        return ""
+    return (
+        ". MLPDailyModel's inputs go through Lago's Invariant by default now; up to 2.3 they were standardised, as these "
+        "results are. Pass scaler='standard' to resume them as they were written, or use a new save_dir"
     )
 
 
@@ -487,10 +520,12 @@ class Manifest:
                 mine, theirs = _cut_rule(mine), _cut_rule(theirs)
             if mine != theirs:
                 note = _OLD_RESULTS_NOTE if name == "training_cut" and theirs is None else ""
+                if name == "training_cut" and theirs is not None:
+                    note = mask_rule_note(theirs, mine)
                 if name == "save_coefficients":
                     note = " (None: records with their coefficients; False: written with save_coefficients=False)"
                 if name == "model_params":
-                    note = _session_module_note(theirs, mine)
+                    note = _session_module_note(theirs, mine) or _mlp_daily_scaler_note(self.model_class, theirs, mine)
                 if name == "fit_path":
                     note = (
                         " (None: the model path, engine off or a model the engine fits on it; 'engine-2': fits from shared "

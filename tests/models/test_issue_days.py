@@ -1,6 +1,7 @@
 """`issue_days=`: a run that issues forecasts on the weekdays it lists, each what a run of every day gives it.
 
-Training is untouched and masks are read on a window's first calendar day, so a Friday run's records are held key by key against
+Training is untouched and masks are read on a window's first calendar day (the `binary_mask="first_day"` rule, the default
+up to 2.3, which the models of the mask tests name; the default now reads each fit's mask from its own rows), so a Friday run's records are held key by key against
 the Fridays of a run of every day, which plans other days and shares none of the weekday filtering. Counts are written down from
 the calendar and the clock by hand. A column that turns from 0/1 to continuous on the first day of the test makes the day a mask
 is read on visible in the forecasts, and the probes are held against a column published weekly, which is late on a Monday and
@@ -184,7 +185,8 @@ def snapshot(directory):
     for path in sorted(Path(directory).iterdir()):
         if path.name.endswith(".manifest.json"):
             manifest = json.loads(path.read_text())
-            out[path.name] = {key: value for key, value in manifest.items() if key not in TIMESTAMPS}
+            # `engine` is the last run's provenance (a resume makes fewer fits), which the code never compares either.
+            out[path.name] = {key: value for key, value in manifest.items() if key not in (*TIMESTAMPS, "engine")}
         else:
             out[path.name] = sorted(line for line in path.read_text().splitlines() if line)
     return out
@@ -328,7 +330,9 @@ def test_a_mask_is_read_on_the_first_calendar_day_of_its_window(windows):
 
     def run(lists, **kwargs):
         return by_key(
-            OLSModel(lists, training_window=WINDOW).run(data, horizon=3, **{**TESTS[windows], **kwargs})._results
+            OLSModel(lists, training_window=WINDOW, binary_mask="first_day")
+            .run(data, horizon=3, **{**TESTS[windows], **kwargs})
+            ._results
         )
 
     every_day = run(MASKED)
@@ -507,8 +511,14 @@ def test_where_a_friday_record_and_a_run_of_every_day_s_differ(case):
     base = market("spring")
 
     def both(data):
-        every = fridays(by_key(OLSModel(fn, training_window=WINDOW).run(data, **test)._results))
-        friday = by_key(OLSModel(fn, training_window=WINDOW).run(data, issue_days=["friday"], **test)._results)
+        every = fridays(
+            by_key(OLSModel(fn, training_window=WINDOW, binary_mask="first_day").run(data, **test)._results)
+        )
+        friday = by_key(
+            OLSModel(fn, training_window=WINDOW, binary_mask="first_day")
+            .run(data, issue_days=["friday"], **test)
+            ._results
+        )
         assert set(every) == set(friday)
         return {key for key in friday if json.loads(friday[key])["prediction"] != json.loads(every[key])["prediction"]}
 
@@ -659,7 +669,7 @@ def test_previous_year_on_fridays(tmp_path):
     test = ("2023-03-19", "2023-04-07")  # Fridays 24 and 31 March, 7 April
 
     def pipeline():
-        p = ModelPipeline()
+        p = ModelPipeline(engine="off")  # the window is compared bit for bit with `OLSModel.run` (the model path) below
         p.add_model(OLSModel(PREDICTORS, training_window=WINDOW, name="a"))
         p.add_model(OLSModel(PREDICTORS + ["price_d-1"], training_window=WINDOW, name="b"))
         return p.add_ensemble(AverageEnsemble(["a", "b"], top=1, name="best")).add_evaluator(MAEEvaluator())
@@ -876,7 +886,10 @@ def test_epf_model_with_issue_days_gives_the_in_process_forecasts(tmp_path, spri
     from epftoolbox2._frame_csv import save_frame_csv
 
     predictors = PREDICTORS + ["price_d-1"]
-    ModelPipeline().add_model(OLSModel(predictors, training_window=WINDOW, name="OLS")).save(tmp_path / "mp.yaml")
+    # engine="off": compared bit for bit with `OLSModel.run` (the model path) below.
+    ModelPipeline(engine="off").add_model(OLSModel(predictors, training_window=WINDOW, name="OLS")).save(
+        tmp_path / "mp.yaml"
+    )
     data = spring_data[["price", "load", "wind", "is_weekend", "is_weekday", "price_d-1"]].join(
         spring_data[[f"{name}_d+{h}" for h in (1, 2) for name in ("load", "wind", "is_weekend", "is_weekday")]]
     )

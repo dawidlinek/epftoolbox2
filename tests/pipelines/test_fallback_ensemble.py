@@ -145,7 +145,7 @@ def manifest(windows, horizons, freq):
         "training_window": MEMBER.training_window,
         # As a run writes it (the real runs below check the rule against the manifests runs write).
         "model_params": model_params(MEMBER),
-        "training_cut": {"rows": "dates"},
+        "training_cut": {"rows": "dates", "binary_mask": "fit"},
         "target": "price",
         "horizon": max(horizons),
         **({} if tuple(horizons) == tuple(range(1, max(horizons) + 1)) else {"horizons": list(horizons)}),
@@ -843,7 +843,7 @@ def test_frozen_without_a_top_ensemble_is_a_copy_and_refuses_zones(tmp_path):
         (OLSModel(["x"], scaler="asinh", name="b"), "model_params"),
         (LassoCVModel(["x"], name="b"), "model_class"),
         (OLSModel(["x"], refit="7D", name="b"), "training_cut"),
-        (OLSModel(["x"], binary_mask="fit", name="b"), "training_cut"),
+        (OLSModel(["x"], binary_mask="first_day", name="b"), "training_cut"),
     ],
 )
 def test_frozen_refuses_members_that_are_other_models_than_the_results(tmp_path, rebuilt, field):
@@ -917,7 +917,7 @@ def test_frozen_accepts_the_models_a_real_run_wrote_and_refuses_others(tmp_path)
         ("fixed", OLSModel(list(reversed(PREDICTORS)), training_window=30, name="fixed"), "predictors"),
         ("fixed", OLSModel(PREDICTORS, training_window=30, refit="7D", name="fixed"), "training_cut"),
         ("fixed", OLSModel(PREDICTORS, training_window=30, refit="auto", name="fixed"), "training_cut"),
-        ("fixed", OLSModel(PREDICTORS, training_window=30, binary_mask="fit", name="fixed"), "training_cut"),
+        ("fixed", OLSModel(PREDICTORS, training_window=30, binary_mask="first_day", name="fixed"), "training_cut"),
         (
             "by_horizon",
             OLSModel(lambda horizon: [f"wind_d+{horizon}"], training_window=30, name="by_horizon"),

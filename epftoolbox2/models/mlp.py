@@ -3,8 +3,9 @@
 - `MLPHourlyModel`: one network per (period, horizon, refit anchor) with one output, on that period's rows. The same as
   `TorchModel(module=MLP, module_params={"hidden": [64]}, output="period", ...)`, forecast for forecast.
 - `MLPDailyModel`: one network per (horizon, refit anchor) with an output for every period of the target day (the Lago-style
-  DNN shape), on day-level predictors. The same as `TorchModel(module=MLP, module_params={"hidden": [256, 128], "dropout":
-  0.1}, output="day", ...)`, forecast for forecast.
+  DNN shape), on day-level predictors, its inputs through Lago's Invariant by default (`INVARIANT_INPUTS`). The same as
+  `TorchModel(module=MLP, module_params={"hidden": [256, 128], "dropout": 0.1}, output="day", scaler=INVARIANT_INPUTS, ...)`,
+  forecast for forecast.
 
 Both save their architecture as `hidden`, `dropout` and `activation` (no `module` in the file). The manifest records the
 hash of `epftoolbox2/nets.py` and the library's version as `module_hash`, compared on resume. Importing this module imports no
@@ -16,9 +17,13 @@ from typing import Callable, List, Optional, Sequence, Tuple, Union
 
 from .torch_model import TorchModel
 
-__all__ = ["MLPHourlyModel", "MLPDailyModel"]
+__all__ = ["MLPHourlyModel", "MLPDailyModel", "INVARIANT_INPUTS"]
 
 MLP_PATH = "epftoolbox2.nets:MLP"
+# `MLPDailyModel`'s default input scaler: epftoolbox's Invariant, asinh((x - median) / MAD) per input column of each fit's rows,
+# binary columns kept, as Lago's DNN and the research scaled them. On the research's test year (top-4 x 4 seeds, identical
+# keys) it gave DE_LU 20.54 / AT 17.64 MAE against 22.18 / 19.03 with standardised inputs, the default up to 2.3.
+INVARIANT_INPUTS = {"name": "asinh", "params": {"standardise": False}}
 _ACTIVATIONS = ("relu", "gelu", "tanh", "sigmoid", "softplus", "elu", "selu", "silu", "leaky_relu")  # nets.ACTIVATIONS
 
 
@@ -171,6 +176,8 @@ class MLPDailyModel(_MLPPreset):
         hidden: Widths of the hidden layers.
         dropout: The rate of each hidden layer's `nets.Dropout` (0: none).
         activation: The hidden layers' activation (`nets.ACTIVATIONS`).
+        scaler: The input scaler: Lago's Invariant (`INVARIANT_INPUTS`, asinh of median and MAD, binary columns kept) by
+            default; `"standard"` standardises them, the default up to 2.3, whose results resume only with it.
         Every other argument is `TorchModel`'s, with these defaults: a 728-day window refitted weekly ("7D"), 4 seeds.
     """
 
@@ -199,7 +206,7 @@ class MLPDailyModel(_MLPPreset):
         random_state: int = 0,
         newest_target: str = "d-1",
         binary_mask: Optional[str] = None,
-        scaler="standard",
+        scaler=INVARIANT_INPUTS,
         name: str = "mlp_daily",
         module_hash: Optional[str] = None,
         refit_from: Union[str, datetime.date, None] = None,

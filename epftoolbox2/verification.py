@@ -535,8 +535,9 @@ def verify_model(
     `issue_days` are the weekdays of a run that issues on some only (`run(issue_days=["friday"])`): `test_period` is planned on
     those days alone, as the run plans it.
 
-    `engine="on"` (`ModelPipeline(engine="on")`) runs each probe of a model the engine takes through it, as a group of one
-    (`models._engine.EngineAlone`): those are its forecasts in any group, so the probe and its control cover that path.
+    `engine="on"` (`ModelPipeline(engine="on")`, the default) runs each probe of a model the engine takes through it, as a group
+    of one (`models._engine.EngineAlone`): those are its forecasts in any group, so the probe and its control cover that path.
+    A model the engine can't take (`_engine_capable()`) is probed as itself.
 
     `rerun` runs the unperturbed issue day twice first (`rerun_check`), and `co_batch` runs the probe, and the control if it
     runs, once more over runs widened to the other items of the issue day's call (`co_batch_probe`), and for a model that predicts
@@ -573,8 +574,10 @@ def verify_model(
         return copied
 
     def probed():
+        # Only a model the engine can take is wrapped: any other runs as with "off", and stays the model its checks see
+        # (`isinstance`, its own attributes), whatever the pipeline's engine, now on by default.
         copied = make_model()
-        return copied if engine == ENGINE_OFF else EngineAlone(copied)
+        return copied if engine == ENGINE_OFF or not copied._engine_capable() else EngineAlone(copied)
 
     # A rebuild that edits its argument must not reach the caller's frame.
     features = None if rebuild is None else (lambda frame: rebuild(frame.copy()))

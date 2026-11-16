@@ -6,8 +6,8 @@ description: ModelPipeline(engine="on") for studies of thousands of model varian
 import { Aside } from '@astrojs/starlight/components';
 
 A study of thousands of model variants (other inputs, other windows, other penalties) spends much of its time on what each model's
-run costs besides its fits, and fits many models on the same training rows. `ModelPipeline(engine="on")` runs the models it can
-in **engine groups**: one read of the data, one pool of processes and one writer for the whole group, and OLS, Ridge, LassoCV and
+run costs besides its fits, and fits many models on the same training rows. `ModelPipeline()` (the default, `engine=None`, which is
+`"on"`) runs the models it can in **engine groups**: one read of the data, one pool of processes and one writer for the whole group, and OLS, Ridge, LassoCV and
 LEAR fitted from **exact sums** of their training rows, shared by every model of the group that trains on those rows.
 
 ```python
@@ -19,8 +19,10 @@ for window in range(28, 365, 7):
     pipeline.add_model(OLSModel(["price_d-1", "load_d+{horizon}"], training_window=window, name=f"ols_{window}"))
 ```
 
-In a workflow it is `model_pipeline.engine: on`. The default, `engine="off"`, runs every model on its own as before and runs
-nothing of this page.
+In a workflow it is `model_pipeline.engine: on`. `engine="off"` runs every model on its own, as every run did up to 2.3, and runs
+nothing of this page. Left out, the engine is on, but a model whose results in `save_dir` were written on the model path (a
+manifest without `fit_path`: engine off, or a folder from 2.3 or earlier) resumes on the model path, with a log line, so those
+folders keep resuming as they were written; see [Saved and Resumed](#saved-and-resumed).
 
 ---
 
@@ -65,9 +67,9 @@ nothing of this page.
 So a model's forecasts don't depend on what it is grouped with: drop a model, add a thousand, cut the list into array tasks, and
 every other model's records stay the same bytes. Nothing a model stores names its group, chunk, task or the union of columns.
 
-`binary_mask="fit"` (see [Time and Calendars](/epftoolbox2/model-pipeline/time-and-calendars/#binary-columns-and-test_start)) reads
-each fit's binary-column mask from its own rows, so with it a forecast is also bitwise the same whatever the test window's start;
-the default mask is read on the window's first day, so moving the start can move forecasts, engine on or off.
+The default `binary_mask` (see [Time and Calendars](/epftoolbox2/model-pipeline/time-and-calendars/#binary-columns-and-test_start))
+reads each fit's binary-column mask from its own rows, so a forecast is also bitwise the same whatever the test window's start;
+`binary_mask="first_day"` reads it on the window's first day, so moving the start can move forecasts, engine on or off.
 
 ## Tolerances
 
@@ -186,13 +188,16 @@ whose largest gap is above its class's tolerance, whose gaps aren't all finite, 
 
 ## Saved and Resumed
 
-- `engine` goes to the pipeline's YAML only when it is `"on"` or `"check"`; `model_pipeline.engine` in a workflow overrides it. In
+- `engine` goes to the pipeline's YAML only when it was given (`"off"`, `"on"` or `"check"`), so a file without it, any file saved up
+  to 2.3 with the engine off included, runs the default; `model_pipeline.engine` in a workflow overrides it. In
   [array mode](/epftoolbox2/workflow/overview/#slurm-arrays-one-model-or-a-block-per-task) each task groups the models of its
   block, and nothing stored depends on the block: 64 tasks of 157 models merge in `epf report` to the bytes of one run.
 - The manifest of a model fitted from sums records `fit_path: "engine-2"`, compared on resume: results written with the engine on
-  resume with it on, those written with it off with it off (another setting raises `ManifestMismatchError`;
-  `allow_manifest_mismatch=True` resumes anyway, into a file that then mixes the two). A change to these fits' numbers gets
-  another name.
+  resume with it on, those written with it off with it off. With `engine` left out, each model follows its own folder: one
+  without `fit_path` (engine off, or any folder up to 2.3) resumes on the model path, one with `"engine-2"` in the engine, a new
+  one in the engine. An `engine` given explicitly applies to every model, and a folder written the other way raises
+  `ManifestMismatchError` (`allow_manifest_mismatch=True` resumes anyway, into a file that then mixes the two). A change to
+  these fits' numbers gets another name.
 - `"engine-1"` is the path before OLS's refinement step, written by development builds only. It is refused for every class,
   though only OLS's numbers moved: Ridge's, LassoCV's and LEAR's records are the same bits under both, so for those three
   `allow_manifest_mismatch=True` resumes `"engine-1"` results safely where `fit_path` is the only difference the error names.
@@ -248,4 +253,4 @@ provenance) and every `epf report` table were the same bytes in all of them.
 
 - [Incremental Training](/epftoolbox2/model-pipeline/caching/): results files, skip records, Parquet results and the manifest
 - [Workflow](/epftoolbox2/workflow/overview/): array tasks, `models_per_task` and `epf report`
-- [Time and Calendars](/epftoolbox2/model-pipeline/time-and-calendars/#binary-columns-and-test_start): `binary_mask="fit"`
+- [Time and Calendars](/epftoolbox2/model-pipeline/time-and-calendars/#binary-columns-and-test_start): `binary_mask`

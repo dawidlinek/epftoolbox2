@@ -40,7 +40,8 @@ def local_data():
 
 def model_args(tmp_path, data_path, **overrides):
     yaml_path = tmp_path / "mp.yaml"
-    ModelPipeline().add_model(OLSModel(MODEL_PREDICTORS, training_window=45, name="OLS")).save(yaml_path)
+    # engine="off": `in_process` runs `OLSModel.run` (the model path) and is compared bit for bit with the CLI's records.
+    ModelPipeline(engine="off").add_model(OLSModel(MODEL_PREDICTORS, training_window=45, name="OLS")).save(yaml_path)
     parser = cli.build_parser()
     argv = ["model", str(yaml_path), "--data", str(data_path), "--test-start", "2023-03-24", "--test-end"]
     argv += ["2023-03-27", "--horizon", "2", "--save-dir", str(tmp_path / "out")]

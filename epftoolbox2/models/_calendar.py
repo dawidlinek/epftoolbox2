@@ -222,8 +222,8 @@ def check_newest_target(value: Any) -> str:
     return value
 
 
-# Which training rows tell a fit which of its columns are binary 0/1 (left unscaled): None is the rule of `refit` (see
-# `check_binary_mask`), `"first_day"` the window's first calendar day, `"fit"` the fit's own rows.
+# Which training rows tell a fit which of its columns are binary 0/1 (left unscaled): None, the default, and `"fit"` a fit's own
+# rows; `"first_day"` the window's first calendar day, the default up to 2.3 (see `check_binary_mask`).
 MASK_FIRST_DAY = "first_day"
 MASK_FIT = "fit"
 BINARY_MASKS = (None, MASK_FIRST_DAY, MASK_FIT)
@@ -232,15 +232,15 @@ BINARY_MASKS = (None, MASK_FIRST_DAY, MASK_FIT)
 def check_binary_mask(value: Any, refit: Optional[str] = None) -> Optional[str]:
     """`value` if it is one of `BINARY_MASKS` and goes with `refit`, else a ValueError.
 
-    None is the default: a forecast's mask read on its window's first calendar day without `refit` (so it depends on where the
-    window starts), and with `refit` from its unit's rows. `"first_day"` names the first, so it raises with `refit`, whose fits
-    have no first day; `"fit"` reads every fit's mask from the training rows of its own span, before any filter, as a refit unit
-    always did, so a forecast depends on no `test_start`."""
+    None is the default and reads every fit's mask from the training rows of its own span, before any filter, as `"fit"` does
+    and a refit unit always did, so a forecast depends on no `test_start` (`BaseModel._mask_rule`). `"first_day"` reads a
+    forecast's mask on its window's first calendar day without `refit`, so it depends on where the window starts: the default
+    up to 2.3, kept for results written with it. It raises with `refit`, whose fits have no first day."""
     if value is not None and (not isinstance(value, str) or value not in BINARY_MASKS):
         raise ValueError(
             f"binary_mask must be None, {MASK_FIRST_DAY!r} or {MASK_FIT!r}, got {value!r}: which training rows say that a "
-            f"column is binary 0/1 and stays unscaled. {MASK_FIRST_DAY!r} reads them on the window's first day (the default "
-            f"without refit), {MASK_FIT!r} from each fit's own rows (the default with refit)"
+            f"column is binary 0/1 and stays unscaled. None (the default) and {MASK_FIT!r} read them from each fit's own rows, "
+            f"{MASK_FIRST_DAY!r} on the window's first day (the default up to 2.3)"
         )
     if value == MASK_FIRST_DAY and refit is not None:
         raise ValueError(

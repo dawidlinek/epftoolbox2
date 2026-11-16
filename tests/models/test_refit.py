@@ -292,10 +292,14 @@ def market():
 def test_refit_1d_is_refit_none_where_the_masks_agree(market):
     """With `"1D"` every forecast is its own unit, on the rows `refit=None` gives it, so it is the same forecast wherever the
     mask agrees: `refit=None` reads a list's mask on the window's first day, a unit on its own rows. `flag` is 0/1 in the rows of
-    the first day and in those of a forecast until its rows reach 29 March; from there `"1D"` scales it and `None` doesn't."""
+    the first day and in those of a forecast until its rows reach 29 March; from there `"1D"` scales it and `None` doesn't. This
+    is the `binary_mask="first_day"` rule of `refit=None`, the default up to 2.3; the default now reads a mask from each fit's
+    own rows, as `"1D"` does."""
     start, end = "2023-03-20", "2023-04-12"
     predictors = PREDICTORS + ["flag"]
-    plain = keyed(ols(None, predictors).run(market, start, end, horizon=2)._results, "refit_anchor")
+    plain = keyed(
+        ols(None, predictors, binary_mask="first_day").run(market, start, end, horizon=2)._results, "refit_anchor"
+    )
     daily = ols("1D", predictors).run(market, start, end, horizon=2)._results
     assert {r["refit_anchor"] for r in daily} == {r["run_date"] for r in daily}
     daily = keyed(daily, "refit_anchor")
@@ -386,7 +390,7 @@ def test_records_carry_the_anchor_and_the_manifest_the_rule(market, tmp_path):
         for name in PROVENANCE:
             manifest.pop(name)
     assert manifests[0] == manifests[1]
-    assert manifests[0]["training_cut"] == {"rows": "dates"}
+    assert manifests[0]["training_cut"] == {"rows": "dates", "binary_mask": "fit"}
 
 
 def test_another_refit_refuses_a_resume(market, tmp_path):
@@ -746,7 +750,9 @@ def test_the_probes_run_a_refit_model_over_the_rest_of_its_block(market, monkeyp
     def model():
         return ols("7D")
 
-    pipeline = ModelPipeline(information_set=INFO)
+    pipeline = ModelPipeline(
+        information_set=INFO, engine="off"
+    )  # the leak below is injected in the model path's `_fit_unit`
     pipeline.add_model(ols("7D", name="weekly"))
     assert not leakage_probe(model, market, monday, INFO, horizon=2, check_target_boundary=True).changed
     pipeline.verify(market, monday, monday, horizon=2, days=1).assert_ok()
@@ -919,7 +925,7 @@ def test_issue_days_horizons_and_a_daily_frame_keep_each_forecast(market):
 
 def test_validation_and_test_windows_give_each_window_s_plain_run(market):
     validation, test = ("2023-03-22", "2023-03-30"), ("2023-04-02", "2023-04-12")
-    pipeline = ModelPipeline()
+    pipeline = ModelPipeline(engine="off")  # compared bit for bit with the model's own `run` below
     pipeline.add_model(ols("7D", PREDICTORS + ["flag"], name="m"))
     records = pipeline.run(market, validation=validation, test=test, horizon=2).refs["m"]._results
     for window, (start, end) in (("validation", validation), ("test", test)):

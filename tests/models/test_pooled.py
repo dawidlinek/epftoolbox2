@@ -123,7 +123,10 @@ def test_a_pooled_model_over_one_zone_is_the_model_itself(tmp_path, kind, refit,
         if freq == "1h"
         else dict(test=FRIDAYS, horizons=[1, 3], freq="1D", issue_days=["friday"], target="price")
     )
-    plain = ModelPipeline().add_model(model_of(kind, refit)).run(frame, save_dir=str(tmp_path / "plain"), **run)
+    # engine="off": a pooled model always runs on the model path, so the model itself is compared bit for bit on that path.
+    plain = (
+        ModelPipeline(engine="off").add_model(model_of(kind, refit)).run(frame, save_dir=str(tmp_path / "plain"), **run)
+    )
     pooled = ModelPipeline().add_model(PooledModel(model_of(kind, refit)))
     panel = pooled.run({"PL": frame}, save_dir=str(tmp_path / "pooled"), **run)
 

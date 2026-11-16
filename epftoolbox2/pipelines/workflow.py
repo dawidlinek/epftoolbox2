@@ -113,8 +113,9 @@ class Workflow:
     `save_coefficients: false` (`model_save_coefficients`) writes `coefficients` as `[]`, as `ModelPipeline.run` does; each is
     written only when it isn't the default. `report()` reads either format.
 
-    `model_pipeline.engine: on` runs the models the engine takes in engine groups (`ModelPipeline(engine=...)`), over what the
-    pipeline YAML says; in array mode each task groups the models of its block, and nothing stored depends on the block.
+    `model_pipeline.engine: on|off|check` sets the engine (`ModelPipeline(engine=...)`) over what the pipeline YAML says; without
+    either, the default (on, a model whose folder was written on the model path resuming there). In array mode each task groups
+    the models of its block, and nothing stored depends on the block.
     `model_pipeline.checks: {class: ForecastChecks, params: {...}}` sets the checks before export (`ModelPipeline(checks=...)`)
     over the pipeline YAML's, `checks: null` none.
 

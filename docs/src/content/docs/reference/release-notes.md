@@ -118,6 +118,57 @@ Unchanged: `BaseModel.run(information_set=...)`, without a pipeline, and `leakag
 `pipeline.verify()` still reports a late predictor as a `leak` at every level, and now also what a predictor function uses late on
 an issue day it didn't sample.
 
+### Changed defaults
+
+- **`binary_mask=None` reads each fit's binary columns from its own rows.** Which predictors are binary 0/1, and so left
+  unscaled, was read without `refit` on the training rows of the test's first day (of each window with validation) and kept for
+  the whole test, so a forecast depended on the day its test started: night-time solar that is all 0 in a winter start's rows
+  stayed unscaled all spring. The default now reads each fit's mask from the rows of its own span, as `binary_mask="fit"` did
+  (and a refit unit always did), so no forecast depends on `test_start`, a resume over another start gives the fresh run, and
+  validation days move no test forecast. See
+  [Binary columns and `test_start`](/epftoolbox2/model-pipeline/time-and-calendars/#binary-columns-and-test_start).
+  - **What moves.** Only forecasts of a model without `refit` whose own rows say otherwise about a column than the first day's:
+    a column that turns from 0/1 to other values inside the test, or back (night-time solar, cooling degree days, a regime flag).
+    On Lago's DE data OLS, LassoCV and LEAR move none of 2,928 forecasts; the week-ahead Lasso at W = 91 moved 78 and 101 of 301
+    (min and max load, up to 297 MW); the resolution study's post-gate REN+ runs, up to 16 % MAE15 above the study's under the old
+    default, come within 5 % of it. Refit models, day and
+    pooled units, `NaiveModel` and the networks (all refit) don't move. The golden metrics don't move.
+  - **Resuming.** A manifest of the default now holds `"binary_mask": "fit"` in `training_cut` (without `refit`), and one written
+    up to 2.3 holds nothing, so resuming old results of a model without `refit` raises `ManifestMismatchError` on `training_cut`,
+    with a note that says how: nothing is mixed. Refit results resume as before.
+  - **The old behaviour.** `binary_mask="first_day"` is the old default's rule, record for record and manifest for manifest: pass
+    it (in Python, or `binary_mask: first_day` in YAML) to resume results written before or to reproduce their numbers. A YAML
+    file without `binary_mask` runs the new default. A `ResidualModel` warns about a base with `"first_day"` instead of one with
+    None.
+- **The engine is on by default.** `ModelPipeline(engine=None)`, the default, runs OLS, Ridge, LassoCV and LEAR (`"lars"`) in
+  engine groups, fitted from shared exact sums, where every model ran on its own before. See
+  [The Engine](/epftoolbox2/model-pipeline/engine/).
+  - **What moves.** Those four classes' forecasts, within 1e-8 EUR/MWh (Ridge 1e-9) of the model path, with the same penalty and
+    kink: in the last bits, not to the bit. Every other model (NaiveModel, trees, networks, foundation models, a model with a
+    per-row target, a `train_on="matching"` list, a `ResidualModel` and its base, LEAR `"cd"`) and every `forecast_only` run is
+    as before. The golden metrics move within their pinned 1e-9 relative tolerance and are not rewritten. A `ResidualModel`'s
+    base, which runs on the model path, now agrees with the pipeline's own model of the same settings within those tolerances,
+    not to the bit. Stored fits (`refit`) record the fit path in their configuration digest, so a live directory's fits are
+    made again once, by `refit(if_due=True)`, under the new default.
+  - **Resuming.** With `engine` left out, each model follows its own folder: one written on the model path (no `fit_path` in its
+    manifest, as every folder up to 2.3) resumes on the model path, with a log line, so old results keep resuming as they were
+    written; a new folder, or one with `fit_path: "engine-2"`, runs in the engine. An explicit `engine` applies to every model,
+    and a folder written the other way refuses with `ManifestMismatchError` on `fit_path`. Nothing is mixed.
+  - **The old behaviour.** `ModelPipeline(engine="off")`, or `engine: off` in the pipeline's YAML or `model_pipeline.engine: off`
+    in a workflow. YAML writes `engine` only when it was given, so a file saved up to 2.3 (without it) runs the new default.
+    `BayesSearch.run(engine="off")` keeps its own default.
+- **`MLPDailyModel`'s inputs go through Lago's Invariant by default.** `scaler` defaults to
+  `{"name": "asinh", "params": {"standardise": False}}` (`epftoolbox2.models.mlp.INVARIANT_INPUTS`), asinh of each input's median
+  and MAD on each fit's rows, binary columns kept, as the research and Lago's DNN scaled them, where it was `"standard"`. On the
+  research's test year (top 4 configurations x 4 seeds, 8,760 identical keys per market) that is DE_LU 20.54 / AT 17.64 MAE against
+  22.18 / 19.03 standardised. See [Neural Networks](/epftoolbox2/models/neural-networks/#the-researchs-recipe-reproduced).
+  - **What moves.** Every `MLPDailyModel` forecast with the default scaler. `MLPHourlyModel`, `TorchModel` (both `output`s) and an
+    `MLPDailyModel` with an explicit scaler don't. The torch golden metrics (`MLPDaily`) are rewritten.
+  - **Resuming and YAML.** The scaler is in the manifest's `model_params` and YAML always writes it: a pipeline file saved before
+    keeps `scaler: standard`, and results written with standardised inputs refuse the default with `ManifestMismatchError` on
+    `model_params`, whose message says to pass `scaler="standard"`. Nothing is mixed.
+  - **The old behaviour.** `MLPDailyModel(..., scaler="standard")`.
+
 ### Fixed
 
 - **A 30-minute profile's slots are judged at their own time.** `DailyProfileTransformer` names every slot but an hour's `_sNN`, and

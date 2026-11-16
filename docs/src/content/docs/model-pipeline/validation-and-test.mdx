@@ -43,10 +43,11 @@ One run per model covers both windows, into one results file and one manifest. T
 - **Records.** A record of a run with validation carries `window` (`"validation"` or `"test"`), decided by its issue day
   whatever its target day, and its `day_in_test` counts from the start of its own window. A plain run writes no `window`, and a
   record without one means `"test"`, so old files keep loading.
-- **Binary columns.** A list's mask of columns left unscaled is read from the training window of the first day it is used.
-  With one mask for the run, adding validation days would change the masks, and with them the test forecasts, without a word.
-  So each window reads its masks from its own first day, a column with no value there on the first later day of the window with
-  one and never after the window's last, and the manifest holds a digest of each.
+- **Binary columns.** By default each fit reads its mask of columns left unscaled from its own training rows, so adding
+  validation days changes no test forecast. With `binary_mask="first_day"` (the default up to 2.3) a list's mask is read from the
+  training window of the first day it is used; with one mask for the run, adding validation days would change the masks, and with
+  them the test forecasts, without a word. So each window reads its masks from its own first day, a column with no value there on
+  the first later day of the window with one and never after the window's last, and the manifest holds a digest of each.
 - **Days between the windows** are not forecast. A predictor function isn't asked about them, the issue-time check
   doesn't look at them, and the data contract's spacing check reads only what the windows' training windows reach.
 - **A predictor function doesn't see the window.** `ctx` has no way to ask, so a list can't depend on it.
@@ -116,8 +117,10 @@ Results resume as usual, and interrupted then resumed equals fresh. On top of th
   another window now (results of `run(df, test=V)` can't become validation records), or when moving a window's first day gives
   a stored forecast other binary columns than a fresh run would. One results file keeps one mask per window, list, period and
   horizon, also for records outside this run's days, so test chunks run into one directory are refused when their masks differ:
-  give each chunk its own directory, or run the whole period. Pending forecasts may change freely. A model with
-  [`refit`](/epftoolbox2/model-pipeline/time-and-calendars/#refitting-on-a-calendar) keeps no mask: each fit finds its own on its rows.
+  give each chunk its own directory, or run the whole period. Pending forecasts may change freely. This holds for
+  `binary_mask="first_day"`: a model with the default, or with
+  [`refit`](/epftoolbox2/model-pipeline/time-and-calendars/#refitting-on-a-calendar), keeps no mask, as each fit finds its own on
+  its rows.
 - **A plain run and a run with windows meet.** `run(df, test=T)` followed by `run(df, validation=V, test=T)` keeps the stored test
   records, which have no tag and so mean test. Their `actual` is compared with the data, since a plain manifest holds no hash of it,
   and a stored forecast issued past the end of the frame is refused, since no later run would compare it.

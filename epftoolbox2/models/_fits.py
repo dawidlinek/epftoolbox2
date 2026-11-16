@@ -1352,7 +1352,7 @@ def _unit_meta(plan: IssuePlan, anchor: datetime.date, key: UnitKey, made: Dict[
 MASK_ISSUE_DAY_NOTE = (
     "mask: a refit=None unit's binary-column mask is read on its issue day, as a backtest of that day alone reads it; a backtest "
     "over a longer test reads it on the test's first day, and the two differ where a column turns binary or stops being "
-    "binary between them (binary_mask='fit' reads each fit's own)"
+    "binary between them (binary_mask='first_day' only: the default reads each fit's own)"
 )
 INCOMPLETE_NOTE = (
     "incomplete: the fit of {anchor} was made from a frame without every '{target}' value of {days}, which its rule said was out: "
@@ -1373,7 +1373,7 @@ def anchor_notes(plan: IssuePlan, units: Sequence[Dict[str, Any]]) -> List[str]:
     """Where a forecast served from these units can differ from a backtest over a longer test, though it is a backtest of its
     issue day to the bit: a refit=None model's mask read on the issue day, and engine units whose model path fails."""
     notes = []
-    if plan.model.refit is None and plan.model.binary_mask != "fit":
+    if plan.model.refit is None and not plan.model._masks_from_fits:
         notes.append(MASK_ISSUE_DAY_NOTE)
     failing = sum(1 for unit in units if unit.get("engine") and unit.get("fit_error"))
     if failing:

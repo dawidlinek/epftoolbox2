@@ -9,7 +9,8 @@ research, the top 4 configurations x 4 seeds beat the single best configuration 
 validation and test ranks within the top 16 barely agreed: a small search averaged, not a large search picked.
 
 On the Lago et al. (2021) DE benchmark (no API key: EpftoolboxBenchmarkSource downloads it from Zenodo once), one day ahead,
-with LEAR's 247 day-level inputs. Forecasts are issued at 11:45 Brussels on the day before each target day. Needs the [torch]
+with LEAR's 247 day-level inputs, each scaled through Lago's Invariant (asinh of median/MAD, MLPDailyModel's default, as the
+research scaled them: standardised inputs were 7.5-8.4 % worse with its best configurations). Forecasts are issued at 11:45 Brussels on the day before each target day. Needs the [torch]
 extra (pip install 'epftoolbox2[torch]'). The full run (48 configurations, a validation year and the paper's two test years, 4
 seeds, weekly refits: about 32,000 networks of 256 to 1024 units) takes a few CPU-days on one thread per fit, so run it on many
 cores (one process per usable CPU by default; set MAX_PROCESSES to use fewer) or shard it with a Workflow array job; results go
@@ -36,9 +37,6 @@ from epftoolbox2.pipelines import DataPipeline, ModelPipeline
 from epftoolbox2.presets import WEEKDAYS, lear_predictors, profile_columns
 
 EXOGENOUS = ["load_forecast_amprion", "wind_solar_forecast"]  # the DE file's two series
-# The inputs through epftoolbox's Invariant (asinh of median/MAD), as the research scaled them; standardised inputs (the
-# default) were 7.5-8.4 % worse with the research's best configurations (docs: Neural Networks, the research's recipe).
-INVARIANT = {"name": "asinh", "params": {"standardise": False}}
 
 
 def main(n_configs=48, top=4, seeds=4, validation=None, test=None, output_dir="."):
@@ -94,7 +92,6 @@ def main(n_configs=48, top=4, seeds=4, validation=None, test=None, output_dir=".
                 training_window=728,
                 refit="7D",
                 seeds=seeds,
-                scaler=INVARIANT,
                 random_state=i,  # each configuration its own seeds, as the research seeded each one
                 name=name,
             )
