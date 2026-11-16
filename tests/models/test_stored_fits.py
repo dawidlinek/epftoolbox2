@@ -127,9 +127,9 @@ def served(pipeline, data, live, days, freq, horizon, **kwargs):
     return out
 
 
-def assert_served_is_backtest(models, switch, freq, engine, tmp_path, horizon=1, **frame_kwargs):
-    data = frame(switch, freq, **frame_kwargs)
-    pipeline = ModelPipeline(information_set=INFO, engine=engine)
+def assert_served_is_backtest(models, switch, freq, engine, tmp_path, horizon=1, data=None, info=INFO, **frame_kwargs):
+    data = frame(switch, freq, **frame_kwargs) if data is None else data
+    pipeline = ModelPipeline(information_set=info, engine=engine)
     for model in models:
         pipeline.add_model(model)
     expected = backtest(pipeline, data, switch, freq, horizon, tmp_path / "backtest")
@@ -173,6 +173,22 @@ def test_a_forecast_served_from_a_stored_fit_is_the_backtest_s_record(
     kind, make, refit, freq, switch, engine, tmp_path
 ):
     assert_served_is_backtest([make()], switch, freq, engine, tmp_path)
+
+
+@pytest.mark.parametrize("refit", [None, "7D"])
+def test_the_mask_is_the_span_s_before_any_filter(refit, tmp_path):
+    """`aux` is 0/1 on the rows a fit keeps and 0.5 on rows the finite filter drops (their load is missing): binary on the kept
+    rows, scaled by the span's mask. A stored scaler with a mask of its own kept rows would scale another column set."""
+    data = frame(SPRING, "1h")
+    rng = np.random.default_rng(4)
+    aux = (rng.random(len(data)) > 0.5).astype(float)
+    dropped = rng.random(len(data)) < 0.05
+    aux[dropped] = 0.5
+    data = data.assign(aux=aux)
+    data.loc[dropped, "load_d+1"] = np.nan
+    info = InformationSet("11:45", "Europe/Warsaw", rules={**RULES, "aux": Availability.static()})
+    model = OLSModel([*PREDICTORS, "aux"], 21, refit=refit, binary_mask="fit" if refit is None else None, name="m")
+    assert_served_is_backtest([model], SPRING, "1h", "off", tmp_path, data=data, info=info)
 
 
 @pytest.mark.parametrize("engine", ["off", "on"])
