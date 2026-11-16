@@ -456,6 +456,8 @@ def model_fingerprint(model: Any) -> str:
         params = ModelPipeline()._serialize_component(model)["params"]
     except (TypeError, ValueError):
         params = {key: value for key, value in vars(model).items() if not key.startswith("_")}
+        if params.get("refit_from", 0) is None:
+            del params["refit_from"]  # added later: left out at its default, so the hashes made before it don't move
     for attribute in ("_ctx_fn", "_predictors_fn"):  # a function of ctx, or of (horizon) / (horizon, hour)
         function = getattr(model, attribute, None)
         if function is not None:

@@ -523,6 +523,7 @@ class FoundationModel(BaseModel):
     training_window = _Internal()
     scaler = _Internal()
     refit = _Internal()
+    refit_from = _Internal()
     binary_mask = _Internal()
     normalise_by = _Internal()
     bounds = _Internal()
