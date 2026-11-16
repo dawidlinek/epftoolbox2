@@ -799,9 +799,9 @@ def _issue(
         # 6. checks before export, then the ensembles.
         checks_record = None
         if pipeline.checks is not None:
-            outcome = check_records(held, pipeline.checks, planned_periods(freq, data_zone), freq=freq, zone=data_zone)
-            held = outcome.records
-            checks_record = outcome.to_dict(pipeline.checks)
+            checked = check_records(held, pipeline.checks, planned_periods(freq, data_zone), freq=freq, zone=data_zone)
+            held = checked.records
+            checks_record = checked.to_dict(pipeline.checks)
         ensembles = compute_ensembles(pipeline, held, day, horizons, freq, data_zone, settings["weekdays"])
         every = {**held, **ensembles}
         planned = planned_keys(day, horizons, freq, data_zone, settings["weekdays"])

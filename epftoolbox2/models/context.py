@@ -502,7 +502,10 @@ class PredictorContext:
 
         `columns` is one name or several, with `{horizon}` expanded. A column that isn't in the frame raises `KeyError`.
         Without an information set availability isn't checked, only NaN. In a backtest "not NaN" is the archive's state,
-        not the server's at the issue time: a value that came late and was backfilled reads as published.
+        not the server's at the issue time: a value that came late and was backfilled reads as published. Live
+        (`ModelPipeline.forecast()`) the frame is the one refreshed now, so the answer is "known by the issue time under the
+        rules and present now" (decision 7 of step 8): a revision made before a value is out plans without it, and a value out
+        early whose rule says after the issue time is never used, so no live list holds a column the backtest's couldn't.
 
         The answer is the same at every `availability` level. A column without a rule raises `InformationSetError` at
         "raise"; at "warn" and "none" only NaN counts for it, and "warn" lists it as "no rule".
