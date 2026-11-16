@@ -1130,3 +1130,18 @@ def test_a_training_row_keeps_only_the_hours_its_actual_ramp_reads_when_the_targ
         found.append({r["hour"]: r["prediction"] for r in ref._results})
     assert len(found[0]) > 90
     assert [hour for hour in found[0] if found[0][hour] != found[1].get(hour)] == []
+
+
+def test_the_newest_target_of_a_period_is_capped_at_the_hours_its_lagged_twin_reads():
+    """A twin lagged by an hour reads the hour before the period's: all four of its quarter-hours, and across midnight the day
+    before, whose target is a day older (so its `k` counts a day later)."""
+    model = ramp_model()
+    k = np.full((96, 2), -1, dtype=np.int64)
+    k[95, 0] = -4  # the last quarter-hour of 23:00 is known to the day before yesterday's target on the first issue day
+    k[8, 1] = -3  # 02:00 on the second
+    capped = model._capped_by_lag(k, pd.Timedelta(hours=1))
+    assert capped[0:4, 0].tolist() == [-3] * 4  # 00:00-00:59 reads 23:00 of the day before: -4 + 1
+    assert capped[4:92, 0].tolist() == [-1] * 88 and capped[92:96, 0].tolist() == [-1, -1, -1, -4]  # its own
+    assert capped[12:16, 1].tolist() == [-3] * 4  # 03:00 reads 02:00, whose quarter-hours are -3, -1, -1 and -1
+    assert capped[8:12, 1].tolist() == [-3, -1, -1, -1] and capped[0:4, 1].tolist() == [-1] * 4
+    assert k[95, 0] == -4 and k[8, 1] == -3 and (k == -1).sum() == 2 * 96 - 2  # the input is left as it was
