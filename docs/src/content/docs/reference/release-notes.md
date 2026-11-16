@@ -157,6 +157,17 @@ an issue day it didn't sample.
   - **The old behaviour.** `ModelPipeline(engine="off")`, or `engine: off` in the pipeline's YAML or `model_pipeline.engine: off`
     in a workflow. YAML writes `engine` only when it was given, so a file saved up to 2.3 (without it) runs the new default.
     `BayesSearch.run(engine="off")` keeps its own default.
+- **`MLPDailyModel`'s inputs go through Lago's Invariant by default.** `scaler` defaults to
+  `{"name": "asinh", "params": {"standardise": False}}` (`epftoolbox2.models.mlp.INVARIANT_INPUTS`), asinh of each input's median
+  and MAD on each fit's rows, binary columns kept, as the research and Lago's DNN scaled them, where it was `"standard"`. On the
+  research's test year (top 4 configurations x 4 seeds, 8,760 identical keys per market) that is DE_LU 20.54 / AT 17.64 MAE against
+  22.18 / 19.03 standardised. See [Neural Networks](/epftoolbox2/models/neural-networks/#the-researchs-recipe-reproduced).
+  - **What moves.** Every `MLPDailyModel` forecast with the default scaler. `MLPHourlyModel`, `TorchModel` (both `output`s) and an
+    `MLPDailyModel` with an explicit scaler don't. The torch golden metrics (`MLPDaily`) are rewritten.
+  - **Resuming and YAML.** The scaler is in the manifest's `model_params` and YAML always writes it: a pipeline file saved before
+    keeps `scaler: standard`, and results written with standardised inputs refuse the default with `ManifestMismatchError` on
+    `model_params`, whose message says to pass `scaler="standard"`. Nothing is mixed.
+  - **The old behaviour.** `MLPDailyModel(..., scaler="standard")`.
 
 ### Fixed
 

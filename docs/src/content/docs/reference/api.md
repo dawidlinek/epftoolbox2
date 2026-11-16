@@ -829,7 +829,8 @@ class MLPDailyModel(TorchModel):            # nets.MLP, output="day": one networ
                  loss: str = "l1", lr: float = 3e-4, max_epochs: int = 300, patience: int = 20, batch_size: int = 64,
                  early_stopping: float = 0.2, weight_decay: float = 0.0, stack: str = "auto",
                  pad_to: Optional[int] = None, device: str = "auto", tf32: bool = False, random_state: int = 0,
-                 newest_target: str = "d-1", binary_mask: Optional[str] = None, scaler="standard",
+                 newest_target: str = "d-1", binary_mask: Optional[str] = None,
+                 scaler={"name": "asinh", "params": {"standardise": False}},  # Lago's Invariant (INVARIANT_INPUTS); "standard" up to 2.3
                  name: str = "mlp_daily", module_hash: Optional[str] = None): ...
 
 class FoundationModel(BaseModel):           # the base of the pretrained sequence models (a family defines its backend)

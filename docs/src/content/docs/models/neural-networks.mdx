@@ -62,7 +62,7 @@ model = TorchModel(module=MLP, module_params={"hidden": [256, 128], "dropout": 0
 | `random_state` | `0` | The base seed every network's seed is drawn from |
 | `newest_target` | `"d-1"` | The newest training target, as for every model ([Time and Calendars](/epftoolbox2/model-pipeline/time-and-calendars/)) |
 | `binary_mask` | `None` | Which rows decide the binary 0/1 inputs left unscaled; with `refit`, each fit's own |
-| `scaler` | `"standard"` | How the inputs are scaled; `output="day"` takes any scaler (the Invariant, `{"name": "asinh", "params": {"standardise": False}}`, did much better on price inputs, see [the research's recipe](#the-researchs-recipe-reproduced)), `output="period"` only `"standard"` |
+| `scaler` | `"standard"` | How the inputs are scaled; `output="day"` takes any scaler (the Invariant, `{"name": "asinh", "params": {"standardise": False}}`, did much better on price inputs and is `MLPDailyModel`'s default, see [the research's recipe](#the-researchs-recipe-reproduced)), `output="period"` only `"standard"` |
 | `name` | `"torch"` | The model's name |
 | `module_hash` | `None` | Set by a saved file: the hash of the module's file and its package's version (for a class with no module file, a `session-` token) when it was saved (see [Saving and loading](#saving-and-loading)) |
 | `normalise_by`, `bounds`, `zero_when` | `None` | A per-row target, as for every model, with `output="period"`; a model with `output="day"` refuses them before any fit (see [Generation targets](/epftoolbox2/models/common-parameters/#generation-targets)) |
@@ -84,8 +84,8 @@ inputs only, never dates or targets, and its outputs are in the scaled target sp
   02:00 hour of the spring switch, the repeated autumn hour) or a missing value masked, never filled from another period.
   `output="period"`: the rows of one period, as every model fits. Both on the fixed refit calendar: a forecast issued on D uses
   the fit of its refit day, whose targets end the day before it, never warm-started from an earlier fit.
-- **Scaling.** The inputs are standardised, binary columns kept, on each fit's own rows (each window of a list on its own); the
-  target of each output goes through its own Invariant, `asinh((y - median) / MAD)`, and back. The module's outputs, the loss,
+- **Scaling.** The inputs are standardised (`MLPDailyModel`: through Lago's Invariant, asinh of median and MAD, by default),
+  binary columns kept, on each fit's own rows (each window of a list on its own); the target of each output goes through its own Invariant, `asinh((y - median) / MAD)`, and back. The module's outputs, the loss,
   the learning rate and early stopping are in that space, so a network takes no other target transform: there is no
   `target_transform` parameter (the trees' `"none"`, a raw target, isn't offered), and setting the attribute to anything but
   `"per_period"` raises.
@@ -212,12 +212,15 @@ hourly = MLPHourlyModel(lear_x, hidden=[64], dropout=0.0, seeds=3, name="mlp_hou
 ```
 
 `MLPDailyModel(predictors, hidden=(256, 128), dropout=0.1, activation="relu", ..., seeds=4, name="mlp_daily")` is
-`TorchModel(module=MLP, module_params={"hidden": [256, 128], "dropout": 0.1}, output="day", ...)` and
+`TorchModel(module=MLP, module_params={"hidden": [256, 128], "dropout": 0.1}, output="day", scaler=INVARIANT_INPUTS, ...)` and
 `MLPHourlyModel(predictors, hidden=(64,), dropout=0.0, activation="relu", ..., seeds=3, name="mlp_hourly")` is
 `TorchModel(module=MLP, module_params={"hidden": [64]}, output="period", ...)`, forecast for forecast. Every other parameter is
 `TorchModel`'s, with its defaults: `training_window=728`, `refit="7D"`, `loss="l1"`, `lr=3e-4`, `max_epochs=300`,
 `patience=20`, `batch_size=64`, `early_stopping=0.2`, `weight_decay=0.0`, `stack="auto"`, `pad_to=None`, `device="auto"`,
-`tf32=False`, `random_state=0`, `newest_target="d-1"`, `binary_mask=None`, `scaler="standard"`, `module_hash=None`;
+`tf32=False`, `random_state=0`, `newest_target="d-1"`, `binary_mask=None`, `module_hash=None`, and `scaler="standard"` for
+`MLPHourlyModel`; `MLPDailyModel`'s inputs go through Lago's Invariant by default (`scaler=INVARIANT_INPUTS`, which is
+`{"name": "asinh", "params": {"standardise": False}}`, from `epftoolbox2.models.mlp`; `"standard"` up to 2.3: pass it to resume
+results written then, which otherwise refuse with `ManifestMismatchError` on `model_params`);
 `MLPHourlyModel` also takes `normalise_by=None`, `bounds=None` and `zero_when=None` ([Generation
 targets](/epftoolbox2/models/common-parameters/#generation-targets)), which `MLPDailyModel`, of day units, doesn't.
 
@@ -238,12 +241,13 @@ dropout rates and LEAR input blocks, the 175 LEAR inputs of `lear_predictors(["l
 | Inputs scaled by | DE_LU test MAE | AT test MAE |
 |---|---|---|
 | the research's stored forecasts | 20.62 | 17.56 |
-| the Invariant, `scaler={"name": "asinh", "params": {"standardise": False}}` (as the research) | 20.54 (−0.4 %) | 17.64 (+0.5 %) |
-| standardisation, `scaler="standard"` (the default) | 22.18 (+7.5 %) | 19.03 (+8.4 %) |
+| the Invariant, `scaler={"name": "asinh", "params": {"standardise": False}}` (as the research; the default) | 20.54 (−0.4 %) | 17.64 (+0.5 %) |
+| standardisation, `scaler="standard"` (the default up to 2.3) | 22.18 (+7.5 %) | 19.03 (+8.4 %) |
 
 The configurations were chosen with Invariant inputs, so the second row isn't a search of its own; but `MLPDailyModel` with
 its defaults on DE_LU gave 23.04 standardised against 21.10 with Invariant inputs too. Prices have spikes, which
-standardisation leaves as large inputs. The research's L1 penalty on the first layer (on 2 of the DE and 3 of the AT
+standardisation leaves as large inputs. So `MLPDailyModel` takes Invariant inputs by default; `MLPHourlyModel` and `TorchModel`
+keep standardised inputs. The research's L1 penalty on the first layer (on 2 of the DE and 3 of the AT
 configurations, 3e-6 to 9e-5) and its seeds aren't the library's, and it refitted on every seventh day from the test's
 first, where the library refits on Mondays.
 
