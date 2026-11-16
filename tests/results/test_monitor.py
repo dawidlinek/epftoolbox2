@@ -1242,3 +1242,24 @@ def test_check_failed_is_read_under_the_policy_s_revision(tmp_path):
         with pytest.warns(UserWarning, match="check_failed"):
             table = run_monitor(directory, windows=(10,), policy=policy).tables().set_index("member")
         assert table.loc["naive", "check_failed_days"] == 1
+
+
+def test_a_fridays_only_pipeline_is_not_missing_the_other_six_days(tmp_path):
+    """Participation counts as due only the days the pipeline issues on."""
+    directory = tmp_path / "live"
+    write_live(directory)
+    fridays = [d for d in DAYS if datetime.date.fromisoformat(d).weekday() == 4]
+    assert fridays == [DAYS[5]]  # 10-23, the fallback day
+    got = run_monitor(directory, windows=(10,), issue_days=["friday"]).tables().iloc[0]
+    assert got["issue_days"] == len(fridays) and got["issue_days"] < 10
+    committed = [d for d in fridays if Oracle().committed(d)]
+    assert got["committed_days"] == len(committed)
+    assert got["participation"] == pytest.approx(len(committed) / len(fridays))
+    every = run_monitor(directory, windows=(10,)).tables().iloc[0]
+    assert every["issue_days"] == 10 and every["participation"] == pytest.approx(0.8)
+    # live.json's own record of them is the default
+    meta = json.loads((directory / "live.json").read_text())
+    (directory / "live.json").write_text(json.dumps({**meta, "issue_days": ["friday"]}))
+    assert run_monitor(directory, windows=(10,)).tables().iloc[0]["issue_days"] == len(fridays)
+    with pytest.raises(ValueError, match="weekday"):
+        run_monitor(directory, windows=(10,), issue_days=["fri"])

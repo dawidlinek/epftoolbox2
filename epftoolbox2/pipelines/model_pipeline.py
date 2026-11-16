@@ -2292,6 +2292,7 @@ class ModelPipeline:
         backtest: Any = None,
         alerts: Any = None,
         target: str = "price",
+        issue_days: Optional[Sequence[str]] = None,
     ) -> MonitorReport:
         """How the forecasts of the live directory `save_dir` did against what happened, with skill first: a `MonitorReport`
         (`tables()`, `by_window()`, `daily()`, `rungs()`, `quality()`, `alerts`; see the docs page Monitoring).
@@ -2302,7 +2303,8 @@ class ModelPipeline:
         through `LossPanel`. `windows` are numbers of issue days ending at the newest due one. `benchmarks` name members the skill
         is measured against (the pipeline's `NaiveModel`s by default); `backtest` is an `EvaluationReport` (or a mapping of
         member -> frame of forecasts) of the same pipeline over the same days, for the live/backtest skill ratio; `alerts` a
-        list of rules (or a YAML file of one). Needs the pipeline's information set (`issue_time=`) for the target's rule."""
+        list of rules (or a YAML file of one). `issue_days` are the weekdays the pipeline issues on, as for `run` (`live.json`'s
+        if it records them, else every day): only those are due, so participation isn't judged on the others. Needs the pipeline's information set (`issue_time=`) for the target's rule."""
         if not isinstance(data, pd.DataFrame):
             raise TypeError(f"monitor takes the data as a DataFrame, got {type(data).__name__}")
         store = LiveStore(save_dir)
@@ -2342,6 +2344,7 @@ class ModelPipeline:
             alerts=alerts,
             target=target,
             missing=missing,
+            issue_days=issue_days,
         )
 
     # -- stored fits (step 8d, `models._fits`) -----------------------------------------------------------------------------

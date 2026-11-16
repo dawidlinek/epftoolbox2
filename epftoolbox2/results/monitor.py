@@ -456,9 +456,15 @@ def _daily(panel: LossPanel, members: Sequence[str], benchmarks: Sequence[str]) 
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
 
-def _calendar(store: LiveStore, now: pd.Timestamp) -> Tuple[List[str], Optional[str]]:
+def _calendar(
+    store: LiveStore, now: pd.Timestamp, issue_days: Optional[Sequence[str]] = None
+) -> Tuple[List[str], Optional[str]]:
     """(the issue days from the directory's first call to the newest due one, that one): an issue day is due once its deadline has
-    passed on the clock, or the day before today without a deadline on file."""
+    passed on the clock, or once the day has ended without a deadline on file (today never counts then). Only the weekdays the
+    pipeline issues on are issue days (`issue_days`, else `live.json`'s, else every day), so a pipeline that issues on Fridays
+    alone isn't missing the other six."""
+    from ..models._calendar import listed_days, resolve_issue_days
+
     first = min((str(line["issue"]) for line in store.calls() if line.get("issue")), default=None)
     if first is None:
         return [], None
@@ -468,6 +474,7 @@ def _calendar(store: LiveStore, now: pd.Timestamp) -> Tuple[List[str], Optional[
         raise ValueError(
             f"{store.identity_path} records no issue_timezone: monitor() can't tell which issue days are due"
         )
+    weekdays = resolve_issue_days(issue_days if issue_days is not None else identity.get("issue_days"))
     today = now.tz_convert(zone).date()
     candidate = pd.Timestamp(today)
     if deadline is None or local_instant(str(today), deadline, zone) > now:
@@ -475,7 +482,8 @@ def _calendar(store: LiveStore, now: pd.Timestamp) -> Tuple[List[str], Optional[
     last = candidate.date().isoformat()
     if last < first:
         return [], None
-    return [d.date().isoformat() for d in pd.date_range(first, last, freq="D")], last
+    days = listed_days([d.date().isoformat() for d in pd.date_range(first, last, freq="D")], weekdays)
+    return days, (days[-1] if days else None)
 
 
 def _quality(
@@ -872,6 +880,7 @@ def monitor(
     alerts: Any,
     target: str,
     missing: Sequence[str] = (),
+    issue_days: Optional[Sequence[str]] = None,
 ) -> MonitorReport:
     """`ModelPipeline.monitor` over members already found in `store`: see the module docstring."""
     if not store.is_live():
@@ -887,7 +896,7 @@ def monitor(
     if unknown:
         raise ValueError(f"benchmarks {unknown} have no results in {store.save_dir}; its members are {names}")
     now = current_clock().now()
-    days, through = _calendar(store, now)
+    days, through = _calendar(store, now, issue_days)
 
     visible = {"latest": store.visible("latest", cutoff), "first": store.visible("first", cutoff)}
     visible["delivered"] = _delivered_view(visible["latest"], store)
