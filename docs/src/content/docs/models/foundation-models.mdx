@@ -366,20 +366,29 @@ negative price), max |library - stored| in EUR/MWh, on the CPU (AMD EPYC 7713, 8
 | Timestral-209M, ctx 364, load forecast | CPU (timestral a534bdb) | 2.3e-4 / 3.2e-4 | 5.0e-5 / 2.0e-4 | 1e-3 |
 | TimesFM-3, ctx 364, load forecast (DE_LU) / univariate (AT) | H100 (timesfm 3.0.2) | 2.1e-3 / 9.4e-4 | 6.4e-4 / 6.8e-4 | 0.1 |
 | TimesFM-3, ctx 91, load forecast | H100 | | 9.2e-4 / 5.4e-4 | 0.1 |
-| PatchTST-FM-r2, ctx 341, univariate | H100 (granite-tsfm 0.3.10, bfloat16 autocast) | 0.32 / 1.93 (two days each, the CPU's float32) | | 1e-3 on a GPU |
+| PatchTST-FM-r2, ctx 341, univariate, on an H100 | H100 (granite-tsfm 0.3.10, bfloat16 autocast) | 2.79 / 2.70 | 2.37 / 2.96 | 1e-3, **not met** |
 
 Every year has the stored file's forecasts on identical keys (8,736 validation and 8,760 test per market), the mean difference
 is 3 to 5 x 10⁻⁵ (the files' rounding), and the MAEs equal the stored ones to 4 decimals: test Timestral-209M 18.4811 and 15.8979,
-TimesFM-3 19.7906 (DE_LU, load forecast) and 16.9939 (AT, univariate). PatchTST-FM-r2 on the CPU runs in float32, where the
-research's H100 ran the package's bfloat16 autocast: the difference is that precision's (granite-tsfm 0.3.10's code gives the
-library's forecasts within 1.4 x 10⁻⁴ of 0.3.12's), so its 1e-3 check is a GPU run's (an H100 job of the research folder's
-`wcss/gpu_b1.sbatch`, with TimesFM-3's GPU time).
+TimesFM-3 19.7906 (DE_LU, load forecast) and 16.9939 (AT, univariate). On an H100 (`wcss/gpu_b1.sbatch` of the research
+folder) TimesFM-3 is within 5.0 x 10⁻⁵ of its stored H100 forecasts in all six years (the files' rounding) and Timestral-209M
+within 5.2 x 10⁻⁴ of its stored CPU ones.
+
+PatchTST-FM-r2 doesn't reproduce its stored forecasts to 1e-3. The package runs its backbone under bfloat16 autocast on a
+GPU, and the library's H100 run (granite-tsfm 0.3.12, torch 2.11) differs from the research's H100 one by up to 2.96 EUR/MWh,
+0.07 on average, with the same keys and MAEs within 0.003 (test 19.8475 against 19.8502 on DE_LU, 16.5120 against 16.5117 on
+AT): bfloat16 rounding moves single values. On the CPU it runs in float32 and differed by 0.32 and 1.93 on two days. Which part
+comes from the batches' composition (the research's calls held 64 consecutive days, the last one 44; the library's hold a
+calendar block of 64, padded) and which from the package or torch release was not separated; granite-tsfm 0.3.10's code gives
+the library's forecasts within 1.4 x 10⁻⁴ of 0.3.12's on the CPU.
 
 **Time** on that CPU at 8 torch threads, a machine loaded with other users' work (load 29 to 96 on 128 threads): a market-year
 of Timestral-209M with the load forecast took 1,881 to 2,211 s; one call of 64 items, the backend alone, took 256 to 259 s at a
 steady load of 26 (4.0 s an item: 1,467 s for the research's 364 items, against its 1,053 s on the same machine at load 11 to 24
 with torch 2.14.1, and 1,806 s for the 448 items the zero-shot calendar's seven blocks of 64 days hold over a year). TimesFM-3 took 775 to 991 s (364 days of context, load forecast), 423 to
-488 s (univariate) and 222 to 243 s (91 days).
+488 s (univariate) and 222 to 243 s (91 days). On the H100, a whole library run of a market-year took 7 to 19 s for TimesFM-3 at
+364 days (the first includes loading; the research's 18 to 27 s), 3.5 to 4.0 s at 91 days, 11 to 17 s for Timestral-209M and
+2.4 to 12.5 s for PatchTST-FM-r2.
 
 `verify` with the real weights on that CPU (five issue days with a spring switch among them, a 28-day context, one thread) is ok
 with its positive control, the rerun and the co-batch checks for all three. The scripts are in `library_check_step6/foundation_flagged/`.
