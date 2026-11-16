@@ -3804,9 +3804,8 @@ def _available_array(
                 )
             return latest
         slot, length = col.slot or (1440.0 - step, step)
-        length = max(
-            length, step
-        )  # a slot shorter than the frame's period still holds a whole row: 15:00 of hourly data is 15:00-16:00
+        # A slot shorter than the frame's period still holds a whole row: 15:00 of hourly data is 15:00-16:00.
+        length = max(length, step)
         slots = np.full(len(reached), float(slot))
         occurrence = np.full(len(reached), col.slot is not None)
         return _available_array(
