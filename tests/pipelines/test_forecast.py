@@ -504,19 +504,20 @@ def test_an_issue_row_with_a_missing_input_is_a_skip_and_never_reaches_a_model(t
 
 
 def test_checks_turn_a_failing_member_day_into_check_failed_and_the_ladder_moves_on(tmp_path):
-    a = ols()
-    b = ols("b", PREDICTORS[:2], 14)
-    plain = pipeline(a, b, ensembles=[FallbackEnsemble(["a", "b"], name="fb")]).forecast(DATA, ISSUE, None, horizon=2)
-    high = max(r["prediction"] for r in plain.records["a"] if r["horizon"] == 1)
-    low = max(r["prediction"] for r in plain.records["b"] if r["horizon"] == 1)
-    checks = ForecastChecks(range=(None, (high + low) / 2)) if low < high else pytest.skip("b above a")
-    checked = pipeline(
-        ols(), ols("b", PREDICTORS[:2], 14), ensembles=[FallbackEnsemble(["a", "b"], name="fb")], checks=checks
-    ).forecast(DATA, ISSUE, tmp_path / "live", horizon=2)
-    failed = {r["status"] for r in checked.records["a"] if r["horizon"] == 1}
-    assert failed == {"check_failed"}
-    assert checked.checks["failed"][0]["member"] == "a"
-    assert checked.status == "fallback" and checked.rungs["2023-03-08"] == 1
+    # A naive forecast of a weekday's `is_weekend` is one value all day: `not_constant` fails each of its days, so the ladder
+    # serves them from the OLS model, and the checks run before the ensembles.
+    flat = NaiveModel(["is_weekend_d+{horizon}"], name="flat")
+    ladder = [FallbackEnsemble(["flat", "b"], name="fb")]
+    plain = pipeline(flat, ols("b", PREDICTORS[:2], 14), ensembles=ladder).forecast(DATA, ISSUE, None, horizon=2)
+    assert plain.status == "ok" and set(plain.rungs.values()) == {0}
+    flat = NaiveModel(["is_weekend_d+{horizon}"], name="flat")
+    checked = pipeline(flat, ols("b", PREDICTORS[:2], 14), ensembles=ladder, checks=ForecastChecks()).forecast(
+        DATA, ISSUE, tmp_path / "live", horizon=2
+    )
+    assert {r["status"] for r in checked.records["flat"]} == {"check_failed"}
+    assert {(f["member"], f["horizon"]) for f in checked.checks["failed"]} == {("flat", 1), ("flat", 2)}
+    assert (checked.status, checked.exit_code) == ("fallback", 10)
+    assert checked.rungs == {"2023-03-08": 1, "2023-03-09": 1}
     written = json.loads((tmp_path / "live" / "issues" / ISSUE / "r1" / "checks.json").read_text())
     assert written == json.loads(json.dumps(checked.checks))
 
@@ -553,6 +554,21 @@ def test_the_revision_keeps_its_inputs_quality_and_the_fits_it_was_made_from(tmp
     quality = json.loads((folder / "quality.json").read_text())
     assert quality["columns"]["load_d+1"]["missing"] == 0
     assert json.loads((live / "a.manifest.json").read_text())["mode"] == "live"
+
+
+def test_an_inline_fit_s_identity_moves_with_a_training_cell_it_reads_alone(tmp_path):
+    def identity(frame):
+        result = pipeline(ols("b", PREDICTORS[:2], 14)).forecast(frame, ISSUE, None, horizon=2)
+        return result.models["b"]["fits"][ISSUE]["rows_sha256"]
+
+    revised = DATA.copy()
+    row = revised.index[revised.index.normalize() == pd.Timestamp("2023-03-01", tz="Europe/Warsaw")][3]
+    revised.loc[row, "price"] += 5.0  # a target of b's span
+    unread = DATA.copy()
+    unread.loc[row, "is_weekend_d+1"] = 1.0 - unread.loc[row, "is_weekend_d+1"]  # a column b doesn't read
+    assert identity(DATA) == identity(DATA.copy())
+    assert identity(revised) != identity(DATA)
+    assert identity(unread) == identity(DATA)
 
 
 def test_the_export_writes_every_market_product_and_the_repeated_hour_twice(tmp_path):
