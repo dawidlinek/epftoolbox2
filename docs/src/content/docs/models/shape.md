@@ -41,7 +41,7 @@ df15 = data15.run("2025-09-30", "2026-10-12")
 # 3. The shape: per quarter-hour, an OLS of the deviation on the forecast hourly ramp and the load forecast's deviation.
 shape_x = ["price_1h_fc_d+{horizon}", "price_1h_fc_d+{horizon}_h-1", "load_forecast_hour_dev_d+{horizon}"]
 shape = ModelPipeline(issue_time="11:45", issue_timezone="Europe/Berlin")
-shape.information_set = shape.information_set.with_source_rules(data15.sources)
+shape.information_set = shape.information_set.with_source_rules([*data15.sources, *data15.transformers])
 shape.add_model(
     ShapeModel(
         base="price_1h_fc_d+{horizon}",

@@ -247,7 +247,7 @@ exactly the columns an `OpenMeteoSource`, an `EpftoolboxBenchmarkSource` or a pr
   `published(issue time, days_before=horizon, timezone=issue zone, day_zone=data zone, vintage="snapshot")` from the
   upstream's manifest, and `with_source_rules` registers its upstream (`InformationSet.chained_inputs()`), which the
   downstream's input check reads for coverage and late upstream inputs: see [Chaining](/epftoolbox2/model-pipeline/chaining/).
-  Only this knows when such a column is out: outside a `Workflow`, pass `with_source_rules(data_pipeline.sources)`. Unlike every
+  Only this knows when such a column is out: outside a `Workflow`, pass `with_source_rules([*data_pipeline.sources, *data_pipeline.transformers])`. Unlike every
   other source rule it comes first: no rule, accepted assumption or pattern replaces it, for the column, its shifts, profiles and
   day aggregates, and a rule in `rules=` that names it is refused (`InformationSetError`), as it would be ignored.
 - An `EpftoolboxBenchmarkSource` gets its rules on the files' own wall clock, its `index_timezone`: `price` published
@@ -514,7 +514,8 @@ key on a shifted name (`x_h05_d+1`) describes that very column at its row, as fo
   two-digit `_sNN` is a quarter-hour, which on 15-minute data is all it can be; on an hourly model it doesn't take the rule of its
   column and needs a key of its own in `rules=`, and is then read as a quarter-hour, which for a profile of another slot length is
   the wrong time. A slot shorter than the data's period holds a whole row: the 30-minute slot of hourly data at 15:00 is the hour
-  15:00 to 16:00, so a `realised("1h")` rule knows it at 17:00. Names of three or more digits (5-minute slots) aren't read as slots.
+  15:00 to 16:00, so a `realised("1h")` rule knows it at 17:00. A column that is read as a quarter-hour while untold, on a model whose period isn't 15 minutes, takes a rule of your own only with a
+  warning (once per column) saying so. Names of three or more digits (5-minute slots) aren't read as slots.
 </Aside>
 
 ---

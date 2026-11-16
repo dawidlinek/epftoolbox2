@@ -35,7 +35,7 @@ frame = data.run("2023-01-01", "2024-12-31")
 
 # 3. Downstream model: its information set knows the source, so it knows when solar_fc is out.
 price = ModelPipeline(issue_time="11:45", issue_timezone="Europe/Brussels", availability="raise")
-price.information_set = price.information_set.with_source_rules(data.sources)
+price.information_set = price.information_set.with_source_rules([*data.sources, *data.transformers])
 price.add_model(LEARModel(["price_d-1", "solar_fc_d+{horizon}"], training_window=364, name="LEAR_solar"))
 report = price.run(frame, test_start="2024-01-01", test_end="2024-12-31", horizon=1)
 ```
@@ -85,7 +85,7 @@ df15 = data15.run("2025-09-30", "2026-10-12")
 # 3. Downstream: the hourly forecast plus a per-quarter-hour OLS of the deviation, on 15-minute dates only.
 shape_x = ["price_1h_fc_d+{horizon}", "price_1h_fc_d+{horizon}_h-1", "load_forecast_hour_dev_d+{horizon}"]
 shape = ModelPipeline(issue_time="11:45", issue_timezone="Europe/Berlin", availability="raise")
-shape.information_set = shape.information_set.with_source_rules(data15.sources)
+shape.information_set = shape.information_set.with_source_rules([*data15.sources, *data15.transformers])
 shape.add_model(
     ShapeModel("price_1h_fc_d+{horizon}", OLSModel(shape_x, training_window=182, fit_intercept=True), name="B24_dyn")
 )

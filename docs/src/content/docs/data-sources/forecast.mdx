@@ -29,7 +29,7 @@ df = data.run("2024-01-01", "2024-12-31")
 
 pipeline = ModelPipeline(issue_time="11:45", issue_timezone="Europe/Brussels")
 # Outside a Workflow, tell the information set about the sources: only it knows when solar_fc is out.
-pipeline.information_set = pipeline.information_set.with_source_rules(data.sources)
+pipeline.information_set = pipeline.information_set.with_source_rules([*data.sources, *data.transformers])
 ```
 
 ## Parameters
@@ -122,7 +122,7 @@ ignored; use `available=` for a later time.
 
 <Aside type="caution">
   A chained column has no built-in rule: only `with_source_rules` knows it. A `Workflow` applies it; a model run outside one needs
-  `information_set.with_source_rules(data_pipeline.sources)`. Without it the column has no rule: refused at
+  `information_set.with_source_rules([*data_pipeline.sources, *data_pipeline.transformers])`. Without it the column has no rule: refused at
   `availability="raise"` with `unknown="raise"`, listed as `no rule` at `"warn"`, and its coverage and its upstream's own inputs are
   not checked.
 </Aside>

@@ -41,7 +41,7 @@ data = (
 df = data.run("2022-01-01", "2024-12-31")  # a year before the first training row, for the proxy's window
 
 pipeline = ModelPipeline(issue_time="11:45", issue_timezone="Europe/Brussels", availability="raise")
-pipeline.information_set = pipeline.information_set.with_source_rules(data.sources)
+pipeline.information_set = pipeline.information_set.with_source_rules([*data.sources, *data.transformers])
 pipeline.add_model(
     RidgeModel(
         ["de_shortwave_radiation_d+{horizon}", "clear_sky_ghi_d+{horizon}"],
