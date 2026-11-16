@@ -184,6 +184,20 @@ class ModelPipeline:
         dry_run: bool = False,            # Check everything, write nothing
     ) -> Dict[str, Any]: ...              # The delivered line; LiveBusyError while another call holds live.lock
 
+    def monitor(                          # How a live directory's forecasts did, skill first: a MonitorReport; writes nothing
+        self,
+        data: pd.DataFrame,               # The frame the actuals come from
+        save_dir: Union[str, Path],       # The live directory (live.json)
+        *,
+        windows: Sequence[int] = (7, 30, 90),  # Numbers of issue days, each ending at the newest due one
+        benchmarks: Optional[Sequence[str]] = None,  # Members the skill is against; None: the pipeline's NaiveModels
+        policy: str = "latest",           # Which committed revision of an issue day a key is read from: "latest", "first", "delivered"
+        cutoff: Any = "deadline",         # Revisions committed by this are seen: "deadline", "HH:MM", an instant, a mapping or a function
+        backtest: Any = None,             # An EvaluationReport (or member -> forecasts frame) of the same pipeline, for live/backtest skill
+        alerts: Any = None,               # A list of rules, or a YAML file of one
+        target: str = "price",            # The column the actuals are read from
+    ) -> MonitorReport: ...               # LiveDirectoryError for a directory that isn't live
+
     def frozen(self, save_dir: Union[str, Path]) -> "ModelPipeline": ...  # Each top= ensemble as a plain average of its newest segment's choice
 
     availability: str                     # The level in force; assign None to go back to the default
@@ -194,6 +208,43 @@ class ModelPipeline:
 
     @classmethod
     def load(cls, path: Union[str, Path]) -> "ModelPipeline": ...  # Load from YAML
+```
+
+---
+
+## MonitorReport
+
+Returned by `ModelPipeline.monitor()`, see [Monitoring](/epftoolbox2/operations/monitoring/).
+
+```python
+class MonitorReport:
+    windows: Tuple[int, ...]              # The windows asked for, in issue days
+    policy: str                           # The revision policy
+    cutoff: Any                           # The cut-off
+    benchmarks: Tuple[str, ...]           # The members skill is measured against
+    members: Tuple[str, ...]              # The members with results in the directory
+    missing: Tuple[str, ...]              # The pipeline's members without results there
+    through: Optional[str]                # The newest due issue day
+    now: pd.Timestamp                     # The clock's instant the report was made at
+    alerts: List[Alert]                   # The rules that fired; empty when none did
+
+    def tables(self) -> pd.DataFrame: ...                  # One row per (window, member), skill first, every count beside its number
+    def by_window(self) -> Dict[int, pd.DataFrame]: ...    # tables() cut by window
+    def daily(self) -> pd.DataFrame: ...                   # One row per (member, issue day, horizon): forecasts, mae, rmse, bias, skill_<b>
+    def rungs(self) -> pd.DataFrame: ...                   # Each FallbackEnsemble's rungs per policy and window: days, forecasts, share, mae
+    def quality(self) -> pd.DataFrame: ...                 # One row per issue day: the missing and imputed cells and failed sources of its quality.json
+
+
+class Alert:                              # A rule of monitor(alerts=...) that fired
+    rule: str                             # "skill_above", "participation_below", "delivered_below", "rung_at_least" or "stale_input"
+    message: str                          # One line saying what happened
+    member: Optional[str]                 # The member it concerns, if any
+    benchmark: Optional[str]              # The benchmark of a skill alert
+    value: Optional[float]                # What was observed
+    threshold: Optional[float]            # The rule's number
+    through: Optional[str]                # The last issue day it looked at
+
+    def to_dict(self) -> Dict[str, Any]: ...
 ```
 
 ---

@@ -108,6 +108,7 @@ Rules to know before using the library:
 
 ## Operations
 
+- [Monitoring](docs/src/content/docs/operations/monitoring.mdx): `ModelPipeline.monitor(data, save_dir)` on a live directory: skill first on common keys with counts, level and shape, revision policies, rung counts, input quality, live/backtest skill ratio, and alerts as a YAML list
 - [Snapshot Archives](docs/src/content/docs/operations/snapshots.mdx): `SnapshotArchive(path).record(data_pipeline)` on a schedule of your own (cron, systemd timer, SLURM examples), every source's download stored as returned with a catalog line and never a secret, `first_seen()`, `rewrites()`, and `record_snapshot()` for a scheduled job
 
 ## Models
