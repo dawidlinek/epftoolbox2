@@ -118,6 +118,10 @@ def availability_warnings(captured):
     return [str(w.message) for w in captured if str(w.message).startswith("Availability:")]
 
 
+def no_rule_warnings(captured):
+    return [str(w.message) for w in captured if str(w.message).startswith("Information set:")]
+
+
 def no_warnings_of_ours(captured):
     return [str(w.message) for w in captured if "availability" in str(w.message).lower()]
 
@@ -334,10 +338,49 @@ def test_one_warning_covers_every_model_and_says_what_to_do(df, recwarn):
     )
     messages = availability_warnings(recwarn)
     assert len(messages) == 1
-    assert "2 input(s) of 2 model(s)" in messages[0]
+    assert "1 input(s) of 1 model(s)" in messages[0]
     assert "a: observed is late (periods 10-23, horizons 1; known D+1 01:00, issued D 11:45)" in messages[0]
-    assert "b: mystery has no rule (periods 0-23, horizons 1)" in messages[0]
+    assert "mystery" not in messages[0]  # a column without a rule has a warning of its own
     assert 'availability="raise"' in messages[0]
+
+
+def test_columns_without_a_rule_are_named_in_one_warning_that_points_to_the_source_rules(df, recwarn):
+    df = df.assign(also_unruled=1.0)
+    pipeline(ols(PREDICTORS + ["mystery"], name="a"), ols(PREDICTORS + ["mystery", "also_unruled"], name="b")).run(
+        df, *TEST, horizon=1
+    )
+    messages = no_rule_warnings(recwarn)
+    assert len(messages) == 1  # once for the run, not per model or per task
+    assert "2 column(s)" in messages[0]
+    assert "also_unruled (b)" in messages[0] and "mystery (a, b)" in messages[0]
+    assert "InformationSet.with_source_rules" in messages[0]
+    assert "observed" not in messages[0]
+
+
+def test_a_run_with_a_rule_for_every_column_has_no_warning_about_rules(df, recwarn):
+    pipeline(ols(PREDICTORS + ["observed"])).run(df, *TEST, horizon=1)
+    assert no_rule_warnings(recwarn) == []
+
+
+def test_a_prefixed_default_name_is_named_as_without_a_rule(df, recwarn):
+    """The built-in rules match exact names, so `gas_price` is no `price`: it is named, not given the day-ahead rule."""
+    frame = df.assign(gas_price=1.0)
+    pipeline(ols(PREDICTORS + ["gas_price"]), info=InformationSet("11:45", "Europe/Warsaw")).run(
+        frame, *TEST, horizon=1
+    )
+    assert len(no_rule_warnings(recwarn)) == 1 and "gas_price" in no_rule_warnings(recwarn)[0]
+
+
+def test_raise_still_refuses_a_column_without_a_rule_and_warns_of_nothing_at_none(df, recwarn):
+    with pytest.raises(InformationSetError, match="mystery"):
+        pipeline(ols(PREDICTORS + ["mystery"]), level="raise").run(df, *TEST, horizon=1)
+    pipeline(ols(PREDICTORS + ["mystery"]), level="none").run(df, *TEST, horizon=1)
+    assert no_rule_warnings(recwarn) == []
+
+
+def test_a_model_run_directly_warns_once_of_its_columns_without_a_rule(df, recwarn):
+    ols(PREDICTORS + ["mystery"]).run(df, *TEST, horizon=1, information_set=INFO, availability="warn")
+    assert len(no_rule_warnings(recwarn)) == 1
 
 
 def test_the_warning_comes_before_any_fit(df, monkeypatch):

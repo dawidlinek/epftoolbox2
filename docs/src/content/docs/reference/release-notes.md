@@ -228,6 +228,14 @@ an issue day it didn't sample.
 
 ### New
 
+- **A run warns of the predictors that have no availability rule.** Under `availability="warn"` a column with no rule counts as
+  known at the issue time, and only a `no rule` row of `report.availability()` said so; a prefixed `de_price` or an
+  Energy-Charts column outside a `Workflow` ran with none. The run now warns once at its start, before any fit, naming each such
+  column with the models that read it and pointing to `InformationSet.with_source_rules(data_pipeline.sources)` and to
+  `rules=`. It was part of the one `Availability:` warning, which now holds what is late alone. No name pattern is applied for a
+  column, so a `*_price` pattern can't hand the day-ahead price's rule to a gas price. `availability="raise"` is unchanged.
+  No forecast moves.
+
 - **Stored fits: `ModelPipeline.refit(data, save_dir, issue="today", if_due=True)`.** Fits each model's units for an issue day
   ahead of time, on the backtest's rows and cut, and stores them in the live directory as `fits/<model>/<anchor>/units.npz` (arrays
   only, read without pickle) and `fit.json` (the configuration digest, the units, the hash of the rows read, the sha256 of
