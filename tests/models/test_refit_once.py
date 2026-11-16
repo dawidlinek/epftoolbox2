@@ -4,7 +4,8 @@ forecast.
 `refit_from=F` moves the epoch the blocks count from (`"7D"` refits on F's weekday, `"kMS"` every k months from F's month,
 before F too). `refit="once"` needs it: one fit on F, trained as a forecast issued on F would be (rows up to F - 1, or the newest
 targets `"published"` calls known by F's issue time), serves every forecast issued on F or later, and a forecast issued before
-F raises. So a forecast still depends on its issue day and the configuration alone. Without `refit_from` nothing runs differently.
+F raises. So a forecast still depends on its issue day and the configuration alone. A model that predicts a block in one call
+calls it on 7-day stretches from F, each padded to 7 days as a `"7D"` block is. Without `refit_from` nothing runs differently.
 """
 
 import datetime
@@ -37,6 +38,9 @@ from epftoolbox2.models._calendar import (
 from epftoolbox2.models._worker import _worker_init
 from epftoolbox2.pipelines import ModelPipeline
 from epftoolbox2.results.manifest import ManifestMismatchError, manifest_path
+from tests.models.test_block_predict import SEES_CALL, KernelModel
+from tests.models.test_day_units import DayRidge, PooledOLS
+from tests.models.test_day_units import frame as profile_frame
 from tests.synthetic import PREDICTORS, make_market_data
 
 WINDOW = 21
@@ -87,8 +91,12 @@ def single_process(monkeypatch):
     monkeypatch.setenv("THREADS_PER_PROCESS", "1")
     for module in POOLED:
         monkeypatch.setattr(f"{module}.ProcessPoolExecutor", InProcessPool)
+    for model in (KernelModel, DayRidge, PooledOLS):
+        model.calls.clear()
     with threadpool_limits(limits=1):  # what a pool's worker runs on
         yield
+    for model in (KernelModel, DayRidge, PooledOLS):
+        model.calls.clear()
 
 
 @pytest.fixture(scope="module")
@@ -446,6 +454,64 @@ def test_yaml_writes_refit_from_only_when_set_and_loads_it_back(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Block calls: 7-day stretches from refit_from, one fit
+# ---------------------------------------------------------------------------
+
+WEDNESDAY = "2023-03-22"  # stretches from it don't start on Mondays, and the first holds the spring switch
+
+
+def kernel(refit, **kwargs):
+    return KernelModel(refit=refit, refit_from=WEDNESDAY, **SEES_CALL, **kwargs)
+
+
+def day_ridge(refit, **kwargs):
+    return DayRidge(refit=refit, refit_from=WEDNESDAY, **SEES_CALL, **kwargs)
+
+
+def pooled_ols(refit, **kwargs):
+    return PooledOLS(refit=refit, refit_from=WEDNESDAY, **SEES_CALL, **kwargs)
+
+
+@pytest.fixture(scope="module")
+def profiles():
+    return profile_frame()
+
+
+@pytest.mark.parametrize(
+    ("make", "fit_method", "units", "rows_per_day"),
+    [(kernel, "_fit_model", 24 * 2, 1), (day_ridge, "_fit_days", 2, 1), (pooled_ols, "_fit_model", 2, 24)],
+    ids=["period", "day", "pooled"],
+)
+def test_a_block_call_under_once_is_a_seven_day_stretch_of_the_one_fit(
+    market, profiles, monkeypatch, make, fit_method, units, rows_per_day
+):
+    """Three stretches from a Wednesday, the first over the spring switch: one fit per unit, calls of 7 days (each the shape of
+    a `"7D"` call), a forecast the same in a run of its day alone (the models see their call's rows), and the first stretch
+    the records of `"7D"` from the same Wednesday, whose first block is that fit and that call."""
+    data = profiles if make is not kernel else market
+    cls = type(make("once"))
+    fitted = []
+    real = getattr(cls, fit_method)
+
+    def spy(self, *args):
+        fitted.append(1)
+        return real(self, *args)
+
+    monkeypatch.setattr(cls, fit_method, spy)
+    end = shift(WEDNESDAY, 20)
+    full = keyed(make("once").run(data, WEDNESDAY, end, horizon=2)._results, "day_in_test")
+    assert len(fitted) == units
+    assert {len(call) for call in cls.calls} == {7 * rows_per_day}
+    assert len(cls.calls) == 3 * units if make is kernel else 3 * 2
+    alone = keyed(make("once").run(data, shift(WEDNESDAY, 10), shift(WEDNESDAY, 10), horizon=2)._results, "day_in_test")
+    assert alone and all(full[key] == text for key, text in alone.items())
+    weekly = keyed(make("7D").run(data, WEDNESDAY, shift(WEDNESDAY, 6), horizon=2)._results, "day_in_test")
+    assert weekly == {key: text for key, text in full.items() if key[0] <= shift(WEDNESDAY, 6)}
+    later = keyed(make("7D").run(data, shift(WEDNESDAY, 7), shift(WEDNESDAY, 13), horizon=2)._results, "day_in_test")
+    assert any(full[key] != text for key, text in later.items())  # a weekly refit is another fit
+
+
+# ---------------------------------------------------------------------------
 # Stored fits: the stored fit is the one fit
 # ---------------------------------------------------------------------------
 
@@ -507,3 +573,39 @@ def test_a_frozen_choice_compares_refit_from_as_the_run_writes_it(market, tmp_pa
         assert _model_cut(model) == {k: v for k, v in cut.items() if k != "rows"}, model.refit
         path.unlink()
         manifest_path(path).unlink()
+
+
+def test_the_torch_stack_key_holds_refit_from_and_an_mlp_fits_once():
+    pytest.importorskip("torch")
+    from epftoolbox2.models import MLPDailyModel
+    from epftoolbox2.models._torch.groups import stack_key
+
+    def mlp(refit="once", refit_from=F, **kwargs):
+        return MLPDailyModel(
+            ["price_h08_d-1", "load_h08_d+{horizon}", "is_weekend_d+{horizon}"],
+            hidden=(4,),
+            training_window=WINDOW,
+            refit=refit,
+            refit_from=refit_from,
+            seeds=1,
+            max_epochs=2,
+            device="cpu",
+            stack="vmap",
+            loss="l1",
+            **kwargs,
+        )
+
+    keys = {stack_key(mlp()), stack_key(mlp(refit_from=shift(F, 1))), stack_key(mlp("60D"))}
+    assert len(keys) == 3 and None not in keys
+    data = profile_frame()
+    end = shift(F, 9)
+    once = keyed(mlp(name="a").run(data, F, end, horizon=1)._results, "day_in_test")
+    block = keyed(mlp("60D", name="a").run(data, F, end, horizon=1)._results, "day_in_test")
+    assert once == block and {json.loads(text)["refit_anchor"] for text in once.values()} == {F}
+    # Two of them stacked (one key): each unit predicts once per stretch through the stack's session, as alone.
+    pipeline = ModelPipeline()
+    pipeline.add_model(mlp(name="a")).add_model(mlp(name="b", random_state=1))
+    stacked = pipeline.run(data, F, end, horizon=1)
+    assert keyed(stacked.refs["a"]._results, "day_in_test") == once
+    alone = keyed(mlp(name="b", random_state=1).run(data, F, end, horizon=1)._results, "day_in_test")
+    assert keyed(stacked.refs["b"]._results, "day_in_test") == alone

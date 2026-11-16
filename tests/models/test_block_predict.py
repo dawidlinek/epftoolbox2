@@ -165,8 +165,8 @@ def block_spy(monkeypatch):
     seen = []
     original = worker.block_rows
 
-    def spy(cfg, unit, days, x, col_idx):
-        rows = original(cfg, unit, days, x, col_idx)
+    def spy(cfg, unit, days, x, col_idx, call=None):
+        rows = original(cfg, unit, days, x, col_idx, call)
         first = cfg["refit"]["first_ordinal"]
         seen.append((unit, [datetime.date.fromordinal(int(days[row]) + first) for row in rows], rows, days))
         return rows
