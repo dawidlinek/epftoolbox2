@@ -1003,3 +1003,37 @@ def test_live_json_says_on_which_days_and_in_which_zone_the_directory_issues(tmp
     weekly = tmp_path / "weekly"
     simple().forecast(DATA, ISSUE, weekly, horizon=2, issue_days=["Tuesday"])
     assert json.loads((weekly / "live.json").read_text())["issue_days"] == ["tuesday"]
+
+
+def test_a_noop_and_an_unchanged_call_export_the_committed_revision_and_busy_and_late_say_why_they_can_t(tmp_path):
+    live = tmp_path / "live"
+    with use_clock(FakeClock(AT)):
+        first = simple().forecast(DATA, ISSUE, live, horizon=2, deadline="11:55")
+        noop = simple().forecast(DATA, ISSUE, live, horizon=2, deadline="11:55", ensure=True)
+        unchanged = simple().forecast(DATA, ISSUE, live, horizon=2, deadline="11:55")
+    assert noop.noop and unchanged.unchanged
+    expected = first.table("products")
+    pd.testing.assert_frame_equal(noop.table("products"), expected)
+    pd.testing.assert_frame_equal(unchanged.table("products"), expected)
+    assert len(noop.export(tmp_path / "noop.csv").read_text().splitlines()) == 49
+    with LiveStore(live).hold():
+        busy = simple().forecast(DATA, ISSUE, live, horizon=2)
+    with pytest.raises(ValueError, match="'busy'"):
+        busy.frame()
+    with use_clock(FakeClock(pd.Timestamp("2023-03-07 11:00", tz="UTC"))):
+        late = simple().forecast(DATA, ISSUE, live, horizon=2, deadline="11:55")
+    with pytest.raises(ValueError, match="'late'"):
+        late.export(tmp_path / "late.csv")
+    assert not (tmp_path / "late.csv").exists()
+
+
+def test_a_live_busy_error_raised_under_the_lock_is_not_reported_as_busy(tmp_path, monkeypatch):
+    from epftoolbox2.results.live import LiveBusyError
+
+    def busy_inside(*args, **kwargs):
+        raise LiveBusyError("a model's own lock")
+
+    monkeypatch.setattr(_live, "serve_models", busy_inside)
+    with pytest.raises(LiveBusyError, match="a model's own lock"):
+        simple().forecast(DATA, ISSUE, tmp_path / "live", horizon=2)
+    assert lines(tmp_path / "live" / "issues.jsonl")[-1]["status"] == "error"

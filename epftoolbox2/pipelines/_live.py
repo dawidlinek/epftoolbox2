@@ -34,6 +34,8 @@ import datetime
 import json
 import re
 import warnings
+from contextlib import ExitStack
+from dataclasses import dataclass
 import tempfile
 import uuid
 from pathlib import Path
@@ -702,11 +704,14 @@ def latest_committed(store: LiveStore, day: str) -> Optional[Tuple[int, Any]]:
 
 
 def committed_records(
-    store: LiveStore, day: str, names: Sequence[str], formats: Mapping[str, str]
+    store: LiveStore, day: str, names: Sequence[str], formats: Mapping[str, str], revision: Optional[int] = None
 ) -> Dict[str, List[Dict]]:
-    """Each model's and ensemble's records of the latest committed revision of D, by name (none for a name without a file)."""
+    """Each model's and ensemble's records of the latest committed revision of D (or of `revision`), by name (none for a name
+    without a file)."""
     seen = store.visible("latest", None)
     seen = {day: seen[day]} if day in seen else {}
+    if revision is not None:
+        seen = {day: {revision: seen[day][revision]}} if revision in seen.get(day, {}) else {}
     out: Dict[str, List[Dict]] = {}
     for name in names:
         stem = name.lower().replace(" ", "_")
@@ -827,6 +832,8 @@ def forecast(
     options = dict(cache=cache, budget=budget_s, timeout=timeout_s, retries=retries, on_failure=on_failure)
     source = _Data(data, span, options, refresh, deadline_at, dry_run)
     store = None if save_dir is None else LiveStore(save_dir)
+    frame_zone = getattr(data.index, "tz", None) if isinstance(data, pd.DataFrame) else getattr(data, "timezone", None)
+    data_zone = None if frame_zone is None else str(frame_zone)
 
     def result(status: str, **fields: Any) -> ForecastResult:
         return ForecastResult(
@@ -839,38 +846,59 @@ def forecast(
             **fields,
         )
 
-    if store is None:
-        return _issue(pipeline, source, None, day, zone, deadline_at, call, started, result, locals_of(locals()))
-    try:
-        with store.hold(create=not dry_run):
-            return _issue(pipeline, source, store, day, zone, deadline_at, call, started, result, locals_of(locals()))
-    except LiveBusyError:
-        return result(BUSY)
-
-
-def locals_of(scope: Dict[str, Any]) -> Dict[str, Any]:
-    """The call's settings `_issue` reads, by name."""
-    keys = (
-        "wait_for",
-        "deadline",
-        "ensure",
-        "grace_s",
-        "poll_s",
-        "fit_missing",
-        "dry_run",
-        "target",
-        "horizon",
-        "horizons",
-        "freq",
-        "weekdays",
-        "day_names",
-        "info",
-        "formats",
-        "delivered",
-        "names",
-        "save_format",
+    settings = CallSettings(
+        wait_for=wait_for,
+        ensure=ensure,
+        grace_s=grace_s,
+        poll_s=poll_s,
+        fit_missing=fit_missing,
+        dry_run=dry_run,
+        target=target,
+        horizon=horizon,
+        horizons=list(horizons),
+        freq=freq,
+        weekdays=weekdays,
+        day_names=day_names,
+        info=info,
+        formats=formats,
+        delivered=delivered,
+        names=names,
+        save_format=save_format,
+        data_zone=data_zone,
     )
-    return {key: scope[key] for key in keys}
+    if store is None:
+        return _issue(pipeline, source, None, day, zone, deadline_at, call, started, result, settings)
+    held = ExitStack()
+    try:
+        held.enter_context(store.hold(create=not dry_run))
+    except LiveBusyError:  # the lock alone: a LiveBusyError of anything under it is that thing's own
+        return result(BUSY)
+    with held:
+        return _issue(pipeline, source, store, day, zone, deadline_at, call, started, result, settings)
+
+
+@dataclass(frozen=True)
+class CallSettings:
+    """One call's resolved settings, which `_issue` reads."""
+
+    wait_for: Any
+    ensure: bool
+    grace_s: Optional[float]
+    poll_s: float
+    fit_missing: str
+    dry_run: bool
+    target: str
+    horizon: int
+    horizons: List[int]
+    freq: str
+    weekdays: Optional[Tuple[int, ...]]
+    day_names: Optional[List[str]]
+    info: Any
+    formats: Dict[str, str]
+    delivered: str
+    names: List[str]
+    save_format: str
+    data_zone: Optional[str]
 
 
 def _issue(
@@ -883,11 +911,11 @@ def _issue(
     call: str,
     started: pd.Timestamp,
     result: Any,
-    settings: Dict[str, Any],
+    settings: CallSettings,
 ) -> ForecastResult:
     """Steps 2-8 of the module docstring, under the lock when there is a live directory."""
     clock = current_clock()
-    dry_run = settings["dry_run"]
+    dry_run = settings.dry_run
     issue = day.isoformat()
     writes = store is not None and not dry_run
     revision = None
@@ -901,12 +929,22 @@ def _issue(
                     f"{store.save_dir} issues in {recorded}, this pipeline in {zone}: use another save_dir for it"
                 )
         # 2. ensure: an issue with a committed revision, ok or fallback, by the deadline is done.
-        if settings["ensure"] and store is not None and store.is_live():
+        if settings.ensure and store is not None and store.is_live():
             for number, commit in sorted(store.committed(issue).get(issue, {}).items(), reverse=True):
                 limit = deadline_at if deadline_at is not None else commit.deadline
                 status = commit.line.get("status")
                 if status in (OK, FALLBACK) and (limit is None or commit.finished <= limit):
-                    return result(status, revision=number, noop=True)
+                    # What that revision holds, so `frame()` and `export()` give what was committed.
+                    held = committed_records(store, issue, settings.names, settings.formats, revision=number)
+                    data_zone = settings.data_zone
+                    return result(
+                        status,
+                        revision=number,
+                        noop=True,
+                        records={name: [_strip(record) for record in rows] for name, rows in held.items()},
+                        planned_keys=planned_keys(day, settings.horizons, settings.freq, data_zone, settings.weekdays),
+                        zone=data_zone,
+                    )
         if deadline_at is not None and clock.now() > deadline_at:
             return _late(store, writes, issue, call, started, deadline_at, result)
         if store is not None:
@@ -916,7 +954,7 @@ def _issue(
             # (`monitor()`) which days were due and in which zone.
             identity: Dict[str, Any] = {
                 "issue_timezone": zone,
-                "issue_days": list(WEEKDAYS) if settings["day_names"] is None else list(settings["day_names"]),
+                "issue_days": list(WEEKDAYS) if settings.day_names is None else list(settings.day_names),
             }
             if pipeline.frozen_choices:
                 identity["frozen_choices"] = pipeline.frozen_choices
@@ -926,9 +964,9 @@ def _issue(
                 check_identity(store, identity)
 
         # 3. refresh and poll.
-        info = settings["info"]
-        horizons, freq, target = settings["horizons"], settings["freq"], settings["target"]
-        wait_for = settings["wait_for"]
+        info = settings.info
+        horizons, freq, target = settings.horizons, settings.freq, settings.target
+        wait_for = settings.wait_for
         if wait_for is None:
             frame, polls = source.frame(), []
         elif wait_for == "rules":
@@ -937,12 +975,12 @@ def _issue(
                 columns = read_columns(
                     pipeline.models, frame, day, target, horizons, freq, info.in_data_zone(frame.index)
                 )
-                return rule_give_ups(frame, columns, info.in_data_zone(frame.index), day, freq, settings["grace_s"])
+                return rule_give_ups(frame, columns, info.in_data_zone(frame.index), day, freq, settings.grace_s)
 
-            frame, polls = wait(source, {}, day, zone, settings["poll_s"], deadline_at, columns_of=give_ups)
+            frame, polls = wait(source, {}, day, zone, settings.poll_s, deadline_at, columns_of=give_ups)
         else:
             give = {column: instant_on(day, when, zone, f"wait_for[{column!r}]") for column, when in wait_for.items()}
-            frame, polls = wait(source, give, day, zone, settings["poll_s"], deadline_at)
+            frame, polls = wait(source, give, day, zone, settings.poll_s, deadline_at)
         if not isinstance(frame.index, pd.DatetimeIndex) or frame.index.tz is None:
             raise ValueError(
                 "forecast() needs a frame whose index holds instants (a time zone): the issue day is local"
@@ -958,12 +996,12 @@ def _issue(
                 day,
                 None if store is None or not store.is_live() else store.save_dir,
                 target=target,
-                horizon=settings["horizon"],
+                horizon=settings.horizon,
                 horizons=horizons,
                 freq=freq,
                 info=run_info,
-                issue_days=settings["day_names"],
-                fit_missing=settings["fit_missing"],
+                issue_days=settings.day_names,
+                fit_missing=settings.fit_missing,
             )
         # 6. checks before export, then the ensembles.
         checks_record = None
@@ -971,10 +1009,10 @@ def _issue(
             checked = check_records(held, pipeline.checks, planned_periods(freq, data_zone), freq=freq, zone=data_zone)
             held = checked.records
             checks_record = checked.to_dict(pipeline.checks)
-        ensembles = compute_ensembles(pipeline, held, day, horizons, freq, data_zone, settings["weekdays"])
+        ensembles = compute_ensembles(pipeline, held, day, horizons, freq, data_zone, settings.weekdays)
         every = {**held, **ensembles}
-        planned = planned_keys(day, horizons, freq, data_zone, settings["weekdays"])
-        status, missing, rungs = issue_status(every[settings["delivered"]], planned)
+        planned = planned_keys(day, horizons, freq, data_zone, settings.weekdays)
+        status, missing, rungs = issue_status(every[settings.delivered], planned)
 
         # The issue's records: the snapshot of its inputs, their quality, the fits.
         # The issue day's rows as the models read them: local dates in the frame's zone (the issue zone's may be another day's).
@@ -1010,9 +1048,9 @@ def _issue(
                     continue
                 if pipeline.checks is not None:
                     manifest.checks = pipeline.checks.to_dict()
-                path = results_path(store.save_dir, name, settings["formats"][name])
+                path = results_path(store.save_dir, name, settings.formats[name])
                 check_and_write_live(
-                    manifest_path(path), manifest, model_name=name, save_format=settings["formats"][name], write=write
+                    manifest_path(path), manifest, model_name=name, save_format=settings.formats[name], write=write
                 )
 
         if store is not None:
@@ -1021,7 +1059,7 @@ def _issue(
             latest = latest_committed(store, issue)
             if latest is not None:
                 number, commit = latest
-                before = committed_records(store, issue, settings["names"], settings["formats"])
+                before = committed_records(store, issue, settings.names, settings.formats)
                 if _canonical(before, issue) == _canonical(every, issue):
                     line = None
                     head_status = commit.line.get("status", status)
@@ -1044,7 +1082,7 @@ def _issue(
         manifests_checked(write=True)
         revision = store.begin(issue, issued_at=clock.now(), snapshot=snap.hash, call=call, started=started)
         for name, held_records in every.items():
-            writer = revision.open(name, settings["formats"][name])
+            writer = revision.open(name, settings.formats[name])
             for record in held_records:
                 if record.get("status", STATUS_OK) == STATUS_OK:
                     writer.save(record)
@@ -1062,7 +1100,7 @@ def _issue(
                 status,
                 exit_code(status),
                 deadline=deadline_at,
-                delivered=settings["delivered"],
+                delivered=settings.delivered,
                 planned=len(planned),
                 missing=missing,
                 issue_timezone=zone,

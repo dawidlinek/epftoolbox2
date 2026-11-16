@@ -137,6 +137,16 @@ class ForecastResult:
     def frame(self, model: Optional[str] = None) -> pd.DataFrame:
         """The records of `model` (the delivered one by default) as a DataFrame, one row per key: `run_date`, `target_date`,
         `hour` (the period), `horizon`, `prediction` (None for a skip record), `status`, and `rung`/`member` for a fallback's."""
+        if self.status in (BUSY, LATE):
+            raise ValueError(
+                f"this call is {self.status!r}: it committed no forecast to give "
+                + (
+                    "(another call held live.lock). "
+                    if self.status == BUSY
+                    else "(the deadline passed before its revision could be committed). "
+                )
+                + "Read the issue's latest committed revision with ModelResultRef(path, ..., policy='latest')."
+            )
         name = self.delivered if model is None else model
         if name not in self.records:
             raise KeyError(f"no records of {name!r} in this result: {sorted(self.records)}")
