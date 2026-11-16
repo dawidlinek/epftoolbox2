@@ -367,8 +367,8 @@ class ModelPipeline:
             information set. "warn" and "raise" need an issue time. The level doesn't change a forecast, unless a
             predictor function catches the error a late `ctx.value()` raises at "raise" and chooses another list, which it
             must not do. Changing the level alone resumes a run.
-        engine: "on" runs the models that can be fitted from shared statistics (OLS, Ridge, LassoCV and LEAR, `BaseModel._engine_capable`) in engine groups: the
-            models of one refit rule share one read of the data and one pool of processes, which cuts the fixed cost of each
+        engine: "on" runs the models that can be fitted from shared statistics (OLS, Ridge, LassoCV and LEAR,
+            `BaseModel._engine_capable`) in engine groups: the models of one refit rule share one read of the data and one pool of processes, which cuts the fixed cost of each
             model in a study of thousands. NaiveModel, a `train_on="matching"` list, a subclass that fits without its own
             `_fit_stats` and a `forecast_only` run go through their own run as with "off". The fits of OLS, Ridge, LassoCV
             and LEAR (`solver="lars"`) with `StandardScaler` or a VST come from exact sums shared in the group: the same bits
@@ -2601,9 +2601,8 @@ class ModelPipeline:
             out["information_set"] = self.information_set.to_dict()
         if self._availability is not None:  # what was asked for; left out, a load takes the default again
             out["availability"] = self._availability
-        if (
-            self._engine is not None
-        ):  # written only when given, so a file without it takes the default, as one saved before
+        # Written only when given, so a file without it takes the default, as one saved before.
+        if self._engine is not None:
             out["engine"] = self._engine
         if self.checks is not None:  # written only when set (step 8f)
             out["checks"] = self._serialize_component(self.checks)
