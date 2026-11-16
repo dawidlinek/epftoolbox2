@@ -1306,7 +1306,7 @@ class BaseModel(ABC):
         plan = state.plan
         # Step 8f: a member-day still held (none when every task came back), checked, and its writes on file.
         if state.check_gate is not None:
-            state.check_gate.finish(self, state, store if store else _MemorySink(state.in_memory))
+            state.check_gate.finish(state, store if store else _MemorySink(state.in_memory))
             if store:
                 store.flush()
         if store and state.pool_note:
@@ -1795,7 +1795,7 @@ class BaseModel(ABC):
         its skip record through `sink`, with one example per reason. With checks (step 8f) the gate does it, writing each
         member-day's forecasts once the day is whole and has passed them (`models._checks.CheckGate`)."""
         if state.check_gate is not None:
-            state.check_gate.collect(self, state, results, skipped, sink)
+            state.check_gate.collect(state, results, skipped, sink)
             return
         for result in results:
             sink.save(result)

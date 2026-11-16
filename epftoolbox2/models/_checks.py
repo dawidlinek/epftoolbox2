@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple
 from ..results.checks import CHECK_FAILED, ForecastChecks, failure_detail, planned_periods
 
 if TYPE_CHECKING:  # pragma: no cover
-    from .base import BaseModel, _RunState
+    from .base import _RunState
 
 
 class CheckGate:
@@ -40,7 +40,7 @@ class CheckGate:
     def _run_date(self, day: int) -> datetime.date:
         return self.first_day + datetime.timedelta(days=day)
 
-    def _start(self, model: "BaseModel", state: "_RunState", sink: Any) -> None:
+    def _start(self, state: "_RunState") -> None:
         """What the run's tasks are of each member-day, and the forecasts on file of the member-days this run gives a record and
         that have some. Those without a task (every new record a skip decided before any fit) are checked by `finish`."""
         self._expected = Counter((task[2], task[1]) for task in state.tasks)
@@ -57,18 +57,17 @@ class CheckGate:
                 wanted[(self._run_date(day).isoformat(), horizon)] = ((day, horizon), done)
         if not wanted:
             return
+        store.flush()  # the skips decided before any fit, which this reads past, are on file
         for record in store.iter_lines(cols=["hour", "horizon", "run_date", "prediction"]):
             found = wanted.get((record.get("run_date"), record.get("horizon")))
             if found is not None and record.get("hour") in found[1]:
                 self._on_file.setdefault(found[0], {})[int(record["hour"])] = record.get("prediction")
 
-    def collect(
-        self, model: "BaseModel", state: "_RunState", results: List[Dict], skipped: List[Tuple[tuple, str]], sink: Any
-    ) -> None:
+    def collect(self, state: "_RunState", results: List[Dict], skipped: List[Tuple[tuple, str]], sink: Any) -> None:
         """What a job gave back (`BaseModel._collect`): its skips counted and written at once, its forecasts held by
         member-day, and each member-day this completes checked and written."""
         if self._expected is None:
-            self._start(model, state, sink)
+            self._start(state)
         touched = []
         for result in results:
             key = ((datetime.date.fromisoformat(result["run_date"]) - self.first_day).days, int(result["horizon"]))
@@ -85,11 +84,11 @@ class CheckGate:
             if self._returned[key] >= self._expected.get(key, 0):
                 self._finish(key, state, sink)
 
-    def finish(self, model: "BaseModel", state: "_RunState", sink: Any) -> None:
+    def finish(self, state: "_RunState", sink: Any) -> None:
         """At the end of the run: every member-day still held checked with what it has (none is, when every task came back),
         and every one with forecasts on file and no task, from those alone."""
         if self._expected is None:
-            self._start(model, state, sink)
+            self._start(state)
         for key in sorted({*self._held, *self._on_file}):
             self._finish(key, state, sink)
 

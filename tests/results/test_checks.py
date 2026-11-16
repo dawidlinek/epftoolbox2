@@ -405,15 +405,21 @@ def test_overrule_refuses_a_forecast_not_yet_written(tmp_path, monkeypatch):
 
 
 class FakeStore:
-    """What the gate reads of a store: whether it has results, and its forecasts."""
+    """What the gate reads of a store: whether it has results, and its forecasts. Like a store whose writer thread still holds
+    the skips decided before any fit (`unwritten`), it refuses to be read before `flush()` has written them."""
 
-    def __init__(self, records):
-        self.records = records
+    def __init__(self, records, unwritten=0):
+        self.records, self.unwritten = records, unwritten
 
     def has_results(self):
         return bool(self.records)
 
+    def flush(self):
+        self.unwritten = 0
+
     def iter_lines(self, cols=None):
+        if self.unwritten:
+            raise AssertionError("read while the writer thread still appends: flush the store first")
         return iter(self.records)
 
 
@@ -445,10 +451,10 @@ def test_the_gate_checks_a_day_whose_new_records_are_all_skips_with_its_forecast
     first = datetime.date.fromisoformat(PLAIN)
     on_file = [{"hour": p, "horizon": 1, "run_date": PLAIN, "prediction": 100.0 + p} for p in range(20)]
     on_file += [{"hour": p, "horizon": 1, "run_date": plus(PLAIN, 1), "prediction": 100.0 + p} for p in range(24)]
-    state = FakeState(tasks=[], pending=[(p, 1, 0) for p in range(20, 24)], store=FakeStore(on_file))
+    state = FakeState(tasks=[], pending=[(p, 1, 0) for p in range(20, 24)], store=FakeStore(on_file, unwritten=4))
     gate = CheckGate(ForecastChecks(), "1h", ZONE, first)
     sink = FakeSink()
-    gate.finish(None, state, sink)
+    gate.finish(state, sink)
     assert sorted(state.skipped) == [((p, 1, 0), CHECK_FAILED, True) for p in range(20)]
     assert sink.saved == []
 
@@ -462,8 +468,8 @@ def test_the_gate_holds_a_day_until_every_task_of_it_is_back():
     gate = CheckGate(ForecastChecks(), "1h", ZONE, first)
     sink = FakeSink()
     day = day_records(PLAIN, 1, "1h", {p: 100.0 + p for p in range(24)})
-    gate.collect(None, state, day[:10], [], sink)
+    gate.collect(state, day[:10], [], sink)
     assert sink.saved == []  # 14 periods still out
-    gate.collect(None, state, day[10:23], [((23, 1, 0), "missing_test_predictors")], sink)
+    gate.collect(state, day[10:23], [((23, 1, 0), "missing_test_predictors")], sink)
     assert sink.saved == [] and [s[1] for s in state.skipped] == ["missing_test_predictors"] + [CHECK_FAILED] * 23
     assert not any(s[2] for s in state.skipped)
