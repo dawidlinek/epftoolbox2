@@ -278,9 +278,18 @@ def _still_published_tail_cap(df: pd.DataFrame, now: pd.Timestamp) -> Optional[p
 
 
 class CacheManager:
-    def __init__(self, cache_dir: str = ".cache/sources", unsettled_period: pd.Timedelta = UNSETTLED_PERIOD):
+    def __init__(
+        self,
+        cache_dir: str = ".cache/sources",
+        unsettled_period: pd.Timedelta = UNSETTLED_PERIOD,
+        read_only: bool = False,
+    ):
         self.cache_dir = Path(os.path.expanduser(os.path.expandvars(str(cache_dir))))
-        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        # `read_only`: reads what is cached and writes nothing, not a lock, a directory or a dropped entry (a dry run's
+        # refresh, `DataPipeline.run(cache_writes=False)`); what isn't cached is fetched and not recorded.
+        self.read_only = read_only
+        if not read_only:
+            self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.unsettled_period = pd.Timedelta(unsettled_period)
         self.logger = get_logger(__name__)
         self._locks: Dict[str, FileLock] = {}
@@ -293,7 +302,10 @@ class CacheManager:
 
     @contextmanager
     def lock(self, cache_key: str) -> Iterator[None]:
-        """Inter-process lock for one cache key. Re-entrant within a thread."""
+        """Inter-process lock for one cache key. Re-entrant within a thread. None in a read-only manager, which writes nothing."""
+        if self.read_only:
+            yield
+            return
         if cache_key not in self._locks:
             self._locks[cache_key] = make_file_lock(self._get_cache_path(cache_key) / ".lock")
         with hold_lock(self._locks[cache_key], f"cache {cache_key}"):
@@ -301,7 +313,8 @@ class CacheManager:
 
     def _get_cache_path(self, cache_key: str) -> Path:
         path = self.cache_dir / cache_key
-        path.mkdir(parents=True, exist_ok=True)
+        if not self.read_only:
+            path.mkdir(parents=True, exist_ok=True)
         return path
 
     def _get_metadata_path(self, cache_key: str) -> Path:
@@ -323,6 +336,9 @@ class CacheManager:
         return metadata
 
     def _write_metadata(self, cache_key: str, metadata: Dict):
+        if self.read_only:
+            return
+
         def write(tmp: Path):
             with open(tmp, "w") as f:
                 json.dump(metadata, f, indent=2)
@@ -525,6 +541,8 @@ class CacheManager:
 
         Rows outside a recorded range are not stored. Each new range replaces any overlapping part of older ranges.
         """
+        if self.read_only:
+            return None
         if df is None or df.empty:
             return None
         ranges = self.covered_ranges(df, start, end, timezone, settled_until)

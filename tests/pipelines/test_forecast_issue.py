@@ -30,6 +30,7 @@ from epftoolbox2.models.residual import ResidualModel
 from epftoolbox2.models._worker import _worker_init
 from epftoolbox2.pipelines import ModelPipeline, _live
 from epftoolbox2.data.sources import CsvSource
+from epftoolbox2.data.sources.base import DataSource
 from epftoolbox2.data.transformers import LambdaTransformer, RollingStatsTransformer, TimezoneTransformer
 from epftoolbox2.pipelines import DataPipeline
 from epftoolbox2.pipelines._issue_records import read_snapshot
@@ -937,3 +938,55 @@ def test_the_export_grids_on_each_clock(freq, days, issue, horizons, products, p
         assert (first.date(), first.hour, first.minute) == (target, 0, 0)
     if freq == "1h" and issue == "2023-03-25":
         assert 2 not in set(table["slot"])
+
+
+class FrameSource(DataSource):
+    """A cached source over a frame: each fetch is the frame's rows of [start, end) in UTC, counted."""
+
+    def __init__(self, frame):
+        self._frame = frame.tz_convert("UTC")
+        self._fetches = []  # private: a source's public attributes are its cache fingerprint
+
+    @property
+    def fetches(self):
+        return self._fetches
+
+    def _validate_config(self) -> bool:
+        return True
+
+    def get_cache_config(self):
+        return {"frame": "market", "columns": list(self._frame.columns)}
+
+    def fetch(self, start, end):
+        self._fetches.append((start, end))
+        return self._frame[(self._frame.index >= start) & (self._frame.index < end)]
+
+
+def test_a_dry_run_reads_the_sources_caches_and_writes_none(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    source = FrameSource(market(days=200, start="2022-10-01"))
+    data = DataPipeline(sources=[source], transformers=[TimezoneTransformer("Europe/Warsaw")], timezone="Europe/Warsaw")
+    dry = pipeline(ols()).forecast(data, ISSUE, None, horizon=2, dry_run=True)
+    assert dry.status == "ok" and source.fetches and not (tmp_path / ".cache").exists()
+    pipeline(ols()).forecast(data, ISSUE, None, horizon=2)  # a call that writes: the cache is made
+    cached = snapshot_of(tmp_path / ".cache")
+    assert cached
+    fetched = len(source.fetches)
+    again = pipeline(ols()).forecast(data, ISSUE, None, horizon=2, dry_run=True)
+    assert len(source.fetches) == fetched  # read from the cache
+    later = pipeline(ols()).forecast(data, "2023-03-09", None, horizon=2, dry_run=True)  # partly beyond it: fetched
+    assert len(source.fetches) > fetched and later.status == "ok" and again.status == "ok"
+    assert snapshot_of(tmp_path / ".cache") == cached
+
+
+def test_a_file_cache_read_without_writes_makes_nothing(tmp_path):
+    source = FrameSource(market(days=60, start="2023-01-20"))
+    data = DataPipeline(sources=[source], transformers=[TimezoneTransformer("Europe/Warsaw")], timezone="Europe/Warsaw")
+    path = tmp_path / "cache" / "frame.parquet"
+    fresh = data.run("2023-02-01", "2023-03-01", cache=str(path), cache_writes=False)
+    assert not (tmp_path / "cache").exists() and len(source.fetches) == 1
+    data.run("2023-02-01", "2023-03-01", cache=str(path))
+    written = snapshot_of(tmp_path / "cache")
+    again = data.run("2023-02-01", "2023-03-01", cache=str(path), cache_writes=False)
+    assert len(source.fetches) == 2 and snapshot_of(tmp_path / "cache") == written
+    pd.testing.assert_frame_equal(fresh, again, check_freq=False)

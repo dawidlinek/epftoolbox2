@@ -233,8 +233,17 @@ def data_span(models: Sequence[Any], day: datetime.date, horizons: Sequence[int]
 class _Data:
     """The data of a call: a frame used as given, or a data pipeline refreshed on each `frame()` within the call's limits."""
 
-    def __init__(self, data: Any, span: Tuple[str, str], options: Dict[str, Any], refresh: str, deadline: Any):
+    def __init__(
+        self,
+        data: Any,
+        span: Tuple[str, str],
+        options: Dict[str, Any],
+        refresh: str,
+        deadline: Any,
+        dry_run: bool = False,
+    ):
         self.data = data
+        self.dry_run = dry_run
         self.span = span
         self.options = options
         self.refresh = refresh
@@ -250,6 +259,8 @@ class _Data:
         if not self.refreshable:
             return self.data
         options = dict(self.options)
+        if self.dry_run:  # decision 6: the caches are read, never written
+            options["cache_writes"] = False
         if self.refresh == "never":  # the per-source caches alone: no time for any request
             options.update(cache=True, budget=0, on_failure="cache")
         if self.deadline is not None:
@@ -813,7 +824,7 @@ def forecast(
     if span is None and _is_pipeline(data):
         span = data_span(pipeline.models, day, horizons, data)
     options = dict(cache=cache, budget=budget_s, timeout=timeout_s, retries=retries, on_failure=on_failure)
-    source = _Data(data, span, options, refresh, deadline_at)
+    source = _Data(data, span, options, refresh, deadline_at, dry_run)
     store = None if save_dir is None else LiveStore(save_dir)
 
     def result(status: str, **fields: Any) -> ForecastResult:
