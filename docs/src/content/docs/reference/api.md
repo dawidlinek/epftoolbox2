@@ -1011,7 +1011,7 @@ class BayesSearch:
         issue_time: Optional[str] = None,
         issue_timezone: str = "Europe/Brussels",
         availability: Optional[str] = None,
-        engine: str = "off",
+        engine: Optional[str] = None,                # None: "on", or the engine a resumed journal recorded
         test: Any = None,                            # Refused: a search never reads the test period
     ) -> SearchResult: ...
 

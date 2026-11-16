@@ -613,13 +613,16 @@ class BayesSearch:
         issue_time: Optional[str] = None,
         issue_timezone: str = "Europe/Brussels",
         availability: Optional[str] = None,
-        engine: str = "off",
+        engine: Optional[str] = None,
         test: Any = None,
     ) -> "SearchResult":
         """Run the search on the validation period and return its result.
 
         `target`, `horizon`/`horizons`, `freq` and `validation=(start, end)` are as in `ModelPipeline.run`; `information_set`
-        (or `issue_time` and `issue_timezone`), `availability` and `engine` as in `ModelPipeline(...)`. Each trial runs one
+        (or `issue_time` and `issue_timezone`), `availability` and `engine` as in `ModelPipeline(...)`: `engine` None, the
+        default, is "on" for a new search and, for a search resumed from its storage, the engine it recorded (a journal written
+        before the default changed records "off" and keeps it); an explicit `engine` other than the recorded one refuses, as
+        any other setting does. Each trial runs one
         model through a `ModelPipeline` of these on the frame cut after the validation end, and is scored on the forecasts for
         days up to it.
         `test=` raises: a search chooses on validation, and the test period is never read (`validation="previous_year"` too:
@@ -661,6 +664,9 @@ class BayesSearch:
         optuna = _optuna()
         with _quiet_optuna():
             storage = run.storage = self._storage()
+            if engine is None:
+                # As `ModelPipeline` follows a results folder: a resumed search keeps the engine it was made with.
+                run.pipeline["engine"] = self._recorded_engine(storage) or "on"
             settings = self._settings(run)
             study = self._open(storage, STUDY, optuna.samplers.RandomSampler(seed=self.seed), settings, warm=True)
             self._check_models(storage)
@@ -670,6 +676,16 @@ class BayesSearch:
                 self._work_rung(storage, r, run)
             self._wait_for_rung(storage, len(self._rungs) - 1)
             return SearchResult(self._record(storage, settings), make=self.make)
+
+    def _recorded_engine(self, storage: Any) -> Optional[str]:
+        """The engine the search in `storage` recorded in its settings, once its creator set it up; None for a new one."""
+        optuna = _optuna()
+        try:
+            study = optuna.load_study(study_name=STUDY, storage=storage)
+        except KeyError:  # no such study yet: this run creates it
+            return None
+        self._wait_for_setup(study, STUDY)
+        return (study.user_attrs.get(_SETTINGS) or {}).get("engine")
 
     def _storage(self) -> Any:
         optuna = _optuna()

@@ -184,7 +184,9 @@ a YAML file holds (None, bools, numbers, strings, and lists or dicts of them), s
    the first 10 trials, then where a low validation MAE is likeliest), `"random"` draws every trial at random. A trial is
    `make(params)` run through a `ModelPipeline` with `validation_every=` the rung's `every_nth_day`, and its rung's `seeds` in
    place of the model's own (a model class without a `seeds` parameter raises, at the first trial, before the dearer rungs).
-   `information_set`, `issue_time`, `availability` and `engine` of `search.run` are the trial pipeline's.
+   `information_set`, `issue_time`, `availability` and `engine` of `search.run` are the trial pipeline's. `engine` left out is
+   the pipeline's default, on, for a new search; a search resumed from its journal keeps the engine it recorded (one written
+   before the default changed recorded `"off"` and resumes on it), and an explicit other engine refuses.
 3. **Later rungs.** When every trial of a rung has finished, the best `keep` share of the trials it tried (ties by trial number,
    at least one) goes on to the next rung. 100 trials and `keep=1/3` promote 33, then 11: about 62 full-cost runs instead of 100
    (100/8 + 33/2 + 11 x 3), and the dear rung only sees settings that were already good. `rungs=None` is one rung of every day

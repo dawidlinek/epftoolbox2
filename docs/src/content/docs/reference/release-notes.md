@@ -156,7 +156,8 @@ an issue day it didn't sample.
     and a folder written the other way refuses with `ManifestMismatchError` on `fit_path`. Nothing is mixed.
   - **The old behaviour.** `ModelPipeline(engine="off")`, or `engine: off` in the pipeline's YAML or `model_pipeline.engine: off`
     in a workflow. YAML writes `engine` only when it was given, so a file saved up to 2.3 (without it) runs the new default.
-    `BayesSearch.run(engine="off")` keeps its own default.
+    `BayesSearch.run` follows the pipeline: `engine` left out is "on" for a new search, and a journal resumes on the engine it
+    recorded, so one written before (`"off"`) keeps resuming on the model path; an explicit other engine refuses.
 - **`MLPDailyModel`'s inputs go through Lago's Invariant by default.** `scaler` defaults to
   `{"name": "asinh", "params": {"standardise": False}}` (`epftoolbox2.models.mlp.INVARIANT_INPUTS`), asinh of each input's median
   and MAD on each fit's rows, binary columns kept, as the research and Lago's DNN scaled them, where it was `"standard"`. On the

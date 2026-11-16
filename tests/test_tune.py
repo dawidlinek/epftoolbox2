@@ -756,6 +756,41 @@ def test_a_journal_of_other_data_is_refused(df, monkeypatch, tmp_path):
         fake_search(n_trials=5, storage=journal).run(changed, horizon=1, validation=V)
 
 
+def test_the_engine_is_the_pipeline_s_default_and_a_journal_keeps_its_own(df, monkeypatch, tmp_path):
+    """`engine` None is "on" for a new search, as `ModelPipeline()`'s default, and is recorded so. A journal written with "off"
+    (every journal written before the default changed records it) resumes on "off" when no engine is given, its trials
+    scored on the model path, and an explicit other engine refuses, as any other setting does."""
+    engines = []
+
+    def scoring(self, values, r, run):
+        engines.append(run.pipeline["engine"])
+        return fake_score(self, values, r, run)
+
+    monkeypatch.setattr(BayesSearch, "_score", scoring)
+
+    import optuna
+
+    def recorded(journal):
+        storage = BayesSearch(make, SPACE, storage=journal)._storage()
+        return optuna.load_study(study_name=bayes.STUDY, storage=storage).user_attrs[bayes._SETTINGS]["engine"]
+
+    new = tmp_path / "new.journal"
+    fake_search(n_trials=5, storage=new).run(df, horizon=1, validation=V)
+    assert recorded(new) == "on" and set(engines) == {"on"}
+    fake_search(n_trials=5, storage=new).run(df, horizon=1, validation=V, engine="on")
+    with pytest.raises(ValueError, match="other settings or data \\(engine"):
+        fake_search(n_trials=5, storage=new).run(df, horizon=1, validation=V, engine="off")
+
+    old = tmp_path / "old.journal"
+    first = fake_search(n_trials=5, storage=old).run(df, horizon=1, validation=V, engine="off")
+    engines.clear()
+    resumed = fake_search(n_trials=5, storage=old).run(df, horizon=1, validation=V)
+    assert recorded(old) == "off" and set(engines) <= {"off"}
+    assert resumed.table().equals(first.table())
+    with pytest.raises(ValueError, match="other settings or data \\(engine"):
+        fake_search(n_trials=5, storage=old).run(df, horizon=1, validation=V, engine="on")
+
+
 def test_several_workers_need_a_storage(df, monkeypatch):
     monkeypatch.setenv(bayes.ENV_WORKERS, "2")
     with pytest.raises(ValueError, match="storage="):
