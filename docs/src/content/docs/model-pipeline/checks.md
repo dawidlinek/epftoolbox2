@@ -57,7 +57,12 @@ read the predictions and the clock alone, never an actual, so no check can let a
   hour either.
 - **Neighbours are in clock order:** 01:00 and 03:00 on a spring day, a day's last period and the next day's first never.
 - **A key skipped for another reason** (`missing_test_predictors`, `not_published`, ...) keeps its own skip record, and with
-  `periods` makes its day fail: the other periods of that day aren't kept either.
+  `periods` makes its day fail: the other periods of that day aren't kept either. So with the defaults, **one hour skipped for a
+  missing input makes the whole day `check_failed`**, and so does the Monday after a spring switch for a model reading
+  `price_d-1` (its 02:00 reads the hour the clock skipped).
+- **`not_constant` flags a day that is flat for a reason**: a model that forecasts one value all day (a constant or an
+  intercept-only model), or a naive rung on a day of zero prices. Both defaults are on, as the checks are meant for a delivered
+  curve; turn either off (`periods=False`, `not_constant=False`) where such days are expected.
 
 ## What a failing day becomes
 
@@ -91,7 +96,9 @@ engine group sends a day back period by period) and writes nothing of a failing 
   run that crashed or skipped them) is checked with the forecasts on file; when it fails, those are overruled by a `check_failed`
   skip record one revision above them, which the readers take.
 - **What checks don't do.** They don't look at inputs: the data validators stay advisory and turn no value into a missing one.
-  `verify()` runs without them, and a `ResidualModel`'s base isn't checked, only what the residual model forecasts.
+  `verify()` runs without them, and a `ResidualModel`'s base isn't checked, only what the residual model forecasts. A
+  [hyper-parameter search](/epftoolbox2/model-pipeline/hyperparameter-search/) (`tune.BayesSearch`) has no `checks`: its trials
+  are scored without them, so a setting chosen there may fail them later.
 
 ## Saving
 
