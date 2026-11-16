@@ -174,7 +174,7 @@ window the label is the usual one and says how many days differ: `T-2 12:00 (els
 has, as on the day the clocks go forward), judged on every issue day of `test` with a row at that period, and
 `known` is that of the day it comes latest, as an instant shown on the data's clock (see [Clock Changes](#clock-changes)). A
 period the issue day doesn't have (02:00 on the day clocks go forward) is
-noted under the table. On hourly data `_sNN` can be a slot of any length, so its time is `?`.
+noted under the table. On hourly data an `_sNN` whose slot length the information set wasn't told (`with_source_rules` of its transformer) can be a slot of any length, so its time is `?`.
 
 For a predictor function it shows [the distinct lists first](/epftoolbox2/model-pipeline/predictor-functions/#seeing-the-lists).
 
@@ -508,10 +508,13 @@ its first occurrence, as the transformer fills them. A `_d+k` after the slot alw
 key on a shifted name (`x_h05_d+1`) describes that very column at its row, as for any column.
 
 <Aside type="caution">
-  `_hNN` is read as an hour and `_sNN` as a quarter-hour, which on 15-minute data is all a two-digit `_sNN` can be. A
-  profile with another slot length (`freq="30min"` on hourly data also gives `_sNN` names) cannot be told apart by
-  name, so on an hourly model `_sNN` doesn't take the rule of its column and needs a key of its own in `rules=`. It is
-  then read as a quarter-hour, which for such a profile is the wrong time.
+  `_hNN` is read as an hour. `_sNN` carries no slot length in its name (every slot but an hour's is `_sNN`), so the
+  information set is told it: `with_source_rules([..., DailyProfileTransformer(columns="x", freq="30min")])` (a `Workflow` passes
+  its transformers), and `_s05` of that profile is then 02:30, not 01:15, taking the rule of its column like any slot. Untold, a
+  two-digit `_sNN` is a quarter-hour, which on 15-minute data is all it can be; on an hourly model it doesn't take the rule of its
+  column and needs a key of its own in `rules=`, and is then read as a quarter-hour, which for a profile of another slot length is
+  the wrong time. A slot shorter than the data's period holds a whole row: the 30-minute slot of hourly data at 15:00 is the hour
+  15:00 to 16:00, so a `realised("1h")` rule knows it at 17:00. Names of three or more digits (5-minute slots) aren't read as slots.
 </Aside>
 
 ---
@@ -659,7 +662,7 @@ rule reads a daily row like this, with the rule's own clock times and delays as 
 | `weather_run`, `as_of`, `weather_cutoff` | As on an hourly row, from the stamp |
 | A profile or a day aggregate | The column it was built from, at its slot or the day's last slot, as on an hourly row |
 | An hour aggregate | As a day aggregate, over its whole date (a resample's maximum of the hour means holds every hour), whatever shift follows it: stricter than needed for one that holds a single hour, such as `x_hour_mean_h-3` on a noon-stamped frame (09:00), refused where `x_h-3` passes |
-| A `_sNN` slot | Needs a rule of your own, as on hourly data |
+| A `_sNN` slot | As on hourly data: told its slot length, the rule of its column; else a rule of your own |
 
 With `realised("1h")` and a noon stamp:
 

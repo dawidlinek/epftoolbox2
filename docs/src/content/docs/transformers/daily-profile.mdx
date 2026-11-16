@@ -45,6 +45,10 @@ slot it names, not at the row's period, by the rule of the column it was built f
 `load_actual` is realised 1 h after its hour and an 11:45 issue, `load_actual_h05` is known on every row of D and
 `load_actual_h23` on none.
 
+A slot of another length than an hour is named `_sNN`, which doesn't say how long it is: a `Workflow` passes its transformers to the
+information set, which then reads `_s05` of a `freq="30min"` profile at 02:30. Outside a `Workflow` pass
+`information_set.with_source_rules([..., transformer])`; untold, `_sNN` is a quarter-hour.
+
 <Aside type="caution">
   Leading a profile (`price_h05_d+1`) looks up the prices being forecast. Only lead columns that are known in
   advance.

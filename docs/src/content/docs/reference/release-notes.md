@@ -120,6 +120,13 @@ an issue day it didn't sample.
 
 ### Fixed
 
+- **A 30-minute profile's slots are judged at their own time.** `DailyProfileTransformer` names every slot but an hour's `_sNN`, and
+  the information set read each as a quarter-hour, so with `freq="30min"` on hourly data `load_actual_s30` (15:00) was read as
+  07:30 and passed an 11:45 issue. The information set is now told the slot length: `InformationSet.with_source_rules` takes the
+  transformer (a `Workflow` passes its transformers), and `_s05` of a 30-minute profile is 02:30. A slot shorter than the data's
+  period holds a whole row, so it is known by the row's own end. The names are unchanged, and an `_sNN` the information set wasn't
+  told still needs a rule of your own on an hourly model, as before. Nothing moves for hourly or 15-minute profiles.
+
 - **A refit unit's forecasts no longer depend on how many days its block call holds.** The issue rows of a
   refit unit were taken as a Fortran-ordered block, and a variance-stabilising scaler (`asinh`, `mlog`, `poly`, `npit`) kept that
   order, so with several days in one call the model multiplied a strided row; numpy takes another kernel for it than for a
