@@ -296,7 +296,7 @@ model is `inconclusive`. If it really is known in advance, for example a column 
 
 <Aside type="tip">
   Columns from an `OpenMeteoSource` or a prefixed source get their rules from the data pipeline:
-  `ModelPipeline(information_set=InformationSet("11:45").with_source_rules(data_pipeline.sources))`. A `Workflow` does
+  `ModelPipeline(information_set=InformationSet("11:45").with_source_rules([*data_pipeline.sources, *data_pipeline.transformers]))`. A `Workflow` does
   this when it runs, but `verify` only knows the information set you give it, and `epf verify` only the rules its YAML
   lists.
 </Aside>

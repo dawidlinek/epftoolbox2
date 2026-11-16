@@ -16,28 +16,6 @@ from epftoolbox2.information_set import Availability, InformationSet
 @pytest.mark.xfail(
     strict=True,
     raises=AssertionError,
-    reason="`_sNN` profile names don't say their slot length; the information set reads each as a quarter-hour",
-)
-def test_a_half_hour_profile_slot_is_judged_at_its_own_time():
-    """DailyProfileTransformer names the slots of every length but one hour `_sNN`. With freq="30min" on hourly data,
-    `load_actual_s30` is the load at 15:00 on D, realised at 16:30 with a 1 h rule, but the information set reads it
-    as quarter-hour 30 (07:30-07:45, known 08:45) and accepts it at every period of an 11:45 issue: a look-ahead."""
-    index = pd.date_range("2024-01-01", periods=24 * 30, freq="h", tz="Europe/Warsaw")
-    raw = pd.DataFrame({"load_actual": np.arange(len(index), dtype=float)}, index=index)
-    data = DailyProfileTransformer(columns="load_actual", freq="30min").transform(raw)
-    day = data.loc["2024-01-10"]
-    assert (day["load_actual_s30"] == raw.loc["2024-01-10 15:00", "load_actual"]).all()  # 15:00 on every row
-    info = InformationSet("11:45", "Europe/Brussels", rules={"load_actual_s*": Availability.realised("1h")})
-    expanded = {(period, 1): ["load_actual_s30"] for period in range(24)}
-
-    found, _ = info.violations(expanded, "price", "1h", index, "2024-01-10", "2024-01-16")
-
-    assert {v.period for v in found} == set(range(24))
-
-
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
     reason="criterion='cv' cuts its five blocks by rows: the two rows of a doubled autumn hour can fall on either side of an edge",
 )
 def test_cv_keeps_both_rows_of_a_doubled_autumn_hour_in_one_block(monkeypatch):
@@ -174,3 +152,27 @@ def test_a_resume_over_another_target_after_test_end_gives_the_fresh_run(monkeyp
         return
     stale = sorted(key for key in fresh if resumed.get(key) != fresh[key])
     assert resumed == fresh, f"{len(stale)} of {len(fresh)} records aren't the fresh run's, e.g. {stale[:3]}"
+
+
+@pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason="an information set that wasn't told a profile's slot length (no `with_source_rules` of its transformer: "
+    "`ModelPipeline.load`, the CLI, a hand-built set) reads each `_sNN` as a quarter-hour",
+)
+def test_a_half_hour_profile_slot_is_judged_at_its_own_time_without_being_told():
+    """The same as the judged-at-its-own-time test next to `InformationSet`, with the information set not told the slot length:
+    `load_actual_s30` (15:00, an hourly row known at 17:00) is read as quarter-hour 30 (07:30, known 08:45) and accepted at every
+    period of an 11:45 issue, and `_s20` (10:00, known 12:00) as 05:00. A warning says so (`_warn_untold_slot`); what would
+    judge it is `with_source_rules([..., transformer])`."""
+    index = pd.date_range("2024-01-01", periods=24 * 30, freq="h", tz="Europe/Warsaw")
+    raw = pd.DataFrame({"load_actual": np.arange(len(index), dtype=float)}, index=index)
+    DailyProfileTransformer(columns="load_actual", freq="30min").transform(raw)
+    info = InformationSet("11:45", "Europe/Brussels", rules={"load_actual_s*": Availability.realised("1h")})
+    expanded = {(period, 1): ["load_actual_s20", "load_actual_s30"] for period in range(24)}
+
+    found, _ = info.violations(expanded, "price", "1h", index, "2024-01-10", "2024-01-16")
+
+    assert {(v.predictor, v.period) for v in found} == {
+        (name, p) for name in ("load_actual_s20", "load_actual_s30") for p in range(24)
+    }

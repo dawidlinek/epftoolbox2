@@ -120,6 +120,20 @@ an issue day it didn't sample.
 
 ### Fixed
 
+- **A 30-minute profile's slots are judged at their own time.** `DailyProfileTransformer` names every slot but an hour's `_sNN`, and
+  the information set read each as a quarter-hour, so with `freq="30min"` on hourly data `load_actual_s30` (15:00) was read as
+  07:30 and passed an 11:45 issue. The information set is now told the slot length: `InformationSet.with_source_rules` takes the
+  transformer (a `Workflow` passes its transformers), and `_s05` of a 30-minute profile is 02:30. A slot shorter than the data's
+  period holds a whole row, so it is known by the row's own end. The names are unchanged. An `_sNN` the information set wasn't
+  told (`ModelPipeline.load`, the CLI, `with_source_rules(data_pipeline.sources)` without the transformers) is still read as a
+  quarter-hour, which for a 30-minute profile is a look-ahead the check can't see: it now warns once per column when such a column
+  takes a rule of your own on an hourly model, and the recipes pass `[*data_pipeline.sources, *data_pipeline.transformers]`.
+  - **Verdicts can flip for 15-minute profiles of hourly frames, too.** A slot shorter than the frame's period is known by its
+    row's end, so `_s60` of a 15-minute profile on an hourly frame with a rule of its own is known at 17:00, not 16:15. Every
+    verdict that flips was a look-ahead accepted before. An `availability="raise"` run that passed can now raise, a listing can
+    show more, and a predictor function that asks `ctx.known` can pick other lists. Hourly profiles (`_hNN`) and 15-minute
+    profiles on 15-minute frames don't move.
+
 - **A refit unit's forecasts no longer depend on how many days its block call holds.** The issue rows of a
   refit unit were taken as a Fortran-ordered block, and a variance-stabilising scaler (`asinh`, `mlog`, `poly`, `npit`) kept that
   order, so with several days in one call the model multiplied a strided row; numpy takes another kernel for it than for a

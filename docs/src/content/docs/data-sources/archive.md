@@ -29,7 +29,7 @@ df = data.run("2026-12-01", "2027-03-31")  # days the archive covers
 
 pipeline = ModelPipeline(issue_time="11:45", issue_timezone="Europe/Brussels")
 # Outside a Workflow, tell the information set about the sources: only it knows the archive's rule.
-pipeline.information_set = pipeline.information_set.with_source_rules(data.sources)
+pipeline.information_set = pipeline.information_set.with_source_rules([*data.sources, *data.transformers])
 ```
 
 ## Parameters
@@ -76,7 +76,7 @@ Each day is read on its own, so a sub-range holds the same values as a larger ra
 
 Every column it emits has the rule `Availability.published(known_at, days_before, timezone=timezone, vintage="snapshot")`:
 published at `known_at` on the day `days_before` before the delivery day, its archive a snapshot (one value per cell, as fetched
-by then). `InformationSet.with_source_rules(data.sources)` gives it, and a `Workflow` applies it. It comes before every rule,
+by then). `InformationSet.with_source_rules([*data.sources, *data.transformers])` gives it, and a `Workflow` applies it. It comes before every rule,
 assumption and pattern of the information set, as the values were chosen by it: a rule of yours that names one of its columns
 (or a lag, profile or day statistic of one) raises `InformationSetError`, and a pattern such as `load_*` is left alone for the
 other columns it matches.

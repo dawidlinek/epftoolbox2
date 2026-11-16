@@ -1606,6 +1606,72 @@ def test_a_slot_name_of_unknown_length_on_an_hourly_model_still_needs_a_rule_of_
         perturb_unknown(pd.DataFrame({"load_actual_s30": 1.0}, index=index), "2024-01-10", info)
 
 
+def _half_hour_profile():
+    from epftoolbox2.data.transformers import DailyProfileTransformer
+
+    index = pd.date_range("2024-01-01", periods=24 * 30, freq="h", tz="Europe/Warsaw")
+    raw = pd.DataFrame({"load_actual": np.arange(len(index), dtype=float)}, index=index)
+    transformer = DailyProfileTransformer(columns="load_actual", freq="30min")
+    return index, raw, transformer, transformer.transform(raw)
+
+
+def test_a_half_hour_profile_slot_is_judged_at_its_own_time():
+    """DailyProfileTransformer names the slots of every length but one hour `_sNN`. With freq="30min" on hourly data,
+    `load_actual_s30` is the load at 15:00 on D, realised at 17:00 with a 1 h rule (an hourly row), where a quarter-hour reading
+    put it at 07:30 and accepted it at every period of an 11:45 issue. The information set is told the slot length by
+    `with_source_rules` of the transformer (a `Workflow` does)."""
+    index, raw, transformer, data = _half_hour_profile()
+    day = data.loc["2024-01-10"]
+    assert (day["load_actual_s30"] == raw.loc["2024-01-10 15:00", "load_actual"]).all()  # 15:00 on every row
+    told = InformationSet("11:45", "Europe/Brussels", rules={"load_actual_s*": Availability.realised("1h")})
+    told = told.with_source_rules([transformer])
+    expanded = {(period, 1): ["load_actual_s30"] for period in range(24)}
+
+    found, _ = told.violations(expanded, "price", "1h", index, "2024-01-10", "2024-01-16")
+
+    assert {v.period for v in found} == set(range(24))
+
+
+def test_a_half_hour_slot_starts_at_its_number_times_half_an_hour():
+    """`_s20` of a 30-minute profile is 10:00, whose hourly row (10:00-11:00) is realised at 12:00: late for 11:45. At 15
+    minutes a slot, number 20 is 05:00, known by 06:15, so the quarter-hour reading would accept it; `_s16` (08:00, known 10:00)
+    is on time either way."""
+    index, _, transformer, _ = _half_hour_profile()
+    expanded = {(period, 1): ["load_actual_s16", "load_actual_s20"] for period in range(24)}
+    told = InformationSet("11:45", "Europe/Brussels").with_source_rules([transformer])
+
+    found, unknown = told.violations(expanded, "price", "1h", index, "2024-01-10", "2024-01-16")
+
+    assert unknown == set()
+    assert _refused_periods({(v.predictor, v.period, v.horizon) for v in found}) == {"load_actual_s20": set(range(24))}
+
+
+def test_the_slot_length_is_told_per_column_and_a_fifteen_minute_profile_of_hourly_data_is_read_too():
+    from epftoolbox2.data.transformers import DailyProfileTransformer
+
+    index = pd.date_range("2024-01-01", periods=24 * 30, freq="h", tz="Europe/Warsaw")
+    transformers = [
+        DailyProfileTransformer(columns="load_actual", freq="30min"),
+        DailyProfileTransformer(columns="generation_wind_onshore", freq="15min"),
+        DailyProfileTransformer(columns="price", freq="1h"),  # `_hNN`: its names say their length
+    ]
+    info = InformationSet("11:45", "Europe/Brussels").with_source_rules(transformers)
+
+    assert info.resolve("load_actual_s05").slot == (150, 30)
+    assert info.resolve("generation_wind_onshore_s05").slot == (75, 15)
+    assert info.resolve("price_h05").slot == (300, 60)
+    assert info.copy().resolve("load_actual_s05").slot == (150, 30)
+    # Told, a slot of an hourly model takes its column's rule instead of going without one.
+    found, unknown = info.violations(
+        {(0, 1): ["generation_wind_onshore_s05_d-1"]}, "price", "1h", index, "2024-01-10", "2024-01-16"
+    )
+    assert unknown == set() and found == []
+    assert InformationSet("11:45", "Europe/Brussels").resolve("load_actual_s05").slot == (
+        75,
+        15,
+    )  # untold: a quarter-hour
+
+
 def test_a_quarter_hour_slot_on_a_15_minute_model_takes_the_rule_of_its_column():
     """On 15-minute data a two-digit `_sNN` can only be a quarter-hour: another slot length is off the data's grid or has
     three digits. So the built-in rule reaches it: realised 1 h after it ends, quarter-hour 42 (10:30-10:45) is known at
@@ -2241,3 +2307,26 @@ def test_issue_timezone_data_refuses_a_frame_in_utc_or_at_a_fixed_offset():
     named = InformationSet("10:00", "data", rules={"load": Availability.published("12:00", 0)})
     with pytest.raises(InformationSetError, match=r"\(10:00 Europe/Warsaw on the issue day D\)"):
         named.check({(0, 1): ["load"]}, "price", "1h", frame.index, "2023-05-25", "2023-05-25", check_target=False)
+
+
+def test_an_untold_slot_name_on_an_hourly_model_that_takes_a_rule_warns_once(monkeypatch):
+    """Read as a quarter-hour, which is the wrong time for a 30-minute profile: the user is told, once per column, to pass the
+    transformer. Told, on 15-minute data, and with no rule of its own (where it has none) it doesn't warn."""
+    monkeypatch.setattr("epftoolbox2.information_set._WARNED_SLOTS", set())
+    _, _, transformer, _ = _half_hour_profile()
+    own = InformationSet("11:45", "Europe/Brussels", rules={"load_actual_s*": Availability.realised("1h")})
+    with pytest.warns(UserWarning, match=r"load_actual_s30.*read as a quarter-hour.*with_source_rules") as caught:
+        own._resolve_for("load_actual_s30", 60)
+        own._resolve_for("load_actual_s30_d-1", 60)
+    assert len(caught) == 1
+    text = str(caught[0].message)
+    assert "ModelPipeline.load" in text and "Workflow" in text and "rule of its own" in text  # both remedies
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        own._resolve_for("load_actual_s30", 60)  # once
+        own.with_source_rules([transformer])._resolve_for("load_actual_s31", 60)  # told
+        monkeypatch.setattr("epftoolbox2.information_set._WARNED_SLOTS", set())
+        own._resolve_for("load_actual_s30", 15)  # a quarter-hour on 15-minute data
+        InformationSet("11:45", "Europe/Brussels")._resolve_for(
+            "load_actual_s30", 60
+        )  # no rule of its own: a column without one
