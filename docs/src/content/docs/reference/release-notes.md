@@ -237,13 +237,16 @@ an issue day it didn't sample.
   retries' waits, which follow the current clock). See [Clock](/epftoolbox2/reference/api/#clock).
 - **A refresh with a budget: `DataPipeline.run(..., budget=, deadline=, timeout=, retries=, on_failure=)` and `last_refresh`**
   (step 8b). `budget` (seconds from now, on the clock) and `deadline` (an instant; a naive one in the pipeline's zone) bound the
-  whole refresh, the earlier counting: the sources are asked one after another, each within what is left, a request only while
-  time is left and with its timeout cut to it, and a wait that would end at or after the deadline (a backoff, a Retry-After,
-  Energy-Charts' rate limit) is never started: the source raises `SourceTimeout` (`epftoolbox2.data.refresh`) instead, and a
-  source whose turn comes after the deadline isn't asked (`skipped`). `timeout` and `retries` replace every request's own; they
-  are run arguments, so YAML files and cache keys don't move. `on_failure="cache"` (with `cache=True`) gives a source that
-  failed, timed out or got no time only what its cache holds, settled rows and never the last two days before now, and goes on;
-  `"raise"`, the default, raises as before. `pipeline.last_refresh` is a `RefreshRecord`, also after a run that raised: per source
+  whole refresh, the earlier counting (`deadline="11:55"` is that time today in the pipeline's zone, on the clock; another string
+  needs a full date): the sources are asked one after another, each within what is left, a request only while time is left and
+  with its timeout cut to it, and a wait that would end at or after the deadline (a backoff, a Retry-After, Energy-Charts' rate
+  limit, another process's cache lock) is never started: the source raises `SourceTimeout` (`epftoolbox2.data.refresh`)
+  instead (`skipped` when it couldn't send a request, `timeout` after). Every source is started, so a full cache hit or a
+  local source needs no time. `timeout` and `retries` replace every request's own; they are run arguments, so YAML files and
+  cache keys don't move. `on_failure="cache"` (with `cache=True`) gives a source out of reach (out of time, a network error,
+  retries run out on 429 or 5xx) only what its cache holds, settled rows and never the last two days before now, and goes on;
+  an invalid key, a missing file or a bug is raised, a source whose cache holds no row warns, and no row at all raises
+  `RefreshError`. `"raise"`, the default, raises as before. `pipeline.last_refresh` is a `RefreshRecord`, also after a run that raised: per source
   its status (`ok`, `failed`, `timeout`, `skipped`), seconds on the clock, requests and retries, its error with every key of the
   pipeline's sources replaced by `***` (plain and URL-encoded), its rows and the last valid timestamp of each column; `to_dict()`
   is JSON. The retry loops of ENTSO-E, PSE, Energy-Charts, Open-Meteo and OpenHolidays are one (`data/sources/_http.py`) with each

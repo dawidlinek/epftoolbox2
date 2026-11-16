@@ -183,12 +183,19 @@ df = pipeline.run("today_d-30", "today_d+1", cache=True, budget=300, timeout=30,
 - The sources are asked one after another, each within what is left. A request is sent only while time is left, with its
   timeout cut to what is left, and a wait that would end at or after the deadline is never started: a retry's backoff, a
   server's Retry-After, Energy-Charts' rate limit. The source raises `SourceTimeout` (`epftoolbox2.data.refresh`) instead,
-  with its last error. A source whose turn comes after the deadline is not asked at all (`skipped`). So a source that answers
-  503 forever costs the budget and at most one request's timeout more.
+  with its last error, also when its last attempt ran into the deadline. Every source is started, also after the deadline:
+  a full hit of its cache and work of its own (a CSV file, a calendar, another pipeline's forecasts) need no time, and only
+  a request it really needs runs out of it (`skipped` when it couldn't send one, `timeout` after it sent some). So a source
+  that answers 503 forever costs the budget and at most one request's timeout more.
+- Waiting for a cache lock another process holds (it is fetching the same source) counts too: the wait lasts as long as the
+  time left, then the source is `skipped` and its error names the cache lock. That wait is on real time, as the other
+  process is.
 - `timeout` and `retries` replace each source's own for every HTTP request (ENTSO-E and PSE: 60 s and 5 retries,
   Energy-Charts 60 s and 6, Open-Meteo 60 s and 4, OpenHolidays 30 s and 2). They are arguments of the run, not of the sources, so a saved pipeline
   and its cache keys don't change. `retries=0` asks once.
-- A naive `deadline` is a time of the pipeline's `timezone`, as a naive `start` is (UTC without one).
+- A naive `deadline` is a time of the pipeline's `timezone`, as a naive `start` is (UTC without one). A time of day alone,
+  `deadline="11:55"`, is that time on today's date in that zone, read on the clock; once it has passed it leaves no time.
+  Any other string needs a full date (`"2026-10-21 11:55"`): `"noon"` or `"Oct 21"` raise `ValueError`.
 - Budgets and deadlines are read on the clock (`epftoolbox2.clock`), so a test or a simulated week runs them on a
   `FakeClock` without waiting. A Retry-After given as an HTTP date is an instant of real time and is read against the
   machine's clock, and Energy-Charts' rate limit counts real seconds, so a replay on a fake clock against a real server keeps
@@ -197,16 +204,21 @@ df = pipeline.run("today_d-30", "today_d+1", cache=True, budget=300, timeout=30,
 
 ### Failure modes
 
-| `on_failure` | A source that failed, ran out of time or got no time |
-|--------------|-------------------------------------------------------|
+| `on_failure` | A source that ran out of time or out of reach |
+|--------------|-----------------------------------------------|
 | `"raise"` (default) | Its error is raised, a `SourceTimeout` included, and `last_refresh` ends at it |
 | `"cache"` (needs `cache=True`) | It gives only what its source cache holds, and the run goes on |
+
+Out of reach means out of time (`SourceTimeout`), a network error, or retries that ran out on network errors, 429 or 5xx
+answers. Anything else is raised with either setting: an invalid key or another refused request, a missing file, a bug. A
+source out of reach whose cache holds no row of the range leaves its columns out of the frame, with a `RuntimeWarning`
+naming it; when no source gives a row at all, `run` raises `RefreshError` (`epftoolbox2.data.refresh`) naming each one.
 
 What the source cache holds is settled data only: never the last two days before now, nor a tail the source declared
 unsettled (see [What is recorded as cached](#what-is-recorded-as-cached)). So with `on_failure="cache"` a failed source's
 recent cells are missing, and the models decide what that means (a model skips a forecast whose predictor is NaN, a
-`FallbackEnsemble` takes the next rung). Nothing is filled with an older value. A source without a cache of its own
-(`CsvSource`, `ForecastSource`) gives no rows and no columns. A part a failed fetch had already written to the cache counts:
+`FallbackEnsemble` takes the next rung). Nothing is filled with an older value. A source without a cache of its own gives
+no rows and no columns. A part a failed fetch had already written to the cache counts:
 the cache is read after the fetch let go of its lock.
 
 The lock of a source's cache is held around its fetch and the write, and a fetch that raises (a `SourceTimeout` too) lets go

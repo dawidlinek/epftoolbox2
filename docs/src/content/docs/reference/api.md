@@ -28,10 +28,10 @@ class DataPipeline:
         cache: Union[bool, str] = False,  # Caching option
         *,
         budget: Optional[float] = None,   # Seconds the sources may take, from now on the clock
-        deadline: Union[None, str, pd.Timestamp] = None,  # An instant they must be done by (naive: in `timezone`)
+        deadline: Union[None, str, pd.Timestamp] = None,  # An instant (naive: in `timezone`), or "HH:MM" today
         timeout: Optional[float] = None,  # Seconds per HTTP request, in place of each source's own
         retries: Optional[int] = None,    # Retries per HTTP request, in place of each source's own
-        on_failure: str = "raise",        # "raise", or "cache" (with cache=True): a failed source's settled cached rows
+        on_failure: str = "raise",        # "raise", or "cache" (with cache=True): an unreachable source's cached rows
     ) -> pd.DataFrame: ...                # last_refresh then holds a RefreshRecord of the run
 
     def save(
@@ -48,7 +48,7 @@ class DataPipeline:
 [Refresh with a budget](/epftoolbox2/data-pipeline/caching/#refresh-with-a-budget)):
 
 ```python
-from epftoolbox2.data.refresh import RefreshRecord, SourceRefresh, SourceTimeout
+from epftoolbox2.data.refresh import RefreshError, RefreshRecord, SourceRefresh, SourceTimeout
 
 class RefreshRecord:                        # DataPipeline.last_refresh
     start: pd.Timestamp                     # The run's range [start, end), UTC
@@ -80,6 +80,7 @@ class SourceRefresh:
     def to_dict(self) -> Dict[str, Any]: ...
 
 class SourceTimeout(RuntimeError): ...      # A source ran out of the refresh's time; `deadline` is the instant
+class RefreshError(RuntimeError): ...       # on_failure="cache" and no source gave a row
 ```
 
 ---
