@@ -392,6 +392,21 @@ an issue day it didn't sample.
   deadline is recorded. Backtest records, readers, manifests and Parquet parts are bit for bit as before (the live columns are in
   live parts alone). A JSONL store now writes records saved after its `flush()` (they were dropped; no backtest saves any), and
   saving into a closed store raises. See [Live records](/epftoolbox2/model-pipeline/caching/#live-records).
+- **`ModelPipeline.monitor`: how a live directory's forecasts did, skill first** (step 8h). `monitor(data, save_dir, *, windows=(7, 30,
+  90), benchmarks=None, policy="latest", cutoff="deadline", backtest=None, alerts=None, target="price")` reads a live directory and
+  writes nothing, and returns a `MonitorReport` (`tables()`, `by_window()`, `daily()`, `rungs()`, `quality()`, `alerts`). Each key is
+  read from the revision `policy` names (`"latest"`, `"first"`, `"delivered"`) of those committed by the cut-off; its actual is the
+  data's value at the same period `horizon` local days after the issue day, scored once the target's rule says it is out on the
+  clock. Per member and window: forecasts, MAE, RMSE (pooled and the mean of daily RMSE), bias, level (the mean of |daily mean
+  error|), shape (MAE after removing each day's mean error), skill against each benchmark (MAE ratio on common keys, with the
+  count, the days and the days won), participation and delivered shares, rung counts per policy, the score on fallback days,
+  input-quality days and, with `backtest=`, the live/backtest skill ratio on matched target days, all through `LossPanel` on
+  common keys. A live/backtest ratio is on the forecast keys both hold; `data` is converted to the zone the members' manifests record;
+  `check_failed` keys and days are counted and warned about; `"delivered"` takes the delivered revision whenever its delivery was
+  recorded (`LiveStore.visible` keeps asking for it by the cut-off); only the weekdays the pipeline issues on are due; `days_`, `wins_`
+  and `for_days` count issue days (run dates); a day no rung served is a skipped day. `alerts` (a list of mappings or a YAML file: `skill_above` for n days, `participation_below`, `delivered_below`,
+  `rung_at_least`, `stale_input`) fire into `report.alerts`. `LossPanel` gained `day_ids` and `run_days`. Nothing that exists moves:
+  backtests, records and tables are bit for bit as before. See [Monitoring](/epftoolbox2/operations/monitoring/).
 - **Snapshot archives and `ArchiveSource`: what the sources returned, when, replayed as an honest vintage** (step 8j).
   `SnapshotArchive(path).record(data_pipeline, days_back=3, days_ahead=2)`, run by a job you schedule (cron, a systemd timer, SLURM:
   the library schedules nothing), fetches every source over the whole local days around today, bypassing every cache, and stores

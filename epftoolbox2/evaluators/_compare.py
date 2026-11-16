@@ -228,6 +228,15 @@ class LossPanel:
         tested = [group for group in groups.values() if len(group) > 1]
         return [[benchmark, *repeats], *tested] if repeats else tested
 
+    def day_ids(self, rows: np.ndarray) -> np.ndarray:
+        """The day of each key in `rows`: an integer per (run_date, horizon), the delivered curve of one target day, in calendar
+        order (a later run date or horizon has a larger id). What `daily` groups by."""
+        return self._day[rows]
+
+    def run_days(self, rows: np.ndarray) -> np.ndarray:
+        """The run date of each key in `rows`, as a count of days since 1970-01-01."""
+        return self._run_days[self._run_of_day[self._day[rows]]]
+
     def daily(self, rows: np.ndarray, models: Sequence[str]) -> "DailyLosses":
         """Daily losses of `models` on exactly the keys in `rows`, which all of them must hold.
 

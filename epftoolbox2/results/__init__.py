@@ -5,6 +5,7 @@ from .ref import ModelResultRef
 from .manifest import Manifest, ManifestMismatchError, read_windows
 from .windows import RunWindows, Segment
 from .checks import ForecastChecks
+from .monitor import Alert, MonitorReport
 
 __all__ = [
     "ResultStore",
@@ -17,4 +18,6 @@ __all__ = [
     "Segment",
     "read_windows",
     "ForecastChecks",
+    "MonitorReport",
+    "Alert",
 ]
