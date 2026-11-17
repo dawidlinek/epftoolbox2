@@ -75,7 +75,10 @@ What the call does, in order:
    `retries`, `on_failure`, and never past the deadline; see [Caching](/epftoolbox2/data-pipeline/caching/)); a DataFrame is
    used as given. `wait_for={column: "HH:MM"}` polls: while the column lacks a value on a row of the issue day (its rows as the
    models take them, by local date in the frame's zone) and its give-up time hasn't passed, the call sleeps `poll` on the clock
-   and refreshes again. `wait_for="rules"` waits for every column a model
+   and refreshes again. Name the columns the models read on those rows: `load_forecast_d+1` is tomorrow's load forecast there,
+   while `load_forecast` is the issue day's own, out since the day before. A column no model reads (no fixed list, no list or
+   `ctx` question of a predictor function) makes the call warn, naming the shifted column of that name the models read.
+   `wait_for="rules"` waits for every column a model
    may read until its rule's publication time plus `grace` (a column out only after the issue time is never waited for: no list
    may use it). Every poll goes into `waits.json`.
 4. **Plan.** Each model's issue day is planned as a backtest of that day alone. A predictor function's `ctx.published(c)` is
@@ -93,9 +96,10 @@ What the call does, in order:
    failing member-day into `check_failed` skips; then every ensemble, a [`FallbackEnsemble`](/epftoolbox2/model-pipeline/fallback/)
    among them, is computed from the records as a backtest computes it. A `top=` ensemble chooses on validation, which a live call
    can't: freeze it first (`pipeline.frozen(study_dir)`).
-7. **Commit.** Past the deadline by the clock: status `late`, exit 30, a call line and nothing else. Forecasts equal to the latest
-   committed revision's (every model's and ensemble's predictions, statuses, skip details, rungs and members, key by key; not the
-   list a skip would have read): no revision, `unchanged`, that revision's status.
+7. **Commit.** Past the deadline by the clock: status `late`, exit 30, a call line and nothing else. Records identical to the latest
+   committed revision's, in full (every model's and ensemble's records, every field but the live keys: a skip's list and a
+   failed check's detail included): no revision, `unchanged`, that revision's status. So the last revision of a day is the
+   backtest's record of its frame, skips and their lists included.
    Otherwise the next revision is written: every model's and ensemble's records, the issue's files, the live manifests, then the
    commit line that makes it visible.
 
@@ -236,7 +240,7 @@ What each call gave (times Berlin; "r" is the revision written):
 | Thu 22 (Fri 23) | EXAA late, at 11:37 | 08:45 | ok | 0 | r1 |
 | | | 11:20 | ok | 0 | r2 at 11:40 after five polls, with EXAA; the backtest's |
 | Fri 23 (Sat 24) | A65 for Saturday never published | 08:45 | fallback | 10 | r1 at 10:45 (gave up): main skipped on its 96 keys, base serves (rung 1); `quality.json`: 96 missing A65 cells |
-| | | 11:20 | fallback | 10 | none (`unchanged`: EXAA is out, but no member that serves reads it) |
+| | | 11:20 | fallback | 10 | r2: base serves again; main's skips now carry its list with EXAA (out at 11:08), as the backtest's do |
 | Sat 24 (Sun 25, 100 products) | every request 503 from 08:00 to 11:25 | 08:45 | fallback | 10 | r1 at 10:46: naive serves (rung 2), the cache holding settled rows only; every poll's refresh `timeout` within its 120 s; the export has 100 products |
 | | | 11:20 | ok | 0 | r2 at 11:27: the 11:20 poll timed out, the next refreshed; rung 0, the backtest's |
 | Sun 25 (Mon 26) | no 08:45 call; a hung call holds `live.lock` until 09:40 | 09:30 `--ensure` | busy | 75 | none; nothing written |
@@ -259,9 +263,11 @@ What each call gave (times Berlin; "r" is the revision written):
 The monitor scores 668 of the 672 keys (the repeated autumn hour's four have no actual), participation 7 of 7, the final rungs
 {0: 5, 1: 2, 2: 0} and the first revisions' {0: 4, 1: 2, 2: 1}. The last revision of each day before the deadline equals a
 backtest of the same pipeline over what the server holds at the end of the week, record by record (but the actual, which a
-forecast issued at 11:45 can't have), on all seven days: the pipeline that was backtested is the one that ran. On Friday main's
-skips keep the list without EXAA (r1 was made before it), where the backtest's carry the list with it. First revisions differ
-from the backtest where they had less: no EXAA yet, the outage's cache, the stale fit. The whole week run again into a fresh
+forecast issued at 11:45 can't have), on all seven days, skips and their lists included: the pipeline that was backtested is the
+one that ran. First revisions differ from the backtest where they had less: no EXAA yet, the outage's cache, the stale fit. The
+monitor's input-quality days are those whose `quality.json` records a missing or imputed cell or a source that failed or timed
+out: Friday in the last revisions, Friday and Saturday in the first. Tuesday's 1e6 is a value, not a missing cell: implausible
+values are the checks' business, in `checks.json` and the monitor's `check_failed` columns. The whole week run again into a fresh
 directory, in Parquet, gives the same records, snapshots and exit codes, byte for byte.
 
 ## What each guard answers
