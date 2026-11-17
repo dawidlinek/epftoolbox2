@@ -15,7 +15,7 @@ periods are the records', and `rmse_daily`, `level`, `shape` and `partial_days` 
 the member has a forecast and a known actual for:
 
 - `forecasts`, `mae`, `rmse` (pooled), `rmse_daily` (the mean of the curves' RMSEs, the arena's convention), `bias` (the mean
-  error), `partial_days` (curves with only part of their periods scored, flagged with a warning and `attrs["partial_days"]`);
+  error), `partial_days` (curves with fewer scored forecasts than their own target date has periods to score: 23 of 24 is partial, 23 of the 23 of a spring day isn't; flagged with a warning and `attrs["partial_days"]`);
 - `level`, the mean over curves of |the curve's mean error|, and `shape`, the MAE after removing each curve's mean error. Per
   curve `mean|e| <= |mean e| + mean|e - mean e|`, so `mae <= level + shape` when the curves weigh the same; level is what the
   forecast got wrong about the whole curve (a shared input or weather problem), shape what it got wrong inside it;
@@ -27,7 +27,7 @@ the member has a forecast and a known actual for:
 - `participation`: the share of the window's issue days with a revision committed before the deadline (the cut-off), whatever
   the policy; `delivered`: the share with a delivery recorded; `member_days`: the issue days the member has a forecast on;
 - for a `FallbackEnsemble`: `fallback_days`, the issue days a rung above 0 served, `skipped_days`, those no rung served (a planned
-  horizon of a committed day with no forecast: worse than any rung, a row of `rungs()` and read so by `rung_at_least`), and
+  horizon of a committed day with no forecast or short of its planned periods: worse than any rung, a row of `rungs()` and read so by `rung_at_least`), and
   `fallback_mae` on the keys a rung above 0 served;
 - `quality_days`: the issue days whose `quality.json` (step 8f) records a missing cell, an imputed cell or a source that didn't
   refresh, of `quality_records` days that have one;
@@ -70,6 +70,7 @@ A key the rule doesn't know raises, so a typo never silently disables an alert.
 
 from __future__ import annotations
 
+import datetime
 import json
 import math
 import warnings
@@ -88,6 +89,7 @@ from .live import POLICIES, LiveStore, _warn_dropped, local_instant
 from .checks import CHECK_FAILED
 from .store import OK_ONLY, LiveDirectoryError, read_records
 
+_EPOCH = datetime.date(1970, 1, 1)
 # What a record is read for.
 _COLUMNS = ["run_date", "target_date", "hour", "horizon", "prediction", "freq", "revision", "rung", "member"]
 RUNG_CHANNEL = "\x00rung"  # a panel channel that carries each key's rung, as a "model" whose error is the rung
@@ -380,15 +382,57 @@ def _rung_frame(frame: pd.DataFrame, known: np.ndarray) -> pd.DataFrame:
     )
 
 
+class _Periods:
+    """How many periods a forecast curve has: the clock's (`models._calendar.clock_periods`) on its issue day and its target date at
+    `freq` in `zone` (23 and 25 hours around a switch, 92 and 100 quarter-hours; every period without a zone), and how many of them
+    can be scored: the hour a target date repeats in autumn has no actual (a run has none for it either), so it isn't one."""
+
+    def __init__(self, zone: Any, freq: str) -> None:
+        self.zone, self.freq = zone, freq
+        self._planned: Dict[Tuple[datetime.date, datetime.date], Tuple[int, ...]] = {}
+        self._repeated: Dict[datetime.date, Tuple[int, ...]] = {}
+
+    def planned(self, run_day: int, horizon: int) -> Tuple[int, ...]:
+        """The period ids planned for issue day `run_day` (days since 1970-01-01) at `horizon`: on the clock of both dates."""
+        from ..models._calendar import clock_periods, periods_per_day
+
+        run = _EPOCH + datetime.timedelta(days=int(run_day))
+        target = run + datetime.timedelta(days=int(horizon))
+        key = (run, target)
+        if key not in self._planned:
+            if self.zone is None:
+                self._planned[key] = tuple(range(periods_per_day(self.freq)))
+            else:
+                there = set(clock_periods(run, self.freq, self.zone))
+                self._planned[key] = tuple(p for p in clock_periods(target, self.freq, self.zone) if p in there)
+        return self._planned[key]
+
+    def scorable(self, run_day: int, horizon: int) -> int:
+        """How many of the planned periods can have an actual."""
+        target = _EPOCH + datetime.timedelta(days=int(run_day) + int(horizon))
+        if target not in self._repeated:
+            repeated: Tuple[int, ...] = ()
+            if self.zone is not None and self.freq != "1D":
+                step = pd.Timedelta(hours=1) if self.freq == "1h" else pd.Timedelta(minutes=15)
+                first = pd.Timestamp(target).tz_localize(self.zone, nonexistent="shift_forward", ambiguous=True)
+                end = pd.Timestamp(target + datetime.timedelta(days=1)).tz_localize(
+                    self.zone, nonexistent="shift_forward", ambiguous=True
+                )
+                instants = pd.date_range(first, end, freq=step, inclusive="left")
+                counts = pd.Series(period_index(instants, self.freq)).value_counts()
+                repeated = tuple(int(p) for p in counts[counts > 1].index)
+            self._repeated[target] = repeated
+        return len(set(self.planned(run_day, horizon)) - set(self._repeated[target]))
+
+
 def _panel(frames: Mapping[str, pd.DataFrame], rungs: Mapping[str, pd.DataFrame], freq: str) -> LossPanel:
     """A `LossPanel` of the members' signed frames and, for each with a rung, its rung channel."""
     every = dict(frames)
     for name, frame in rungs.items():
         every[name + RUNG_CHANNEL] = frame
-    whole = (1,) if freq == "1D" else (23, 24, 25, 92, 96, 100)
     with warnings.catch_warnings():
         warnings.simplefilter("error", UserWarning)  # actuals agree by construction, so this never hides one
-        return LossPanel(every, whole_day_periods=whole)
+        return LossPanel(every)
 
 
 def _day_numbers(days: Iterable[str]) -> np.ndarray:
@@ -402,7 +446,15 @@ def _per_day(day_ids: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     return ids, inverse, np.bincount(inverse, minlength=len(ids))
 
 
-def _stats(panel: LossPanel, rows: np.ndarray, name: str) -> Dict[str, float]:
+def _partial(panel: LossPanel, rows: np.ndarray, ids: np.ndarray, count: np.ndarray, periods: _Periods) -> int:
+    """How many of the curves `ids` (counts `count`, of the keys `rows`) have fewer scored keys than periods to score."""
+    first = np.unique(panel.day_ids(rows), return_index=True)[1]
+    run_days, horizons = panel.run_days(rows)[first], panel.horizon[rows][first]
+    wanted = np.array([periods.scorable(r, h) for r, h in zip(run_days, horizons)])
+    return int((count != wanted).sum())
+
+
+def _stats(panel: LossPanel, rows: np.ndarray, name: str, periods: _Periods) -> Dict[str, float]:
     """The absolute metrics of one member on the keys of `rows` it holds a scored forecast of."""
     j = panel.column(name)
     absolute = panel.errors[rows, j]
@@ -432,8 +484,8 @@ def _stats(panel: LossPanel, rows: np.ndarray, name: str) -> Dict[str, float]:
         bias=float(signed.mean()),
         level=float(np.abs(mean_signed).mean()),
         shape=float(np.abs(signed - mean_signed[inverse]).mean()),
-        # days (an issue day at a horizon) with only part of their periods scored, as `LossPanel.daily` counts them
-        partial_days=int(np.isin(count, panel.whole_day_periods, invert=True).sum()),
+        # curves with fewer scored forecasts than their own target date has periods (23 of 24 is partial, 23 of 23 isn't)
+        partial_days=_partial(panel, rows, ids, count, periods),
     )
 
 
@@ -674,19 +726,26 @@ def _frequency(frame: pd.DataFrame) -> str:
 SKIPPED = float("inf")  # the rung of a day no rung served: worse than any
 
 
-def _served_days(frame: pd.DataFrame, planned: Sequence[str], horizons: Sequence[int]) -> pd.DataFrame:
-    """A fallback ensemble's planned issue days (the due days with a committed revision), one row each (`run_date_text`, `run_date`,
-    `rung`): the highest rung that served a key of the day, from every key read, scored or not (a fallback is known the day it
-    is issued), or `SKIPPED` when a horizon planned (any member's, in the directory) has no forecast of it, a day no rung served."""
+def _served_days(
+    frame: pd.DataFrame, planned: Sequence[str], horizons: Sequence[int], periods: _Periods
+) -> pd.DataFrame:
+    """A fallback ensemble's planned issue days (the due days with a committed revision), one row each (`run_date_text`,
+    `run_date`, `rung`): the highest rung that served a key of the day, from every key read, scored or not (a fallback is known the
+    day it is issued), or `SKIPPED` when a horizon planned (any member's, in the directory) has no forecast of it or fewer than
+    its planned periods (a curve missing an hour is no day to deliver: `forecast()` calls it skipped)."""
     columns = ["run_date_text", "run_date", "rung"]
-    served = frame.groupby(["run_date_text", "horizon"])["rung"].max() if len(frame) else pd.Series(dtype=float)
-    held = {(d, int(h)): rung for (d, h), rung in served.items()}
+    held: Dict[Tuple[str, int], Tuple[float, int]] = {}
+    if len(frame):
+        grouped = frame.groupby(["run_date_text", "horizon"]).agg(rung=("rung", "max"), n=("hour", "size"))
+        held = {(d, int(h)): (float(r), int(n)) for (d, h), (r, n) in grouped.iterrows()}
     rows = []
     for day in planned:
-        rungs = [held.get((day, int(h))) for h in horizons]
-        rows.append(
-            (day, pd.Timestamp(day), SKIPPED if any(r is None for r in rungs) or not rungs else float(np.nanmax(rungs)))
+        run_day = (datetime.date.fromisoformat(day) - _EPOCH).days
+        found = [held.get((day, int(h))) for h in horizons]
+        lacking = not horizons or any(
+            f is None or f[1] < len(periods.planned(run_day, h)) for f, h in zip(found, horizons)
         )
+        rows.append((day, pd.Timestamp(day), SKIPPED if lacking else float(np.nanmax([f[0] for f in found]))))
     return pd.DataFrame(rows, columns=columns)
 
 
@@ -780,6 +839,7 @@ def _rungs(
     days: Sequence[str],
     through: Optional[str],
     horizons: Sequence[int],
+    periods: _Periods,
     freq: str,
 ) -> pd.DataFrame:
     """The rung table (`MonitorReport.rungs`): each fallback ensemble read under every policy."""
@@ -789,7 +849,7 @@ def _rungs(
         for policy in POLICIES:
             frame, actual, known = read[(member.name, policy)]
             committed = [d for d in days if visible[policy].get(d)]
-            served_days = _served_days(frame, committed, horizons)
+            served_days = _served_days(frame, committed, horizons, periods)
             panel = _panel({member.name: _signed(frame, actual, known)}, {member.name: _rung_frame(frame, known)}, freq)
             rows = panel.rows()
             run_days = panel.run_days(rows)
@@ -1016,6 +1076,7 @@ def monitor(
         raise ValueError(f"monitor() needs one frequency, but these members' results have several: {freqs}")
     freq = next(iter(freqs.values()), "1h")
     actuals = _Actuals(data, target, freq, information_set, now)
+    periods = _Periods(data.index.tz if isinstance(data.index, pd.DatetimeIndex) else None, freq)
     ladders = [m for m in members if m.ladder]
     # every frame to score, the ladders' under each policy too, looked up in one pass: a key is looked up once however many hold it
     ladder_keys = {
@@ -1035,7 +1096,7 @@ def monitor(
     bt_panel = _backtest_panel(backtest, names, freq) if backtest is not None else None
     horizons = sorted({int(h) for frame in keys.values() for h in frame["horizon"].unique()})
     planned = [d for d in days if revisions.get(d)]
-    served = {m.name: _served_days(keys[m.name], planned, horizons) for m in ladders}
+    served = {m.name: _served_days(keys[m.name], planned, horizons, periods) for m in ladders}
 
     daily = _daily(panel, names, benchmarks)
     skill_days = {(m, b): _skill_days(panel, m, b) for m in names for b in benchmarks if m != b}
@@ -1052,7 +1113,7 @@ def monitor(
         for name in names:
             raw = keys[name][keys[name]["run_date_text"].isin(in_window)]
             row: Dict[str, Any] = {"window": window, "member": name}
-            stats = _stats(panel, mine, name)
+            stats = _stats(panel, mine, name, periods)
             for bench in benchmarks:
                 skill = (
                     dict(skill=math.nan, common=0, days=0, wins=0)
@@ -1135,7 +1196,7 @@ def monitor(
         now=now,
         _tables=tables,
         _daily=daily,
-        _rungs=_rungs(ladders, visible, read, windows, days, through, horizons, freq),
+        _rungs=_rungs(ladders, visible, read, windows, days, through, horizons, periods, freq),
         _quality=quality_table,
     )
     report.alerts = _evaluate(rules, report, skill_days, served, quality, store, committed_days, delivered, days)

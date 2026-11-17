@@ -19,6 +19,8 @@ import datetime
 import json
 import math
 
+import warnings
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -554,6 +556,7 @@ def test_a_spring_day_has_23_hours_in_the_daily_rmse(tmp_path):
     pipe.add_model(OLSModel(["price_d-1"], name="a")).add_model(NaiveModel(["price_d-1"], name="naive"))
     with use_clock(FakeClock(pd.Timestamp("2026-03-30T14:00", tz=ZONE))):
         report = pipe.monitor(data, directory, benchmarks=["naive"], windows=(4,))
+    assert report.tables()["partial_days"].eq(0).all()  # 23 of the 23 periods of the spring day is a whole curve
     daily = report.daily()
     counts = daily[daily["member"] == "a"].set_index("target_date")["forecasts"].to_dict()
     assert counts == {pd.Timestamp("2026-03-28"): 24, pd.Timestamp("2026-03-29"): 23, pd.Timestamp("2026-03-30"): 23}
@@ -1371,3 +1374,41 @@ def test_daily_of_an_empty_report_has_its_documented_columns(tmp_path):
         "rmse",
         "bias",
     ]
+
+
+def test_a_curve_missing_one_hour_of_a_normal_day_is_partial_but_a_switch_day_is_not(tmp_path, monkeypatch):
+    """23 of 24 is whole only on a day that has 23 periods: a curve is compared with the periods of its own target date."""
+    monkeypatch.setitem(globals(), "GAPS", {("lear", DAYS[0], 1, 7)})  # one hour, both horizons, an ordinary day
+    directory = tmp_path / "live"
+    write_live(directory)
+    with pytest.warns(UserWarning, match="part of their periods"):
+        report = run_monitor(directory, windows=(10,))
+    table = report.tables().set_index("member")
+    assert table.loc["lear", "partial_days"] == len(HORIZONS)
+    assert table.loc["naive", "partial_days"] == 0 and table.loc["best", "partial_days"] == 0
+    # with every hour there, the autumn switch day (24 periods, the repeated hour unscorable: 23) and the days around it are whole
+    monkeypatch.setitem(globals(), "GAPS", set())
+    clean = tmp_path / "clean"
+    write_live(clean)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        whole = run_monitor(clean, windows=(10,))
+    assert whole.tables()["partial_days"].eq(0).all() and "partial_days" not in whole.tables().attrs
+    assert not [w for w in caught if "part of their periods" in str(w.message)]
+
+
+def test_a_delivered_day_missing_a_planned_hour_is_skipped(tmp_path, monkeypatch):
+    """The ensemble has every horizon of day 8 but not its hour 5: no curve to deliver, as `forecast()` says `skipped`."""
+    monkeypatch.setitem(globals(), "GAPS", {("best", DAYS[8], 1, 5)})
+    directory = tmp_path / "live"
+    write_live(directory)
+    report = run_monitor(directory, windows=(10,))
+    table = report.tables().set_index("member")
+    assert table.loc["best", "skipped_days"] == 1
+    assert table.loc["lear", "skipped_days"] == 0
+    rungs = report.rungs()
+    assert rungs[(rungs["policy"] == "latest") & (rungs["window"] == 10) & (rungs["rung"] == -1)]["days"].iloc[0] == 1
+    now = pd.Timestamp(f"{DAYS[8]}T14:00", tz=ZONE)
+    assert [
+        a.through for a in run_monitor(directory, windows=(10,), now=now, alerts=[{"rung_at_least": 3}]).alerts
+    ] == [DAYS[8]]

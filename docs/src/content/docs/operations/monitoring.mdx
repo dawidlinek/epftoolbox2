@@ -75,7 +75,7 @@ Every model and ensemble of the pipeline that has results in the directory is a 
 | `forecasts`, `unscored` | Forecasts scored, and forecasts of the window whose actual isn't known yet (or doesn't exist) |
 | `check_failed`, `check_failed_days` | Keys and issue days the member's checks before export turned into `check_failed` skip records: out of its keys and of the common keys. See below |
 | `mae`, `rmse`, `rmse_daily`, `bias` | On the member's own scored keys: MAE, RMSE pooled, the mean of the days' RMSEs (the arena's convention), and the mean error |
-| `level`, `shape`, `partial_days` | See below; and the curves with only part of their periods scored |
+| `level`, `shape`, `partial_days` | See below; and the curves with fewer scored forecasts than their target date has periods (23 of 24 is partial; a 23-hour day with 23 isn't) |
 | `issue_days`, `committed_days`, `participation` | Due issue days in the window; those with a revision committed before the deadline; their share |
 | `delivered_days`, `delivered` | Due issue days with a delivery recorded (`mark_delivered`), and their share |
 | `member_days` | Issue days the member has a forecast on |
@@ -113,7 +113,7 @@ An uncommitted revision, or one committed after the cut-off, is never read.
 
 `monitored.rungs()` reads each `FallbackEnsemble` under all three policies and gives, per window: the `rung`, the ladder's member at
 it (`rung_member`), the `days` (issue days with a key it served) and `forecasts` it served, its `share` of the planned days, and the `scored` forecasts and their
-`mae`. A row with `rung` -1 and `rung_member` `"skipped"` counts the days no rung served: a committed day on which a planned horizon has no forecast from any rung. A fallback is known the day it is issued; its MAE waits for the actuals. `fallback_mae` in the table scores the days a
+`mae`. A row with `rung` -1 and `rung_member` `"skipped"` counts the days no rung served: a committed day on which a planned horizon has no forecast from any rung, or one short of its planned periods (no curve to deliver, as `forecast()` says `skipped`). A fallback is known the day it is issued; its MAE waits for the actuals. `fallback_mae` in the table scores the days a
 rung above 0 served, so a late input shows as days on a lower rung with a worse MAE, never as a better-looking average.
 
 ## Input quality
