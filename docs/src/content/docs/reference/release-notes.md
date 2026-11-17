@@ -251,7 +251,8 @@ an issue day it didn't sample.
     forecast and no colours, which shifts the sheets after it. The `Summary` sheet's colour scale no longer covers the `forecasts` column, which
     it coloured like an error. `CsvExporter` is unchanged. `summary()` does not warn.
 
-- **Nothing after the issue day decides how a column is scaled.** A model leaves a 0/1 column unscaled and decides which columns
+- **Nothing after the issue day decides how a column is scaled.** (This describes `binary_mask="first_day"`, the rule up to 2.3;
+  the new default, `None`, reads each fit's own rows and has none of it, see Changed defaults.) A model leaves a 0/1 column unscaled and decides which columns
   those are once per list, period and horizon (and window), from the training rows of one day. A column with no value in those rows,
   such as one that starts inside the test, can't tell. It stayed unscaled for good in a fixed list and in a function's list used on
   every issue day, and was decided on a later issue day of the list otherwise; whether a list was used on every day depended on the
@@ -306,6 +307,19 @@ an issue day it didn't sample.
   only. The repeated hour takes the values of its second occurrence, the row a run forecasts from, at 1 h and at 15 min. A file whose
   results have no repeated hour and whose source has the results' resolution is the same, byte for byte, and so is every file written
   without `extra_columns`.
+
+- **A column that is constant up to rounding noise is no longer divided by its standard deviation.** The scalers took a column
+  for constant only when its standard deviation was exactly 0. A column of 0.3 with floating-point error, or 0.3 repeated 30
+  times (numpy gives a standard deviation of 5.6e-17, not 0), was divided by about 1e-16 and became a regressor: on a narrow
+  training window a test row of 0.31 gave a forecast of 3.5e13 with `StandardScaler`, and `AsinhScaler` and `NPITScaler` turned
+  the noise into an input. A standard deviation at or below 1e-12 of the column's largest finite absolute value now counts as
+  constant, for every scaler and for the target, and the scale is 1.0 as for 0 before. A constant predictor's training values are
+  set to exactly 0, so the model gives it the coefficient 0 whichever solver it uses. **Forecasts change only for a model that had
+  such a column in a training window**; all other columns scale bit for bit as before. On the 247 LEAR inputs of the five
+  epftoolbox benchmark datasets (NP, PJM, FR, BE, DE) no column of any training window of 7 to 728 days was within a factor of
+  about 1e9 of the threshold, so those results don't change. Results stored by an earlier version resume without a warning:
+  re-run a model whose training windows could hold a constant column. See
+  [Constant columns](/epftoolbox2/models/scalers/#constant-columns).
 
 ### New
 
@@ -764,8 +778,8 @@ an issue day it didn't sample.
   hash of its source file and its package's version; a network defined in a notebook, by `exec`, in a function or in the script being
   run has a `session-` token instead and resumes only within its session (`save()` raises for one from `__main__` or a function).
   `examples/mlp_search.py` is the default search. See [Neural Networks](/epftoolbox2/models/neural-networks/).
-- **`ModelPipeline(engine="on")`: engine groups for studies of many models.** With `engine="on"` (`model_pipeline.engine: on` in a
-  workflow) the models the engine takes, OLS, Ridge, LassoCV and LEAR, run in groups, one per refit rule: each group reads the
+- **`ModelPipeline(engine="on")`: engine groups for studies of many models.** With `engine="on"` (the default now, see Changed
+  defaults; `model_pipeline.engine: on` in a workflow) the models the engine takes, OLS, Ridge, LassoCV and LEAR, run in groups, one per refit rule: each group reads the
   data once for all its models, runs one pool of processes whose jobs are one day (or refit block) and period of every model, and
   writes every model's results into its own file as before, through one writer. A model's per-run cost beyond its fits drops (the
   pool start, the `gc.collect()` and the read of the data are once per group, and the checks of the frame and of the information
@@ -789,7 +803,8 @@ an issue day it didn't sample.
   `fit_path: "engine-2"`, compared on resume, so results written with the engine on refuse a resume with it off and the other way
   round (`allow_manifest_mismatch=True` overrides), and as provenance how many fits came from the sums; `"engine-1"` results
   of a development build (before OLS's refinement step) are refused too, for every class, although only OLS's numbers moved,
-  so for LEAR, Ridge and LassoCV `allow_manifest_mismatch=True` resumes them safely. LEAR's `solver="cd"`
+  so for LEAR, Ridge and LassoCV `allow_manifest_mismatch=True` resumes them safely (with `engine` left out, a folder follows its
+  own `fit_path`, see Changed defaults). LEAR's `solver="cd"`
   (`LEARModel.lago()`'s) is fitted as with `"off"`, to the bit. **`engine="check"`** is `"on"` with one fit in about 50 also
   fitted as `"off"` fits it: the results are `"on"`'s, the manifest records the gaps as provenance (`engine_check`: fits, largest
   absolute and relative gap, gaps that aren't finite, how many chose another kink or penalty, fits `"off"` couldn't fit), and a
@@ -797,9 +812,9 @@ an issue day it didn't sample.
   variants (asinh) the engine spends 1.45-1.54 times fewer core-seconds than `"off"` where the inputs have no gaps, and runs at
   0.84-0.98 times its speed (2-19 % more core-seconds) where every variant's gaps give it rows of its own; LassoCV spends 1.64
   times fewer; a run's wall time is 5-14 times shorter. `NaiveModel`, a `train_on="matching"` list, a subclass with its own fit and a `forecast_only` run go through their own run as
-  with `"off"`, the default, which runs nothing new. `ENGINE_MAX_MODELS` (20,000)
+  with `"off"`, which runs nothing of this entry. `ENGINE_MAX_MODELS` (20,000)
   and `ENGINE_MAX_COLUMNS` (4,096) bound how many models and columns a group reads at once; `verify` runs each model through the
-  engine too. YAML writes `engine` only when it is `"on"` or `"check"`. At scale (10,000 OLS, 1,000 Ridge, 1,000 LEAR and 200 LassoCV
+  engine too. YAML writes `engine` only when it was given. At scale (10,000 OLS, 1,000 Ridge, 1,000 LEAR and 200 LassoCV
   variants of a gappy 40-column weather union, 24 periods, 7 issue days) every model's records, manifest and `epf report` tables
   are the same bytes over 64 array tasks, at 1 and 12 processes and alone, and `binary_mask="fit"` keeps every shared forecast of
   two test starts; the 10,000 OLS variants take 7.2 minutes on 12 cores, against about 48 with `"off"`. See
@@ -829,15 +844,16 @@ an issue day it didn't sample.
   `allow_restricted_prices=True`. The API allows 2 requests a minute per IP and endpoint: the source throttles itself, waits
   `Retry-After` and caches on disk. See [EnergyChartsSource](/epftoolbox2/data-sources/energy-charts/).
 - **`binary_mask=`: binary columns read on each fit's own rows, so no forecast depends on `test_start`.** Every model that fits takes
-  `binary_mask=None | "first_day" | "fit"`. `None`, the default, is today's rule: without `refit` a list's binary 0/1 columns (left
+  `binary_mask=None | "first_day" | "fit"`. Introduced with `None` as the rule of every release up to 2.3 (the default became
+  `"fit"`'s rule afterwards, see Changed defaults): without `refit` a list's binary 0/1 columns (left
   unscaled) are read on the window's first day and kept for the window, so a column that is 0/1 there and not later (night-time
   solar at 06:00 from a winter start) makes a forecast depend on where the test starts; with `refit` each unit reads its own rows.
-  `"first_day"` names the first and raises with `refit`. `"fit"` reads each fit's own training rows, before any row is dropped, as a
+  `"first_day"` names that rule and raises with `refit`. `"fit"` reads each fit's own training rows, before any row is dropped, as a
   refit unit does: its records are `refit="1D"`'s, and runs from any start share their forecasts bit for bit. It moves only forecasts
   whose own rows disagree with the first day's (none of 2,928 on Lago's DE data with OLS, LassoCV or LEAR; on the Polish week-ahead
   Fridays none at the study's W = 1092, and 78 and 101 of 301 of a 91-day LassoCV, whose cooling degree days are 0 in January's
   rows). The manifest's `training_cut` records `"binary_mask": "fit"` without
-  `refit`, so a resume under the other rule refuses; YAML writes it only when set. **Nothing moves without it.** See
+  `refit`, so a resume under the other rule refuses; YAML writes it only when set. See
   [Time and Calendars](/epftoolbox2/model-pipeline/time-and-calendars/#binary-columns-and-test_start).
 - **Parquet results: `run(save_format="parquet")`, `save_coefficients=False` and `epf results`.** With `save_format="parquet"`
   (`model_pipeline.save_format: parquet` in a workflow) each model's results are a directory of zstd Parquet parts,
@@ -1064,18 +1080,3 @@ an issue day it didn't sample.
 - `report.availability()`: the inputs a run can't vouch for, per model, list, period and horizon.
 - `pipeline.explain()`: what a forecast's predictors hold relative to the target day, and when each is known; for a predictor
   function, the distinct lists with their days and what each adds or drops.
-
-### Fixed
-
-- **A column that is constant up to rounding noise is no longer divided by its standard deviation.** The scalers took a column
-  for constant only when its standard deviation was exactly 0. A column of 0.3 with floating-point error, or 0.3 repeated 30
-  times (numpy gives a standard deviation of 5.6e-17, not 0), was divided by about 1e-16 and became a regressor: on a narrow
-  training window a test row of 0.31 gave a forecast of 3.5e13 with `StandardScaler`, and `AsinhScaler` and `NPITScaler` turned
-  the noise into an input. A standard deviation at or below 1e-12 of the column's largest finite absolute value now counts as
-  constant, for every scaler and for the target, and the scale is 1.0 as for 0 before. A constant predictor's training values are
-  set to exactly 0, so the model gives it the coefficient 0 whichever solver it uses. **Forecasts change only for a model that had
-  such a column in a training window**; all other columns scale bit for bit as before. On the 247 LEAR inputs of the five
-  epftoolbox benchmark datasets (NP, PJM, FR, BE, DE) no column of any training window of 7 to 728 days was within a factor of
-  about 1e9 of the threshold, so those results don't change. Results stored by an earlier version resume without a warning:
-  re-run a model whose training windows could hold a constant column. See
-  [Constant columns](/epftoolbox2/models/scalers/#constant-columns).
