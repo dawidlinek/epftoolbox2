@@ -213,7 +213,7 @@ the week it ends.
 
 A frame in another zone than the issue time's (left in UTC, or at a fixed offset) still holds each value of the market's date: with
 `DataPipeline(timezone=None)` Warsaw's Monday starts at 23:00Z on Sunday. There the week is read in the issue zone's dates too, and
-the later of the two weeks counts, so it is never early. With the issue in the market's zone (`InformationSet("12:00",
+the later of the two weeks counts, so it is never early, except on a UTC frame issued in UTC, where Monday's first hour can still be read early (a strict xfail in `tests/test_known_issues.py`). With the issue in the market's zone (`InformationSet("12:00",
 "Europe/Lisbon")`) that is exact on any frame; with neither zone the market's, a Lisbon frame issued on Brussels time say, the last
 hour of a Sunday is taken as published a week late. A rule from `with_source_rules` (below) or one of your own with `week_zone=` the
 market's zone reads the market's week on any frame.
@@ -230,7 +230,8 @@ Madrid value on a Lisbon frame at 23:00 is Madrid's next day). So the built-in r
 day_zone="later_of_data_and_rule")` and `published("18:00", 1, day_zone="later_of_data_and_rule")`: the delivery day is the later of
 the data's local date (read as `day_zone="data"` reads it) and Brussels', and the publication instant is 10:00 (18:00) Brussels on
 the date before it. That is never earlier than the Brussels day, on any frame and issue clock, and is each area's own day east of
-Brussels on a frame in the area's zone. On Brussels' clock (DE_LU, AT, PL and every other CET zone) nothing moved. What the built-in
+Brussels on a frame in the area's zone. On Brussels' clock (DE_LU, AT, PL and every other CET zone) nothing moved, except on a
+frame east of Brussels (`Etc/GMT-2`, say), where the frame's later date makes the last hour of a CET market's day a day stricter. What the built-in
 rules don't get right, an `EntsoeSource`'s rule (below, through `with_source_rules`, which `Workflow` applies) does:
 
 - West of Brussels (Lisbon, Dublin) the built-in rules keep the Brussels day, a day late in the last hour.

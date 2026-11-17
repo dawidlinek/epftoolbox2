@@ -60,7 +60,7 @@ Notes for changes that need something from you. The full list of changes of a re
     columns Friday 10:00 on the bound market's clock: an hour early in an EET market, a look-ahead for an issue from 09:00 to 10:00
     Brussels on a Friday, and an hour late in Lisbon or Dublin. It is 10:00 Brussels now, for the week of that market's zone.
   - **Issue in the market's zone for an exact week.** On a frame in another zone than the issue time's (UTC, a fixed offset) the
-    week is also read in the issue zone's dates and the later counts, so it is never early: exact when the issue zone is the market's,
+    week is also read in the issue zone's dates and the later counts, so it is never early (except on a UTC frame issued in UTC, where Monday's first hour can still be read early (a strict xfail in `tests/test_known_issues.py`)): exact when the issue zone is the market's,
     a week late on the last hour of a Sunday where neither is (a Lisbon frame issued on Brussels time, which keeps the old rule's
     verdicts there). The keys that come back west of Brussels need the issue in the market's zone, as in the week-ahead study.
   - **Resuming.** A `NaiveModel(known_only=True)` of these columns records the rules that decide its keys, so its results from before
@@ -89,7 +89,8 @@ Notes for changes that need something from you. The full list of changes of a re
   - **Where the built-in rules aren't exact.** They are never earlier than the Brussels day, not exact: east of Brussels on a frame in
     another zone than the area's (UTC, Brussels, a market west of it), or issued on such a clock, the first hour can still be a day
     early, as it always was with the Brussels day. This gap predates the change. The exact answer needs `with_source_rules` (`Workflow`
-    applies it) or the frame and the issue time in the market's zone.
+    applies it) or the frame and the issue time in the market's zone. A CET market on a frame east of Brussels (`Etc/GMT-2`) loses
+    the last hour of each day to the frame's later date: stricter, never early.
   - **Resuming.** A model that records these columns' rules refuses to resume results written before with `ManifestMismatchError` on
     `training_cut`: `NaiveModel(known_only=True)` (`training_cut["known_only"]`), a sequence model whose history reads them
     (`training_cut["history"]`), and a `newest_target="published"` model with one as its target. Use a new `save_dir`. The `explain()`

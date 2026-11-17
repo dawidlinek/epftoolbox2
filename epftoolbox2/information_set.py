@@ -186,7 +186,7 @@ class Availability:
                      (day-ahead prices: 13:00, days_before=1; a daily close: its close time, days_before=0;
                      a value known only after its delivery day: "00:00", days_before=-1). The delivery day is a local
                      date of `day_zone`: None, `timezone`'s; "data", the data's own (on a frame in another zone than the
-                     issue time's, the later of the data's date and the issue zone's, so it is never early); or a zone such
+                     issue time's, the later of the data's date and the issue zone's, exact on a frame in the market's zone); or a zone such
                      as "Europe/Helsinki", the zone whose dates another pipeline's forecasts are for (`ForecastSource`);
                      or "later_of_data_and_rule" (`LATER_OF_DATA_AND_RULE`), the later of the data's date (as "data") and
                      `timezone`'s, never earlier than `timezone`'s day (the built-in A65/A01 and A69 rules).
@@ -194,7 +194,7 @@ class Availability:
         weekly:      published on `weekday` at `time` (in `timezone`) for the whole following Monday-Sunday week
                      (week-ahead load). The week is one of local dates of `week_zone`: None, `timezone`'s; "data", the
                      data's own, so each market's Monday to Sunday on a frame in its zone (on a frame in another zone than
-                     the issue time's, the later of the data's week and the issue zone's, so it is never early); or a zone
+                     the issue time's, the later of the data's week and the issue zone's; still early on a UTC frame issued in UTC, a known issue); or a zone
                      such as "Europe/Helsinki". The publication instant stays `time` in `timezone` whatever the week's zone.
         weather_run: a weather forecast column `x_d+k` from the Open-Meteo previous-runs API. The value at row t
                      comes from the model run started about at t (lead time k days), published `delay` later, so
