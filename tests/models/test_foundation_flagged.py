@@ -661,7 +661,11 @@ def test_the_extras_and_their_install_lines():
         if name not in ("timesfm", "timestral"):
             assert not any("[timesfm" in r or "timestral]" in r or "timesfm[" in r for r in requirements), name
     assert [{"extra": "patchtst-fm"}, {"extra": "torch"}] in pyproject["tool"]["uv"]["conflicts"]
-    assert "all" not in extras or "patchtst-fm" not in str(extras["all"])  # 6q's [all] leaves it out
+    # [all] holds every permissive family that resolves with the others: not patchtst-fm, timesfm or timestral.
+    everything = extras["all"][0].split("[")[1].split("]")[0].split(",")
+    assert not {"patchtst-fm", "timesfm", "timestral"} & set(everything)
+    assert {"torch", "t0", "chronos", "tabpfn", "tabicl", "lightgbm", "xgboost", "tune"} <= set(everything)
+    assert [{"extra": "patchtst-fm"}, {"extra": "all"}] in pyproject["tool"]["uv"]["conflicts"]
 
 
 def locked_versions(lock, extra, python):
