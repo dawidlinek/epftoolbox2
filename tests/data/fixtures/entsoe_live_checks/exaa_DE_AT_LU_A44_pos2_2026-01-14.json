@@ -1,0 +1,27 @@
+{
+  "ack_text": "No matching data found for Data item ENERGY_PRICES [12.1.D] (10Y1001A1001A63L, 10Y1001A1001A63L) and interval 2026-01-13T23:00:00Z/2026-01-14T23:00:00Z.",
+  "acknowledgement": true,
+  "area": "DE_AT_LU",
+  "bytes": 963,
+  "day": "2026-01-14",
+  "fixture": "exaa_DE_AT_LU_A44_pos2_2026-01-14.xml",
+  "id": "exaa_DE_AT_LU_A44_pos2_2026-01-14",
+  "kind": "exaa",
+  "n_points": 0,
+  "no_data": true,
+  "params": {
+    "classificationSequence_AttributeInstanceComponent.position": "2",
+    "documentType": "A44",
+    "in_Domain": "10Y1001A1001A63L",
+    "out_Domain": "10Y1001A1001A63L",
+    "periodEnd": "202601142300",
+    "periodStart": "202601132300"
+  },
+  "periods": [],
+  "positions_in_series": [],
+  "reason": "OK",
+  "resolutions": [],
+  "status": 200,
+  "verdict": "AS EXPECTED: no data returned (zone ended 2018-10-01)",
+  "zone": "Europe/Brussels"
+}

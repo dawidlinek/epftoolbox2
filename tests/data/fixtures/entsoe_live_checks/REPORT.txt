@@ -1,0 +1,218 @@
+<frozen importlib._bootstrap>:491: RuntimeWarning: The global interpreter lock (GIL) has been enabled to load module 'pandas._libs.pandas_parser', which has not declared that it can run safely without the GIL. To override this behavior and keep the GIL disabled (at your own risk), run with PYTHON_GIL=0 or -Xgil=0.
+====================================================================================================
+Live ENTSO-E source checks
+====================================================================================================
+
+[exaa_AT_A44_pos2_2026-01-14]
+  hypothesis: A44 with classificationSequence position 2 returns only the EXAA auction (every TimeSeries carries position 2), one value per period of the day (24 hourly or 96 quarter-hours), and the source's parser puts it on both the hourly and the 15-minute grid
+  HTTP 200, 95 points in 1 period(s), resolution ['PT15M'], positions ['2']
+    timeInterval 2026-01-13T23:00Z -> 2026-01-14T23:00Z  PT15M  95 pts  seq 2
+  grid points from the source's parser: {'hourly': 24, '15min': 96}
+  verdict: SUPPORTED: position 2 only, native resolution PT15M, full day on both grids
+
+[exaa_AT_A44_pos2_2026-07-15]
+  hypothesis: A44 with classificationSequence position 2 returns only the EXAA auction (every TimeSeries carries position 2), one value per period of the day (24 hourly or 96 quarter-hours), and the source's parser puts it on both the hourly and the 15-minute grid
+  HTTP 200, 96 points in 1 period(s), resolution ['PT15M'], positions ['2']
+    timeInterval 2026-07-14T22:00Z -> 2026-07-15T22:00Z  PT15M  96 pts  seq 2
+  grid points from the source's parser: {'hourly': 24, '15min': 96}
+  verdict: SUPPORTED: position 2 only, native resolution PT15M, full day on both grids
+
+[exaa_AT_A44_pos2_2025-01-15]
+  hypothesis: A44 with classificationSequence position 2 returns only the EXAA auction (every TimeSeries carries position 2), one value per period of the day (24 hourly or 96 quarter-hours), and the source's parser puts it on both the hourly and the 15-minute grid
+  HTTP 200, 94 points in 1 period(s), resolution ['PT15M'], positions ['2']
+    timeInterval 2025-01-14T23:00Z -> 2025-01-15T23:00Z  PT15M  94 pts  seq 2
+  grid points from the source's parser: {'hourly': 24, '15min': 96}
+  verdict: SUPPORTED: position 2 only, native resolution PT15M, full day on both grids
+
+[exaa_AT_A44_pos2_2025-07-15]
+  hypothesis: A44 with classificationSequence position 2 returns only the EXAA auction (every TimeSeries carries position 2), one value per period of the day (24 hourly or 96 quarter-hours), and the source's parser puts it on both the hourly and the 15-minute grid
+  HTTP 200, 96 points in 1 period(s), resolution ['PT15M'], positions ['2']
+    timeInterval 2025-07-14T22:00Z -> 2025-07-15T22:00Z  PT15M  96 pts  seq 2
+  grid points from the source's parser: {'hourly': 24, '15min': 96}
+  verdict: SUPPORTED: position 2 only, native resolution PT15M, full day on both grids
+
+[exaa_DE_LU_A44_pos2_2026-01-14]
+  hypothesis: A44 with classificationSequence position 2 returns only the EXAA auction (every TimeSeries carries position 2), one value per period of the day (24 hourly or 96 quarter-hours), and the source's parser puts it on both the hourly and the 15-minute grid
+  HTTP 200, 92 points in 1 period(s), resolution ['PT15M'], positions ['2']
+    timeInterval 2026-01-13T23:00Z -> 2026-01-14T23:00Z  PT15M  92 pts  seq 2
+  grid points from the source's parser: {'hourly': 24, '15min': 96}
+  verdict: SUPPORTED: position 2 only, native resolution PT15M, full day on both grids
+
+[exaa_DE_LU_A44_pos2_2026-07-15]
+  hypothesis: A44 with classificationSequence position 2 returns only the EXAA auction (every TimeSeries carries position 2), one value per period of the day (24 hourly or 96 quarter-hours), and the source's parser puts it on both the hourly and the 15-minute grid
+  HTTP 200, 95 points in 1 period(s), resolution ['PT15M'], positions ['2']
+    timeInterval 2026-07-14T22:00Z -> 2026-07-15T22:00Z  PT15M  95 pts  seq 2
+  grid points from the source's parser: {'hourly': 24, '15min': 96}
+  verdict: SUPPORTED: position 2 only, native resolution PT15M, full day on both grids
+
+[exaa_DE_LU_A44_pos2_2025-01-15]
+  hypothesis: A44 with classificationSequence position 2 returns only the EXAA auction (every TimeSeries carries position 2), one value per period of the day (24 hourly or 96 quarter-hours), and the source's parser puts it on both the hourly and the 15-minute grid
+  HTTP 200, 96 points in 1 period(s), resolution ['PT15M'], positions ['2']
+    timeInterval 2025-01-14T23:00Z -> 2025-01-15T23:00Z  PT15M  96 pts  seq 2
+  grid points from the source's parser: {'hourly': 24, '15min': 96}
+  verdict: SUPPORTED: position 2 only, native resolution PT15M, full day on both grids
+
+[exaa_DE_LU_A44_pos2_2025-07-15]
+  hypothesis: A44 with classificationSequence position 2 returns only the EXAA auction (every TimeSeries carries position 2), one value per period of the day (24 hourly or 96 quarter-hours), and the source's parser puts it on both the hourly and the 15-minute grid
+  HTTP 200, 96 points in 1 period(s), resolution ['PT15M'], positions ['2']
+    timeInterval 2025-07-14T22:00Z -> 2025-07-15T22:00Z  PT15M  96 pts  seq 2
+  grid points from the source's parser: {'hourly': 24, '15min': 96}
+  verdict: SUPPORTED: position 2 only, native resolution PT15M, full day on both grids
+
+[exaa_DE_AT_LU_A44_pos2_2026-01-14]
+  hypothesis: A44 with classificationSequence position 2 returns only the EXAA auction (every TimeSeries carries position 2), one value per period of the day (24 hourly or 96 quarter-hours), and the source's parser puts it on both the hourly and the 15-minute grid; DE_AT_LU is unverified live (the zone ended on 2018-10-01), so no data on the recent days is expected
+  HTTP 200, 0 points in 0 period(s), resolution [], positions []
+  verdict: AS EXPECTED: no data returned (zone ended 2018-10-01)
+
+[exaa_DE_AT_LU_A44_pos2_2026-07-15]
+  hypothesis: A44 with classificationSequence position 2 returns only the EXAA auction (every TimeSeries carries position 2), one value per period of the day (24 hourly or 96 quarter-hours), and the source's parser puts it on both the hourly and the 15-minute grid; DE_AT_LU is unverified live (the zone ended on 2018-10-01), so no data on the recent days is expected
+  HTTP 200, 0 points in 0 period(s), resolution [], positions []
+  verdict: AS EXPECTED: no data returned (zone ended 2018-10-01)
+
+[exaa_DE_AT_LU_A44_pos2_2018-01-15]
+  hypothesis: A44 with classificationSequence position 2 returns only the EXAA auction (every TimeSeries carries position 2), one value per period of the day (24 hourly or 96 quarter-hours), and the source's parser puts it on both the hourly and the 15-minute grid
+  HTTP 200, 0 points in 0 period(s), resolution [], positions []
+  verdict: NOT SUPPORTED: no data returned (No matching data found for Data item ENERGY_PRICES [12.1.D] (10Y1001A1001A63L, 10Y1001A1001A63L) and interval 2018-01-14T23:00:00Z/2018-01-15T23:00:00Z.)
+
+[exaa_DE_AT_LU_A44_pos2_2018-07-15]
+  hypothesis: A44 with classificationSequence position 2 returns only the EXAA auction (every TimeSeries carries position 2), one value per period of the day (24 hourly or 96 quarter-hours), and the source's parser puts it on both the hourly and the 15-minute grid
+  HTTP 200, 0 points in 0 period(s), resolution [], positions []
+  verdict: NOT SUPPORTED: no data returned (No matching data found for Data item ENERGY_PRICES [12.1.D] (10Y1001A1001A63L, 10Y1001A1001A63L) and interval 2018-07-14T22:00:00Z/2018-07-15T22:00:00Z.)
+
+[delivery_FI_A65_A01_2026-01-14]
+  hypothesis: day-ahead load forecast (A65/A01) for FI: the plan fears the built-in rule reads delivery days as Brussels days while the TSO submits local days. Local days start at Europe/Helsinki midnight; Brussels days start at Europe/Brussels midnight
+  HTTP 200, 83 points in 1 period(s), resolution ['PT15M'], positions []
+    timeInterval 2026-01-13T22:00Z -> 2026-01-14T22:00Z  PT15M  83 pts
+  verdict: LOCAL DAYS (starts at Europe/Helsinki midnight; the Brussels-day rule is wrong here): local-midnight: 1 period(s), starts ['2026-01-13T22:00Z']
+
+[delivery_FI_A69_A01_2026-01-14]
+  hypothesis: wind and solar day-ahead forecast (A69/A01) for FI: the plan fears the built-in rule reads delivery days as Brussels days while the TSO submits local days. Local days start at Europe/Helsinki midnight; Brussels days start at Europe/Brussels midnight
+  HTTP 200, 118 points in 2 period(s), resolution ['PT15M'], positions []
+    timeInterval 2026-01-13T22:00Z -> 2026-01-14T22:00Z  PT15M  27 pts  B16
+    timeInterval 2026-01-13T22:00Z -> 2026-01-14T22:00Z  PT15M  91 pts  B19
+  verdict: LOCAL DAYS (starts at Europe/Helsinki midnight; the Brussels-day rule is wrong here): local-midnight: 2 period(s), starts ['2026-01-13T22:00Z']
+
+[delivery_FI_A65_A01_2026-07-15]
+  hypothesis: day-ahead load forecast (A65/A01) for FI: the plan fears the built-in rule reads delivery days as Brussels days while the TSO submits local days. Local days start at Europe/Helsinki midnight; Brussels days start at Europe/Brussels midnight
+  HTTP 200, 91 points in 1 period(s), resolution ['PT15M'], positions []
+    timeInterval 2026-07-14T21:00Z -> 2026-07-15T21:00Z  PT15M  91 pts
+  verdict: LOCAL DAYS (starts at Europe/Helsinki midnight; the Brussels-day rule is wrong here): local-midnight: 1 period(s), starts ['2026-07-14T21:00Z']
+
+[delivery_FI_A69_A01_2026-07-15]
+  hypothesis: wind and solar day-ahead forecast (A69/A01) for FI: the plan fears the built-in rule reads delivery days as Brussels days while the TSO submits local days. Local days start at Europe/Helsinki midnight; Brussels days start at Europe/Brussels midnight
+  HTTP 200, 159 points in 2 period(s), resolution ['PT15M'], positions []
+    timeInterval 2026-07-14T21:00Z -> 2026-07-15T21:00Z  PT15M  74 pts  B16
+    timeInterval 2026-07-14T21:00Z -> 2026-07-15T21:00Z  PT15M  85 pts  B19
+  verdict: LOCAL DAYS (starts at Europe/Helsinki midnight; the Brussels-day rule is wrong here): local-midnight: 2 period(s), starts ['2026-07-14T21:00Z']
+
+[delivery_GR_A65_A01_2026-01-14]
+  hypothesis: day-ahead load forecast (A65/A01) for GR: the plan fears the built-in rule reads delivery days as Brussels days while the TSO submits local days. Local days start at Europe/Athens midnight; Brussels days start at Europe/Brussels midnight
+  HTTP 200, 90 points in 1 period(s), resolution ['PT15M'], positions []
+    timeInterval 2026-01-13T22:00Z -> 2026-01-14T22:00Z  PT15M  90 pts
+  verdict: LOCAL DAYS (starts at Europe/Athens midnight; the Brussels-day rule is wrong here): local-midnight: 1 period(s), starts ['2026-01-13T22:00Z']
+
+[delivery_GR_A69_A01_2026-01-14]
+  hypothesis: wind and solar day-ahead forecast (A69/A01) for GR: the plan fears the built-in rule reads delivery days as Brussels days while the TSO submits local days. Local days start at Europe/Athens midnight; Brussels days start at Europe/Brussels midnight
+  HTTP 200, 118 points in 2 period(s), resolution ['PT15M'], positions []
+    timeInterval 2026-01-13T22:00Z -> 2026-01-14T22:00Z  PT15M  41 pts  B16
+    timeInterval 2026-01-13T22:00Z -> 2026-01-14T22:00Z  PT15M  77 pts  B19
+  verdict: LOCAL DAYS (starts at Europe/Athens midnight; the Brussels-day rule is wrong here): local-midnight: 2 period(s), starts ['2026-01-13T22:00Z']
+
+[delivery_GR_A65_A01_2026-07-15]
+  hypothesis: day-ahead load forecast (A65/A01) for GR: the plan fears the built-in rule reads delivery days as Brussels days while the TSO submits local days. Local days start at Europe/Athens midnight; Brussels days start at Europe/Brussels midnight
+  HTTP 200, 89 points in 1 period(s), resolution ['PT15M'], positions []
+    timeInterval 2026-07-14T21:00Z -> 2026-07-15T21:00Z  PT15M  89 pts
+  verdict: LOCAL DAYS (starts at Europe/Athens midnight; the Brussels-day rule is wrong here): local-midnight: 1 period(s), starts ['2026-07-14T21:00Z']
+
+[delivery_GR_A69_A01_2026-07-15]
+  hypothesis: wind and solar day-ahead forecast (A69/A01) for GR: the plan fears the built-in rule reads delivery days as Brussels days while the TSO submits local days. Local days start at Europe/Athens midnight; Brussels days start at Europe/Brussels midnight
+  HTTP 200, 128 points in 2 period(s), resolution ['PT15M'], positions []
+    timeInterval 2026-07-14T21:00Z -> 2026-07-15T21:00Z  PT15M  61 pts  B16
+    timeInterval 2026-07-14T21:00Z -> 2026-07-15T21:00Z  PT15M  67 pts  B19
+  verdict: LOCAL DAYS (starts at Europe/Athens midnight; the Brussels-day rule is wrong here): local-midnight: 2 period(s), starts ['2026-07-14T21:00Z']
+
+[delivery_PT_A65_A01_2026-01-14]
+  hypothesis: day-ahead load forecast (A65/A01) for PT: the plan fears the built-in rule reads delivery days as Brussels days while the TSO submits local days. Local days start at Europe/Lisbon midnight; Brussels days start at Europe/Brussels midnight
+  HTTP 200, 24 points in 1 period(s), resolution ['PT60M'], positions []
+    timeInterval 2026-01-14T00:00Z -> 2026-01-15T00:00Z  PT60M  24 pts
+  verdict: LOCAL DAYS (starts at Europe/Lisbon midnight; the Brussels-day rule is wrong here): local-midnight: 1 period(s), starts ['2026-01-14T00:00Z']
+
+[delivery_PT_A69_A01_2026-01-14]
+  hypothesis: wind and solar day-ahead forecast (A69/A01) for PT: the plan fears the built-in rule reads delivery days as Brussels days while the TSO submits local days. Local days start at Europe/Lisbon midnight; Brussels days start at Europe/Brussels midnight
+  HTTP 200, 56 points in 3 period(s), resolution ['PT60M'], positions []
+    timeInterval 2026-01-14T00:00Z -> 2026-01-15T00:00Z  PT60M  11 pts  B16
+    timeInterval 2026-01-14T00:00Z -> 2026-01-15T00:00Z  PT60M  21 pts  B18
+    timeInterval 2026-01-14T00:00Z -> 2026-01-15T00:00Z  PT60M  24 pts  B19
+  verdict: LOCAL DAYS (starts at Europe/Lisbon midnight; the Brussels-day rule is wrong here): local-midnight: 3 period(s), starts ['2026-01-14T00:00Z']
+
+[delivery_PT_A65_A01_2026-07-15]
+  hypothesis: day-ahead load forecast (A65/A01) for PT: the plan fears the built-in rule reads delivery days as Brussels days while the TSO submits local days. Local days start at Europe/Lisbon midnight; Brussels days start at Europe/Brussels midnight
+  HTTP 200, 24 points in 1 period(s), resolution ['PT60M'], positions []
+    timeInterval 2026-07-14T23:00Z -> 2026-07-15T23:00Z  PT60M  24 pts
+  verdict: LOCAL DAYS (starts at Europe/Lisbon midnight; the Brussels-day rule is wrong here): local-midnight: 1 period(s), starts ['2026-07-14T23:00Z']
+
+[delivery_PT_A69_A01_2026-07-15]
+  hypothesis: wind and solar day-ahead forecast (A69/A01) for PT: the plan fears the built-in rule reads delivery days as Brussels days while the TSO submits local days. Local days start at Europe/Lisbon midnight; Brussels days start at Europe/Brussels midnight
+  HTTP 200, 58 points in 3 period(s), resolution ['PT60M'], positions []
+    timeInterval 2026-07-14T23:00Z -> 2026-07-15T23:00Z  PT60M  18 pts  B16
+    timeInterval 2026-07-14T23:00Z -> 2026-07-15T23:00Z  PT60M  16 pts  B18
+    timeInterval 2026-07-14T23:00Z -> 2026-07-15T23:00Z  PT60M  24 pts  B19
+  verdict: LOCAL DAYS (starts at Europe/Lisbon midnight; the Brussels-day rule is wrong here): local-midnight: 3 period(s), starts ['2026-07-14T23:00Z']
+
+[delivery_IE_A65_A01_2026-01-14]
+  hypothesis: day-ahead load forecast (A65/A01) for IE: the plan fears the built-in rule reads delivery days as Brussels days while the TSO submits local days. Local days start at Europe/Dublin midnight; Brussels days start at Europe/Brussels midnight
+  HTTP 200, 48 points in 1 period(s), resolution ['PT30M'], positions []
+    timeInterval 2026-01-14T00:00Z -> 2026-01-15T00:00Z  PT30M  48 pts
+  verdict: LOCAL DAYS (starts at Europe/Dublin midnight; the Brussels-day rule is wrong here): local-midnight: 1 period(s), starts ['2026-01-14T00:00Z']
+
+[delivery_IE_A69_A01_2026-01-14]
+  hypothesis: wind and solar day-ahead forecast (A69/A01) for IE: the plan fears the built-in rule reads delivery days as Brussels days while the TSO submits local days. Local days start at Europe/Dublin midnight; Brussels days start at Europe/Brussels midnight
+  HTTP 200, 24 points in 1 period(s), resolution ['PT60M'], positions []
+    timeInterval 2026-01-14T00:00Z -> 2026-01-15T00:00Z  PT60M  24 pts  B19
+  verdict: LOCAL DAYS (starts at Europe/Dublin midnight; the Brussels-day rule is wrong here): local-midnight: 1 period(s), starts ['2026-01-14T00:00Z']
+
+[delivery_IE_A65_A01_2026-07-15]
+  hypothesis: day-ahead load forecast (A65/A01) for IE: the plan fears the built-in rule reads delivery days as Brussels days while the TSO submits local days. Local days start at Europe/Dublin midnight; Brussels days start at Europe/Brussels midnight
+  HTTP 200, 48 points in 1 period(s), resolution ['PT30M'], positions []
+    timeInterval 2026-07-14T23:00Z -> 2026-07-15T23:00Z  PT30M  48 pts
+  verdict: LOCAL DAYS (starts at Europe/Dublin midnight; the Brussels-day rule is wrong here): local-midnight: 1 period(s), starts ['2026-07-14T23:00Z']
+
+[delivery_IE_A69_A01_2026-07-15]
+  hypothesis: wind and solar day-ahead forecast (A69/A01) for IE: the plan fears the built-in rule reads delivery days as Brussels days while the TSO submits local days. Local days start at Europe/Dublin midnight; Brussels days start at Europe/Brussels midnight
+  HTTP 200, 24 points in 1 period(s), resolution ['PT60M'], positions []
+    timeInterval 2026-07-14T23:00Z -> 2026-07-15T23:00Z  PT60M  24 pts  B19
+  verdict: LOCAL DAYS (starts at Europe/Dublin midnight; the Brussels-day rule is wrong here): local-midnight: 1 period(s), starts ['2026-07-14T23:00Z']
+
+====================================================================================================
+Requests sent: 28 (cap 40); responses saved: 28
+Overview
+  exaa_AT_A44_pos2_2026-01-14                SUPPORTED
+  exaa_AT_A44_pos2_2026-07-15                SUPPORTED
+  exaa_AT_A44_pos2_2025-01-15                SUPPORTED
+  exaa_AT_A44_pos2_2025-07-15                SUPPORTED
+  exaa_DE_LU_A44_pos2_2026-01-14             SUPPORTED
+  exaa_DE_LU_A44_pos2_2026-07-15             SUPPORTED
+  exaa_DE_LU_A44_pos2_2025-01-15             SUPPORTED
+  exaa_DE_LU_A44_pos2_2025-07-15             SUPPORTED
+  exaa_DE_AT_LU_A44_pos2_2026-01-14          AS EXPECTED
+  exaa_DE_AT_LU_A44_pos2_2026-07-15          AS EXPECTED
+  exaa_DE_AT_LU_A44_pos2_2018-01-15          NOT SUPPORTED
+  exaa_DE_AT_LU_A44_pos2_2018-07-15          NOT SUPPORTED
+  delivery_FI_A65_A01_2026-01-14             LOCAL DAYS (starts at Europe/Helsinki midnight; the Brussels-day rule is wrong here)
+  delivery_FI_A69_A01_2026-01-14             LOCAL DAYS (starts at Europe/Helsinki midnight; the Brussels-day rule is wrong here)
+  delivery_FI_A65_A01_2026-07-15             LOCAL DAYS (starts at Europe/Helsinki midnight; the Brussels-day rule is wrong here)
+  delivery_FI_A69_A01_2026-07-15             LOCAL DAYS (starts at Europe/Helsinki midnight; the Brussels-day rule is wrong here)
+  delivery_GR_A65_A01_2026-01-14             LOCAL DAYS (starts at Europe/Athens midnight; the Brussels-day rule is wrong here)
+  delivery_GR_A69_A01_2026-01-14             LOCAL DAYS (starts at Europe/Athens midnight; the Brussels-day rule is wrong here)
+  delivery_GR_A65_A01_2026-07-15             LOCAL DAYS (starts at Europe/Athens midnight; the Brussels-day rule is wrong here)
+  delivery_GR_A69_A01_2026-07-15             LOCAL DAYS (starts at Europe/Athens midnight; the Brussels-day rule is wrong here)
+  delivery_PT_A65_A01_2026-01-14             LOCAL DAYS (starts at Europe/Lisbon midnight; the Brussels-day rule is wrong here)
+  delivery_PT_A69_A01_2026-01-14             LOCAL DAYS (starts at Europe/Lisbon midnight; the Brussels-day rule is wrong here)
+  delivery_PT_A65_A01_2026-07-15             LOCAL DAYS (starts at Europe/Lisbon midnight; the Brussels-day rule is wrong here)
+  delivery_PT_A69_A01_2026-07-15             LOCAL DAYS (starts at Europe/Lisbon midnight; the Brussels-day rule is wrong here)
+  delivery_IE_A65_A01_2026-01-14             LOCAL DAYS (starts at Europe/Dublin midnight; the Brussels-day rule is wrong here)
+  delivery_IE_A69_A01_2026-01-14             LOCAL DAYS (starts at Europe/Dublin midnight; the Brussels-day rule is wrong here)
+  delivery_IE_A65_A01_2026-07-15             LOCAL DAYS (starts at Europe/Dublin midnight; the Brussels-day rule is wrong here)
+  delivery_IE_A69_A01_2026-07-15             LOCAL DAYS (starts at Europe/Dublin midnight; the Brussels-day rule is wrong here)
+
+Fixtures and summaries: /home/dawid-home-pc/Desktop/epftoolbox2-wt/chore-live-source-checks/tests/data/fixtures/entsoe_live_checks

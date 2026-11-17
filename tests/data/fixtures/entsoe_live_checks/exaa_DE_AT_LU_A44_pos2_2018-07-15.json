@@ -1,0 +1,27 @@
+{
+  "ack_text": "No matching data found for Data item ENERGY_PRICES [12.1.D] (10Y1001A1001A63L, 10Y1001A1001A63L) and interval 2018-07-14T22:00:00Z/2018-07-15T22:00:00Z.",
+  "acknowledgement": true,
+  "area": "DE_AT_LU",
+  "bytes": 963,
+  "day": "2018-07-15",
+  "fixture": "exaa_DE_AT_LU_A44_pos2_2018-07-15.xml",
+  "id": "exaa_DE_AT_LU_A44_pos2_2018-07-15",
+  "kind": "exaa",
+  "n_points": 0,
+  "no_data": true,
+  "params": {
+    "classificationSequence_AttributeInstanceComponent.position": "2",
+    "documentType": "A44",
+    "in_Domain": "10Y1001A1001A63L",
+    "out_Domain": "10Y1001A1001A63L",
+    "periodEnd": "201807152200",
+    "periodStart": "201807142200"
+  },
+  "periods": [],
+  "positions_in_series": [],
+  "reason": "OK",
+  "resolutions": [],
+  "status": 200,
+  "verdict": "NOT SUPPORTED: no data returned (No matching data found for Data item ENERGY_PRICES [12.1.D] (10Y1001A1001A63L, 10Y1001A1001A63L) and interval 2018-07-14T22:00:00Z/2018-07-15T22:00:00Z.)",
+  "zone": "Europe/Brussels"
+}

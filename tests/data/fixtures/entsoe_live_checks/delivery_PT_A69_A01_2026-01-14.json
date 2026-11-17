@@ -1,0 +1,63 @@
+{
+  "acknowledgement": false,
+  "area": "PT",
+  "bytes": 10888,
+  "day": "2026-01-14",
+  "fixture": "delivery_PT_A69_A01_2026-01-14.xml",
+  "id": "delivery_PT_A69_A01_2026-01-14",
+  "kind": "delivery",
+  "n_points": 56,
+  "n_timeseries": 3,
+  "no_data": false,
+  "params": {
+    "documentType": "A69",
+    "in_Domain": "10YPT-REN------W",
+    "periodEnd": "202601150000",
+    "periodStart": "202601140000",
+    "processType": "A01"
+  },
+  "periods": [
+    {
+      "classification_sequence": null,
+      "curve_type": "A03",
+      "expected_positions": 24,
+      "max_position": 18,
+      "n_points": 11,
+      "psr_type": "B16",
+      "resolution": "PT60M",
+      "time_interval_end": "2026-01-15T00:00Z",
+      "time_interval_start": "2026-01-14T00:00Z"
+    },
+    {
+      "classification_sequence": null,
+      "curve_type": "A03",
+      "expected_positions": 24,
+      "max_position": 24,
+      "n_points": 21,
+      "psr_type": "B18",
+      "resolution": "PT60M",
+      "time_interval_end": "2026-01-15T00:00Z",
+      "time_interval_start": "2026-01-14T00:00Z"
+    },
+    {
+      "classification_sequence": null,
+      "curve_type": "A03",
+      "expected_positions": 24,
+      "max_position": 24,
+      "n_points": 24,
+      "psr_type": "B19",
+      "resolution": "PT60M",
+      "time_interval_end": "2026-01-15T00:00Z",
+      "time_interval_start": "2026-01-14T00:00Z"
+    }
+  ],
+  "positions_in_series": [],
+  "reason": "OK",
+  "resolutions": [
+    "PT60M"
+  ],
+  "series_without_position": true,
+  "status": 200,
+  "verdict": "LOCAL DAYS (starts at Europe/Lisbon midnight; the Brussels-day rule is wrong here): local-midnight: 3 period(s), starts ['2026-01-14T00:00Z']",
+  "zone": "Europe/Lisbon"
+}

@@ -1,0 +1,41 @@
+{
+  "acknowledgement": false,
+  "area": "IE",
+  "bytes": 7137,
+  "day": "2026-01-14",
+  "fixture": "delivery_IE_A65_A01_2026-01-14.xml",
+  "id": "delivery_IE_A65_A01_2026-01-14",
+  "kind": "delivery",
+  "n_points": 48,
+  "n_timeseries": 1,
+  "no_data": false,
+  "params": {
+    "documentType": "A65",
+    "outBiddingZone_Domain": "10YIE-1001A00010",
+    "periodEnd": "202601150000",
+    "periodStart": "202601140000",
+    "processType": "A01"
+  },
+  "periods": [
+    {
+      "classification_sequence": null,
+      "curve_type": "A03",
+      "expected_positions": 48,
+      "max_position": 48,
+      "n_points": 48,
+      "psr_type": null,
+      "resolution": "PT30M",
+      "time_interval_end": "2026-01-15T00:00Z",
+      "time_interval_start": "2026-01-14T00:00Z"
+    }
+  ],
+  "positions_in_series": [],
+  "reason": "OK",
+  "resolutions": [
+    "PT30M"
+  ],
+  "series_without_position": true,
+  "status": 200,
+  "verdict": "LOCAL DAYS (starts at Europe/Dublin midnight; the Brussels-day rule is wrong here): local-midnight: 1 period(s), starts ['2026-01-14T00:00Z']",
+  "zone": "Europe/Dublin"
+}
