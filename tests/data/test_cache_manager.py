@@ -741,3 +741,35 @@ class TestWithoutRanges:
         df.index = df.index.tz_localize(None)
         out = without_ranges(df, [(ts("2024-01-01 02:00"), ts("2024-01-01 04:00"))])
         assert len(out) == 22
+
+
+def _tail_cap_on_every_diff(df, now):
+    """`_still_published_tail_cap` as it was: the local step of every diff of each column, the last one used."""
+    from epftoolbox2.data.cache_manager import DISCONTINUED_AFTER, _local_steps
+
+    caps = []
+    for _, series in df.items():
+        valid_index = series.dropna().index
+        if len(valid_index) < 2 or now - valid_index[-1] > DISCONTINUED_AFTER:
+            continue
+        caps.append(valid_index[-1] + _local_steps(list(valid_index[1:] - valid_index[:-1]))[-1])
+    return min(caps) if caps else None
+
+
+@pytest.mark.parametrize("seed", range(20))
+def test_the_tail_cap_reads_the_last_diffs_alone_and_gives_what_every_diff_gave(seed):
+    """The last diff's local step reads the `_STEP_WINDOW` diffs before it, so the cap computed from the tail alone is the one
+    computed from every diff: on columns of mixed and changing resolutions with gaps, short and long."""
+    from epftoolbox2.data.cache_manager import _still_published_tail_cap
+
+    rng = np.random.default_rng(seed)
+    start = pd.Timestamp("2026-07-01", tz="UTC")
+    columns = {}
+    for name in ("a", "b", "c"):
+        steps = rng.choice([15, 15, 15, 60, 60, 1440], size=int(rng.integers(1, 40)))
+        stamps = start + pd.to_timedelta(np.cumsum(steps), unit="min")
+        columns[name] = pd.Series(rng.normal(size=len(stamps)), index=stamps)
+    df = pd.DataFrame(columns)
+    df.iloc[rng.integers(0, len(df), size=len(df) // 4), rng.integers(0, 3)] = np.nan
+    now = df.index[-1] + pd.Timedelta(hours=int(rng.integers(0, 24 * 40)))
+    assert _still_published_tail_cap(df, now) == _tail_cap_on_every_diff(df, now)
