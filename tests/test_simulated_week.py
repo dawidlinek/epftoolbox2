@@ -83,15 +83,16 @@ A65 = "load_forecast_d+1"
 # the backtest's archive holds and no forecast issued at 11:45 can (the target day's prices come out at 12:57).
 NOT_COMPARED = ("day_in_test", "revision", "issued_at", "mode", "snapshot", "actual")
 
-# The table: per issue day, the revision each policy reads, and what the first revision lacked against the backtest. Tuesday has
-# an r2 the spec's table doesn't: main's check_failed detail names the failing value, which the list with EXAA moves, and an
-# issue whose records' details changed is a revision (`_live._canonical`).
-FINAL = {WED: 2, THU: 2, FRI: 1, SAT: 2, SUN: 3, MON: 2, TUE: 2}
+# The table: per issue day, the revision each policy reads, and what the first revision lacked against the backtest. A call is
+# unchanged only when its records are identical in full (decision 2 as Dawid settled it on 2026-11-17), so Friday's and Tuesday's
+# 11:20 calls write r2, where the spec's table had them unchanged: on Friday main's skips now read the list with EXAA, on Tuesday
+# main's check_failed detail names another failing value. Each r2 is the backtest's record.
+FINAL = {WED: 2, THU: 2, FRI: 2, SAT: 2, SUN: 3, MON: 2, TUE: 2}
 DELIVERED = {WED: 2, MON: 2}
 FIRST_DIFFERS = {  # the names whose first revision isn't the backtest's record, and why
     WED: {"main", "live"},  # no EXAA at 10:15
     THU: {"main", "live"},  # no EXAA at 10:15
-    FRI: {"main"},  # its only revision: main's skips carry the list without EXAA (see the Friday test)
+    FRI: {"main"},  # 10:45, before EXAA: main's skips carry the list without it
     SAT: {"main", "base", "live"},  # the outage: no price of Friday or Saturday in the cache
     SUN: {"main", "live"},  # no EXAA at 10:15
     MON: {"main", "base", "live"},  # the 10-19 fit (stale) and A65 before its revision
@@ -583,7 +584,7 @@ def test_the_calls_run_one_after_another_and_give_the_table_s_status_exit_code_a
         ("thu C1", "ok", 0, 1),
         ("thu C2", "ok", 0, 2),
         ("fri C1", "fallback", 10, 1),
-        ("fri C2", "fallback", 10, 1),  # unchanged: the revision it reports is r1
+        ("fri C2", "fallback", 10, 2),  # the spec's table: unchanged (r1); see FINAL
         ("sat C1", "fallback", 10, 1),
         ("sat C2", "ok", 0, 2),
         ("sun busy 09:30", None, 75, None),
@@ -612,6 +613,9 @@ def test_the_calls_run_one_after_another_and_give_the_table_s_status_exit_code_a
 
 
 def test_wednesday_r1_waits_for_a65_until_the_10_15_poll_and_reads_no_exaa(week):
+    # The spec's "r1 at 10:15" is 10:16:35 here: each poll sleeps 5 minutes from the end of its refresh, and a refresh takes 5 s
+    # on the clock (five requests, 1 s each), so the polls drift by 5 s each: 08:45:05, 08:50:10, ..., 10:11:30, 10:16:35.
+    # Likewise Thursday's "about 11:41" is 11:40:05 and Sunday's 10:15 is 10:15:35.
     result = week.calls["wed C1"].result
     waits = polls(result)
     assert waits[-1]["outcome"] == "in" and between(waits[-1]["at"], WED, "10:12", "10:20")
@@ -661,29 +665,19 @@ def test_friday_gives_up_on_a65_at_10_45_and_base_serves(week):
     assert quality["columns"][A65]["missing"] == 96 and quality["columns"][A65]["issue_rows"] == 96
 
 
-def test_friday_r2_is_unchanged_since_no_member_that_serves_reads_exaa(week):
+def test_friday_r2_records_main_s_skips_with_the_list_that_reads_exaa(week):
+    """EXAA was out at 11:08, so at 11:20 main's list has it; main is still skipped on every key (no A65), base still serves. The
+    records differ from r1 in main's list alone, and that is a revision: r2's skips are the backtest's, list and all."""
     result = week.calls["fri C2"].result
-    assert result.unchanged and result.revision == 1
-    assert polls(result)[-1]["outcome"] == "in"  # EXAA was out at 11:08
-    assert sorted(week.store().committed(FRI)[FRI.isoformat()]) == [1]
-    others = ["live", "base", "naive"]
-    assert equals_twin(week, FRI, 1, others) == dict.fromkeys(others, True)
-
-
-def test_friday_s_skips_keep_the_list_of_the_revision_that_made_them(week):
-    """Friday's only revision is r1 (10:45, before EXAA): main's 96 skips carry the list without EXAA, the backtest's the list
-    with it. Every other field is the backtest's; the unchanged rule compares forecasts, statuses and details, not the list a
-    skip would have read, so C2 wrote no r2 to carry the other list (a disagreement with the spec's "final revision equals the
-    backtest bitwise" for this one case)."""
-    live = week.revision("main", FRI, 1)
-    backtest = [r for r in lines(week.backtest / "main.jsonl") if r["run_date"] == FRI.isoformat()]
+    assert (result.unchanged, result.revision) == (False, 2)
+    assert polls(result)[-1]["outcome"] == "in"
     without, with_exaa = (list_hash(names) for names in LISTS["main"])
-    assert {r["list_hash"] for r in live} == {without} and {r["list_hash"] for r in backtest} == {with_exaa}
-
-    def strip(rows):
-        return keyed([{k: v for k, v in r.items() if k not in ("list_hash", "predictor_list")} for r in rows])
-
-    assert strip(live) == strip(backtest)
+    first, second = (week.revision("main", FRI, number) for number in (1, 2))
+    assert {r["list_hash"] for r in first} == {without} and {r["list_hash"] for r in second} == {with_exaa}
+    assert {r["status"] for r in second} == {"missing_test_predictors"}
+    for name in ("base", "naive", "live"):
+        assert keyed(week.revision(name, FRI, 1)) == keyed(week.revision(name, FRI, 2))
+    assert equals_twin(week, FRI, 2) == dict.fromkeys(NAMES, True)
 
 
 def test_saturday_r1_in_the_outage_is_naive_s_from_the_settled_cache_and_exports_100_products(week):
@@ -693,7 +687,10 @@ def test_saturday_r1_in_the_outage_is_naive_s_from_the_settled_cache_and_exports
         assert result.models[model]["skipped"] == {"missing_test_predictors": 96}
     waits = polls(result)
     assert waits[-1]["outcome"] == "gave up" and between(waits[-1]["at"], SAT, "10:45", "10:48")
-    for poll in waits:  # every poll's refresh: ENTSO-E out of time within the 120 s budget, the calendar fine
+    # Every poll's refresh: ENTSO-E out of time within the 120 s budget, the calendar fine. The spec's table says "failed"; the
+    # refresh record says `timeout`, its status for a source that ran out of the refresh's time (a 503 on each attempt, 20 s
+    # each, then a wait or a request the budget no longer fits), and `failed` for one that refused or gave up within it.
+    for poll in waits:
         assert poll["refresh"] == {"EntsoeSource #1": "timeout", "CalendarSource #2": "ok"}
     refresh = week.json(SAT, 1, "refresh.json")
     entsoe = refresh["sources"][0]
@@ -877,11 +874,16 @@ def test_the_monitor_scores_the_week_and_alerts_on_deliveries(week):
     assert (live["issue_days"], live["committed_days"], live["delivered_days"]) == (7, 7, 2)
     assert live["participation"] == 1.0 and live["delivered"] == pytest.approx(2 / 7)
     assert live["forecasts"] == 668 and live["unscored"] == 4  # 672 keys: the repeated hour's four have no actual
-    # Input-quality days are days whose quality.json records a missing or imputed cell or a source that didn't refresh, in the
-    # policy's revision. The spec's table says Fri, Sat, Tue: Saturday's last revision refreshed after the outage, and a 1e6 is a
-    # value, not a missing cell (plausibility is the checks' business, and checks.json's): Friday alone, and Saturday's first.
+    # Input-quality days are days whose quality.json, in the policy's revision, records a missing or imputed cell or a source that
+    # failed or timed out (Dawid, 2026-11-17). Implausible values are the checks' (checks.json, `check_failed`). The spec's table
+    # says Fri, Sat, Tue: Saturday's last revision refreshed after the outage, and Tuesday's 1e6 is a value, not a missing cell.
     assert problem_days(report) == [FRI.isoformat()] and live["quality_days"] == 1 and live["quality_records"] == 7
     assert problem_days(week.monitor_first) == [FRI.isoformat(), SAT.isoformat()]
+    first = week.monitor_first.quality().assign(issue=lambda q: q["issue"].astype(str).str[:10]).set_index("issue")
+    assert first.loc[SAT.isoformat(), "failed_sources"] == "EntsoeSource #1"  # timed out on every poll
+    latest = report.quality().assign(issue=lambda q: q["issue"].astype(str).str[:10]).set_index("issue")
+    assert not latest.loc[TUE.isoformat(), "problem"] and live["check_failed"] == 0
+    assert report.tables().set_index("member").loc["main", "check_failed_days"] == 1  # Tuesday's 1e6, in the checks
     assert [alert.rule for alert in report.alerts] == ["delivered_below"]
     assert rung_counts(report) == {0: 5, 1: 2, 2: 0}
     assert rung_counts(week.monitor_first) == {0: 4, 1: 2, 2: 1}
@@ -958,16 +960,13 @@ def test_no_model_received_a_nan_input(week):
 
 def test_the_final_revisions_equal_the_backtest_and_the_first_differ_only_where_the_table_says(week):
     for day in WEEK:
-        expected = (
-            {name: name not in FIRST_DIFFERS[FRI] for name in NAMES} if day == FRI else dict.fromkeys(NAMES, True)
-        )
-        assert equals_twin(week, day, FINAL[day]) == expected, day  # Friday: see its skips' test
+        assert equals_twin(week, day, FINAL[day]) == dict.fromkeys(NAMES, True), day
         first = equals_twin(week, day, 1)
         assert {name for name, same in first.items() if not same} == FIRST_DIFFERS[day], day
     # Friday and Tuesday through base, statuses and skip details included.
     for day, status in ((FRI, "missing_test_predictors"), (TUE, "check_failed")):
-        assert {r["status"] for r in week.revision("main", day, 1)} == {status}
-        assert {r["member"] for r in week.revision("live", day, 1)} == {"base"}
+        assert {r["status"] for r in week.revision("main", day, FINAL[day])} == {status}
+        assert {r["member"] for r in week.revision("live", day, FINAL[day])} == {"base"}
 
 
 def test_every_quality_record_names_a65_s_last_valid_timestamp(week):
@@ -983,25 +982,28 @@ def test_every_quality_record_names_a65_s_last_valid_timestamp(week):
                 held = archive(week.fake, pd.Timestamp(refresh["started"]))["load_forecast"].dropna()
                 held = held[held.index < pd.Timestamp(refresh["end"])]
                 assert last == held.index[-1], (day, number)
-            expected = {(FRI, 1): local(FRI, "23:45"), (SAT, 1): local(datetime.date(2026, 10, 20), "23:45")}.get(
-                (issue, number), local(issue + datetime.timedelta(days=1), "23:45")
-            )
+            expected = {
+                (FRI, 1): local(FRI, "23:45"),
+                (FRI, 2): local(FRI, "23:45"),
+                (SAT, 1): local(datetime.date(2026, 10, 20), "23:45"),
+            }.get((issue, number), local(issue + datetime.timedelta(days=1), "23:45"))
             assert last == expected, (day, number)
 
 
 def test_a_second_pass_in_parquet_gives_the_same_bytes_and_records(week, tmp_path):
     """The whole week again into a fresh directory, with `save_format="parquet"` (the models' records in Parquet directories,
     the ensemble's in JSONL as always): every exit code, every snapshot file's bytes, the ensemble's JSONL lines (sorted), and
-    every model's and the ensemble's records of each committed revision as sorted JSON lines are the first pass's. One pass
-    answers both of the spec's checks, a second run and the Parquet format, since a third pass would put the module past 60 s
-    (each pass is about 21 s on one process)."""
+    every model's and the ensemble's records of each committed revision as sorted JSON lines are the first pass's.
+
+    One pass answers both of the spec's checks, determinism (a second run) and format equivalence (Parquet), since a third pass
+    would put the module past 60 s (each pass is about 21 s on one process). So it checks the sorted records and the snapshot
+    bytes, not the JSONL bytes of the models' files of a second JSONL run."""
     again = run_week(tmp_path / "again", save_format="parquet")
     assert (again.live / "main.parquet").is_dir() and not (again.live / "main.jsonl").exists()
     first, second = week.summary(), again.summary()
     assert first["exit_codes"] == second["exit_codes"]
-    assert (
-        first["records"].keys() == second["records"].keys() and len(first["records"]) == 4 * 13
-    )  # 13 committed revisions
+    assert first["records"].keys() == second["records"].keys()
+    assert len(first["records"]) == 4 * 14  # 14 committed revisions, four names each
     differ = [key for key in first["records"] if first["records"][key] != second["records"][key]]
     assert not differ
     assert second["files"] == {"live.jsonl": first["files"]["live.jsonl"]}
