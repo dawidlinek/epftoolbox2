@@ -80,7 +80,7 @@ Every model and ensemble of the pipeline that has results in the directory is a 
 | `delivered_days`, `delivered` | Due issue days with a delivery recorded (`mark_delivered`), and their share |
 | `member_days` | Issue days the member has a forecast on |
 | `fallback_days`, `skipped_days`, `fallback_mae` | For a `FallbackEnsemble`: issue days a rung above 0 served, issue days no rung served, and the MAE of the keys a rung above 0 served |
-| `quality_records`, `quality_days` | Days with a `quality.json`, and of them days that record a missing or imputed cell or a source that didn't refresh |
+| `quality_records`, `quality_days` | Days with a `quality.json`, and of them days that record a missing or imputed cell or a source that failed or timed out (an implausible value is the checks', in `check_failed`) |
 
 **Skill is on common keys.** `skill_naive` of a member is its MAE over naive's on the keys where both have a forecast and an
 actual, and `common_naive` says how many. A model that skipped a key the benchmark made is not compared on it, and its own
@@ -120,7 +120,10 @@ rung above 0 served, so a late input shows as days on a lower rung with a worse 
 
 `monitored.quality()` has one row per issue day with a committed revision, from the `quality.json` of the revision the policy reads:
 `record` (whether it has one), `missing_cells`, `imputed_cells`, the columns with either, the sources that didn't refresh, and
-`problem`. `quality_days` in the table counts the problem days of the window.
+`problem`. `quality_days` in the table counts the problem days of the window. A problem is a missing or imputed cell or a
+source whose refresh failed or timed out, nothing else: an implausible value (a load forecast of 1e6) is a value, which the
+[checks before export](/epftoolbox2/model-pipeline/checks/) judge, so it shows in `checks.json` and in `check_failed` and
+`check_failed_days`, not here.
 
 ## Against the backtest
 

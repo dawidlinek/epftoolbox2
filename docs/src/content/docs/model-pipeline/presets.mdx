@@ -205,21 +205,23 @@ The all-Fridays form can't be issued as it is on other days: see the page's "Iss
 
 ## Live Defaults
 
-`live_defaults(zone, exaa=False)` returns the settings of a day-ahead live run as a plain dict, for the `forecast(**...)` of the
-live layer (step 8e), which this version does not have yet: until then it is only data.
+`live_defaults(zone, exaa=False)` returns the settings of a day-ahead live run as a plain dict: `issue_time` and `issue_timezone`
+for `ModelPipeline`, `deadline` and `wait_for` for [`forecast()`](/epftoolbox2/operations/live/). The columns waited for are those
+a model reads on the issue row (`load_forecast_d+1`, tomorrow's forecast); the plain `load_forecast` there is today's, out since
+yesterday.
 
 ```python
 from epftoolbox2.presets import live_defaults
 
 live_defaults("DE_LU")
-# {'issue_time': '11:45', 'issue_timezone': 'Europe/Berlin', 'deadline': '11:55', 'wait_for': {'load_forecast': '10:45'}}
-live_defaults("DE_LU", exaa=True)["wait_for"]  # also {'price_exaa': '11:40'}
+# {'issue_time': '11:45', 'issue_timezone': 'Europe/Berlin', 'deadline': '11:55', 'wait_for': {'load_forecast_d+1': '10:45'}}
+live_defaults("DE_LU", exaa=True)["wait_for"]  # also {'price_exaa_d+1': '11:40'}
 ```
 
 | Zone | `issue_timezone` | Day-ahead load forecast waited for |
 |---|---|---|
-| `DE_LU`, `DE`, `AT`, `BE` | `Europe/Berlin`, `Europe/Berlin`, `Europe/Vienna`, `Europe/Brussels` | `load_forecast` |
-| `PL` | `Europe/Warsaw` | `pse_load_fcst` |
+| `DE_LU`, `DE`, `AT`, `BE` | `Europe/Berlin`, `Europe/Berlin`, `Europe/Vienna`, `Europe/Brussels` | `load_forecast_d+1` |
+| `PL` | `Europe/Warsaw` | `pse_load_fcst_d+1` |
 
 Evidence: the issue time is the 11:45 local time that the docs' examples use for Berlin, Warsaw and Brussels
 ([Information Set](/epftoolbox2/model-pipeline/information-set/)). The load forecast is published at 10:00 (ENTSO-E's rule; PSE's

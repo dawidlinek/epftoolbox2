@@ -326,10 +326,22 @@ an issue day it didn't sample.
   late inputs (`wait_for={column: "HH:MM"}` or `"rules"`, polling on the clock), serves every model from its stored fits or fits it
   inline by the backtest's own lines (a forecast served over the backtest's frame is its record to the bit), applies the checks
   before export, computes the ensembles and fallbacks, and commits a revision with its input snapshot, quality, checks, refresh,
-  waits and fits files; or reports `late` (30), `unchanged` (no revision when nothing changed), `noop` (`ensure=True`). The issue
+  waits and fits files; or reports `late` (30), `unchanged` (no revision when every record is identical in full, a skip's list
+  and a failed check's detail included), `noop` (`ensure=True`). The issue
   status is `ok` (0), `fallback` (10) or `skipped` (20). `ForecastResult.export(path, format, grid="products")` writes one row per
   market product, the repeated autumn hour twice. `dry_run=True` writes nothing anywhere. `verify(through="serve")` probes the live
   path. Nothing about a backtest moves. See [Live Forecasts](/epftoolbox2/operations/live/).
+- **A week of live calls, end to end.** The Live Forecasts page walks through seven issue days of one pipeline: a late source, a
+  missing input, an ENTSO-E outage, a missed slot behind a hung call, a crash before the commit, a failed refit, a stale fit, a
+  revised and an implausible input, a dry run, deliveries and a late call, each call's status, exit code and revision, which guard
+  answers which failure, and what to schedule (refit at night, an 08:45 call with catch-ups, an 11:20 call, the monitor, the
+  snapshots). The library's own test runs that week offline against a fake ENTSO-E server on a fake clock and checks that the last
+  revision of each day equals a backtest over what the server held, record by record. `wait_for` names the issue rows' columns:
+  `{"load_forecast_d+1": "10:45"}` waits for tomorrow's load forecast; a column no model reads there warns and names the one
+  they read, and `presets.live_defaults` gives `load_forecast_d+1` and `price_exaa_d+1`.
+- **A live poll refreshes faster.** The per-source cache estimated a still-published column's step from every diff of the column,
+  where it uses the last one alone: about 0.07 s per cached write of a quarter-year of 15-minute ENTSO-E data, on every refresh of
+  a poll. The same caps, faster.
 - **`refit_from=` and `refit="once"`: train once and keep the fit for a whole period.** Every model that takes `refit` takes
   `refit_from`, a local date (`"2024-01-01"` or a `datetime.date`) that the refit calendar counts from instead of Monday
   1970-01-05: `"7D"` refits on its weekday, a `"kMS"` rule (from the first of a month) every k months from it. `refit="once"` needs
@@ -361,7 +373,9 @@ an issue day it didn't sample.
   rows that moved since (`stale`). A fit is refused (`FitTooEarlyError`) while a training target, or an input of the newest
   training row, isn't out by its rule at the clock's now; a frame missing a newest target stores the fit marked `incomplete`. A forecast served from a stored fit is the backtest's record
   to the bit, with the engine on or off. OLS, Ridge, LassoCV and LEAR store fits (`_fit_state`/`_from_state`); every scaler has
-  `state()`, `BaseScaler.from_state()` and `transform()`. The other families fit at serve time. See
+  `state()`, `BaseScaler.from_state()` and `transform()`. The other families fit at serve time. A list of a predictor function
+  that the anchor's stored fit lacks (the refit ran before an input the function switches on was out) is fitted inline at the
+  anchor under the default `fit_missing="previous"`, as under `"fit"`; `"skip"` leaves it as `no_stored_fit` skips. See
   [Stored Fits](/epftoolbox2/model-pipeline/stored-fits/).
 - **OLS, Ridge and LassoCV record their scikit-learn release.** Their manifests add `scikit_learn` (the release they fitted with),
   as provenance, and a resume under another release warns, every time while the file mixes them, and lists each release in the

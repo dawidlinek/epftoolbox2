@@ -371,12 +371,13 @@ def test_live_defaults_follow_the_docs_issue_times():
         "issue_time": "11:45",
         "issue_timezone": "Europe/Berlin",
         "deadline": "11:55",
-        "wait_for": {"load_forecast": "10:45"},
+        "wait_for": {"load_forecast_d+1": "10:45"},
     }
     assert live_defaults("PL")["issue_timezone"] == "Europe/Warsaw"
-    assert live_defaults("PL")["wait_for"] == {"pse_load_fcst": "10:45"}
+    assert live_defaults("PL")["wait_for"] == {"pse_load_fcst_d+1": "10:45"}
     assert live_defaults("BE")["issue_timezone"] == "Europe/Brussels"
-    assert live_defaults("AT", exaa=True)["wait_for"] == {"load_forecast": "10:45", "price_exaa": "11:40"}
+    # The issue row's columns: tomorrow's values, which a model reads and a wait can be for (the plain columns are today's).
+    assert live_defaults("AT", exaa=True)["wait_for"] == {"load_forecast_d+1": "10:45", "price_exaa_d+1": "11:40"}
 
 
 def test_live_defaults_are_plain_data_and_a_fresh_dict_each_time():
