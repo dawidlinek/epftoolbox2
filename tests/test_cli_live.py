@@ -189,13 +189,50 @@ def test_a_live_only_workflow_refuses_a_backtest(experiment):
         ({"save_dir": "live", "export": {"path": "x", "format": "xlsx"}}, "export.format"),
         ({"save_dir": "live", "export": {"path": "x", "grid": "days"}}, "export.grid"),
         ({"save_dir": "live", "export": {"path": "x", "mode": "a"}}, "unknown key"),
+        ({"save_dir": "live", "checks": {"class": "ForecastChecks"}}, r"model_pipeline\.checks"),
+        ({}, "needs save_dir"),
+        (None, "needs save_dir"),
     ],
 )
 def test_a_mistake_in_the_live_section_is_refused_when_the_file_is_loaded(tmp_path, live, message):
+    config = experiment_config(tmp_path, live={})
+    config["live"] = live
     path = tmp_path / "bad.yaml"
-    path.write_text(yaml.safe_dump(experiment_config(tmp_path, live=live)))
+    path.write_text(yaml.safe_dump(config))
     with pytest.raises(ValueError, match=message):
         Workflow.load(path)
+
+
+@pytest.mark.parametrize("single_file", ["data_cache", "cache_path"])
+def test_a_file_cache_with_on_failure_cache_is_refused_at_load(tmp_path, single_file):
+    config = experiment_config(tmp_path)
+    if single_file == "data_cache":
+        config["data_pipeline"]["cache"] = "cache.csv"
+    else:
+        config["environment"] = {"cache_path": "cache.csv"}
+    path = tmp_path / "bad.yaml"
+    path.write_text(yaml.safe_dump(config))
+    with pytest.raises(ValueError, match="single-file cache"):
+        Workflow.load(path)
+    config["live"] = {**LIVE, "on_failure": "raise"}
+    path.write_text(yaml.safe_dump(config))
+    assert Workflow.load(path).live.on_failure == "raise"  # the file cache is fine without the fallback
+
+
+def test_the_checks_of_a_live_call_are_the_pipeline_s(tmp_path, monkeypatch):
+    seen = []
+    real = ModelPipeline.forecast
+
+    def spy(self, *args, **kwargs):
+        seen.append(self.checks)
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(ModelPipeline, "forecast", spy)
+    checks = {"class": "ForecastChecks", "params": {"range": [-5000, 5000]}}
+    path = experiment_with(tmp_path, checks=checks)
+    assert forecast(path) == 0
+    (held,) = seen
+    assert held is not None and held.range == (-5000, 5000)
 
 
 def test_forecast_only_into_a_save_dir_is_still_refused_next_to_a_live_section(tmp_path):
@@ -211,8 +248,8 @@ def test_forecast_only_into_a_save_dir_is_still_refused_next_to_a_live_section(t
 
 def forecast(experiment, *extra, at=BEFORE_DEADLINE, clock=None):
     argv = ["forecast", str(experiment), "--issue", ISSUE, *extra]
-    if clock is None:
-        argv += ["--as-of", at]
+    if clock is None:  # --as-of replays over cached or offline data: the CSV is offline
+        argv += ["--as-of", at] if "--refresh" in extra else ["--refresh", "never", "--as-of", at]
     return cli.main(argv, clock=clock)
 
 
@@ -276,7 +313,13 @@ def test_forecast_gives_exit_1_when_the_call_raises(tmp_path, capsys):
 
 
 def test_a_usage_mistake_exits_with_2(experiment):
-    for argv in (["--issue", "someday"], ["--as-of", "2023-03-07T11:30"], ["--wait-for", "load"], ["--refresh", "now"]):
+    for argv in (
+        ["--issue", "someday"],
+        ["--as-of", "2023-03-07T11:30"],
+        ["--wait-for", "load"],
+        ["--refresh", "now"],
+        ["--wait-for", "rules", "--wait-for", "load_d+1=10:00"],
+    ):
         with pytest.raises(SystemExit) as stop:
             cli.main(["forecast", str(experiment), *argv])
         assert stop.value.code == 2
@@ -300,6 +343,24 @@ def test_a_forecast_exports_the_delivered_model_as_the_live_section_says(experim
     assert forecast(experiment) == 0
     exported = pd.read_csv(tmp_path / "out" / f"{ISSUE}.csv")
     assert len(exported) == 48 and exported["status"].eq("ok").all() and exported["prediction"].notna().all()
+
+
+def test_a_failed_export_is_reported_after_the_status_and_the_retry_writes_it(experiment, tmp_path, capsys):
+    target = tmp_path / "out" / f"{ISSUE}.csv"
+    target.mkdir(parents=True)  # a directory where the file goes: the export can't be written
+    assert forecast(experiment) == 1
+    out = capsys.readouterr().out
+    assert "status ok, exit 0, revision 1" in out and "export failed" in out
+    assert out.index("status ok") < out.index("export failed")
+    assert sorted(LiveStore(tmp_path / "live").committed()[ISSUE]) == [1]  # the revision was committed
+    target.rmdir()
+    assert forecast(experiment, "--ensure") == 0  # a noop that exports what is missing
+    assert len(pd.read_csv(target)) == 48
+    stamp = target.stat().st_mtime_ns
+    assert forecast(experiment, "--ensure") == 0 and target.stat().st_mtime_ns == stamp  # and leaves a file alone
+    target.unlink()
+    assert forecast(experiment) == 0  # an unchanged rerun exports it too
+    assert len(pd.read_csv(target)) == 48 and sorted(LiveStore(tmp_path / "live").committed()[ISSUE]) == [1]
 
 
 # --- --as-of is a FakeClock ------------------------------------------------------------------------------------------
@@ -349,6 +410,40 @@ def test_a_wait_passes_at_once_on_the_fake_clock(tmp_path):
     assert len(polls) == 13 and polls[-1]["at"] == "2023-03-07T10:00:00+00:00"  # it gave up at 11:00
 
 
+def usage_error(capsys, *argv):
+    with pytest.raises(SystemExit) as stop:
+        cli.main(list(argv))
+    assert stop.value.code == 2
+    return capsys.readouterr().err
+
+
+def test_as_of_on_a_forecast_or_a_refit_needs_refresh_never(experiment, tmp_path, capsys):
+    for command in ("forecast", "refit"):
+        for refresh in ([], ["--refresh", "auto"]):
+            err = usage_error(capsys, command, str(experiment), "--issue", ISSUE, *refresh, "--as-of", BEFORE_DEADLINE)
+            assert "--refresh never" in err and "cached or offline" in err
+    assert not (tmp_path / "live").exists()
+    assert forecast(experiment) == 0 and refit(experiment, "--if-due") == 0  # with it, they run
+
+
+def test_as_of_is_refused_by_snapshot_and_main_s_clock_is_not_restricted(tmp_path, capsys):
+    from epftoolbox2.data.sources import CalendarSource
+    from epftoolbox2.pipelines import DataPipeline
+
+    DataPipeline(sources=[CalendarSource("BE")], timezone="Europe/Brussels").save(tmp_path / "data.yaml")
+    argv = ["snapshot", str(tmp_path / "data.yaml"), "--archive", str(tmp_path / "archive")]
+    assert "vintage" in usage_error(capsys, *argv, "--as-of", BEFORE_DEADLINE)
+    assert not (tmp_path / "archive").exists()
+    assert cli.main(argv, clock=FakeClock(BEFORE_DEADLINE)) == 0
+
+
+def test_a_mixed_wait_for_is_a_usage_error(experiment, capsys):
+    err = usage_error(
+        capsys, "forecast", str(experiment), "--wait-for", "rules", "--wait-for", "load_d+1=10:00", "--dry-run"
+    )
+    assert "stands alone" in err
+
+
 # --- --dry-run writes nothing --------------------------------------------------------------------------------------------
 
 
@@ -380,7 +475,7 @@ def spy(monkeypatch):
 
     def stub(self, data, issue="today", save_dir=None, **kwargs):
         calls.append({"issue": issue, "save_dir": save_dir, **kwargs})
-        return ForecastResult(issue="2023-03-07", status="ok", exit_code=0, noop=True)
+        return ForecastResult(issue="2023-03-07", status="ok", exit_code=0, dry_run=True)
 
     monkeypatch.setattr(ModelPipeline, "forecast", stub)
     return calls
@@ -410,7 +505,7 @@ def test_the_live_keys_reach_forecast_unchanged(experiment, tmp_path, spy):
 
 def test_a_key_the_section_does_not_set_is_left_to_forecast_s_default(tmp_path, spy):
     path = experiment_with(tmp_path, live={"save_dir": "live"})
-    assert forecast(path) == 0
+    assert forecast(path, clock=FakeClock(BEFORE_DEADLINE)) == 0
     (call,) = spy
     assert not {"deadline", "wait_for", "poll", "budget", "timeout", "retries", "on_failure", "deliver"} & set(call)
     assert call["ensure"] is False and call["refresh"] == "auto" and call["dry_run"] is False
@@ -511,11 +606,27 @@ def test_status_exits_1_where_nothing_was_forecast(experiment):
     assert cli.main(["status", str(experiment), "--issue", ISSUE, "--as-of", BEFORE_DEADLINE]) == 1
 
 
+def test_status_and_mark_delivered_read_files_only(experiment, receipt, tmp_path, monkeypatch):
+    assert forecast(experiment) == 0
+
+    def no_build(*args, **kwargs):
+        raise AssertionError("a pipeline was built, or an extra checked, by a call that reads files")
+
+    monkeypatch.setattr(Workflow, "_build_data_pipeline", no_build)
+    monkeypatch.setattr(Workflow, "_build_model_pipeline", no_build)
+    monkeypatch.setattr("epftoolbox2.pipelines.workflow.preflight", no_build)
+    assert cli.main(["status", str(experiment), "--issue", "today", "--as-of", BEFORE_DEADLINE]) == 0
+    assert deliver(experiment, receipt) == 0
+    assert deliver(experiment, receipt, "--dry-run") == 0
+    assert [line["revision"] for line in LiveStore(tmp_path / "live").deliveries(ISSUE)] == [1]
+
+
 # --- epf refit -----------------------------------------------------------------------------------------------------------
 
 
 def refit(experiment, *extra, issue=ISSUE, at="2023-03-07T11:30+01:00"):
-    return cli.main(["refit", str(experiment), "--issue", issue, *extra, "--as-of", at])
+    refresh = [] if "--refresh" in extra else ["--refresh", "never"]
+    return cli.main(["refit", str(experiment), "--issue", issue, *extra, *refresh, "--as-of", at])
 
 
 def test_refit_stores_the_fits_and_a_second_if_due_changes_nothing(experiment, tmp_path):
@@ -584,6 +695,32 @@ def test_monitor_passes_its_windows_the_live_deadline_and_the_issue_days(experim
     assert kwargs["issue_days"] == ["monday", "tuesday"] and kwargs["target"] == "price"
 
 
+def test_monitor_reads_the_actuals_from_the_first_committed_day_to_the_last_one_s_targets(tmp_path, monkeypatch):
+    from epftoolbox2.pipelines import DataPipeline
+
+    path = experiment_with(tmp_path)
+    for day in ("2023-03-06", ISSUE):
+        argv = ["forecast", str(path), "--issue", day, "--refresh", "never", "--as-of", f"{day}T11:30+01:00"]
+        assert cli.main(argv) == 0
+    ranges = []
+    real = DataPipeline.run
+
+    def spy(self, start, end, *args, **kwargs):
+        ranges.append((str(start), str(end)))
+        return real(self, start, end, *args, **kwargs)
+
+    monkeypatch.setattr(DataPipeline, "run", spy)
+    assert monitor(path) == 0
+    # horizon 2: the last issue day's furthest target is 2023-03-09; the end is exclusive, with a day of margin
+    assert ranges == [("2023-03-06", "2023-03-11")]
+
+
+def test_as_of_is_kept_by_monitor_and_status_without_refresh_never(experiment):
+    assert forecast(experiment) == 0
+    assert monitor(experiment) == 0
+    assert cli.main(["status", str(experiment), "--issue", ISSUE, "--as-of", BEFORE_DEADLINE]) == 0
+
+
 def test_monitor_exits_1_without_a_live_directory_or_a_revision(experiment, tmp_path):
     assert monitor(experiment) == 1
     with LiveStore(tmp_path / "live").hold():
@@ -607,12 +744,12 @@ def test_snapshot_records_the_data_pipeline_into_the_archive(tmp_path):
     from epftoolbox2.pipelines import DataPipeline
 
     DataPipeline(sources=[CalendarSource("BE")], timezone="Europe/Brussels").save(tmp_path / "data.yaml")
-    argv = ["snapshot", str(tmp_path / "data.yaml"), "--archive", str(tmp_path / "archive"), "--as-of", BEFORE_DEADLINE]
-    assert cli.main(argv) == 0
+    argv = ["snapshot", str(tmp_path / "data.yaml"), "--archive", str(tmp_path / "archive")]
+    assert cli.main(argv, clock=FakeClock(BEFORE_DEADLINE)) == 0
     catalog = SnapshotArchive(tmp_path / "archive").catalog()
     assert len(catalog) == 1 and catalog["status"].tolist() == ["ok"]
     assert catalog["fetched_at"].iloc[0] == pd.Timestamp(BEFORE_DEADLINE).tz_convert("UTC")
-    assert cli.main([*argv[:-2], "--days-back", "0", "--days-ahead", "0", "--as-of", AFTER_DEADLINE]) == 0
+    assert cli.main([*argv, "--days-back", "0", "--days-ahead", "0"], clock=FakeClock(AFTER_DEADLINE)) == 0
     assert len(SnapshotArchive(tmp_path / "archive").catalog()) == 2
 
 

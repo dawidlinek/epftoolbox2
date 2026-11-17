@@ -212,6 +212,12 @@ class Workflow:
         self.model_save_format = model_save_format
         self.model_save_coefficients = model_save_coefficients
         self.live = None if live is None else LiveSettings.from_dict(live)
+        if self.live is not None and self.live.on_failure == "cache" and (cache_path or isinstance(data_cache, str)):
+            raise ValueError(
+                "live.on_failure: cache falls back to the per-source caches, which a single-file cache "
+                "(data_pipeline.cache: <path> or environment.cache_path) doesn't have: use data_pipeline.cache: true, or "
+                "another on_failure"
+            )
         refuse_forecast_only_into_save_dir(self.model_forecast_only, self.model_save_dir)
         self._yaml_dir: Optional[Path] = None  # set by load(), used for relative path resolution
         self._dp_inline: dict = {}  # inline sources/transformers/validators overrides
@@ -445,15 +451,13 @@ class Workflow:
 
     def _live_pipelines(self) -> tuple:
         """The data pipeline and the model pipeline of a live call: as `run` builds them, with the information set knowing the
-        configured sources' columns, and `live.checks` (if set) in place of the pipeline's."""
+        configured sources' columns."""
         self._live_settings()
         self._apply_environment()
         mp = self._build_model_pipeline()
         dp = self._build_data_pipeline()
         if mp.information_set is not None:
             mp.information_set = mp.information_set.with_source_rules([*dp.sources, *dp.transformers])
-        if self.live.checks is not None:
-            mp.checks = ModelPipeline._load_component("checks", self.live.checks)
         preflight(mp.models)
         return dp, mp
 
@@ -524,54 +528,67 @@ class Workflow:
 
     def export_result(self, result: Any) -> Optional[Path]:
         """Write `live.export` for `result` (path with `{issue}` filled in, relative to the YAML): the delivered model's
-        forecasts. Nothing for a call that has none (busy, late), a dry run, or a noop; None without an export section."""
+        forecasts. Nothing for a call that has none (busy, late), a dry run, or without an export section. A noop (`--ensure`)
+        or unchanged call exports from the committed revision's records only when the file for the issue is missing, so
+        a retry after a failed export writes it and a repeat call leaves a delivered file alone. Returns the path written."""
         export = self._live_settings().export
-        if export is None or result.dry_run or result.noop or result.status in ("busy", "late"):
+        if export is None or result.dry_run or result.status in ("busy", "late"):
             return None
         path = self._resolve(export["path"].format(issue=result.issue))
+        if (result.noop or result.unchanged) and path.exists():
+            return None
         return result.export(path, format=export["format"], grid=export["grid"])
 
-    def refit(self, issue: Any = "today", *, if_due: bool = True):
+    def refit(self, issue: Any = "today", *, if_due: bool = True, refresh: str = "auto"):
         """`ModelPipeline.refit` into `live.save_dir` for the issue day: the data pipeline refreshed over the range the fits
-        read (the live section's budget, timeout, retries and on_failure)."""
+        read (the live section's budget, timeout, retries and on_failure); `refresh="never"` reads the per-source caches alone."""
+        if refresh not in ("auto", "never"):
+            raise ValueError(f"refresh must be 'auto' or 'never', got {refresh!r}")
         from ..pipelines._live import data_span, issue_zone, resolve_issue
 
         dp, mp = self._live_pipelines()
         _, horizons = resolve_horizons(self.model_horizon, self.model_horizons, 7)
         day = resolve_issue(issue, issue_zone(mp.information_set, dp))
-        frame = dp.run(*data_span(mp.models, day, horizons, dp), **self._live_data_options())
+        options = self._live_data_options()
+        if refresh == "never":  # as forecast(refresh="never"): no time for any request
+            options.update(cache=True, budget=0, on_failure="cache")
+        frame = dp.run(*data_span(mp.models, day, horizons, dp), **options)
         return mp.refit(frame, self._live_dir(), issue=day, if_due=if_due, **self._run_shape())
 
-    def mark_delivered(self, issue: Any, revision: int, receipt: Union[str, Path], dry_run: bool = False) -> dict:
-        """`ModelPipeline.mark_delivered` into `live.save_dir`; `issue` may be "today" (in the issue zone)."""
-        _, mp = self._live_pipelines()
-        day = self._issue_day(issue, mp)
-        return mp.mark_delivered(self._live_dir(), day, revision, receipt, dry_run=dry_run)
-
-    def _issue_day(self, issue: Any, mp: ModelPipeline) -> Any:
-        """`issue` as a date for a call that reads no data: "today" is read in the information set's zone, or the one `live.json`
-        records when the set says "data"."""
-        from ..information_set import DATA_ZONE
-        from ..pipelines._live import resolve_issue
+    def _live_store(self) -> Any:
+        """The live directory's store, for the calls that read files alone: no pipeline is built, no extra imported, no key read."""
         from ..results.live import LiveStore
+        from ..results.store import LiveDirectoryError
 
-        zone = None if mp.information_set is None else mp.information_set.issue_timezone
-        if zone is None or zone == DATA_ZONE:
-            zone = LiveStore(self._live_dir()).zone()
+        store = LiveStore(self._live_dir())
+        if not store.is_live():
+            raise LiveDirectoryError(f"{store.save_dir} is no live directory yet: nothing has been forecast into it")
+        return store
+
+    def _issue_day(self, issue: Any, store: Any) -> Any:
+        """`issue` as a date: "today" is read in the issue zone `live.json` records."""
+        from ..pipelines._live import resolve_issue
+
+        zone = store.zone()
         if zone is None:
-            raise ValueError("the issue zone is unknown: give the pipeline an information set with an issue_timezone")
+            raise ValueError(
+                f"{store.identity_path} records no issue_timezone, so 'today' can't be read: give the date"
+            )
         return resolve_issue(issue, zone)
+
+    def mark_delivered(self, issue: Any, revision: int, receipt: Union[str, Path], dry_run: bool = False) -> dict:
+        """Record that `revision` of the issue day was delivered, as `ModelPipeline.mark_delivered` does, from the live directory
+        alone; `issue` may be "today" (in the zone `live.json` records)."""
+        store = self._live_store()
+        day = self._issue_day(issue, store)
+        with store.hold(create=not dry_run):
+            return store.mark_delivered(day, revision, receipt, dry_run=dry_run)
 
     def status(self, issue: Any = "today") -> dict:
         """What the live directory holds for one issue day: its call lines in order, its committed revisions, its deliveries,
-        the newest call's deadline and the newest committed revision's status. Reads files only."""
-        from ..results.live import LiveStore
-
-        _, mp = self._live_pipelines()
-        day = self._issue_day(issue, mp).isoformat()
-        store = LiveStore(self._live_dir())
-        if not store.is_live():
-            raise ValueError(f"{store.save_dir} is no live directory yet: nothing has been forecast into it")
+        the newest call's deadline and the newest committed revision's status. Reads the live directory's files only: no pipeline is built."""
+        store = self._live_store()
+        day = self._issue_day(issue, store).isoformat()
         calls = [line for line in store.calls() if line.get("issue") == day]
         deadlines = [line["deadline"] for line in calls if line.get("deadline")]
         committed = store.committed(day).get(day, {})
@@ -694,6 +711,8 @@ class Workflow:
         dp = config["data_pipeline"]
         mp = config["model_pipeline"]
 
+        if "live" in config and config["live"] is None:
+            raise ValueError("live: needs save_dir, the live directory")
         workflow = cls(
             data_pipeline=dp.get("path"),
             model_pipeline=mp.get("path"),
