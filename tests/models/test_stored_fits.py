@@ -813,6 +813,37 @@ def test_units_a_stored_fit_lacks_are_fitted_inline(tmp_path):
     assert keyed(result.records) == expected
 
 
+def exaa_when_out(ctx):
+    """A list that switches on `wind` (standing in for EXAA) where it is published: the refit's plan and a later call's differ."""
+    return PREDICTORS if ctx.published("wind_d+{horizon}") else [p for p in PREDICTORS if not p.startswith("wind")]
+
+
+@pytest.mark.parametrize("fit_missing", ["previous", "skip"])
+def test_a_list_the_stored_anchor_lacks_is_fitted_inline_at_the_anchor_under_previous(tmp_path, fit_missing):
+    """A refit model's anchor stored by a refit whose plan gave the list without `wind` (out after the refit ran): a call that
+    needs the list with it gets those units fitted inline at the anchor, the backtest's record to the bit, under the default
+    "previous" (not `no_stored_fit` skips, which took the first rung out of a fallback ladder on every last revision of a
+    day whose function switches on a late input); "skip" still skips them."""
+    data = frame(SPRING, "1h")
+    early = data.copy()
+    early.loc["2023-03-20", ["wind_d+1", "wind_d+2"]] = np.nan  # the anchor's issue day, before `wind` was out
+    live = tmp_path / "live"
+
+    def make():
+        return pipeline_of(OLSModel(exaa_when_out, 21, name="m", refit="7D"))
+
+    make().refit(early, live, issue="2023-03-20", horizon=2)
+    result = serve_one(make(), data, live, "2023-03-22", fit_missing=fit_missing)
+    entry = result.fits["2023-03-20"]
+    assert entry["source"] == "stored"
+    if fit_missing == "skip":
+        assert "inline_units" not in entry and {r["status"] for r in result.records} == {"no_stored_fit"}
+        return
+    assert entry["inline_units"] == 48
+    expected = backtest_of_day(make(), data, "2023-03-22", tmp_path / "bt", horizon=2)
+    assert keyed(result.records) == expected
+
+
 # --- review round 2 -----------------------------------------------------------------------------------------------------
 
 

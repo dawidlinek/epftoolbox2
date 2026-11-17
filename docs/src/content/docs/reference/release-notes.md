@@ -361,7 +361,9 @@ an issue day it didn't sample.
   rows that moved since (`stale`). A fit is refused (`FitTooEarlyError`) while a training target, or an input of the newest
   training row, isn't out by its rule at the clock's now; a frame missing a newest target stores the fit marked `incomplete`. A forecast served from a stored fit is the backtest's record
   to the bit, with the engine on or off. OLS, Ridge, LassoCV and LEAR store fits (`_fit_state`/`_from_state`); every scaler has
-  `state()`, `BaseScaler.from_state()` and `transform()`. The other families fit at serve time. See
+  `state()`, `BaseScaler.from_state()` and `transform()`. The other families fit at serve time. A list of a predictor function
+  that the anchor's stored fit lacks (the refit ran before an input the function switches on was out) is fitted inline at the
+  anchor under the default `fit_missing="previous"`, as under `"fit"`; `"skip"` leaves it as `no_stored_fit` skips. See
   [Stored Fits](/epftoolbox2/model-pipeline/stored-fits/).
 - **OLS, Ridge and LassoCV record their scikit-learn release.** Their manifests add `scikit_learn` (the release they fitted with),
   as provenance, and a resume under another release warns, every time while the file mixes them, and lists each release in the
