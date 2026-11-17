@@ -641,6 +641,17 @@ def cmd_monitor(args: argparse.Namespace) -> int:
     return 3 if report.alerts else 0
 
 
+def cmd_snapshot(args: argparse.Namespace) -> int:
+    from .data.archive import record_snapshot
+
+    try:
+        result = record_snapshot(args.yaml, args.archive, days_back=args.days_back, days_ahead=args.days_ahead)
+    except Exception as exc:
+        return _failed(exc)
+    console.print(result.summary(), markup=False, highlight=False)
+    return result.exit_code
+
+
 _EXPERIMENT_TEMPLATE = """\
 data_pipeline:
   path: data_pipeline.yaml
@@ -1085,6 +1096,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     monitor_p.add_argument("--alert", metavar="alerts.yaml", help="A YAML list of alert rules")
 
+    snapshot_p = live_command(
+        "snapshot",
+        "Record every source's raw download into an archive (exit 0, 4 with a warning, 1)",
+        "Path to a DataPipeline or workflow YAML",
+    )
+    snapshot_p.add_argument("--archive", required=True, metavar="DIR", help="The archive directory")
+    snapshot_p.add_argument(
+        "--days-back", type=int, default=3, metavar="N", help="Days before now to fetch (default 3)"
+    )
+    snapshot_p.add_argument(
+        "--days-ahead", type=int, default=2, metavar="N", help="Days after now to fetch (default 2)"
+    )
+
     # -- validate --
     val_p = sub.add_parser("validate", help="Validate a pipeline or workflow YAML")
     val_p.add_argument("yaml", metavar="pipeline.yaml", help="Path to YAML file to validate")
@@ -1136,6 +1160,7 @@ def main(argv: Optional[List[str]] = None, clock=None) -> Optional[int]:
         "mark-delivered": cmd_mark_delivered,
         "status": cmd_status,
         "monitor": cmd_monitor,
+        "snapshot": cmd_snapshot,
     }
     if clock is None:
         return dispatch[args.cmd](args)

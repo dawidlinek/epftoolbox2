@@ -596,3 +596,36 @@ def test_monitor_windows_must_be_whole_days(experiment):
         with pytest.raises(SystemExit) as stop:
             cli.main(["monitor", str(experiment), "--windows", windows])
         assert stop.value.code == 2
+
+
+# --- epf snapshot -----------------------------------------------------------------------------------------------------------
+
+
+def test_snapshot_records_the_data_pipeline_into_the_archive(tmp_path):
+    from epftoolbox2.data.archive import SnapshotArchive
+    from epftoolbox2.data.sources import CalendarSource
+    from epftoolbox2.pipelines import DataPipeline
+
+    DataPipeline(sources=[CalendarSource("BE")], timezone="Europe/Brussels").save(tmp_path / "data.yaml")
+    argv = ["snapshot", str(tmp_path / "data.yaml"), "--archive", str(tmp_path / "archive"), "--as-of", BEFORE_DEADLINE]
+    assert cli.main(argv) == 0
+    catalog = SnapshotArchive(tmp_path / "archive").catalog()
+    assert len(catalog) == 1 and catalog["status"].tolist() == ["ok"]
+    assert catalog["fetched_at"].iloc[0] == pd.Timestamp(BEFORE_DEADLINE).tz_convert("UTC")
+    assert cli.main([*argv[:-2], "--days-back", "0", "--days-ahead", "0", "--as-of", AFTER_DEADLINE]) == 0
+    assert len(SnapshotArchive(tmp_path / "archive").catalog()) == 2
+
+
+@pytest.mark.parametrize("code", [0, 4, 1])
+def test_snapshot_exits_with_the_record_s_code(tmp_path, monkeypatch, code):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        "epftoolbox2.data.archive.record_snapshot",
+        lambda *args, **kwargs: SimpleNamespace(exit_code=code, summary=lambda: "a line"),
+    )
+    assert cli.main(["snapshot", "data.yaml", "--archive", str(tmp_path / "archive")]) == code
+
+
+def test_snapshot_exits_1_when_the_pipeline_file_is_missing(tmp_path):
+    assert cli.main(["snapshot", str(tmp_path / "none.yaml"), "--archive", str(tmp_path / "archive")]) == 1
