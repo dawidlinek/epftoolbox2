@@ -9,6 +9,14 @@ Notes for changes that need something from you. The full list of changes of a re
 
 ### Breaking changes
 
+- **`run(forecast_only=True)` with a `save_dir` raises.** It resumed what the directory held, so a rerun into the same directory
+  returned the earlier forecast as if it were today's, and its manifest refused the next day's data. Issue live forecasts with
+  `ModelPipeline.forecast()` into a live directory (revisions, stored fits, deadlines; see
+  [Live Forecasts](/epftoolbox2/operations/live/)), keep a `forecast_only=True` run in memory (no `save_dir`), or run a backtest of
+  the dates you want into `save_dir`: its forecasts are the forecast-only run's. A `Workflow` YAML with `forecast_only: true` and
+  a `save_dir` (an array task's too) is refused when it is loaded, with `ValueError` naming those three ways, and `epf run` says so
+  and exits 1; so does `epf model --forecast-only --save-dir`. The wizard's forecast-only run keeps its forecasts in memory.
+
 - **`forecast_only`'s "today" is the issue zone's date.** A `forecast_only=True` run without `test_start`/`test_end` issued on
   the host's date: on a host in UTC, a run at 00:30 Warsaw time (22:30 UTC in summer) forecast from the Warsaw day before. With an
   information set it now issues on today in its `issue_timezone` (with `"data"`, the frame's zone), in `BaseModel.run`,
@@ -301,6 +309,15 @@ an issue day it didn't sample.
 
 ### New
 
+- **Live forecasts: `ModelPipeline.forecast(data, issue="today", save_dir=...)`.** One call issues one day into a live directory:
+  it takes `live.lock` (status `busy`, exit 75, when held), refreshes a `DataPipeline` within a budget and the deadline, waits for
+  late inputs (`wait_for={column: "HH:MM"}` or `"rules"`, polling on the clock), serves every model from its stored fits or fits it
+  inline by the backtest's own lines (a forecast served over the backtest's frame is its record to the bit), applies the checks
+  before export, computes the ensembles and fallbacks, and commits a revision with its input snapshot, quality, checks, refresh,
+  waits and fits files; or reports `late` (30), `unchanged` (no revision when nothing changed), `noop` (`ensure=True`). The issue
+  status is `ok` (0), `fallback` (10) or `skipped` (20). `ForecastResult.export(path, format, grid="products")` writes one row per
+  market product, the repeated autumn hour twice. `dry_run=True` writes nothing anywhere. `verify(through="serve")` probes the live
+  path. Nothing about a backtest moves. See [Live Forecasts](/epftoolbox2/operations/live/).
 - **`refit_from=` and `refit="once"`: train once and keep the fit for a whole period.** Every model that takes `refit` takes
   `refit_from`, a local date (`"2024-01-01"` or a `datetime.date`) that the refit calendar counts from instead of Monday
   1970-01-05: `"7D"` refits on its weekday, a `"kMS"` rule (from the first of a month) every k months from it. `refit="once"` needs

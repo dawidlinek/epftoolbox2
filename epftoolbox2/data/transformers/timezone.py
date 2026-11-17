@@ -94,6 +94,10 @@ class TimezoneTransformer(Transformer):
     def _require_market_timezone(self) -> str:
         return _require_timezone(self.market_timezone, "TimezoneTransformer.target_tz")
 
+    def lookback_days(self) -> int:
+        """Its output on a row reads the row's own local day only."""
+        return 0
+
     def transform(self, df: pd.DataFrame) -> pd.DataFrame:
         if not isinstance(df.index, pd.DatetimeIndex):
             raise ValueError("DataFrame index must be a DatetimeIndex")

@@ -182,6 +182,23 @@ def quiet_shortfall():
         _QUIET_SHORTFALL.set(_QUIET_SHORTFALL.get() - 1)
 
 
+# How many blocks (`empty_runs_kept`) the current thread or task is in: a run there that produces no forecast keeps its skip
+# records and warns, instead of raising. For `ModelPipeline.forecast()`'s run of one issue day, where a member without any
+# forecast (every input missing) is what a fallback ladder moves past, never a failed call.
+_EMPTY_KEPT: contextvars.ContextVar[int] = contextvars.ContextVar("epftoolbox2_empty_kept", default=0)
+
+
+@contextlib.contextmanager
+def empty_runs_kept():
+    """Runs inside keep a run that produced no forecast (its skip records are written and counted) and warn, where
+    `BaseModel._report_counts` raises otherwise. Only in this thread or task."""
+    _EMPTY_KEPT.set(_EMPTY_KEPT.get() + 1)
+    try:
+        yield
+    finally:
+        _EMPTY_KEPT.set(_EMPTY_KEPT.get() - 1)
+
+
 # Whether the models of one run share what they would each compute alike (step 5k): the frame contract of each (freq, read days,
 # target, horizon) once per `ModelPipeline.run` (`_RunChecks`), and on one set of period frames each column's binary-mask
 # verdict per (period, training rows) and the test days' missing rows (`_Periods.memo`). The same computations, kept: False
@@ -1894,6 +1911,9 @@ class BaseModel(ABC):
             return
         reasons = "; ".join(f"{reason} x{n} (e.g. {examples.get(reason, '?')})" for reason, n in skipped.items())
         if produced == 0 and planned > 0:
+            if _EMPTY_KEPT.get() > 0:  # a live issue's member: its skip records stand, and the ladder moves past it
+                logger.warning(f"{self.name}: no forecast of the {planned} planned. Skipped: {reasons}")
+                return
             raise RuntimeError(f"{self.name}: no forecasts produced ({planned} planned). Skipped: {reasons}")
         if _QUIET_SHORTFALL.get() > 0:  # a cut frame's run (`quiet_shortfall`): its later days have no data by design
             return

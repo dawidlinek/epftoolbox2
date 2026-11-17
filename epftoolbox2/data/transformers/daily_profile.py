@@ -43,6 +43,10 @@ class DailyProfileTransformer(Transformer):
         self.freq = freq
         self._step = parse_step(freq)
 
+    def lookback_days(self) -> int:
+        """Its output on a row reads the row's own local day only."""
+        return 0
+
     def transform(self, df: pd.DataFrame) -> pd.DataFrame:
         index = check_index(df, "DailyProfileTransformer")
         n_slots = pd.Timedelta(days=1) // self._step

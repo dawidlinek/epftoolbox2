@@ -43,6 +43,10 @@ class RollingStatsTransformer(Transformer):
     window's newest day (D - lag): a realised series needs `lag_days=1`, while a rolling statistic of a day-ahead price may end
     on D (`lag_days=0`, named without the shift).
 
+    The mean is a running sum over the frame's days, so its last bits depend on where the frame starts: the same window over a
+    frame that starts on another day agrees within a relative 1e-9 or so, not to the bit (a live refresh's range is such a
+    frame). The minimum and maximum don't.
+
     Args:
         column: The column to summarise.
         window_days: Local days in the window, at least 1. Default 365.
@@ -85,6 +89,10 @@ class RollingStatsTransformer(Transformer):
     def output_column(self) -> str:
         """The name of the column it adds."""
         return rolling_name(self.column, self.window_days, self.stat, self.lag_days)
+
+    def lookback_days(self) -> int:
+        """The window's oldest day: `window_days + lag_days - 1` days before the row's."""
+        return self.window_days + self.lag_days - 1
 
     def transform(self, df: pd.DataFrame) -> pd.DataFrame:
         index = check_index(df, "RollingStatsTransformer")

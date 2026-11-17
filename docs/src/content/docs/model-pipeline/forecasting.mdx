@@ -7,6 +7,12 @@ import { Steps, Tabs, TabItem, Aside, Code } from '@astrojs/starlight/components
 
 `forecast_only=True` runs models in operational mode: trains on all available history and predicts the next `horizon` days from today, the issue zone's date when the pipeline has an information set. No evaluators run, no exporters fire, and `report.predictions()` returns a clean DataFrame with no "actual" column.
 
+<Aside type="caution">
+A forecast-only run keeps its forecasts in memory: with a `save_dir` it raises, since a rerun into the directory resumed the
+earlier forecast and returned it as today's. For a daily live pipeline (revisions, stored fits, waits, deadlines, fallbacks, exit
+codes) use `ModelPipeline.forecast()`, see [Live Forecasts](/epftoolbox2/operations/live/).
+</Aside>
+
 ---
 
 ## Minimum Example

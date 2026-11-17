@@ -76,6 +76,20 @@ def _read_model_index(raw: Any) -> Union[int, str, None]:
     return str(raw) if "$" in expanded else int(expanded)
 
 
+def refuse_forecast_only_into_save_dir(forecast_only: bool, save_dir: Optional[str]) -> None:
+    """A Workflow with `model_pipeline.forecast_only: true` and a `save_dir` is refused when it is made (decision 12 of step 8):
+    `run(forecast_only=True)` into a directory resumed the forecast it held and returned it as today's, so it raises, and so
+    would every daily run of such a file. An array task's results go to `save_dir`, so a forecast-only one is refused too."""
+    if forecast_only and save_dir:
+        raise ValueError(
+            "model_pipeline has forecast_only: true and save_dir: a forecast-only run into a directory would resume the "
+            "forecast it holds and return it as today's, so it is refused. Remove save_dir to keep the forecasts in the "
+            "report (forecast_only runs in memory), remove forecast_only to run a backtest of the window into save_dir, or "
+            "issue live forecasts into a live directory with ModelPipeline.forecast() (revisions, stored fits, deadlines; "
+            "see the docs page Live Forecasts)."
+        )
+
+
 class Workflow:
     """Orchestrates a full experiment: loads both pipelines from YAML, sets the
     execution environment, runs data fetching, then model training/evaluation.
@@ -191,6 +205,7 @@ class Workflow:
         self.model_test = model_test
         self.model_save_format = model_save_format
         self.model_save_coefficients = model_save_coefficients
+        refuse_forecast_only_into_save_dir(self.model_forecast_only, self.model_save_dir)
         self._yaml_dir: Optional[Path] = None  # set by load(), used for relative path resolution
         self._dp_inline: dict = {}  # inline sources/transformers/validators overrides
         self._mp_inline: dict = {}  # inline models/evaluators/exporters overrides
@@ -299,6 +314,7 @@ class Workflow:
         return dp.run(start=self.data_start, end=self.data_end, cache=cache)
 
     def run(self) -> EvaluationReport:
+        refuse_forecast_only_into_save_dir(self.model_forecast_only, self.model_save_dir)  # set after load, too
         self._apply_environment()
 
         if isinstance(self.model_index, str):

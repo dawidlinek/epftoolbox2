@@ -49,6 +49,10 @@ class DSTNormalizeTransformer(Transformer):
             except (KeyError, ValueError):
                 raise ValueError(f"Invalid timezone: {tz!r}")
 
+    def lookback_days(self) -> int:
+        """Its output on a row reads the row's own local day only."""
+        return 0
+
     def transform(self, df: pd.DataFrame) -> pd.DataFrame:
         index = df.index
         if not isinstance(index, pd.DatetimeIndex) or index.tz is None:

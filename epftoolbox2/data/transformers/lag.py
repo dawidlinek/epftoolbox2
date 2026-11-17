@@ -1,3 +1,4 @@
+import math
 import numbers
 import warnings
 from collections.abc import Iterable
@@ -113,6 +114,11 @@ class LagTransformer(Transformer):
         if self._calendar_days is not None:
             return shift_calendar_days(index, -self._calendar_days * lag)
         return index - self._freq * lag
+
+    def lookback_days(self) -> int:
+        """The largest backward lag in whole days (rounded up); a forward lag reads later rows, not earlier ones."""
+        back = max([lag for lag in self.lags if lag > 0], default=0)
+        return int(math.ceil(back * self._freq / pd.Timedelta(days=1)))
 
     def transform(self, df: pd.DataFrame) -> pd.DataFrame:
         columns = list(df.columns) if self.columns is None else self.columns

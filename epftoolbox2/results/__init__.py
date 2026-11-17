@@ -6,6 +6,7 @@ from .manifest import Manifest, ManifestMismatchError, read_windows
 from .windows import RunWindows, Segment
 from .checks import ForecastChecks
 from .monitor import Alert, MonitorReport
+from .forecast_result import ForecastResult
 
 __all__ = [
     "ResultStore",
@@ -20,4 +21,5 @@ __all__ = [
     "ForecastChecks",
     "MonitorReport",
     "Alert",
+    "ForecastResult",
 ]

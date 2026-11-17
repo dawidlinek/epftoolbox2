@@ -1284,6 +1284,7 @@ def check_and_write_live(
     allow_mismatch: bool = False,
     save_format: str = "jsonl",
     save_coefficients: bool = True,
+    write: bool = True,
 ) -> None:
     """Compare a live call's `manifest` with the live directory's manifest at `path` (if any), then write it with `mode` "live",
     `save_format` (provenance) and `save_coefficients` (compared, as by `check_and_write`: one file never mixes records with
@@ -1293,11 +1294,14 @@ def check_and_write_live(
     upstream (`chained_differences`), and what decides when an input is known in the information set (the issue time and zone,
     the rules without their notes, the assumptions in any order, whether the defaults apply), which decides which list a revision
     uses. A difference raises `ManifestMismatchError` unless `allow_mismatch`. `path` outside a live directory, or a backtest's
-    manifest there, raises `LiveDirectoryError`. The first call's `created_at` is kept."""
+    manifest there, raises `LiveDirectoryError`. The first call's `created_at` is kept. `write=False` (a dry run) compares
+    and writes nothing; outside a live directory it then has nothing to compare with."""
     from ..ensembles._compute import _what_decides_availability  # the ensembles import this module
     from .store import is_live_dir
 
     path = Path(path)
+    if not write and not is_live_dir(path.parent):
+        return  # a dry run into a directory not made yet: nothing on file to compare with
     if not is_live_dir(path.parent):
         raise LiveDirectoryError(
             f"{model_name}: {path.parent} is no live directory: a live manifest is written into one"
@@ -1335,7 +1339,8 @@ def check_and_write_live(
         if diffs:
             logger.warning(f"{model_name}: live manifest mismatch at {path} overridden: {'; '.join(diffs)}")
         manifest.created_at = existing.created_at
-    manifest.write(path)
+    if write:
+        manifest.write(path)
 
 
 def is_live_manifest(path: Union[str, Path]) -> bool:

@@ -1027,6 +1027,64 @@ def config_digest(
     return hashlib.sha256(json.dumps(kept, sort_keys=True, default=str).encode()).hexdigest()
 
 
+def issue_manifest(plan: "IssuePlan", data: pd.DataFrame) -> Any:
+    """The manifest of the issue day `plan` plans (`results.manifest.build_manifest`, as `config_digest` builds it, with the frame's
+    hashes): what a live call writes as the model's live manifest (`results.manifest.check_and_write_live`), which compares the
+    configuration and records the data as provenance."""
+    from ..results.manifest import build_manifest
+
+    model, state = plan.model, plan.state
+    rules = model._cut_rules(plan.information_set, None)
+    return build_manifest(
+        model=model,
+        data=data,
+        used_columns=list(plan.used_columns),
+        expanded=state.expanded,
+        target=state.target,
+        horizon=state.horizon,
+        horizons=state.horizons,
+        freq=state.freq,
+        test_start=state.test_start,
+        test_end=state.test_end,
+        information_set=plan.information_set,
+        predictor_function=None if state.plan is None else state.plan.function_record(),
+        frame_hashes=plan.hashes,
+        training_cut=model._training_cut(rules, state.target, state.freq),
+        issue_days=state.weekdays,
+        fit_path=plan.fit_path,
+        chained_inputs=getattr(model, "_chained_record", None),
+    )
+
+
+def issue_lists(plan: "IssuePlan") -> Dict[Tuple[int, int], List[str]]:
+    """Each planned key's list of columns, by (period, horizon): what the issue's input snapshot holds of the model
+    (`pipelines._issue_records.snapshot`)."""
+    from ._worker import task_list, task_place
+
+    cfg = plan.inputs.config
+    out: Dict[Tuple[int, int], List[str]] = {}
+    for hour, hz, day_in_test in plan.tasks:
+        position = task_place(cfg, day_in_test)[2]
+        out[(int(hour), int(hz))] = [str(name) for name in task_list(cfg, plan.inputs.expanded, hour, hz, position)[1]]
+    return out
+
+
+def _fit_identity(plan: "IssuePlan", anchor: datetime.date, stored: Optional["StoredFit"]) -> Dict[str, Any]:
+    """What a served forecast's fit was made from (the training data's identity of an issue's records): a stored fit's `fit.json`
+    sha256 and configuration digest; an inline fit's rows (`anchor_rows`) and the sha256 of its units' `unit_rows_hash`es."""
+    if stored is not None:
+        path = stored.directory / FIT_FILE
+        try:
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        except OSError:
+            digest = None
+        return {"fit_json_sha256": digest, "config_digest": stored.meta.get("config_digest")}
+    hashes = hashlib.sha256()
+    for key in _sorted_keys(plan.items.get(anchor, {})):
+        hashes.update(f"{key_text(key)}={unit_rows_hash(plan, anchor, key)}\n".encode())
+    return {"config_digest": plan.digest, "rows": anchor_rows(plan, anchor), "rows_sha256": hashes.hexdigest()}
+
+
 def plan_issue(
     model: Any,
     data: pd.DataFrame,
@@ -1616,6 +1674,12 @@ class Served:
     status: str = "served"
     reason: Optional[str] = None
     notes: List[str] = field(default_factory=list)
+    # What a live call records of the issue (step 8e): the model's manifest of the issue day (`issue_manifest`) and each planned
+    # key's list (`issue_lists`); None for a model whose fits aren't stored.
+    manifest: Any = field(default=None, repr=False)
+    lists: Optional[Dict[Tuple[int, int], List[str]]] = field(default=None, repr=False)
+    # Per anchor what the fit used was made from (`_fit_identity`): the training data's identity of the issue's records.
+    identity: Dict[str, Dict[str, Any]] = field(default_factory=dict, repr=False)
 
 
 def serve(
@@ -1684,6 +1748,7 @@ def serve(
     inline = fit_missing == "fit" or (fit_missing != "skip" and cfg.get("refit") is None)
     lookup: Dict[datetime.date, Optional[Tuple[Dict[UnitKey, UnitFit], datetime.date]]] = {}
     fits: Dict[str, Dict[str, Any]] = {}
+    identity: Dict[str, Dict[str, Any]] = {}
     notes: List[str] = []
     cap = previous_cap(model)
     for anchor in sorted(plan.items):
@@ -1710,6 +1775,7 @@ def serve(
                     "fit_age_days": (issue - anchor).days,
                     "replaced": "stale",
                 }
+                identity[anchor.isoformat()] = _fit_identity(plan, anchor, None)
                 continue
             warnings.warn(
                 f"{model.name}: the stored fit of {anchor} read cells the frame now holds otherwise (a value filled in or "
@@ -1748,6 +1814,7 @@ def serve(
                 check_published(plan, [anchor], current_clock().now(), data)
                 units.update(fitted_units(plan, anchor, missing)[1])
                 entry["inline_units"] = len(missing)
+            identity[anchor.isoformat()] = _fit_identity(plan, anchor, stored)
             lookup[anchor] = (units, stored.anchor)
             fits[anchor.isoformat()] = entry
         elif inline:
@@ -1760,6 +1827,7 @@ def serve(
                 "used": anchor.isoformat(),
                 "fit_age_days": (issue - anchor).days,
             }
+            identity[anchor.isoformat()] = _fit_identity(plan, anchor, None)
         else:
             lookup[anchor] = None
             fits[anchor.isoformat()] = {
@@ -1845,4 +1913,88 @@ def serve(
                 anchor.isoformat(),
             )
         )
-    return Served(model.name, issue.isoformat(), records, fits, notes=list(dict.fromkeys(notes)))
+    return Served(
+        model.name,
+        issue.isoformat(),
+        records,
+        fits,
+        notes=list(dict.fromkeys(notes)),
+        manifest=issue_manifest(plan, data),
+        lists=issue_lists(plan),
+        identity=identity,
+    )
+
+
+class ServedAlone:
+    """A model whose `run` forecasts each issue day through the serve path (`serve`, with fits made inline from the frame it is
+    given, as `forecast()` makes them without a stored fit): what `verify(through="serve")` probes, so that the leakage probe and
+    its control cover the live path's planning, row selection, fits and forecasts. Everything else is the model's (attributes are
+    read through). A model whose fits aren't stored runs through its own `run`, as `forecast()` runs it.
+
+    `rules` gives the information set of each target the probes run on (the target, and the copy of it `verify` trains on when
+    the target is also an input): the serve path plans a predictor function with it and refuses a fit whose training targets
+    aren't known by its rule (`check_published`). `engine` is whether the pipeline's engine is on."""
+
+    def __init__(self, model: Any, rules: Mapping[str, Any], engine: bool):
+        object.__setattr__(self, "_model", model)
+        object.__setattr__(self, "_rules", dict(rules))
+        object.__setattr__(self, "_engine", bool(engine))
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(object.__getattribute__(self, "_model"), name)
+
+    def run(
+        self,
+        data: pd.DataFrame,
+        test_start: Any = None,
+        test_end: Any = None,
+        target: str = "price",
+        horizon: Optional[int] = None,
+        freq: str = "1h",
+        horizons: Optional[Sequence[int]] = None,
+        cut_rules: Any = None,
+        plan: Any = None,
+        **others: Any,
+    ) -> Any:
+        from ..results.ref import ModelResultRef
+        from ._calendar import resolve_horizons
+
+        model = object.__getattribute__(self, "_model")
+        if stores_fits(model) is not None:
+            given = {"horizon": horizon} if horizons is None else {"horizons": horizons}
+            extra = {key: value for key, value in (("cut_rules", cut_rules), ("plan", plan)) if value is not None}
+            return model.run(
+                data, test_start=test_start, test_end=test_end, target=target, freq=freq, **given, **extra, **others
+            )
+        _, planned = resolve_horizons(horizon, horizons, 7)
+        info = object.__getattribute__(self, "_rules").get(target, cut_rules)
+        first, last = (datetime.date.fromisoformat(str(day)[:10]) for day in (test_start, test_end))
+        records: List[Dict[str, Any]] = []
+        for offset in range((last - first).days + 1):
+            day = first + datetime.timedelta(days=offset)
+            records.extend(
+                serve(
+                    model,
+                    data,
+                    day,
+                    None,
+                    target=target,
+                    horizons=planned,
+                    freq=freq,
+                    information_set=info,
+                    availability="none",
+                    issue_days=None,
+                    engine=object.__getattribute__(self, "_engine"),
+                    fit_missing="fit",
+                ).records
+            )
+        return ModelResultRef(
+            name=model.name,
+            path=None,
+            count=len(records),
+            test_start=first.isoformat(),
+            test_end=last.isoformat(),
+            horizon=max(planned),
+            freq=freq,
+            _results=records,
+        )

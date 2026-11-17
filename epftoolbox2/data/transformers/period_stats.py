@@ -76,6 +76,10 @@ class PeriodStatsTransformer(Transformer):
         if unknown or not self.stats:
             raise ValueError(f"stats must be a non-empty subset of {list(STATS)}, got {unknown or self.stats}")
 
+    def lookback_days(self) -> int:
+        """Its output on a row reads the row's own local day only."""
+        return 0
+
     def transform(self, df: pd.DataFrame) -> pd.DataFrame:
         index = check_index(df, "PeriodStatsTransformer")  # a UTC index groups UTC hours: it warns
         check_unique_index(index, "PeriodStatsTransformer")

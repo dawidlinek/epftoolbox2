@@ -1,3 +1,4 @@
+import contextlib
 from datetime import date, datetime
 from typing import List, Optional, Tuple, Union, Dict, Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -19,6 +20,7 @@ from epftoolbox2.data.transformers.timezone import TimezoneTransformer
 from epftoolbox2.data.validators.base import Validator
 from epftoolbox2.data.validators.result import ValidationResult
 from epftoolbox2.data.cache_manager import (
+    no_source_cache_writes,
     CACHE_FORMAT_VERSION,
     CacheManager,
     align_to_local_days,
@@ -384,6 +386,7 @@ class DataPipeline:
         timeout: Optional[float] = None,
         retries: Optional[int] = None,
         on_failure: str = "raise",
+        cache_writes: bool = True,
     ) -> pd.DataFrame:
         """The sources' joined output for ``[start, end)`` (see ``resolve_range``), transformed and validated.
 
@@ -404,6 +407,10 @@ class DataPipeline:
                 only what its cache holds, which is settled rows, never the last two days before now or a tail the
                 source declared unsettled; its recent cells are missing, never filled with an older value. The run goes
                 on and ``last_refresh`` says what happened.
+            cache_writes: ``False`` reads the per-source and single-file caches and writes nothing to them (no file, lock
+                or directory), nor to a source's own response cache (``EnergyChartsSource``): what isn't cached is fetched and
+                not recorded. ``EpftoolboxBenchmarkSource`` still saves its one-time, md5-checked Zenodo download. For a dry
+                run (``ModelPipeline.forecast(dry_run=True)``).
 
         Without ``budget``, ``deadline``, ``timeout``, ``retries`` and ``on_failure`` a run is what it was before
         they existed: the same requests, waits and frame. ``last_refresh`` holds a ``RefreshRecord`` of the run, each
@@ -434,7 +441,8 @@ class DataPipeline:
         self.validation_results = {}
 
         try:
-            result = self._load_or_fetch_sources(start, end, cache, refresh)
+            with contextlib.nullcontext() if cache_writes else no_source_cache_writes():
+                result = self._load_or_fetch_sources(start, end, cache, refresh, cache_writes)
         finally:
             self.last_refresh = refresh.record(start, end)
         if result.empty:
@@ -448,11 +456,37 @@ class DataPipeline:
         return result
 
     def _load_or_fetch_sources(
-        self, start: pd.Timestamp, end: pd.Timestamp, cache: Union[bool, str, os.PathLike], refresh: Refresh
+        self,
+        start: pd.Timestamp,
+        end: pd.Timestamp,
+        cache: Union[bool, str, os.PathLike],
+        refresh: Refresh,
+        cache_writes: bool = True,
     ) -> pd.DataFrame:
         if isinstance(cache, (str, os.PathLike)):
+            if not cache_writes:
+                return self._read_file_cache(start, end, cache, refresh)
             return self._run_sources_with_file_cache(start, end, cache, refresh)
-        return self._run_sources(start, end, cache, refresh)[0]
+        return self._run_sources(start, end, cache, refresh, cache_writes)[0]
+
+    def _read_file_cache(
+        self, start: pd.Timestamp, end: pd.Timestamp, cache: Union[str, os.PathLike], refresh: Refresh
+    ) -> pd.DataFrame:
+        """`_run_sources_with_file_cache` writing nothing (`cache_writes=False`): the file's frame when it is fresh, else the
+        sources' output, not recorded; no directory or lock is made."""
+        fingerprint = self._sources_fingerprint(start, end)
+        digest = hashlib.sha256(json.dumps(fingerprint, sort_keys=True).encode()).hexdigest()[:16]
+        path = _resolve_cache_file(cache, digest)
+        meta = _read_json(path.with_name(path.name + ".meta.json"))
+        if path.exists() and meta.get("fingerprint") == digest and not _is_file_cache_stale(meta, end):
+            try:
+                result = _read_frame(path, meta)
+                for name in self._source_names():
+                    refresh.add(SourceRefresh(name, "ok"))
+                return result
+            except Exception as e:  # noqa: BLE001 - an unreadable cache file is a cache miss
+                logger.warning(f"Cache: cannot read {path} ({type(e).__name__}: {e}); fetching again")
+        return self._run_sources(start, end, cache=False, refresh=refresh)[0]
 
     def _run_sources_with_file_cache(
         self, start: pd.Timestamp, end: pd.Timestamp, cache: Union[str, os.PathLike], refresh: Refresh
@@ -526,11 +560,16 @@ class DataPipeline:
         return [f"{type(source).__name__} #{number}" for number, source in enumerate(self.sources, start=1)]
 
     def _run_sources(
-        self, start: pd.Timestamp, end: pd.Timestamp, cache: Union[bool, str], refresh: Refresh
+        self,
+        start: pd.Timestamp,
+        end: pd.Timestamp,
+        cache: Union[bool, str],
+        refresh: Refresh,
+        cache_writes: bool = True,
     ) -> Tuple[pd.DataFrame, Optional[pd.Timestamp]]:
         """The sources' joined output for ``[start, end)`` and the earliest instant from which any source declared
         its rows unsettled (``None`` if none did). Each source's part goes into ``refresh``."""
-        cache_manager = CacheManager() if cache is True else None
+        cache_manager = CacheManager(read_only=not cache_writes) if cache is True else None
         labelled = []
         unsettled_from = []
         secrets = _secrets(self.sources)

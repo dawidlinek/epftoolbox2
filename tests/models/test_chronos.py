@@ -141,7 +141,7 @@ def test_a_context_longer_than_chronos_reads_warns_for_each_model(hourly, tiny, 
     for context in (364, 350):
         with pytest.warns(UserWarning, match=f"context={context} days of 1h periods is {context * 24} steps"):
             pipeline(make(f"c{context}", tiny, context=context)).run(
-                frame, "2023-06-14", "2023-06-14", horizon=1, forecast_only=True, save_dir=tmp_path
+                frame, "2023-06-14", "2023-06-14", horizon=1, save_dir=tmp_path
             )
         manifest = json.loads((tmp_path / f"c{context}.manifest.json").read_text())
         assert manifest["runtime"]["context_steps"] == 8192

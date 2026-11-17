@@ -889,8 +889,10 @@ def test_forecast_only_issues_on_the_issue_zones_today(
         mp = ModelPipeline(information_set=information_set).add_model(
             OLSModel(PREDICTORS, training_window=28, name="ols")
         )
-        report = mp.run(market, horizon=1, forecast_only=True, save_dir=str(tmp_path))
+        report = mp.run(market, horizon=1, forecast_only=True)
         assert set(report.predictions()["run_date"].astype(str)) == {expected}
+        # Forecast-only results on file are a backtest of that day (`run(forecast_only=True)` refuses a save_dir).
+        mp.run(market, expected, expected, horizon=1, save_dir=str(tmp_path))
         # The report of those results on the same clock reads the same day, also without the frame.
         again = mp.report(str(tmp_path), horizon=1, forecast_only=True)
         assert set(again.predictions()["run_date"].astype(str)) == {expected}
@@ -937,14 +939,18 @@ def test_forecast_only_over_zones_issues_each_zone_on_its_issue_zones_today(zone
     frames = {zone: make_market_data(start="2026-06-01", days=150, tz=tz, horizon=1) for zone, tz in zones.items()}
     mp = ModelPipeline(information_set=DATA_ISSUE).add_model(OLSModel(PREDICTORS, training_window=28, name="ols"))
     with host_zone(host), use_clock(FakeClock(LATE)):
-        panel = mp.run(frames, horizon=1, forecast_only=True, save_dir=str(tmp_path))
-        again = mp.report(str(tmp_path), horizon=1, forecast_only=True)
+        panel = mp.run(frames, horizon=1, forecast_only=True)
         by_tuple = mp.run(frames, horizon=1, forecast_only=True, test=("today", "today"))
         for zone, tz in zones.items():
             alone = mp.run(frames[zone], horizon=1, forecast_only=True)
             expected = {ZONE_TODAY[tz]}
+            # On file, a backtest of the zone's day (`run(forecast_only=True)` refuses a save_dir), which the report of its
+            # folder reads as today's.
+            folder = str(tmp_path / zone)
+            mp.run(frames[zone], ZONE_TODAY[tz], ZONE_TODAY[tz], horizon=1, save_dir=folder)
+            again = mp.report(folder, horizon=1, forecast_only=True)
             assert run_dates(panel.zones[zone]) == run_dates(alone) == expected, zone
-            assert run_dates(again.zones[zone]) == run_dates(by_tuple.zones[zone]) == expected, zone
+            assert run_dates(again) == run_dates(by_tuple.zones[zone]) == expected, zone
 
 
 def test_a_pooled_model_over_zones_on_different_days_asks_for_the_dates(monkeypatch, host_in_new_york):
@@ -989,7 +995,9 @@ def test_today_is_one_day_however_it_is_asked_for(market, tmp_path, monkeypatch,
     with use_clock(FakeClock(LATE)):
         for kwargs in asked:
             assert run_dates(mp.run(market, horizon=1, forecast_only=True, **kwargs)) == {"2026-10-22"}, kwargs
-        mp.run(market, horizon=1, forecast_only=True, save_dir=str(tmp_path))
+        mp.run(
+            market, "2026-10-22", "2026-10-22", horizon=1, save_dir=str(tmp_path)
+        )  # forecast_only refuses a save_dir
         for kwargs in asked:
             assert run_dates(mp.report(str(tmp_path), horizon=1, forecast_only=True, **kwargs)) == {"2026-10-22"}, (
                 kwargs
@@ -1156,7 +1164,9 @@ def test_a_report_over_zones_reads_today_once_for_every_zone(tmp_path, monkeypat
     }
     mp = ModelPipeline(information_set=DATA_ISSUE).add_model(OLSModel(PREDICTORS, training_window=28, name="ols"))
     with use_clock(FakeClock("2026-10-21 21:59:59")):
-        mp.run(frames, horizon=1, forecast_only=True, save_dir=str(tmp_path))
+        mp.run(
+            frames, "2026-10-21", "2026-10-21", horizon=1, save_dir=str(tmp_path)
+        )  # forecast_only refuses a save_dir
     clock = FakeClock(
         "2026-10-21 21:59:59", tick=2.0
     )  # 23:59:59 in Berlin and Paris, and two seconds later at every read
