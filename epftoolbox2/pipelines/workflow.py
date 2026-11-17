@@ -516,6 +516,49 @@ class Workflow:
         path = self._resolve(export["path"].format(issue=result.issue))
         return result.export(path, format=export["format"], grid=export["grid"])
 
+    def mark_delivered(self, issue: Any, revision: int, receipt: Union[str, Path], dry_run: bool = False) -> dict:
+        """`ModelPipeline.mark_delivered` into `live.save_dir`; `issue` may be "today" (in the issue zone)."""
+        _, mp = self._live_pipelines()
+        day = self._issue_day(issue, mp)
+        return mp.mark_delivered(self._live_dir(), day, revision, receipt, dry_run=dry_run)
+
+    def _issue_day(self, issue: Any, mp: ModelPipeline) -> Any:
+        """`issue` as a date for a call that reads no data: "today" is read in the information set's zone, or the one `live.json`
+        records when the set says "data"."""
+        from ..information_set import DATA_ZONE
+        from ..pipelines._live import resolve_issue
+        from ..results.live import LiveStore
+
+        zone = None if mp.information_set is None else mp.information_set.issue_timezone
+        if zone is None or zone == DATA_ZONE:
+            zone = LiveStore(self._live_dir()).zone()
+        if zone is None:
+            raise ValueError("the issue zone is unknown: give the pipeline an information set with an issue_timezone")
+        return resolve_issue(issue, zone)
+
+    def status(self, issue: Any = "today") -> dict:
+        """What the live directory holds for one issue day: its call lines in order, its committed revisions, its deliveries,
+        the newest call's deadline and the newest committed revision's status. Reads files only."""
+        from ..results.live import LiveStore
+
+        _, mp = self._live_pipelines()
+        day = self._issue_day(issue, mp).isoformat()
+        store = LiveStore(self._live_dir())
+        if not store.is_live():
+            raise ValueError(f"{store.save_dir} is no live directory yet: nothing has been forecast into it")
+        calls = [line for line in store.calls() if line.get("issue") == day]
+        deadlines = [line["deadline"] for line in calls if line.get("deadline")]
+        committed = store.committed(day).get(day, {})
+        latest = committed[max(committed)] if committed else None
+        return {
+            "issue": day,
+            "calls": calls,
+            "committed": sorted(committed),
+            "latest": None if latest is None else {"revision": latest.revision, "status": latest.line.get("status")},
+            "deliveries": store.deliveries(day),
+            "deadline": deadlines[-1] if deadlines else None,  # the newest call's, an instant
+        }
+
     def to_dict(self) -> dict:
         config: dict = {}
 

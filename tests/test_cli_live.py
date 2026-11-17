@@ -436,3 +436,76 @@ def test_the_flags_replace_the_section_s_keys_for_one_call(experiment, tmp_path,
     assert call["ensure"] is True and call["refresh"] == "never"
     forecast(path, "--wait-for", "rules")
     assert spy[-1]["wait_for"] == "rules"
+
+
+# --- epf mark-delivered and epf status ------------------------------------------------------------------------------------
+
+
+@pytest.fixture
+def receipt(tmp_path):
+    path = tmp_path / "receipt.json"
+    path.write_text(json.dumps({"accepted": True}))
+    return path
+
+
+def deliver(experiment, receipt, *extra, revision=1, at="2023-03-07T11:35+01:00"):
+    argv = ["mark-delivered", str(experiment), "--issue", ISSUE, "--revision", str(revision), "--receipt", str(receipt)]
+    return cli.main([*argv, *extra, "--as-of", at])
+
+
+def test_mark_delivered_records_the_receipt_and_exits_0(experiment, receipt, tmp_path):
+    assert forecast(experiment) == 0
+    assert deliver(experiment, receipt) == 0
+    (line,) = LiveStore(tmp_path / "live").deliveries(ISSUE)
+    assert (line["revision"], line["delivered_at"]) == (1, "2023-03-07T10:35:00+00:00")
+    assert line["receipt_sha256"] == hashlib.sha256(receipt.read_bytes()).hexdigest()
+
+
+@pytest.mark.parametrize("what", ["revision", "receipt", "directory"])
+def test_mark_delivered_exits_1_on_an_unknown_revision_a_missing_receipt_or_no_live_directory(
+    experiment, receipt, tmp_path, what
+):
+    if what != "directory":
+        assert forecast(experiment) == 0
+    assert (
+        deliver(
+            experiment,
+            tmp_path / "gone.json" if what == "receipt" else receipt,
+            revision=7 if what == "revision" else 1,
+        )
+        == 1
+    )
+    assert LiveStore(tmp_path / "live").deliveries() == []
+
+
+def test_mark_delivered_dry_run_gives_the_code_and_writes_nothing(experiment, receipt, tmp_path):
+    assert forecast(experiment) == 0
+    before = tree(tmp_path)
+    assert deliver(experiment, receipt, "--dry-run") == 0
+    assert deliver(experiment, receipt, "--dry-run", revision=3) == 1
+    assert tree(tmp_path) == before and not (tmp_path / "live" / "delivered.jsonl").exists()
+
+
+def test_mark_delivered_reads_today_in_the_issue_zone(experiment, receipt, tmp_path):
+    assert forecast(experiment) == 0
+    argv = ["mark-delivered", str(experiment), "--issue", "today", "--revision", "1", "--receipt", str(receipt)]
+    assert cli.main([*argv, "--as-of", "2023-03-07T23:30+00:00"]) == 1  # 00:30 on the 8th in Warsaw: no such issue day
+    assert LiveStore(tmp_path / "live").deliveries() == []
+    assert cli.main([*argv, "--as-of", "2023-03-07T22:30+00:00"]) == 0  # 23:30 on the 7th
+    assert [line["issue"] for line in LiveStore(tmp_path / "live").deliveries()] == [ISSUE]
+
+
+def test_status_lists_the_calls_revisions_and_deliveries_of_the_day(experiment, receipt, capsys):
+    assert forecast(experiment, at=AFTER_DEADLINE) == 30
+    assert forecast(experiment) == 0
+    assert deliver(experiment, receipt) == 0
+    capsys.readouterr()
+    assert cli.main(["status", str(experiment), "--issue", ISSUE, "--as-of", AFTER_DEADLINE]) == 0
+    out = capsys.readouterr().out
+    assert "late  not committed" in out and "ok  committed" in out
+    assert "latest committed: r1 (ok)" in out and "delivered r1 at 2023-03-07T10:35:00+00:00" in out
+    assert "deadline 2023-03-07T10:55:00+00:00" in out
+
+
+def test_status_exits_1_where_nothing_was_forecast(experiment):
+    assert cli.main(["status", str(experiment), "--issue", ISSUE, "--as-of", BEFORE_DEADLINE]) == 1

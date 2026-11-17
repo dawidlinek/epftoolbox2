@@ -588,6 +588,36 @@ def cmd_forecast(args: argparse.Namespace) -> int:
     return result.exit_code
 
 
+def cmd_mark_delivered(args: argparse.Namespace) -> int:
+    try:
+        line = _live_workflow(args).mark_delivered(args.issue, args.revision, args.receipt, dry_run=args.dry_run)
+    except Exception as exc:
+        return _failed(exc)
+    verb = "would record" if args.dry_run else "recorded"
+    console.print(
+        f"{verb} the delivery of revision {line['revision']} of {line['issue']}", markup=False, highlight=False
+    )
+    return 0
+
+
+def cmd_status(args: argparse.Namespace) -> int:
+    try:
+        status = _live_workflow(args).status(args.issue)
+    except Exception as exc:
+        return _failed(exc)
+    lines = [f"issue {status['issue']}  (deadline {status['deadline'] or 'none recorded'})"]
+    for call in status["calls"]:
+        revision = "-" if call.get("revision") is None else f"r{call['revision']}"
+        kept = "committed" if call.get("committed") else "not committed"
+        lines.append(f"  {call.get('finished', call.get('started', '?'))}  {revision:>4}  {call.get('status')}  {kept}")
+    latest = status["latest"]
+    lines.append("latest committed: " + ("none" if latest is None else f"r{latest['revision']} ({latest['status']})"))
+    for delivery in status["deliveries"]:
+        lines.append(f"  delivered r{delivery['revision']} at {delivery['delivered_at']}")
+    console.print("\n".join(lines), markup=False, highlight=False)
+    return 0
+
+
 _EXPERIMENT_TEMPLATE = """\
 data_pipeline:
   path: data_pipeline.yaml
@@ -989,6 +1019,17 @@ def build_parser() -> argparse.ArgumentParser:
         "--dry-run", action="store_true", help="Do everything, write nothing: the exit code it would give"
     )
 
+    delivered_p = live_command("mark-delivered", "Record that a revision was delivered (exit 0, or 1)")
+    delivered_p.add_argument("--issue", type=_issue_day, required=True, metavar="DAY", help="The issue day")
+    delivered_p.add_argument("--revision", type=int, required=True, metavar="N", help="The revision delivered")
+    delivered_p.add_argument(
+        "--receipt", required=True, metavar="FILE", help="What the platform answered (kept by hash)"
+    )
+    delivered_p.add_argument("--dry-run", action="store_true", help="Check everything, write nothing")
+
+    status_p = live_command("status", "Show what the live directory holds for an issue day")
+    status_p.add_argument("--issue", type=_issue_day, default="today", metavar="DAY", help="today, tomorrow or a date")
+
     # -- validate --
     val_p = sub.add_parser("validate", help="Validate a pipeline or workflow YAML")
     val_p.add_argument("yaml", metavar="pipeline.yaml", help="Path to YAML file to validate")
@@ -1036,6 +1077,8 @@ def main(argv: Optional[List[str]] = None, clock=None) -> Optional[int]:
         "validate": cmd_validate,
         "init": cmd_init,
         "forecast": cmd_forecast,
+        "mark-delivered": cmd_mark_delivered,
+        "status": cmd_status,
     }
     if clock is None:
         return dispatch[args.cmd](args)
