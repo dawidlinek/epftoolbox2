@@ -330,9 +330,12 @@ The API serves the latest revision of each series, not the version published at 
 are revised after the issue time (load forecasts, wind and solar forecasts) can still carry
 look-ahead even within these limits. The built-in information set rules class `load_actual`, `load_forecast` (and its daily min and max), `generation_*` and `installed_capacity_*` as `latest_revision` and `price` as `snapshot`
 ([Vintage Classes](/epftoolbox2/model-pipeline/information-set/#vintage-classes)); `installed_capacity_*` is known a week ahead,
-and `transfer_capacity_*` has no built-in rule. The `load_forecast` and `generation_*_forecast` rules read the delivery day in the
-data's local dates (an unprefixed `EntsoeSource`'s in its area's zone, through `with_source_rules`), published 10:00 or 18:00
-Brussels on the date before it ([Built-in Availability Rules](/epftoolbox2/model-pipeline/information-set/#built-in-availability-rules)).
+and `transfer_capacity_*` has no built-in rule. The built-in `load_forecast` and `generation_*_forecast` rules read the
+delivery day as the later of the data's local date and Brussels', published 10:00 or 18:00 Brussels on the date before it: never
+earlier than the Brussels day, and each area's own day east of Brussels on a frame in its zone. An unprefixed `EntsoeSource`'s rule
+(through `with_source_rules`) reads its area's own day, exact on any frame, where that is never behind Brussels or the area is PT or
+IE; other areas west of Brussels keep the Brussels day
+([Built-in Availability Rules](/epftoolbox2/model-pipeline/information-set/#built-in-availability-rules)).
 
 ---
 

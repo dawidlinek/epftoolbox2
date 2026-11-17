@@ -68,27 +68,33 @@ Notes for changes that need something from you. The full list of changes of a re
 - **The day-ahead load and wind/solar forecasts' rules follow each area's own day.** The built-in rules of `load_forecast`
   (ENTSO-E A65/A01) and `generation_*_forecast` (A69) read the delivery day in Brussels dates, while every TSO submits them per its
   area's local day: each period starts at the area's own midnight (FI, GR, PT and IE, both documents, winter and summer, checked live).
-  They are now `Availability.published("10:00", 1, day_zone="data")` and `published("18:00", 1, day_zone="data")`: the delivery day
-  is a local date of the data's zone, published at 10:00 (18:00) Brussels on the date before it, as before. So is the assumption
-  `entsoe_a69_by_10`, which moves the time only.
+  They are now `Availability.published("10:00", 1, day_zone="later_of_data_and_rule")` and `published("18:00", 1,
+  day_zone="later_of_data_and_rule")`: the delivery day is the later of the data's local date (read as `day_zone="data"` reads it)
+  and Brussels', published at 10:00 (18:00) Brussels on the date before it, as before. That is never earlier than the Brussels day,
+  on any frame and any issue clock. So is the assumption `entsoe_a69_by_10`, which moves the time only. `day_zone` takes the new value
+  `"later_of_data_and_rule"` for rules of yours too; `"data"` reads as it did.
   - **What moves.** Nothing on Brussels' clock (DE_LU, AT, PL and every other CET zone: every availability instant over 2025 is the
-    old one to the bit, also on frames left in UTC or at UTC+1). East of Brussels (Helsinki, Athens, Bucharest, Sofia, the Baltics) the
-    first hour of a day was taken as published a day early, a look-ahead: at a noon issue `load_forecast_d+2` at 00:00, and A69's
-    `_d+1` at 00:00, one hour a day (365 cells a year at 1h, 1460 at 15 minutes, per column); `NaiveModel(known_only=True)` loses those
-    keys (14 of two January weeks at horizon 2 in Helsinki at 1h, 56 at 15 minutes), and a model that reads them is listed at `"warn"`
-    and refused at `"raise"`. West of Brussels (Lisbon, Dublin), issued in the market's zone, the last hour of a day was taken as
-    published a day late: `load_forecast_d+1` at 23:00 is known at a noon issue again (14 keys come back in the same two weeks).
+    old one to the bit, also on frames left in UTC, at UTC+1, in Lisbon or in London). East of Brussels (Helsinki, Athens, Bucharest,
+    Sofia, the Baltics), on a frame in the market's zone, the first hour of a day was taken as published a day early, a look-ahead:
+    at a noon issue `load_forecast_d+2` at 00:00, and A69's `_d+1` at 00:00, one hour a day (365 cells a year at 1h, 1460 at 15
+    minutes, per column); `NaiveModel(known_only=True)` loses those keys (14 of two January weeks at horizon 2 in Helsinki at 1h, 56
+    at 15 minutes), and a model that reads them is listed at `"warn"` and refused at `"raise"`. West of Brussels the built-in rules
+    keep the Brussels day.
   - **An `EntsoeSource` names its area's day.** `with_source_rules` (so every `Workflow`) gives an unprefixed `EntsoeSource`'s
     `load_forecast` and `generation_*_forecast` the same rules with `day_zone=` its area's zone, exact on a frame in any zone, issued on
-    any clock: these values keep their own instants, so Finnish values in a Warsaw pipeline read Helsinki's days. A prefixed
-    `fi_load_forecast` still has no rule; give it one with `day_zone="Europe/Helsinki"`.
-  - **Frames in another zone.** Without a source rule, a frame in another zone than the issue time's reads the day in the data's and
-    the issue zone's dates and the later counts, as A31's week: never early, exact when the issue zone is the market's. On a frame in no
-    market's zone (UTC, a fixed offset) a published rule of the data's days (`day_zone="data"`) also reads its own zone's dates, so a
-    CET market left in UTC and issued on UTC's clock is never read a day early either.
-  - **Resuming.** A `NaiveModel(known_only=True)` of these columns records their rules, so its results from before refuse to resume
-    with `ManifestMismatchError` on `training_cut`. Use a new `save_dir`. The `explain()` rule column and the availability listings
-    now say "(delivery days of the data's local dates)".
+    any clock: these values keep their own instants, so Finnish values in a Warsaw pipeline read Helsinki's days. That is so where the
+    area's zone is never behind Brussels, and for PT and IE, checked live: there `load_forecast_d+1` at 23:00 is known at a noon issue
+    again (365 cells a year at 1h; 14 keys of two January weeks come back). Every other area west of Brussels (GB, GB_NIR, IE_SEM, IS)
+    keeps the Brussels day, unchecked. A prefixed `fi_load_forecast` still has no rule; give it one with `day_zone="Europe/Helsinki"`.
+  - **Where the built-in rules aren't exact.** They are never earlier than the Brussels day, not exact: east of Brussels on a frame in
+    another zone than the area's (UTC, Brussels, a market west of it), or issued on such a clock, the first hour can still be a day
+    early, as it always was with the Brussels day. This gap predates the change. The exact answer needs `with_source_rules` (`Workflow`
+    applies it) or the frame and the issue time in the market's zone.
+  - **Resuming.** A model that records these columns' rules refuses to resume results written before with `ManifestMismatchError` on
+    `training_cut`: `NaiveModel(known_only=True)` (`training_cut["known_only"]`), a sequence model whose history reads them
+    (`training_cut["history"]`), and a `newest_target="published"` model with one as its target. Use a new `save_dir`. The `explain()`
+    rule column and the availability listings now say "(delivery days of the data's local dates, never before Europe/Brussels
+    dates)", or the area's zone for a source's rule.
 - **`training_window` is checked where it is set.** A float, a string other than `"expanding"`, a bool, None, or a value below 1 now
   raises `ValueError`. An int window ran before with any of these (a float such as `45.0` trained as 45 days and checked the whole frame);
   write the int.
