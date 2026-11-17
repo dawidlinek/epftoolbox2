@@ -193,7 +193,7 @@ recipes), the zero-shot t0-alpha (AT's `t0a`, stored at 341 days of context, the
 member is the 728-day-window variant, the library's the research's w0 recipe) and the MLP (the stored member is merge.py's pick,
 top 8 × 4 in DE_LU and top 4 × 1 in AT, the library's the top 4 × 4 recipe: a different recipe). The once-fine-tuned t0-alpha
 (`t0aft`) is not wrapped and stays the stored member, and is chosen. The rest stay stored, `top="validation"`. The three
-top-k rows of the library's members take the 12 best of them by validation MAE: from merge.py's clean list without Timestral;
+top-k rows of the library's members take up to the 12 best of them by validation MAE (11 candidates, 9 under the card filter): every wrapped family but Timestral;
 without every family whose card gives these windows the verdict "possibly contaminated" (Timestral-209M, Chronos-2 and
 PatchTST-FM-r2, all released after both starts with no corpus end date); and with Timestral. Each chooses `k` on the validation
 year as `AverageEnsemble(top="validation")` does.
@@ -204,7 +204,7 @@ year as `AverageEnsemble(top="validation")` does.
 |---|---|---|---|---|---|---|
 | Ensemble across families (clean) | stored | 18.87 | 0.505 | 0.903 | < 1e-6 | 0.964 |
 | Ensemble across families (clean) | library members, rest stored | 18.84 | 0.504 | 0.902 | < 1e-6 | 0.962 |
-| Top-k of the wrapped families, merge.py's clean list minus Timestral | library | 18.88 | 0.505 | 0.903 | < 1e-6 | 0.964 |
+| Top-k of the wrapped families minus Timestral | library | 18.88 | 0.505 | 0.903 | < 1e-6 | 0.964 |
 | Top-k of the wrapped families, no card verdict "possibly contaminated" | library | 18.92 | 0.506 | 0.905 | < 1e-6 | 0.966 |
 | Top-k of the wrapped families, with Timestral | library | 18.48 | 0.495 | 0.885 | < 1e-6 | 0.944 |
 | Timestral-209M zero-shot | stored / library | 18.48 / 18.48 | 0.495 | 0.885 | < 1e-6 | 0.944 |
@@ -229,7 +229,7 @@ year as `AverageEnsemble(top="validation")` does.
 |---|---|---|---|---|---|---|
 | Ensemble across families (clean) | stored | 15.96 | 0.558 | 0.898 | < 1e-6 | 0.963 |
 | Ensemble across families (clean) | library members, rest stored | 15.99 | 0.559 | 0.899 | < 1e-6 | 0.965 |
-| Top-k of the wrapped families, merge.py's clean list minus Timestral | library | 15.99 | 0.559 | 0.899 | < 1e-6 | 0.965 |
+| Top-k of the wrapped families minus Timestral | library | 15.99 | 0.559 | 0.899 | < 1e-6 | 0.965 |
 | Top-k of the wrapped families, no card verdict "possibly contaminated" | library | 16.09 | 0.562 | 0.905 | < 1e-6 | 0.970 |
 | Top-k of the wrapped families, with Timestral | library | 15.90 | 0.555 | 0.894 | < 1e-6 | 0.959 |
 | Timestral-209M zero-shot | stored / library | 15.90 / 15.90 | 0.555 | 0.894 | < 1e-6 | 0.959 |
