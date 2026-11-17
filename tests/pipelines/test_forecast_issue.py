@@ -805,9 +805,9 @@ def test_a_residual_model_with_a_dated_warmup_is_its_backtest_s_record_live(name
     whole = data.run("2022-10-01", "2023-04-15")
 
     def make():
-        # The base's forecasts from 15 January: with its 21-day window it reads rows from late December, which the range
+        # The base's forecasts from 15 January: with its 56-day window it reads rows from mid-November, which the range
         # of a refresh must hold although the residual model's own window is 14 days.
-        return pipeline(ols("a"), residual("a" if named else ols("a"), "2023-01-15"))
+        return pipeline(ols("a", window=56), residual("a" if named else ols("a", window=56), "2023-01-15"))
 
     folder = tmp_path / "backtest"
     make().run(whole, "2023-03-01", "2023-03-09", horizon=2, save_dir=str(folder))
@@ -815,7 +815,7 @@ def test_a_residual_model_with_a_dated_warmup_is_its_backtest_s_record_live(name
     assert result.status == "ok"
     assert keyed(result.records["res"]) == keyed(lines(folder / "res.jsonl"), ISSUE)
     start, _ = _live.data_span(make().models, datetime.date(2023, 3, 7), [1, 2])
-    assert start <= "2022-12-23"  # 15 January less the base's window and horizon
+    assert start <= "2022-11-18"  # 15 January less the base's window and horizon
 
 
 EARLY_FITS = {
