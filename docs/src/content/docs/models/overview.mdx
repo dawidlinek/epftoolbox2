@@ -8,7 +8,9 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 Every model runs through the same `ModelPipeline`: the refit calendar, the information set, the store, the report and `verify`
-are shared, and so are the record keys, so any two models' forecasts are compared on identical keys. What differs is what one
+are shared, and so are the record keys, so any two models' forecasts can be matched key by key. A report's MAE and forecast
+count are each model's own; its ratios and DM tests are computed on the keys each pair shares. `report.forecast_counts()` shows
+whether the models produced the same forecasts, so check it before comparing MAEs. What differs is what one
 fit sees (its *unit kind*), what it needs installed (its *extra*), what it was trained on before your data (its *weights* and
 their licence) and where it runs well.
 
@@ -16,7 +18,7 @@ their licence) and where it runs well.
 |---|---|---|---|---|---|---|---|
 | Linear | `OLSModel`, `RidgeModel`, `LassoCVModel`, `LEARModel` | period | core | the library's (scikit-learn BSD-3) | none | CPU; the engine shares fits across a loop | [OLS](/epftoolbox2/models/ols/), [Ridge](/epftoolbox2/models/ridge/), [LassoCV](/epftoolbox2/models/lasso/), [LEAR](/epftoolbox2/models/lear/) |
 | Naive | `NaiveModel` | period | core | | none | CPU | [Naive](/epftoolbox2/models/naive/) |
-| Residual hybrid | `ResidualModel(base, learner)`, `HistGBModel` | the base's; the learner pooled | core | scikit-learn BSD-3 | none | CPU, one thread a fit | [Residual Model](/epftoolbox2/models/residual/) |
+| Residual hybrid | `ResidualModel(base, learner)`, `HistGBModel` | the learner's (pooled for `HistGBModel` and the default trees) | core | scikit-learn BSD-3 | none | CPU, one thread a fit | [Residual Model](/epftoolbox2/models/residual/) |
 | Gradient-boosted trees | `LightGBMModel`, `XGBoostModel`, `CatBoostModel` | pooled (or period with `periods="each"`) | `[lightgbm]`, `[xgboost]`, `[catboost]` (`[gbm]` the first two) | MIT, Apache-2.0, Apache-2.0 | none | CPU, one thread a fit; XGBoost also `device="cuda"` | [Trees](/epftoolbox2/models/trees/) |
 | Neural networks | `TorchModel`, `MLPHourlyModel`, `MLPDailyModel` | period (`output="period"`) or day (`output="day"`) | `[torch]` | torch BSD-3 | none | CPU, one thread a fit; a GPU trains a loop's networks in padded stacks | [Neural Networks](/epftoolbox2/models/neural-networks/) |
 | In-context | `TabPFNModel`, `TabICLModel` | period, one padded call per refit block | `[tabpfn]`, `[tabicl]` | Prior Labs License 1.1 (Apache-2.0 with attribution), BSD-3 | TabPFN v2 regression, TabICLv2 | a GPU (6 processes per GPU); a CPU takes 55 to 125 core-hours a market-year | [In-Context Models](/epftoolbox2/models/in-context/) |
@@ -52,6 +54,7 @@ pip install 'epftoolbox2[chronos]'        # ChronosModel
 pip install 'epftoolbox2[patchtst-fm]'    # PatchTSTFMModel (Python 3.13 or older)
 pip install 'epftoolbox2[timesfm]'        # TimesFMModel (non-commercial weights)
 pip install 'epftoolbox2[tune]'           # tune.BayesSearch
+pip install 'epftoolbox2[all]'            # every extra above but [patchtst-fm] and [timesfm], plus [fast] and [catboost]
 ```
 
 `[timestral]` installs the runtime's PyPI dependencies; the timestral package itself comes from its pinned commit, which the
@@ -63,9 +66,11 @@ from every extra that holds torch (granite-tsfm pins an older torch and scikit-l
 them.
 
 <Aside type="note">
-There is no `[all]` extra in this version. One environment can't hold `[patchtst-fm]` with the torch extras, and `[timesfm]`
-and `[timestral]` carry restricted licences, so a combined extra would leave those three out; until it exists, list the extras
-you need.
+`[all]` installs `[fast]`, `[torch]`, `[lightgbm]`, `[xgboost]`, `[catboost]`, `[tune]`, `[t0]`, `[chronos]`, `[tabpfn]` and
+`[tabicl]`: every extra whose licence is permissive and which resolves with the others. It leaves out `[timesfm]` and
+`[timestral]` (their weights carry restricted licences: non-commercial; a revenue cap) and `[patchtst-fm]`, which conflicts
+with it (granite-tsfm needs its own environment); install those by name. It needs a build with the GIL (Python 3.11 to 3.14).
+See [Installation](/epftoolbox2/getting-started/installation/#every-family-at-once-all).
 </Aside>
 
 ## Weights and licences
