@@ -16,6 +16,7 @@ from ..models._engine import engine_from_yaml
 from ..results.report import EvaluationReport
 from ..results.store import DEFAULT_SAVE_FORMAT, check_save_format
 from ..logging import get_logger
+from ._live_settings import LiveSettings
 from ._yaml import dump_yaml
 
 logger = get_logger(__name__)
@@ -151,8 +152,8 @@ class Workflow:
 
     def __init__(
         self,
-        data_start: str,
-        data_end: str,
+        data_start: Optional[str],
+        data_end: Optional[str],
         model_test_start: Optional[str] = None,
         model_test_end: Optional[str] = None,
         data_pipeline: Optional[Union[str, Path]] = None,
@@ -176,7 +177,12 @@ class Workflow:
         model_issue_days: Optional[Sequence[str]] = None,
         model_save_format: str = DEFAULT_SAVE_FORMAT,
         model_save_coefficients: bool = True,
+        live: Union[None, dict, LiveSettings] = None,
     ):
+        if live is None and (data_start is None or data_end is None):
+            raise ValueError(
+                "data_start and data_end are needed to run a backtest: a workflow without them is live-only"
+            )
         resolve_horizons(model_horizon, model_horizons, 7)  # both, or a list that isn't one, raise before anything runs
         resolve_issue_days(model_issue_days)
         check_save_format(model_save_format)
@@ -205,6 +211,7 @@ class Workflow:
         self.model_test = model_test
         self.model_save_format = model_save_format
         self.model_save_coefficients = model_save_coefficients
+        self.live = None if live is None else LiveSettings.from_dict(live)
         refuse_forecast_only_into_save_dir(self.model_forecast_only, self.model_save_dir)
         self._yaml_dir: Optional[Path] = None  # set by load(), used for relative path resolution
         self._dp_inline: dict = {}  # inline sources/transformers/validators overrides
@@ -309,6 +316,8 @@ class Workflow:
         return self._resolve(self.model_save_dir) if self.model_save_dir else None
 
     def _run_data(self, dp: Optional[DataPipeline] = None):  # noqa: ANN202
+        if self.data_start is None or self.data_end is None:
+            raise ValueError("data_pipeline.start and end are not set: this workflow is live-only (epf forecast)")
         cache = self.cache_path if self.cache_path else self.data_cache
         dp = dp if dp is not None else self._build_data_pipeline()
         return dp.run(start=self.data_start, end=self.data_end, cache=cache)
@@ -438,7 +447,12 @@ class Workflow:
         if env:
             config["environment"] = env
 
-        dp: dict = {"start": self.data_start, "end": self.data_end, "cache": self.data_cache}
+        dp: dict = {}
+        if self.data_start is not None:  # a live-only workflow has none: forecast() computes the range from the models
+            dp["start"] = self.data_start
+        if self.data_end is not None:
+            dp["end"] = self.data_end
+        dp["cache"] = self.data_cache
         if self.data_pipeline is not None:
             dp["path"] = self.data_pipeline
         dp.update(self._dp_inline)
@@ -476,6 +490,8 @@ class Workflow:
             mp["path"] = self.model_pipeline
         mp.update(self._mp_inline)
         config["model_pipeline"] = mp
+        if self.live is not None:
+            config["live"] = self.live.to_dict()
 
         return _plain(config)
 
@@ -498,8 +514,8 @@ class Workflow:
         workflow = cls(
             data_pipeline=dp.get("path"),
             model_pipeline=mp.get("path"),
-            data_start=dp["start"],
-            data_end=dp["end"],
+            data_start=dp["start"] if "live" not in config else dp.get("start"),
+            data_end=dp["end"] if "live" not in config else dp.get("end"),
             data_cache=dp.get("cache", False),
             model_test_start=mp.get("test_start"),
             model_test_end=mp.get("test_end"),
@@ -521,6 +537,7 @@ class Workflow:
             models_per_task=env.get("models_per_task"),
             model_save_format=mp.get("save_format", DEFAULT_SAVE_FORMAT),
             model_save_coefficients=mp.get("save_coefficients", True),
+            live=config.get("live"),
         )
         workflow._yaml_dir = path.parent
         workflow._dp_inline = {k: dp[k] for k in _DP_SECTIONS if k in dp}
