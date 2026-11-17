@@ -293,7 +293,7 @@ epf tune --requeue runs/search.journal   # with no worker running: put back the 
 
 ## Live commands: `forecast`, `refit`, `mark-delivered`, `status`, `monitor`, `snapshot`
 
-The commands of a scheduled operation. The first five read a [Workflow YAML](/epftoolbox2/workflow/overview/#the-live-section) with a `live:` section (`save_dir`, `deadline`, `wait_for`, `poll`, `budget`, `timeout`, `retries`, `on_failure`, `checks`, `deliver`, `export`); the data range is computed from the models, so the file needs no `data_pipeline.start` and `end`. Each prints a line or a table and **exits with a code your scheduler can act on**. A usage mistake (a flag that doesn't parse) exits with 2, as argparse does.
+The commands of a scheduled operation. The first five read a [Workflow YAML](/epftoolbox2/workflow/overview/#the-live-section) with a `live:` section (`save_dir`, `deadline`, `wait_for`, `poll`, `budget`, `timeout`, `retries`, `on_failure`, `grace`, `fit_missing`, `deliver`, `export`); the data range is computed from the models, so the file needs no `data_pipeline.start` and `end`. Each prints a line or a table and **exits with a code your scheduler can act on**. A usage mistake (a flag that doesn't parse) exits with 2, as argparse does.
 
 ```bash
 epf forecast experiment.yaml --issue today --ensure --deadline 11:55 --wait-for load_forecast=10:45
@@ -313,27 +313,27 @@ epf snapshot data_pipeline.yaml --archive archive/de
 | `epf monitor` | `0`, or `3` when an alert fires; `1` on an error |
 | `epf snapshot` | `0`; `4` when a fetch was written with a warning (no rows, fewer columns than before); `1` when a fetch failed |
 
-**`epf forecast`** issues one day into `live.save_dir` ([Live Forecasts](/epftoolbox2/operations/live/)) and writes `live.export` (`path` with `{issue}` filled in, `format`, `grid`), relative to the YAML, for a call that has forecasts (not `busy`, `late`, a `--ensure` no-op or a `--dry-run`).
+**`epf forecast`** issues one day into `live.save_dir` ([Live Forecasts](/epftoolbox2/operations/live/)) and writes `live.export` (`path` with `{issue}` filled in, `format`, `grid`), relative to the YAML, for a call that has forecasts (not `busy`, `late` or a `--dry-run`). The status line is printed first; if the export then fails, its error is printed and the exit code is `1`, the revision stays committed, and `--ensure` (or any call that writes no new revision) writes the missing file from the committed revision's records. An export file that exists is left alone by those calls.
 
 | Flag | Description |
 |------|-------------|
 | `--issue DAY` | `today` (the default, read in the issue zone on the clock), `tomorrow`, `yesterday` or `YYYY-MM-DD` |
 | `--ensure` | Do nothing, exit `0`, when the issue already has a committed revision (ok or fallback) by the deadline: the safe call for a catch-up slot |
 | `--deadline HH:MM` | No revision is committed after it; replaces `live.deadline` |
-| `--wait-for COLUMN=HH:MM` | Poll until the column has its cells for the issue day, giving up at that time; repeat for more columns, or `rules` alone; replaces `live.wait_for` |
+| `--wait-for COLUMN=HH:MM` | Poll until the column has its cells for the issue day, giving up at that time; repeat for more columns, or `rules` alone (mixing them exits 2); replaces `live.wait_for` |
 | `--refresh never` | Read the per-source caches only and send no request |
 | `--dry-run` | Do everything and write nothing (no revision, call line, export, lock file or cache entry): the exit code the call would give |
-| `--as-of INSTANT` | Run on a fake clock that starts at this instant, which must carry a UTC offset (`2026-10-21T08:45+02:00`): sleeps pass at once. For replays and tests |
+| `--as-of INSTANT` | Run on a fake clock that starts at this instant, which must carry a UTC offset (`2026-10-21T08:45+02:00`): sleeps pass at once. **For replays over cached or offline data**: it needs `--refresh never`, because a real fetch would build a past revision on today's values (exit 2 otherwise) |
 
-**`epf refit`** fits and stores each model's fits for the issue day into `live.save_dir/fits/` (see [Stored Fits](/epftoolbox2/model-pipeline/stored-fits/)). `--if-due` fits only what isn't stored with this configuration (a second call changes nothing); without it everything is refitted. `--issue` defaults to `today`; `tomorrow` fits tonight for tomorrow's forecast.
+**`epf refit`** fits and stores each model's fits for the issue day into `live.save_dir/fits/` (see [Stored Fits](/epftoolbox2/model-pipeline/stored-fits/)). `--if-due` fits only what isn't stored with this configuration (a second call changes nothing); without it everything is refitted. `--refresh never` reads the caches only, and is required with `--as-of`, as for `forecast`. `--issue` defaults to `today`; `tomorrow` fits tonight for tomorrow's forecast.
 
-**`epf mark-delivered`** records that a revision was delivered, with the receipt file's sha256 and path (what the platform answered: delivering is yours). `--dry-run` checks everything and writes nothing.
+`mark-delivered` records that a revision was delivered, with the receipt file's sha256 and path (what the platform answered: delivering is yours). `--dry-run` checks everything and writes nothing.
 
-**`epf status`** lists the issue day's calls (time, revision, status, committed or not), its newest call's deadline, the newest committed revision and its status, and the deliveries.
+**`epf status`** and **`epf mark-delivered`** read the live directory's files alone (`live.json`, the logs): they build no pipeline and need no API key or model extra. `status` lists the issue day's calls (time, revision, status, committed or not), its newest call's deadline, the newest committed revision and its status, and the deliveries.
 
 **`epf monitor`** scores the live directory against what happened ([Monitoring](/epftoolbox2/operations/monitoring/)): it reads the actuals from the workflow's data pipeline for the days the directory has revisions for, cuts each issue day's revisions at `live.deadline` (the deadline each commit recorded when there is none), and passes the workflow's `issue_days`. `--windows 7,30,90` are numbers of issue days. `--alert alerts.yaml` is a YAML list of rules; one that fires prints `ALERT ...` and the exit code is `3`.
 
-**`epf snapshot`** records every source's raw download of a DataPipeline (or a workflow's `data_pipeline`) YAML into an [archive](/epftoolbox2/operations/snapshots/): `--days-back N` and `--days-ahead N` (3 and 2) set the range. The key comes from the environment; the library never edits a crontab.
+**`epf snapshot`** takes no `--as-of` (exit 2): an archive records what the sources answer now, and a fake time would stamp today's values as a past vintage. It records every source's raw download of a DataPipeline (or a workflow's `data_pipeline`) YAML into an [archive](/epftoolbox2/operations/snapshots/): `--days-back N` and `--days-ahead N` (3 and 2) set the range. The key comes from the environment; the library never edits a crontab.
 
 In Python, `epftoolbox2.cli.main(argv, clock=None)` runs any command in process and returns its exit code; `clock` is a `FakeClock`.
 

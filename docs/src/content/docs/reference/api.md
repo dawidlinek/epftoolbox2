@@ -381,7 +381,7 @@ class Workflow:
     # The live commands' calls (the live: section; see Workflow)
     def forecast(self, issue: Any = "today", *, ensure: bool = False, refresh: str = "auto", dry_run: bool = False, **options: Any): ...  # ModelPipeline.forecast into live.save_dir; options: the live keys (deadline=, wait_for=, ...)
     def export_result(self, result: Any) -> Optional[Path]: ...  # Write live.export for a ForecastResult
-    def refit(self, issue: Any = "today", *, if_due: bool = True): ...  # ModelPipeline.refit into live.save_dir
+    def refit(self, issue: Any = "today", *, if_due: bool = True, refresh: str = "auto"): ...  # ModelPipeline.refit into live.save_dir; "never": caches only
     def mark_delivered(self, issue: Any, revision: int, receipt: Union[str, Path], dry_run: bool = False) -> dict: ...
     def status(self, issue: Any = "today") -> dict: ...       # Calls, committed revisions, deliveries of one issue day
     def monitor(self, windows: Sequence[int] = (7, 30, 90), alerts: Any = None, policy: str = "latest"): ...  # MonitorReport

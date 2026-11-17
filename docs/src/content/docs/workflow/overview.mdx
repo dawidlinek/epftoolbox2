@@ -332,16 +332,13 @@ live:
   retries: 3
   on_failure: cache
   deliver: live                    # the model or ensemble whose forecasts decide the status
-  checks:                          # in place of the pipeline's checks, for live calls only
-    class: ForecastChecks
-    params: {range: [-500, 1000]}
   export:
     path: "out/{issue}.csv"        # {issue} is the issue day; relative to this file
     format: csv                    # csv or json
     grid: products                 # products or periods
 ```
 
-Every key but `save_dir` is optional. The keys `deadline`, `wait_for`, `poll`, `budget`, `timeout`, `retries`, `on_failure`, `grace`, `fit_missing` and `deliver` reach `ModelPipeline.forecast()` as written, and one you leave out keeps `forecast()`'s default; a flag of `epf forecast` replaces its key for that call. `budget`, `timeout`, `retries` and `on_failure` also limit the refresh of `epf refit` and `epf monitor`. The data pipeline's per-source cache is always on in a live call (the fallback to the cache needs it): `data_pipeline.cache` or `environment.cache_path` set a single-file cache instead. `target`, `horizon`, `horizons`, `freq`, `issue_days` and `save_format` come from `model_pipeline`. An unknown key, a time that isn't `HH:MM` or an `export` without `path` raises when the file is loaded. A live workflow can't be an array task (`environment.model_index`), and `forecast_only: true` with a `save_dir` is still refused.
+Every key but `save_dir` is optional. There is no `checks` key: the checks before export are the pipeline's (`model_pipeline.checks`), which apply in backtests too, so live and backtest scores stay comparable; a `checks` key in `live:` is refused. The keys `deadline`, `wait_for`, `poll`, `budget`, `timeout`, `retries`, `on_failure`, `grace`, `fit_missing` and `deliver` reach `ModelPipeline.forecast()` as written, and one you leave out keeps `forecast()`'s default; a flag of `epf forecast` replaces its key for that call. `budget`, `timeout`, `retries` and `on_failure` also limit the refresh of `epf refit` and `epf monitor`. The data pipeline's per-source cache is always on in a live call (`data_pipeline.cache: true` is the same): a single-file cache (`data_pipeline.cache: <path>` or `environment.cache_path`) is used if set, but not together with `on_failure: cache`, which falls back to the per-source caches and is refused at load with it. An empty `live:` is refused as needing `save_dir`. `target`, `horizon`, `horizons`, `freq`, `issue_days` and `save_format` come from `model_pipeline`. An unknown key, a time that isn't `HH:MM` or an `export` without `path` raises when the file is loaded. A live workflow can't be an array task (`environment.model_index`), and `forecast_only: true` with a `save_dir` is still refused.
 
 ```python
 from epftoolbox2.pipelines import Workflow

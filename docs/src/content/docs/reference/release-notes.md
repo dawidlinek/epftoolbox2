@@ -315,10 +315,10 @@ an issue day it didn't sample.
   `epf status`, `epf monitor --windows 7,30,90 [--alert alerts.yaml]` (exit 3 when an alert fires) and
   `epf snapshot data.yaml --archive archive/` (exit 0, 4 with a warning, 1 on a failed fetch) go with it. A workflow YAML takes a
   top-level `live:` section (`save_dir`, `deadline`, `wait_for`, `poll`, `budget`, `timeout`, `retries`, `on_failure`, `checks`,
-  `deliver`, `export`) and may leave out `data_pipeline.start` and `end` (`Workflow(data_start=None, data_end=None, live=...)`:
+  `grace`, `fit_missing`, `deliver`, `export`; the checks before export are the pipeline's, `live.checks` is refused) and may leave out `data_pipeline.start` and `end` (`Workflow(data_start=None, data_end=None, live=...)`:
   a live call computes the range from the models). `Workflow.forecast`, `export_result`, `refit`, `mark_delivered`, `status` and
   `monitor` are the same calls in Python. `--as-of 2026-10-21T08:45+02:00` runs a command on a fake clock from that instant, so
-  sleeps pass at once; `epftoolbox2.cli.main(argv, clock=None)` runs a command in process and **returns its exit code** (the
+  sleeps pass at once, for replays over cached or offline data: `forecast` and `refit` need `--refresh never` with it and `snapshot` refuses it (exit 2); `epftoolbox2.cli.main(argv, clock=None)` runs a command in process and **returns its exit code** (the
   older commands return `None`). See [CLI Reference](/epftoolbox2/getting-started/cli/) and [Workflow](/epftoolbox2/workflow/overview/#the-live-section).
 
 - **Live forecasts: `ModelPipeline.forecast(data, issue="today", save_dir=...)`.** One call issues one day into a live directory:
