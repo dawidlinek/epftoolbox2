@@ -212,6 +212,12 @@ class Workflow:
         self.model_save_format = model_save_format
         self.model_save_coefficients = model_save_coefficients
         self.live = None if live is None else LiveSettings.from_dict(live)
+        if self.live is not None and self.live.on_failure == "cache" and (cache_path or isinstance(data_cache, str)):
+            raise ValueError(
+                "live.on_failure: cache falls back to the per-source caches, which a single-file cache "
+                "(data_pipeline.cache: <path> or environment.cache_path) doesn't have: use data_pipeline.cache: true, or "
+                "another on_failure"
+            )
         refuse_forecast_only_into_save_dir(self.model_forecast_only, self.model_save_dir)
         self._yaml_dir: Optional[Path] = None  # set by load(), used for relative path resolution
         self._dp_inline: dict = {}  # inline sources/transformers/validators overrides
@@ -445,15 +451,13 @@ class Workflow:
 
     def _live_pipelines(self) -> tuple:
         """The data pipeline and the model pipeline of a live call: as `run` builds them, with the information set knowing the
-        configured sources' columns, and `live.checks` (if set) in place of the pipeline's."""
+        configured sources' columns."""
         self._live_settings()
         self._apply_environment()
         mp = self._build_model_pipeline()
         dp = self._build_data_pipeline()
         if mp.information_set is not None:
             mp.information_set = mp.information_set.with_source_rules([*dp.sources, *dp.transformers])
-        if self.live.checks is not None:
-            mp.checks = ModelPipeline._load_component("checks", self.live.checks)
         preflight(mp.models)
         return dp, mp
 
@@ -694,6 +698,8 @@ class Workflow:
         dp = config["data_pipeline"]
         mp = config["model_pipeline"]
 
+        if "live" in config and config["live"] is None:
+            raise ValueError("live: needs save_dir, the live directory")
         workflow = cls(
             data_pipeline=dp.get("path"),
             model_pipeline=mp.get("path"),

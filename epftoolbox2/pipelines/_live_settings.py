@@ -13,7 +13,6 @@
       grace: 30min
       fit_missing: previous
       deliver: live                    # the model or ensemble whose forecasts decide the status
-      checks: {class: ForecastChecks, params: {range: [-500, 1000]}}   # in place of the pipeline's, live calls only
       export: {path: "out/{issue}.csv", format: csv, grid: products}
 
 Every key but `save_dir` is optional and, when absent, left to `ModelPipeline.forecast()`'s own default. The keys of
@@ -37,7 +36,7 @@ FORECAST_KEYS = (
     "fit_missing",
     "deliver",
 )
-LIVE_KEYS = ("save_dir", *FORECAST_KEYS, "checks", "export")
+LIVE_KEYS = ("save_dir", *FORECAST_KEYS, "export")
 EXPORT_KEYS = ("path", "format", "grid")
 _HH_MM = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
 
@@ -50,8 +49,10 @@ def _clock_time(value: Any, what: str) -> str:
 
 
 class LiveSettings:
-    """The validated `live:` section: `save_dir`, the options `forecast()` takes (`forecast_options()`), `checks` (the
-    ForecastChecks component spec for live calls, or None), and `export` (`path`, `format`, `grid`, or None)."""
+    """The validated `live:` section: `save_dir`, the options `forecast()` takes (`forecast_options()`) and `export` (`path`, `format`, `grid`, or None).
+
+    Checks before export are the pipeline's alone (`ModelPipeline(checks=...)`, `model_pipeline.checks`): they apply in backtests
+    too, so live and backtest scores stay comparable. A `checks` key here is refused."""
 
     def __init__(
         self,
@@ -67,7 +68,6 @@ class LiveSettings:
         grace: Any = None,
         fit_missing: Optional[str] = None,
         deliver: Optional[str] = None,
-        checks: Optional[Mapping[str, Any]] = None,
         export: Optional[Mapping[str, Any]] = None,
     ):
         if not isinstance(save_dir, str) or not save_dir.strip():
@@ -84,9 +84,6 @@ class LiveSettings:
             raise ValueError(f"live.retries is a whole number of 0 or more, got {retries!r}")
         self.retries = retries
         self.on_failure, self.fit_missing, self.deliver = on_failure, fit_missing, deliver
-        if checks is not None and not isinstance(checks, Mapping):
-            raise ValueError(f"live.checks is a component, {{class: ForecastChecks, params: ...}}, got {checks!r}")
-        self.checks = None if checks is None else dict(checks)
         if export is not None:
             export = self._export(export)
         self.export = export
@@ -114,6 +111,12 @@ class LiveSettings:
             return raw
         if not isinstance(raw, Mapping):
             raise ValueError(f"live: is a mapping, got {type(raw).__name__}")
+        if "checks" in raw:
+            raise ValueError(
+                "live.checks is not a key: the checks before export belong to the pipeline, `model_pipeline.checks: "
+                "{class: ForecastChecks, params: ...}` (or ModelPipeline(checks=...)), where they apply in backtests too, so "
+                "live and backtest scores stay comparable"
+            )
         unknown = sorted(set(raw) - set(LIVE_KEYS))
         if unknown:
             raise ValueError(f"live: unknown key(s) {unknown}; the keys are {list(LIVE_KEYS)}")
@@ -128,8 +131,6 @@ class LiveSettings:
     def to_dict(self) -> Dict[str, Any]:
         out: Dict[str, Any] = {"save_dir": self.save_dir}
         out.update(self.forecast_options())
-        if self.checks is not None:
-            out["checks"] = dict(self.checks)
         if self.export is not None:
             out["export"] = dict(self.export)
         return out

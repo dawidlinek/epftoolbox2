@@ -189,13 +189,50 @@ def test_a_live_only_workflow_refuses_a_backtest(experiment):
         ({"save_dir": "live", "export": {"path": "x", "format": "xlsx"}}, "export.format"),
         ({"save_dir": "live", "export": {"path": "x", "grid": "days"}}, "export.grid"),
         ({"save_dir": "live", "export": {"path": "x", "mode": "a"}}, "unknown key"),
+        ({"save_dir": "live", "checks": {"class": "ForecastChecks"}}, r"model_pipeline\.checks"),
+        ({}, "needs save_dir"),
+        (None, "needs save_dir"),
     ],
 )
 def test_a_mistake_in_the_live_section_is_refused_when_the_file_is_loaded(tmp_path, live, message):
+    config = experiment_config(tmp_path, live={})
+    config["live"] = live
     path = tmp_path / "bad.yaml"
-    path.write_text(yaml.safe_dump(experiment_config(tmp_path, live=live)))
+    path.write_text(yaml.safe_dump(config))
     with pytest.raises(ValueError, match=message):
         Workflow.load(path)
+
+
+@pytest.mark.parametrize("single_file", ["data_cache", "cache_path"])
+def test_a_file_cache_with_on_failure_cache_is_refused_at_load(tmp_path, single_file):
+    config = experiment_config(tmp_path)
+    if single_file == "data_cache":
+        config["data_pipeline"]["cache"] = "cache.csv"
+    else:
+        config["environment"] = {"cache_path": "cache.csv"}
+    path = tmp_path / "bad.yaml"
+    path.write_text(yaml.safe_dump(config))
+    with pytest.raises(ValueError, match="single-file cache"):
+        Workflow.load(path)
+    config["live"] = {**LIVE, "on_failure": "raise"}
+    path.write_text(yaml.safe_dump(config))
+    assert Workflow.load(path).live.on_failure == "raise"  # the file cache is fine without the fallback
+
+
+def test_the_checks_of_a_live_call_are_the_pipeline_s(tmp_path, monkeypatch):
+    seen = []
+    real = ModelPipeline.forecast
+
+    def spy(self, *args, **kwargs):
+        seen.append(self.checks)
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(ModelPipeline, "forecast", spy)
+    checks = {"class": "ForecastChecks", "params": {"range": [-5000, 5000]}}
+    path = experiment_with(tmp_path, checks=checks)
+    assert forecast(path) == 0
+    (held,) = seen
+    assert held is not None and held.range == (-5000, 5000)
 
 
 def test_forecast_only_into_a_save_dir_is_still_refused_next_to_a_live_section(tmp_path):
