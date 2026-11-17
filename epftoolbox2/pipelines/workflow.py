@@ -16,7 +16,7 @@ from ..models._engine import engine_from_yaml
 from ..results.report import EvaluationReport
 from ..results.store import DEFAULT_SAVE_FORMAT, check_save_format
 from ..logging import get_logger
-from ._live_settings import LiveSettings
+from ._live_settings import FORECAST_KEYS, LiveSettings
 from ._yaml import dump_yaml
 
 logger = get_logger(__name__)
@@ -429,6 +429,92 @@ class Workflow:
             validation=self.model_validation,
             test=self.model_test,
         )
+
+    # --- live calls (step 8i): `epf forecast`, `refit`, `status`, `mark-delivered` and `monitor` -------------------------------
+
+    def _live_settings(self) -> LiveSettings:
+        if self.live is None:
+            raise ValueError(
+                "this workflow has no live: section (live.save_dir at least): see the docs page Live Forecasts"
+            )
+        if self.model_index is not None:
+            raise ValueError(
+                "live calls run the whole pipeline: a workflow with environment.model_index is an array task"
+            )
+        return self.live
+
+    def _live_pipelines(self) -> tuple:
+        """The data pipeline and the model pipeline of a live call: as `run` builds them, with the information set knowing the
+        configured sources' columns, and `live.checks` (if set) in place of the pipeline's."""
+        self._live_settings()
+        self._apply_environment()
+        mp = self._build_model_pipeline()
+        dp = self._build_data_pipeline()
+        if mp.information_set is not None:
+            mp.information_set = mp.information_set.with_source_rules([*dp.sources, *dp.transformers])
+        if self.live.checks is not None:
+            mp.checks = ModelPipeline._load_component("checks", self.live.checks)
+        preflight(mp.models)
+        return dp, mp
+
+    def _live_dir(self) -> Path:
+        return self._resolve(self._live_settings().save_dir)
+
+    def _live_cache(self) -> Any:
+        """The cache of a live refresh: the workflow's cache path or setting, and the per-source caches when it sets none (the
+        fallback to the cache, `on_failure="cache"`, needs them)."""
+        return (self.cache_path or self.data_cache) or True
+
+    def _run_shape(self) -> dict:
+        """The run arguments `forecast`, `refit` and `monitor` share with `run`."""
+        return {
+            "target": self.model_target,
+            "horizon": self.model_horizon,
+            "horizons": self.model_horizons,
+            "freq": self.model_freq,
+            "issue_days": self.model_issue_days,
+        }
+
+    def forecast(
+        self,
+        issue: Any = "today",
+        *,
+        ensure: bool = False,
+        refresh: str = "auto",
+        dry_run: bool = False,
+        **options: Any,
+    ):
+        """`ModelPipeline.forecast` of the live section: the data pipeline refreshed, the models served into `live.save_dir`.
+
+        The keys of the section that `forecast()` takes reach it as written; `options` (the same names) replace them for this
+        call. Returns the `ForecastResult`; `export_result` writes `live.export`."""
+        live = self._live_settings()
+        unknown = sorted(set(options) - set(FORECAST_KEYS))
+        if unknown:
+            raise TypeError(f"forecast() takes the live keys {list(FORECAST_KEYS)}, not {unknown}")
+        dp, mp = self._live_pipelines()
+        merged = {**live.forecast_options(), **{key: value for key, value in options.items() if value is not None}}
+        return mp.forecast(
+            dp,
+            issue,
+            self._live_dir(),
+            ensure=ensure,
+            refresh=refresh,
+            dry_run=dry_run,
+            save_format=self.model_save_format,
+            cache=self._live_cache(),
+            **merged,
+            **self._run_shape(),
+        )
+
+    def export_result(self, result: Any) -> Optional[Path]:
+        """Write `live.export` for `result` (path with `{issue}` filled in, relative to the YAML): the delivered model's
+        forecasts. Nothing for a call that has none (busy, late), a dry run, or a noop; None without an export section."""
+        export = self._live_settings().export
+        if export is None or result.dry_run or result.noop or result.status in ("busy", "late"):
+            return None
+        path = self._resolve(export["path"].format(issue=result.issue))
+        return result.export(path, format=export["format"], grid=export["grid"])
 
     def to_dict(self) -> dict:
         config: dict = {}
