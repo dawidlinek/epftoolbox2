@@ -509,3 +509,39 @@ def test_status_lists_the_calls_revisions_and_deliveries_of_the_day(experiment, 
 
 def test_status_exits_1_where_nothing_was_forecast(experiment):
     assert cli.main(["status", str(experiment), "--issue", ISSUE, "--as-of", BEFORE_DEADLINE]) == 1
+
+
+# --- epf refit -----------------------------------------------------------------------------------------------------------
+
+
+def refit(experiment, *extra, issue=ISSUE, at="2023-03-07T11:30+01:00"):
+    return cli.main(["refit", str(experiment), "--issue", issue, *extra, "--as-of", at])
+
+
+def test_refit_stores_the_fits_and_a_second_if_due_changes_nothing(experiment, tmp_path):
+    assert refit(experiment, "--if-due") == 0
+    fits = sorted(p.name for p in (tmp_path / "live" / "fits").iterdir())
+    assert fits == ["base", "main"]
+    before = tree(tmp_path / "live")
+    assert refit(experiment, "--if-due") == 0
+    assert tree(tmp_path / "live") == before
+    assert refit(experiment) == 0  # without --if-due: refit anyway
+    assert tree(tmp_path / "live") != before
+
+
+def test_refit_exits_1_and_writes_nothing_while_a_training_target_is_not_known_yet(experiment, tmp_path, capsys):
+    assert refit(experiment, "--if-due", issue="2023-03-20", at="2023-03-07T11:30+01:00") == 1
+    assert "refit once it is out" in capsys.readouterr().out
+    assert not (tmp_path / "live" / "fits").exists()
+
+
+def test_refit_exits_1_while_another_call_holds_the_lock(experiment, tmp_path):
+    with LiveStore(tmp_path / "live").hold():
+        assert refit(experiment, "--if-due") == 1
+
+
+def test_a_forecast_serves_the_fits_a_refit_stored(experiment, tmp_path):
+    assert refit(experiment, "--if-due") == 0
+    assert forecast(experiment) == 0
+    fits = json.loads((tmp_path / "live" / "issues" / ISSUE / "r1" / "fits.json").read_text())
+    assert fits and "stored" in json.dumps(fits).lower()

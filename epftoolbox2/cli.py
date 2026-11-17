@@ -588,6 +588,18 @@ def cmd_forecast(args: argparse.Namespace) -> int:
     return result.exit_code
 
 
+def cmd_refit(args: argparse.Namespace) -> int:
+    try:
+        result = _live_workflow(args).refit(args.issue, if_due=args.if_due)
+    except Exception as exc:
+        return _failed(exc)
+    for model, anchors in result.fitted.items():
+        console.print(f"{model}: fitted {', '.join(anchors) or 'nothing'}", markup=False, highlight=False)
+    if result.noop:
+        console.print(f"issue {result.issue}: nothing to fit", markup=False, highlight=False)
+    return 0
+
+
 def cmd_mark_delivered(args: argparse.Namespace) -> int:
     try:
         line = _live_workflow(args).mark_delivered(args.issue, args.revision, args.receipt, dry_run=args.dry_run)
@@ -1019,6 +1031,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--dry-run", action="store_true", help="Do everything, write nothing: the exit code it would give"
     )
 
+    refit_p = live_command("refit", "Fit and store the models' fits for an issue day (exit 0, or 1)")
+    refit_p.add_argument("--issue", type=_issue_day, default="today", metavar="DAY", help="today, tomorrow or a date")
+    refit_p.add_argument(
+        "--if-due",
+        action="store_true",
+        help="Fit only what is not stored with this configuration (otherwise refit anyway)",
+    )
+
     delivered_p = live_command("mark-delivered", "Record that a revision was delivered (exit 0, or 1)")
     delivered_p.add_argument("--issue", type=_issue_day, required=True, metavar="DAY", help="The issue day")
     delivered_p.add_argument("--revision", type=int, required=True, metavar="N", help="The revision delivered")
@@ -1077,6 +1097,7 @@ def main(argv: Optional[List[str]] = None, clock=None) -> Optional[int]:
         "validate": cmd_validate,
         "init": cmd_init,
         "forecast": cmd_forecast,
+        "refit": cmd_refit,
         "mark-delivered": cmd_mark_delivered,
         "status": cmd_status,
     }

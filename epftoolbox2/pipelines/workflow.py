@@ -465,6 +465,21 @@ class Workflow:
         fallback to the cache, `on_failure="cache"`, needs them)."""
         return (self.cache_path or self.data_cache) or True
 
+    def _live_data_options(self) -> dict:
+        """What a refresh of the data pipeline takes besides its range (`refit` and `monitor`): the live section's limits and
+        the cache. `forecast()` takes the same from its own arguments."""
+        from ..pipelines._live import seconds
+
+        live = self._live_settings()
+        options = {
+            "cache": self._live_cache(),
+            "budget": seconds(live.budget, "budget"),
+            "timeout": seconds(live.timeout, "timeout"),
+            "retries": live.retries,
+            "on_failure": live.on_failure,
+        }
+        return {key: value for key, value in options.items() if value is not None}
+
     def _run_shape(self) -> dict:
         """The run arguments `forecast`, `refit` and `monitor` share with `run`."""
         return {
@@ -515,6 +530,17 @@ class Workflow:
             return None
         path = self._resolve(export["path"].format(issue=result.issue))
         return result.export(path, format=export["format"], grid=export["grid"])
+
+    def refit(self, issue: Any = "today", *, if_due: bool = True):
+        """`ModelPipeline.refit` into `live.save_dir` for the issue day: the data pipeline refreshed over the range the fits
+        read (the live section's budget, timeout, retries and on_failure)."""
+        from ..pipelines._live import data_span, issue_zone, resolve_issue
+
+        dp, mp = self._live_pipelines()
+        _, horizons = resolve_horizons(self.model_horizon, self.model_horizons, 7)
+        day = resolve_issue(issue, issue_zone(mp.information_set, dp))
+        frame = dp.run(*data_span(mp.models, day, horizons, dp), **self._live_data_options())
+        return mp.refit(frame, self._live_dir(), issue=day, if_due=if_due, **self._run_shape())
 
     def mark_delivered(self, issue: Any, revision: int, receipt: Union[str, Path], dry_run: bool = False) -> dict:
         """`ModelPipeline.mark_delivered` into `live.save_dir`; `issue` may be "today" (in the issue zone)."""
