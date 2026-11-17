@@ -43,6 +43,10 @@ class RollingStatsTransformer(Transformer):
     window's newest day (D - lag): a realised series needs `lag_days=1`, while a rolling statistic of a day-ahead price may end
     on D (`lag_days=0`, named without the shift).
 
+    The mean is a running sum over the frame's days, so its last bits depend on where the frame starts: the same window over a
+    frame that starts on another day agrees within a relative 1e-9 or so, not to the bit (a live refresh's range is such a
+    frame). The minimum and maximum don't.
+
     Args:
         column: The column to summarise.
         window_days: Local days in the window, at least 1. Default 365.

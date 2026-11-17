@@ -716,12 +716,12 @@ def test_the_range_covers_a_rolling_window_reaching_far_behind_the_oldest_traini
     folder = tmp_path / "backtest"
     make().run(whole, ISSUE, ISSUE, horizon=2, save_dir=str(folder))
     result = make().forecast(data, ISSUE, tmp_path / "live", horizon=2, cache=False)
-    # The rolling mean is a running sum, so its last bits depend on where the frame starts: equal within 1e-9, not to the bit.
+    # The rolling mean is a running sum, so its last bits depend on where the frame starts: equal within relative 1e-9.
     # A range that cuts the window leaves the oldest training rows without it, and those fits lose rows (differences of 1e-2).
     expected = {(r["hour"], r["horizon"]): r["prediction"] for r in lines(folder / "a.jsonl")}
     got = {(r["hour"], r["horizon"]): r["prediction"] for r in result.records["a"] if r["status"] == "ok"}
     assert result.status == "ok" and len(expected) == 48 and set(got) == set(expected)
-    worst = max(abs(got[key] - expected[key]) for key in expected)
+    worst = max(abs(got[key] - expected[key]) / abs(expected[key]) for key in expected)
     assert worst < 1e-9, worst
 
 

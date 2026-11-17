@@ -19,7 +19,7 @@ the backtest's own lines. Only which fit (stored or made inline) and which frame
   lookback (`Transformer.lookback_days()`: a lag's days, a rolling window's) and a margin, to the last target day. A transformer
   that can't say how far back it reads (a `LambdaTransformer`, an `ImputeTransformer` without a `limit`, one of your own) makes
   the call warn: pass `span=(start, end)` wide enough. A statistic computed as a running sum (`RollingStatsTransformer`'s
-  mean) may differ in its last bits with the range's start, so its forecasts agree within 1e-9, not to the bit.
+  mean) may differ in its last bits with the range's start, so its forecasts agree within a relative 1e-9, not to the bit.
 - **A `ResidualModel` needs a dated warm-up** (`warmup="YYYY-MM-DD"`): with a number of days, or none, its base's forecasts
   start where its run starts, so every forecast depends on the backtest's first day and no live one can equal it. `forecast()`
   refuses it.

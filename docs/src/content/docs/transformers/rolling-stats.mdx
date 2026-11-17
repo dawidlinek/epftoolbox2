@@ -51,6 +51,11 @@ from epftoolbox2.data.transformers import RollingStatsTransformer
 df = RollingStatsTransformer("generation_solar", window_days=365, stat="max", lag_days=1, min_days=60).transform(df)
 ```
 
+The mean is a running sum over the frame's days, so its last bits depend on where the frame starts: the same window over a frame
+that starts on another day agrees within a relative 1e-9 or so, not to the bit. A live call's refresh asks for a range of its own
+(see [Live Forecasts](/epftoolbox2/operations/live/)), so its forecasts that read a rolling mean agree with the backtest's to that
+precision. The minimum and maximum don't depend on it.
+
 ## Information Set
 
 The window ends on D - `lag_days` and never reads a later day. The
