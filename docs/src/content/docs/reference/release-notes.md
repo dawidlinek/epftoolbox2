@@ -9,6 +9,10 @@ Notes for changes that need something from you. The full list of changes of a re
 
 ### Breaking changes
 
+- **`EntsoeSource(price_exaa=True)` raises for `DE_AT_LU`.** It was accepted as unverified. A live check on 2026-11-18 asked ENTSO-E
+  for the EXAA auction (A44, classificationSequence position 2) of `DE_AT_LU` on 2018-01-15 and 2018-07-15 and got "No matching data
+  found", while `AT` and `DE_LU` return it. Drop `price_exaa` for Germany before 2018-10-01.
+
 - **`run(forecast_only=True)` with a `save_dir` raises.** It resumed what the directory held, so a rerun into the same directory
   returned the earlier forecast as if it were today's, and its manifest refused the next day's data. Issue live forecasts with
   `ModelPipeline.forecast()` into a live directory (revisions, stored fits, deadlines; see
