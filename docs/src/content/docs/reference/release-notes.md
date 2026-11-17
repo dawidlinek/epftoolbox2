@@ -330,6 +330,16 @@ an issue day it didn't sample.
   status is `ok` (0), `fallback` (10) or `skipped` (20). `ForecastResult.export(path, format, grid="products")` writes one row per
   market product, the repeated autumn hour twice. `dry_run=True` writes nothing anywhere. `verify(through="serve")` probes the live
   path. Nothing about a backtest moves. See [Live Forecasts](/epftoolbox2/operations/live/).
+- **A week of live calls, end to end.** The Live Forecasts page walks through seven issue days of one pipeline: a late source, a
+  missing input, an ENTSO-E outage, a missed slot behind a hung call, a crash before the commit, a failed refit, a stale fit, a
+  revised and an implausible input, a dry run, deliveries and a late call, each call's status, exit code and revision, which guard
+  answers which failure, and what to schedule (refit at night, an 08:45 call with catch-ups, an 11:20 call, the monitor, the
+  snapshots). The library's own test runs that week offline against a fake ENTSO-E server on a fake clock and checks that the last
+  revision of each day equals a backtest over what the server held, record by record. `wait_for` names the issue rows' columns:
+  `{"load_forecast_d+1": "10:45"}` waits for tomorrow's load forecast.
+- **A live poll refreshes faster.** The per-source cache estimated a still-published column's step from every diff of the column,
+  where it uses the last one alone: about 0.07 s per cached write of a quarter-year of 15-minute ENTSO-E data, on every refresh of
+  a poll. The same caps, faster.
 - **`refit_from=` and `refit="once"`: train once and keep the fit for a whole period.** Every model that takes `refit` takes
   `refit_from`, a local date (`"2024-01-01"` or a `datetime.date`) that the refit calendar counts from instead of Monday
   1970-01-05: `"7D"` refits on its weekday, a `"kMS"` rule (from the first of a month) every k months from it. `refit="once"` needs

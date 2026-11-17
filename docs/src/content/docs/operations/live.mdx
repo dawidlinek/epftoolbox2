@@ -27,11 +27,11 @@ the backtest's own lines. Only which fit (stored or made inline) and which frame
   where the backtest started; served live, the issue day is that first day. The default (`None`, the mask of each fit) has no
   such dependence.
 
-<Aside type="caution">
-This page is being completed (step 8l of the forecasting layer): a worked example of a simulated week comes next. The commands
-(`epf forecast`, `epf refit`, `epf mark-delivered`, `epf status`, `epf monitor`, `epf snapshot`) and the `live:` section of a
-workflow YAML are on the [CLI page](/epftoolbox2/getting-started/cli/#live-commands-forecast-refit-mark-delivered-status-monitor-snapshot) and in
-[Workflow](/epftoolbox2/workflow/overview/#the-live-section).
+<Aside>
+The commands (`epf forecast`, `epf refit`, `epf mark-delivered`, `epf status`, `epf monitor`, `epf snapshot`) and the `live:`
+section of a workflow YAML are on the [CLI page](/epftoolbox2/getting-started/cli/#live-commands-forecast-refit-mark-delivered-status-monitor-snapshot)
+and in [Workflow](/epftoolbox2/workflow/overview/#the-live-section). [A week of live calls](#a-week-of-live-calls) below walks
+through every case a scheduled pipeline meets, as the library's own test runs it.
 </Aside>
 
 ## One call
@@ -94,7 +94,8 @@ What the call does, in order:
    among them, is computed from the records as a backtest computes it. A `top=` ensemble chooses on validation, which a live call
    can't: freeze it first (`pipeline.frozen(study_dir)`).
 7. **Commit.** Past the deadline by the clock: status `late`, exit 30, a call line and nothing else. Forecasts equal to the latest
-   committed revision's (every model's and ensemble's predictions and statuses): no revision, `unchanged`, that revision's status.
+   committed revision's (every model's and ensemble's predictions, statuses, skip details, rungs and members, key by key; not the
+   list a skip would have read): no revision, `unchanged`, that revision's status.
    Otherwise the next revision is written: every model's and ensemble's records, the issue's files, the live manifests, then the
    commit line that makes it visible.
 
@@ -155,6 +156,155 @@ rows, the repeated hour's four quarter-hours twice, nobody forward-fills it by h
 as the records hold them. Every planned key is written: one without a forecast has an empty prediction and its status
 (`"missing"` when no record of it was made, a whole target day included). Delivering the file is
 yours (`mark_delivered` stores the platform's receipt).
+
+## A week of live calls
+
+The test `tests/test_simulated_week.py` runs one live pipeline through seven issue days, Wednesday 2026-10-21 to Tuesday
+2026-10-27, 15-minute, issued 11:45 Berlin for the next day, so one target day (Sunday 25 October) has 100 market quarter-hours.
+It runs offline: a `FakeClock` that advances when the code sleeps, and a fake ENTSO-E server that answers the real
+`EntsoeSource` from a seeded truth by a publication schedule (prices of D+1 at 12:57 on D, EXAA at 11:08, the A65 load forecast
+at 10:12, with the week's exceptions), with 1 s per request, and during an outage 20 s and an HTTP 503. Each day has an 08:45 call
+that waits for tomorrow's load forecast and an 11:20 call that waits for EXAA:
+
+```python
+import os
+
+from epftoolbox2 import cli
+from epftoolbox2.clock import FakeClock, use_clock
+from epftoolbox2.data.sources import CalendarSource, EntsoeSource
+from epftoolbox2.data.transformers import LagTransformer, TimezoneTransformer
+from epftoolbox2.ensembles import FallbackEnsemble
+from epftoolbox2.models import NaiveModel, OLSModel
+from epftoolbox2.pipelines import DataPipeline, ModelPipeline
+from epftoolbox2.results import ForecastChecks
+
+weekdays = ["is_monday", "is_tuesday", "is_wednesday", "is_thursday", "is_friday", "is_saturday", "is_sunday"]
+data = (
+    DataPipeline(timezone="Europe/Berlin")
+    .add_source(
+        EntsoeSource(
+            "DE_LU", api_key=os.environ["ENTSOE_API_KEY"], type=["price", "load"], price_exaa=True, prefer_15min=True
+        )
+    )
+    .add_source(CalendarSource("DE", holidays=False, weekday="onehot", freq="15min"))
+    .add_transformer(TimezoneTransformer())
+    .add_transformer(LagTransformer(columns=["price"], lags=[1, 2, 6], freq="day"))
+    .add_transformer(LagTransformer(columns=["load_forecast", "price_exaa", *weekdays], lags=[-1], freq="day"))
+)
+base = ["price_d-1", "price_d-2", "price_d-6", *[f"{day}_d+1" for day in weekdays]]
+
+
+def main_predictors(ctx):
+    """EXAA where it is out: live, by its rule at the issue time and present now; in a backtest, by its rule."""
+    names = [*base, "load_forecast_d+1"]
+    return [*names, "price_exaa_d+1"] if ctx.published("price_exaa_d+1") else names
+
+
+pipeline = (
+    ModelPipeline(issue_time="11:45", issue_timezone="Europe/Berlin", checks=ForecastChecks(range=(-500, 1000)))
+    .add_model(OLSModel(main_predictors, training_window=56, refit="7D", name="main"))
+    .add_model(OLSModel(base, training_window=56, refit="7D", name="base"))
+    .add_model(NaiveModel(["price_d-6"], name="naive"))
+    .add_ensemble(FallbackEnsemble(["main", "base", "naive"], name="live"))
+)
+pipeline.information_set = pipeline.information_set.with_source_rules([*data.sources, *data.transformers])
+
+live = dict(
+    save_dir="live/de_price", deadline="11:55", poll="5min", budget="120s", timeout="30s", on_failure="cache",
+    horizon=1, freq="15min",
+)
+with use_clock(FakeClock("2026-10-21T08:45+02:00")):  # a replay; live, leave the clock alone
+    first = pipeline.forecast(data, "today", ensure=True, wait_for={"load_forecast_d+1": "10:45"}, **live)
+    print(first.status, first.exit_code, first.revision)  # ok 0 1, committed at 10:16 when A65 came
+# The same call from a scheduler, on the workflow YAML of this pipeline with a `live:` section:
+code = cli.main(
+    ["forecast", "experiment.yaml", "--issue", "today", "--wait-for", "price_exaa_d+1=11:40"],
+    clock=FakeClock("2026-10-21T11:20+02:00"),
+)
+```
+
+`wait_for` names the issue rows' columns: on the row of the issue day, `load_forecast_d+1` is tomorrow's load forecast, while
+`load_forecast` is today's, out since yesterday, so waiting for it would wait for nothing.
+
+What each call gave (times Berlin; "r" is the revision written):
+
+| Issue (target) | Event | Call | Status | Exit | Revision |
+|---|---|---|---|---|---|
+| Wed 21 (Thu 22) | none | 08:45 | ok | 0 | r1 at 10:16, the poll after A65 came at 10:12; main without EXAA |
+| | | 11:20 | ok | 0 | r2 with EXAA: every model's records are the backtest's |
+| | | `mark-delivered` r2 11:30 | | 0 | a delivered line |
+| Thu 22 (Fri 23) | EXAA late, at 11:37 | 08:45 | ok | 0 | r1 |
+| | | 11:20 | ok | 0 | r2 at 11:40 after five polls, with EXAA; the backtest's |
+| Fri 23 (Sat 24) | A65 for Saturday never published | 08:45 | fallback | 10 | r1 at 10:45 (gave up): main skipped on its 96 keys, base serves (rung 1); `quality.json`: 96 missing A65 cells |
+| | | 11:20 | fallback | 10 | none (`unchanged`: EXAA is out, but no member that serves reads it) |
+| Sat 24 (Sun 25, 100 products) | every request 503 from 08:00 to 11:25 | 08:45 | fallback | 10 | r1 at 10:46: naive serves (rung 2), the cache holding settled rows only; every poll's refresh `timeout` within its 120 s; the export has 100 products |
+| | | 11:20 | ok | 0 | r2 at 11:27: the 11:20 poll timed out, the next refreshed; rung 0, the backtest's |
+| Sun 25 (Mon 26) | no 08:45 call; a hung call holds `live.lock` until 09:40 | 09:30 `--ensure` | busy | 75 | none; nothing written |
+| | | 09:45 | ok | 0 | r1 at 10:15 |
+| | | 10:30 `ensure` | ok | 0 | none (`noop`) |
+| | | 11:20, crash after main's records | error | 1 | r2's lines on file, never committed: readers see r1 |
+| | | 11:30 `ensure` | ok | 0 | none (`noop`: r1 is complete) |
+| | | 11:35 | ok | 0 | r3 with EXAA (2 is never reused); readers see r3, the backtest's |
+| | | `refit --if-due --issue tomorrow` 22:00, failing | | 1 | no fit of the 10-26 anchor |
+| Mon 26 (Tue 27) | stale fit; A65 revised at 11:05 | 08:45 | ok | 0 | r1 from the 10-19 fit, `fit_age_days` 7 |
+| | | `refit` 11:00 | | 0 | the 10-26 fit |
+| | | 11:20 | ok | 0 | r2: new fit, revised A65, EXAA; another snapshot hash; the backtest's |
+| | | 11:50 `dry_run` | ok | 0 | none; no file changed |
+| | | `mark-delivered` r2, r3, r2 `--dry-run` | | 0, 1, 0 | one delivered line |
+| | | 11:58 | late | 30 | none; one `issues.jsonl` line |
+| Tue 27 (Wed 28) | one A65 value is 1e6 | 08:45 | fallback | 10 | r1: main `check_failed` (range), base serves; `checks.json` names main and the range check |
+| | | 11:20 | fallback | 10 | r2: base serves again, but main's `check_failed` detail moved with EXAA in its list |
+| Wed 28 18:00 | | `epf monitor --windows 7 --alert` | | 3 | `delivered_below: 1.0` fires (2 of 7) |
+
+The monitor scores 668 of the 672 keys (the repeated autumn hour's four have no actual), participation 7 of 7, the final rungs
+{0: 5, 1: 2, 2: 0} and the first revisions' {0: 4, 1: 2, 2: 1}. The last revision of each day before the deadline equals a
+backtest of the same pipeline over what the server holds at the end of the week, record by record (but the actual, which a
+forecast issued at 11:45 can't have), on all seven days: the pipeline that was backtested is the one that ran. On Friday main's
+skips keep the list without EXAA (r1 was made before it), where the backtest's carry the list with it. First revisions differ
+from the backtest where they had less: no EXAA yet, the outage's cache, the stale fit. The whole week run again into a fresh
+directory, in Parquet, gives the same records, snapshots and exit codes, byte for byte.
+
+## What each guard answers
+
+The guards are those a hand-built operations setup grew one lost day at a time (the S02 pipelines of the research behind this
+step, usage report section 1.2):
+
+| What happened | The guard |
+|---|---|
+| The host booted after the 08:45 slot; cron doesn't rerun a missed slot (2 targets lost) | `--ensure` calls from a catch-up schedule: a no-op once a revision is committed; `busy` (75) while another call runs |
+| An ENTSO-E outage made each refresh take 19 to 28 minutes; posts after the gate were refused (10 target-days lost) | `budget`, `timeout`, `deadline` on every refresh; `on_failure="cache"` gives the settled cached rows; `refresh.json` records it |
+| A65 had 0 of 96 slots, and the day was forfeited | `wait_for` with a give-up time, then the fallback ladder: the member without it serves |
+| NaN fed to a model scored 96.6 against 20.6 | an issue row with a missing input is a `missing_test_predictors` skip, never a NaN into a model |
+| A persistence fallback scored far worse than skipping the day | each rung's backtest score (`report.rungs()`); `FallbackEnsemble` rungs you choose |
+| 96 values written for a 100-product day | `export(grid="products")` with occurrences, and the `periods` check |
+| A65 revised after the gate on 22 of 42 days | the input snapshot of every revision (`inputs.parquet`, its hash in every record) |
+| Stale caches left 21 of 87 features empty for weeks | no forward fill; `quality.json` names each input's missing cells and last valid timestamp |
+| A dry run rewrote the payload file, so a file proved nothing | `dry_run=True` writes nothing anywhere; `mark_delivered` stores the receipt's sha256 |
+| Several submissions a day, earlier ones overwritten | numbered revisions, append-only, read by policy (`latest`, `first`, `delivered`) |
+| A rerun returned yesterday's stale forecast | revisions and `unchanged`; `run(forecast_only=True, save_dir=...)` raises |
+| Posts after the gate got HTTP 422 | `deadline`: no revision is committed after it (`late`, 30) |
+| Control flow needed a fake clock and a dry run to test | `epftoolbox2.clock`, `cli.main(argv, clock=)`, `--as-of` with `--refresh never`, `--dry-run` |
+
+## What to schedule, and where
+
+The library schedules nothing and delivers nothing (posting the file is yours; `mark-delivered` records the receipt). Run the
+calls where the live directory and the per-source caches live, on one machine: `live.lock` is a `flock`, which a network file
+system may not honour across hosts (the lock then warns). For the pipeline above, in the issue zone:
+
+| When | Command | Why |
+|---|---|---|
+| 22:00 | `epf refit experiment.yaml --if-due --issue tomorrow` | the stored fits of tomorrow's anchor, before the morning (a no-op when stored); a failed one leaves the older fit in use, with its age recorded |
+| 08:45 | `epf forecast experiment.yaml --issue today --ensure --wait-for load_forecast_d+1=10:45` | the first revision |
+| 09:00 to 11:30, every 15 min | the same with `--ensure` | a catch-up for a missed or crashed slot: a no-op once committed, `busy` while one runs |
+| 11:20 | `epf forecast experiment.yaml --issue today --wait-for price_exaa_d+1=11:40` | the revision with every input; `unchanged` when nothing moved |
+| after your delivery | `epf mark-delivered experiment.yaml --issue today --revision N --receipt receipt.json` | the delivered record |
+| evening | `epf monitor experiment.yaml --windows 7,30,90 --alert alerts.yaml` | exit 3 when an alert fires |
+| every 15 min | `epf snapshot data_pipeline.yaml --archive archive/` | what each source answered, for honest backtests later ([Snapshot Archives](/epftoolbox2/operations/snapshots/)) |
+
+Act on the exit codes: 0 and 10 are a delivery, 20 a partial one, 30 too late, 75 try again later, 1 a look at the call line
+(`epf status experiment.yaml --issue today`). The cron and systemd examples on the
+[Snapshot Archives](/epftoolbox2/operations/snapshots/#cron) page take these commands as they are; keep the key in an environment
+file, never in the crontab or the YAML.
 
 ## Checking the live path
 
