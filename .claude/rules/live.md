@@ -34,12 +34,13 @@ a week; `tests/pipelines/test_forecast_issue.py` per list kind, refit and engine
 
 ## The decisions (step 8 spec, "Decisions"), as invariants
 
-2. **A revision means something changed.** A call whose records equal the latest committed revision's, key by key, writes no
-   revision and reports `unchanged` with that revision's status (`_live._canonical`: prediction, status, `detail`, `rung`, `member`
-   of every model and ensemble; not `list_hash`). Two consequences the week pins: a skip's list isn't compared, so a member skipped
-   in r1 (made before EXAA) keeps r1's list when a later call only changed which list it would have read (Friday: main's final
-   skips carry the list without EXAA, the backtest's the list with it); and a `check_failed` detail names the failing value, so
-   the same failure with another list writes a revision (Tuesday's r2). Changing what `_canonical` compares changes both.
+2. **A revision means something changed, and "unchanged" means identical in full** (Dawid, 2026-11-17). A call whose records
+   equal the latest committed revision's, every field of every model's and ensemble's records but the live keys, writes no
+   revision and reports `unchanged` with that revision's status (`_live._canonical` over `_comparable`: a field without a value,
+   None or NaN, is left out, as a Parquet store reads back a column a record didn't have). A skip's `list_hash` and
+   `predictor_list` and a `check_failed` `detail` count: a member skipped before and after an input it switches on came out
+   gets a revision carrying the new list (the week's Friday r2), the same failed check on another value too (Tuesday's r2). So a
+   day's last revision is the backtest's record of its frame, skips included. Never narrow the comparison back to forecasts.
 3. **Live and backtest directories are separate.** `run()` into a live directory and `forecast()`/`refit()` into a backtest's
    raise (`LiveDirectoryError`). A live manifest compares the configuration (`LIVE_UNCOMPARED` leaves out `data_columns_hash`,
    which grows every day); each revision's inputs are hashed in its snapshot instead. `live.json` holds the issue zone, the issue
@@ -73,9 +74,11 @@ a week; `tests/pipelines/test_forecast_issue.py` per list kind, refit and engine
 - **One clock.** Every clock read and sleep of the package goes through `epftoolbox2.clock` (`tests/test_clock.py` scans the
   source); pool workers never read it. The issue day is "today" in the issue zone on the clock. Tests use `FakeClock` +
   `use_clock`, and `cli.main(argv, clock=)`; `--as-of` needs `--refresh never` (a replay must not fetch today's data as of then).
-- **`wait_for` reads the issue rows' cells.** `{"load_forecast_d+1": "10:45"}` waits for tomorrow's load forecast; the plain
-  `load_forecast` on the issue row is today's, out since yesterday, so waiting for it waits for nothing (`presets.live_defaults`
-  still names the plain columns: an open question for Dawid).
+- **`wait_for` names the columns the models read on the issue rows** (Dawid, 2026-11-17). `{"load_forecast_d+1": "10:45"}`
+  waits for tomorrow's load forecast; the plain `load_forecast` on the issue row is today's, out since yesterday. `forecast()`
+  checks the first refresh's frame (`unread_waits`: every fixed list, and each predictor function's lists and `ctx` questions of
+  the day, via `read_columns`) and warns for a column no model reads, naming the shifted columns of that name they do read.
+  `presets.live_defaults` gives `load_forecast_d+1` (PL `pse_load_fcst_d+1`) and `price_exaa_d+1`.
 - **An issue row with a missing input is a `missing_test_predictors` skip, never a NaN into a model**, whatever the family (the
   week's instrumented `_predict_fitted` counts every row it sees).
 - **Stored anchors and predictor functions** (fixed in 8l): a refit planned before a late input was out stores only the list
@@ -84,6 +87,8 @@ a week; `tests/pipelines/test_forecast_issue.py` per list kind, refit and engine
   of a day whose function switches on EXAA lost its first rung.
 - **The refresh range** (`data_span`): from the oldest row a fit of the day reads (an older stored fit's `previous_cap` included),
   less the horizon, the transformers' summed `lookback_days()` and 31 days, to the last target day. The week's is 125 days.
+- **Input-quality days** (`monitor`, `quality.json`) count missing or imputed cells and sources that failed or timed out, nothing
+  else (Dawid, 2026-11-17): an implausible value is the checks' (`checks.json`, `check_failed`, `check_failed_days`).
 - **The cache never holds the last two days** before the time it was written: `on_failure="cache"` gives settled rows only, so
   during an outage recent cells are missing, and the ladder decides (Saturday: naive serves). A refresh that runs out of its
   budget records the source as `timeout`, one that fails otherwise as `failed`.
@@ -99,5 +104,7 @@ a week; `tests/pipelines/test_forecast_issue.py` per list kind, refit and engine
   logging is off for the week (rich's handler took more than half of it), `EntsoeSource`'s progress bar is a stand-in, and the
   cache's Parquet pieces are read once per unchanged file (`ParquetReads`). None of them touches a number. Don't add a third pass
   (each costs about 21 s): the second pass runs in Parquet and checks both the byte-identity and the format.
-- The table in the spec is the source; where the implementation gives another value the test asserts it and says why in a
-  comment (Tuesday's r2, Friday's skip lists, Saturday's `timeout`, the input-quality days).
+- The table in the spec is the source; where the settled rules give another value the test asserts it and says why in a comment
+  (Friday's and Tuesday's r2, Saturday's `timeout`, the input-quality days, the polls' 5 s drift).
+- The Parquet second pass checks determinism and format equivalence on sorted records and snapshot bytes, not the JSONL bytes of
+  a second JSONL run (Dawid accepted it for the 60 s budget).
