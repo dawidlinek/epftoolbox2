@@ -74,7 +74,7 @@ from ..results.forecast_result import (
 from ..results.live import LiveBusyError, LiveLateError, LiveStore, local_instant
 from ..results.manifest import Manifest, check_and_write_live, manifest_path
 from ..results.ref import ModelResultRef
-from ..results.store import SAVE_FORMATS, STATUS_OK, check_save_format, read_records
+from ..results.store import SAVE_FORMATS, STATUS_OK, check_save_format, outside_stacklevel, read_records
 from . import _issue_records as records_io
 
 REFRESH = ("auto", "never")
@@ -328,6 +328,48 @@ def read_columns(
     return [name for name in names if name in frame.columns]
 
 
+_SHIFTED = re.compile(r"^(?P<base>.+)_d[+-]\d+$")
+
+
+def unread_waits(
+    models: Sequence[Any],
+    columns: Sequence[str],
+    frame: pd.DataFrame,
+    day: datetime.date,
+    target: str,
+    horizons: Sequence[int],
+    freq: str,
+    info: Any,
+) -> Dict[str, List[str]]:
+    """The columns of a `wait_for` mapping that no model reads on the issue rows (`read_columns`: every fixed list, and what each
+    predictor function's plan of D returns or asks `ctx` about, so a column a function switches on counts), each with the shifted
+    columns of the same name the models do read (`load_forecast` -> `load_forecast_d+1`): on the issue row a column is the issue
+    day's value, out long before, so waiting for it decides nothing a forecast reads."""
+    read = read_columns(models, frame, day, target, horizons, freq, info)
+    out: Dict[str, List[str]] = {}
+    for column in columns:
+        if column in read:
+            continue
+        out[column] = sorted(name for name in read if (_SHIFTED.match(name) or {"base": None})["base"] == column)
+    return out
+
+
+def warn_unread_waits(unread: Mapping[str, Sequence[str]]) -> None:
+    for column, shifted in unread.items():
+        hint = (
+            f"; the models read {', '.join(repr(name) for name in shifted)} there: wait for "
+            f"{shifted[0]!r}, tomorrow's value on the issue row"
+            if shifted
+            else ""
+        )
+        warnings.warn(
+            f"wait_for: no model reads {column!r} on the issue day's rows, so waiting for it decides nothing a forecast reads"
+            f"{hint}. wait_for names the columns the models read there (a value of the issue day itself is out long before)",
+            UserWarning,
+            stacklevel=outside_stacklevel(),
+        )
+
+
 def rule_give_ups(
     frame: pd.DataFrame, columns: Sequence[str], info: InformationSet, day: datetime.date, freq: str, grace: float
 ) -> Dict[str, pd.Timestamp]:
@@ -365,14 +407,19 @@ def wait(
     poll: float,
     deadline: Optional[pd.Timestamp],
     columns_of: Any = None,
+    first_frame: Any = None,
 ) -> Tuple[pd.DataFrame, List[Dict[str, Any]]]:
     """Refresh, and while a waited-for column lacks a cell on the issue rows and its give-up time hasn't passed, sleep `poll`
     seconds on the clock and refresh again; never past the latest give-up time or the deadline. Returns the last frame and every
-    poll (`waits.json`). `columns_of(frame)` gives the give-up times from a frame, for `wait_for="rules"`."""
+    poll (`waits.json`). `columns_of(frame)` gives the give-up times from a frame, for `wait_for="rules"`; `first_frame(frame)` is
+    called with the first refresh's frame, before any wait."""
     clock = current_clock()
     polls: List[Dict[str, Any]] = []
     while True:
         frame = source.frame()
+        if first_frame is not None:
+            first_frame(frame)
+            first_frame = None
         if columns_of is not None:
             give_ups = columns_of(frame)
             columns_of = None
@@ -670,29 +717,39 @@ def issue_status(
     return OK, 0, rungs
 
 
-def _canonical(records: Mapping[str, Sequence[Dict[str, Any]]], day: str) -> Dict[str, List[Any]]:
-    """What decides whether two revisions are the same: per model and ensemble, each key's prediction, status, detail and rung,
-    sorted by key."""
-    out = {}
-    for name, held in records.items():
-        rows = []
-        for record in held:
-            if str(record.get("run_date")) != day:
-                continue
-            prediction = record.get("prediction")
-            rows.append(
-                (
-                    int(record["hour"]),
-                    int(record["horizon"]),
-                    None if prediction is None else repr(float(prediction)),
-                    record.get("status", STATUS_OK),
-                    record.get("detail"),
-                    record.get("rung"),
-                    record.get("member"),
-                )
-            )
-        out[name] = sorted(rows, key=lambda row: (row[1], row[0]))
-    return out
+def _plain(value: Any) -> Any:
+    """`value` as JSON reads it back: numpy scalars and arrays, tuples and lists as Python numbers and lists."""
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, (np.ndarray, list, tuple)):
+        return [_plain(item) for item in (value.tolist() if isinstance(value, np.ndarray) else value)]
+    return value
+
+
+def _comparable(record: Dict[str, Any]) -> str:
+    """A record as JSON text without the live keys (`revision`, `issued_at`, `mode`, `snapshot`), every other field kept, a
+    skip's `list_hash`, `predictor_list` and `detail` included. A field without a value (None, NaN, as a Parquet store reads back
+    a column a record didn't have) is left out, and a record without `status` is ok, as the store writes it."""
+    out: Dict[str, Any] = {}
+    for key, value in record.items():
+        if key in _LIVE_KEYS:
+            continue
+        value = _plain(value)
+        if value is None or (isinstance(value, float) and value != value):
+            continue
+        out[key] = value
+    out.setdefault("status", STATUS_OK)
+    return json.dumps(out, sort_keys=True, default=str)
+
+
+def _canonical(records: Mapping[str, Sequence[Dict[str, Any]]], day: str) -> Dict[str, List[str]]:
+    """What decides whether two revisions are the same (decision 2): per model and ensemble, every record of the day in full but
+    the live keys (`_comparable`), sorted. A skip that would read another list, or a check that failed on another value, is a
+    change: the new revision records it, so the last revision is the backtest's record of the same frame."""
+    return {
+        name: sorted(_comparable(record) for record in held if str(record.get("run_date")) == day)
+        for name, held in records.items()
+    }
 
 
 def latest_committed(store: LiveStore, day: str) -> Optional[Tuple[int, Any]]:
@@ -983,7 +1040,15 @@ def _issue(
             frame, polls = wait(source, {}, day, zone, settings.poll_s, deadline_at, columns_of=give_ups)
         else:
             give = {column: instant_on(day, when, zone, f"wait_for[{column!r}]") for column, when in wait_for.items()}
-            frame, polls = wait(source, give, day, zone, settings.poll_s, deadline_at)
+
+            def check_waits(frame: pd.DataFrame) -> None:
+                warn_unread_waits(
+                    unread_waits(
+                        pipeline.models, list(give), frame, day, target, horizons, freq, info.in_data_zone(frame.index)
+                    )
+                )
+
+            frame, polls = wait(source, give, day, zone, settings.poll_s, deadline_at, first_frame=check_waits)
         if not isinstance(frame.index, pd.DatetimeIndex) or frame.index.tz is None:
             raise ValueError(
                 "forecast() needs a frame whose index holds instants (a time zone): the issue day is local"

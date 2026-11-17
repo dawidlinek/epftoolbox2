@@ -813,6 +813,97 @@ def test_units_a_stored_fit_lacks_are_fitted_inline(tmp_path):
     assert keyed(result.records) == expected
 
 
+def exaa_when_out(ctx):
+    """A list that switches on `wind` (standing in for EXAA) where it is published: the refit's plan and a later call's differ."""
+    return PREDICTORS if ctx.published("wind_d+{horizon}") else [p for p in PREDICTORS if not p.startswith("wind")]
+
+
+@pytest.mark.parametrize("fit_missing", ["previous", "skip"])
+def test_a_list_the_stored_anchor_lacks_is_fitted_inline_at_the_anchor_under_previous(tmp_path, fit_missing):
+    """A refit model's anchor stored by a refit whose plan gave the list without `wind` (out after the refit ran): a call that
+    needs the list with it gets those units fitted inline at the anchor, the backtest's record to the bit, under the default
+    "previous" (not `no_stored_fit` skips, which took the first rung out of a fallback ladder on every last revision of a
+    day whose function switches on a late input); "skip" still skips them."""
+    data = frame(SPRING, "1h")
+    early = data.copy()
+    early.loc["2023-03-20", ["wind_d+1", "wind_d+2"]] = np.nan  # the anchor's issue day, before `wind` was out
+    live = tmp_path / "live"
+
+    def make():
+        return pipeline_of(OLSModel(exaa_when_out, 21, name="m", refit="7D"))
+
+    make().refit(early, live, issue="2023-03-20", horizon=2)
+    result = serve_one(make(), data, live, "2023-03-22", fit_missing=fit_missing)
+    entry = result.fits["2023-03-20"]
+    assert entry["source"] == "stored"
+    if fit_missing == "skip":
+        assert "inline_units" not in entry and {r["status"] for r in result.records} == {"no_stored_fit"}
+        return
+    assert entry["inline_units"] == 48
+    expected = backtest_of_day(make(), data, "2023-03-22", tmp_path / "bt", horizon=2)
+    assert keyed(result.records) == expected
+
+
+def stored_without_wind(tmp_path):
+    """A refit model whose anchor 2023-03-20 was stored before `wind` was out (the list without it), and the full frame."""
+    data = frame(SPRING, "1h")
+    early = data.copy()
+    early.loc["2023-03-20", ["wind_d+1", "wind_d+2"]] = np.nan
+    live = tmp_path / "live"
+
+    def make():
+        return pipeline_of(OLSModel(exaa_when_out, 21, name="m", refit="7D"))
+
+    make().refit(early, live, issue="2023-03-20", horizon=2)
+    return data, live, make
+
+
+def test_the_inline_units_of_a_stored_anchor_have_their_training_rows_in_the_identity(tmp_path):
+    """The units a stored anchor lacks are fitted now from the frame: a training-row cell they read moved moves their forecasts,
+    and the anchor's identity (`fits.json` of a revision) must say so, as an inline fit's `rows_sha256` does."""
+    data, live, make = stored_without_wind(tmp_path)
+    before = serve_one(make(), data, live, "2023-03-22")
+    revised = data.copy()
+    revised.loc["2023-03-10", "wind_d+1"] += 100.0  # a training row the inline units read, not the stored ones
+    after = serve_one(make(), revised, live, "2023-03-22")
+    moved = sum(a["prediction"] != b["prediction"] for a, b in zip(before.records, after.records))
+    assert moved > 0 and before.fits["2023-03-20"]["inline_units"] == 48
+    first, second = before.identity["2023-03-20"], after.identity["2023-03-20"]
+    assert first["fit_json_sha256"] == second["fit_json_sha256"]  # the stored fit is the same
+    assert first["inline_rows_sha256"] != second["inline_rows_sha256"]
+    assert (
+        "inline_rows_sha256"
+        not in serve_one(make(), data, live, "2023-03-22", fit_missing="skip").identity["2023-03-20"]
+    )
+
+
+def test_the_inline_units_of_a_stored_anchor_keep_their_notes(tmp_path, monkeypatch):
+    """What `anchor_notes` says of units fitted now (an engine unit whose model path fails) reaches the served notes, as it does
+    for an anchor fitted inline whole."""
+    data, live, make = stored_without_wind(tmp_path)
+    seen = []
+
+    def spy(plan, units):
+        seen.append(len(units))
+        return ["a note of the inline units"]
+
+    monkeypatch.setattr(_fits, "anchor_notes", spy)
+    served = serve_one(make(), data, live, "2023-03-22")
+    assert seen == [48] and "a note of the inline units" in served.notes
+
+
+def test_an_inline_unit_at_a_stored_anchor_is_refused_before_its_targets_are_out(tmp_path):
+    """Decision 5 on the units a stored anchor lacks: on 2023-03-17 the 2023-03-20 anchor's targets aren't out, so "previous",
+    which fits them now, raises FitTooEarlyError and the call writes nothing (it used to leave them as skips); "skip" fits
+    nothing and gives them as no_stored_fit skips."""
+    data, live, make = stored_without_wind(tmp_path)
+    with use_clock(FakeClock(pd.Timestamp("2023-03-17 12:00", tz="UTC"))):
+        with pytest.raises(FitTooEarlyError, match="2023-03-20"):
+            serve_one(make(), data, live, "2023-03-22")
+        skipped = serve_one(make(), data, live, "2023-03-22", fit_missing="skip")
+    assert {r["status"] for r in skipped.records} == {"no_stored_fit"}
+
+
 # --- review round 2 -----------------------------------------------------------------------------------------------------
 
 

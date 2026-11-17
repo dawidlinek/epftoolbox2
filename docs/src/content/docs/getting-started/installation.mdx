@@ -88,6 +88,19 @@ LightGBM and XGBoost are for Python 3.11 to 3.15, free-threaded 3.14t included (
 build's: one build per study). CatBoost needs a 3.11 to 3.14 build with the GIL:
 it has no wheels for 3.15 or free-threaded builds, and on 3.14t pip tries to build it from source, which fails.
 
+### Every family at once: `[all]`
+
+```bash
+pip install 'epftoolbox2[all]'
+```
+
+installs `[fast]`, `[torch]`, the tree extras, `[tune]` and the model families whose licences are permissive and which resolve
+together: `[t0]`, `[chronos]`, `[tabpfn]`, `[tabicl]`. It leaves out `[timesfm]` and `[timestral]`, whose weights carry
+flagged licences (non-commercial; a revenue cap), and `[patchtst-fm]`, whose granite-tsfm pins an older torch and
+scikit-learn and so lives in its own environment ([Foundation Models](/epftoolbox2/models/foundation-models/)): install those
+by name. A plain `pip install epftoolbox2` imports none of these packages. `[all]` needs a build with the GIL (Python 3.11 to
+3.14): TabPFN and CatBoost have no free-threaded wheels.
+
 ---
 
 ## Parallel Model Training

@@ -245,14 +245,17 @@ _EXAA_ZONES = ("DE_LU", "AT")
 
 
 def live_defaults(zone: str, exaa: bool = False) -> dict[str, Any]:
-    """Live-run settings of a day-ahead model for `zone`, as a dict for the `forecast(**...)` of step 8e (which does not exist yet).
+    """Live-run settings of a day-ahead model for `zone`, as a dict: `issue_time` and `issue_timezone` for `ModelPipeline`, and
+    `deadline` and `wait_for` for `ModelPipeline.forecast(**...)`.
 
-    Keys: `issue_time` and `issue_timezone` (what `ModelPipeline(issue_time=, issue_timezone=)` takes today), `deadline` (no
-    revision is committed after it) and `wait_for` (per column, the local time to stop polling for its issue-row cells). The
-    values are those of the docs and the simulated week of the operations spec: issue at 11:45 local time for the next day,
-    wait for the day-ahead load forecast (published 10:00, ENTSO-E rule; PSE's `pse_load_fcst` for PL) until 10:45, commit
-    nothing after 11:55. `exaa=True` (DE_LU and AT) also waits for `price_exaa` until 11:40, the second call of the simulated
-    week (the legal bound for EXAA is 11:15).
+    Keys: `issue_time` and `issue_timezone` (what `ModelPipeline(issue_time=, issue_timezone=)` takes), `deadline` (no revision is
+    committed after it) and `wait_for` (per column, the local time to stop polling for its issue-row cells). The values are those
+    of the docs and the simulated week of the operations spec: issue at 11:45 local time for the next day, wait for tomorrow's
+    day-ahead load forecast (published 10:00, ENTSO-E rule; PSE's `pse_load_fcst` for PL) until 10:45, commit nothing after
+    11:55. `exaa=True` (DE_LU and AT) also waits for tomorrow's EXAA price until 11:40, the second call of the simulated week (the
+    legal bound for EXAA is 11:15). The columns are those a model reads on the issue row, `load_forecast_d+1` and
+    `price_exaa_d+1` (`LagTransformer(columns=[...], lags=[-1], freq="day")`): on the issue row, `load_forecast` is today's,
+    out since yesterday, so waiting for it would wait for nothing.
 
     Evidence: the issue times are those of the docs' examples (`InformationSet("11:45", ...)` for Berlin, Warsaw and
     Brussels); `deadline` and `wait_for` are the operations spec's proposal, not measured on a live run yet. Unknown zones raise.
@@ -262,9 +265,9 @@ def live_defaults(zone: str, exaa: bool = False) -> dict[str, Any]:
     if exaa and zone not in _EXAA_ZONES:
         raise ValueError(f"exaa=True needs one of {list(_EXAA_ZONES)}, got {zone!r}")
     timezone, load = _LIVE_ZONES[zone]
-    wait_for = {load: "10:45"}
+    wait_for = {f"{load}_d+1": "10:45"}
     if exaa:
-        wait_for["price_exaa"] = "11:40"
+        wait_for["price_exaa_d+1"] = "11:40"
     return {"issue_time": "11:45", "issue_timezone": timezone, "deadline": "11:55", "wait_for": wait_for}
 
 

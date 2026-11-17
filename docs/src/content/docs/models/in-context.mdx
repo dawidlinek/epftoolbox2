@@ -13,7 +13,7 @@ years, on the HONEST LEAR rows, TabPFN v2's MAE was 19.58 and 16.58 EUR/MWh and 
 17.78 for LEAR's window average (6 to 7 % and 5 % below it, all significant); averaging TabPFN and TabICL gained nothing
 significant (19.50 and 16.56).
 
-Both run on the [refit calendar](/epftoolbox2/time-and-calendars/): one model per period, horizon and refit day (`refit="7D"`,
+Both run on the [refit calendar](/epftoolbox2/model-pipeline/time-and-calendars/): one model per period, horizon and refit day (`refit="7D"`,
 Mondays, by default), whose context is the rows of that period dated in the training window, and one call per refit block that
 predicts the issue rows of every day of the block at once (padded to the block's 7 rows), so the context is paid for once a
 week and a forecast is the same whatever days a run holds.

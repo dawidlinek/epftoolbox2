@@ -272,7 +272,10 @@ def _still_published_tail_cap(df: pd.DataFrame, now: pd.Timestamp) -> Optional[p
             continue
         if len(valid_index) == 1:
             continue  # no diff to estimate this column's own step from; it can't tighten the cap
-        diffs = list(valid_index[1:] - valid_index[:-1])
+        # The last diff's local step reads only the `_STEP_WINDOW` diffs before it: take those alone, not every diff of the
+        # column (a 15-minute column of a quarter of a year is 9,000 Timedeltas and 9,000 Counters for one step).
+        tail = valid_index[-(_STEP_WINDOW + 2) :]
+        diffs = list(tail[1:] - tail[:-1])
         step = _local_steps(diffs)[-1]
         caps.append(last_valid + step)
     return min(caps) if caps else None

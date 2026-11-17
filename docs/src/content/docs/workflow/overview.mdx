@@ -325,7 +325,7 @@ model_pipeline:
 live:
   save_dir: live/de_price          # the live directory, relative to this file; the only required key
   deadline: "11:55"                # quote it: YAML reads an unquoted 11:55 as a number
-  wait_for: {load_forecast: "10:45"}   # or "rules"
+  wait_for: {load_forecast_d+1: "10:45"}   # an issue-row column a model reads, or "rules"
   poll: 5min
   budget: 120s
   timeout: 30s
