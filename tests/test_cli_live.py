@@ -248,8 +248,8 @@ def test_forecast_only_into_a_save_dir_is_still_refused_next_to_a_live_section(t
 
 def forecast(experiment, *extra, at=BEFORE_DEADLINE, clock=None):
     argv = ["forecast", str(experiment), "--issue", ISSUE, *extra]
-    if clock is None:
-        argv += ["--as-of", at]
+    if clock is None:  # --as-of replays over cached or offline data: the CSV is offline
+        argv += ["--as-of", at] if "--refresh" in extra else ["--refresh", "never", "--as-of", at]
     return cli.main(argv, clock=clock)
 
 
@@ -313,7 +313,13 @@ def test_forecast_gives_exit_1_when_the_call_raises(tmp_path, capsys):
 
 
 def test_a_usage_mistake_exits_with_2(experiment):
-    for argv in (["--issue", "someday"], ["--as-of", "2023-03-07T11:30"], ["--wait-for", "load"], ["--refresh", "now"]):
+    for argv in (
+        ["--issue", "someday"],
+        ["--as-of", "2023-03-07T11:30"],
+        ["--wait-for", "load"],
+        ["--refresh", "now"],
+        ["--wait-for", "rules", "--wait-for", "load_d+1=10:00"],
+    ):
         with pytest.raises(SystemExit) as stop:
             cli.main(["forecast", str(experiment), *argv])
         assert stop.value.code == 2
@@ -386,6 +392,40 @@ def test_a_wait_passes_at_once_on_the_fake_clock(tmp_path):
     assert len(polls) == 13 and polls[-1]["at"] == "2023-03-07T10:00:00+00:00"  # it gave up at 11:00
 
 
+def usage_error(capsys, *argv):
+    with pytest.raises(SystemExit) as stop:
+        cli.main(list(argv))
+    assert stop.value.code == 2
+    return capsys.readouterr().err
+
+
+def test_as_of_on_a_forecast_or_a_refit_needs_refresh_never(experiment, tmp_path, capsys):
+    for command in ("forecast", "refit"):
+        for refresh in ([], ["--refresh", "auto"]):
+            err = usage_error(capsys, command, str(experiment), "--issue", ISSUE, *refresh, "--as-of", BEFORE_DEADLINE)
+            assert "--refresh never" in err and "cached or offline" in err
+    assert not (tmp_path / "live").exists()
+    assert forecast(experiment) == 0 and refit(experiment, "--if-due") == 0  # with it, they run
+
+
+def test_as_of_is_refused_by_snapshot_and_main_s_clock_is_not_restricted(tmp_path, capsys):
+    from epftoolbox2.data.sources import CalendarSource
+    from epftoolbox2.pipelines import DataPipeline
+
+    DataPipeline(sources=[CalendarSource("BE")], timezone="Europe/Brussels").save(tmp_path / "data.yaml")
+    argv = ["snapshot", str(tmp_path / "data.yaml"), "--archive", str(tmp_path / "archive")]
+    assert "vintage" in usage_error(capsys, *argv, "--as-of", BEFORE_DEADLINE)
+    assert not (tmp_path / "archive").exists()
+    assert cli.main(argv, clock=FakeClock(BEFORE_DEADLINE)) == 0
+
+
+def test_a_mixed_wait_for_is_a_usage_error(experiment, capsys):
+    err = usage_error(
+        capsys, "forecast", str(experiment), "--wait-for", "rules", "--wait-for", "load_d+1=10:00", "--dry-run"
+    )
+    assert "stands alone" in err
+
+
 # --- --dry-run writes nothing --------------------------------------------------------------------------------------------
 
 
@@ -447,7 +487,7 @@ def test_the_live_keys_reach_forecast_unchanged(experiment, tmp_path, spy):
 
 def test_a_key_the_section_does_not_set_is_left_to_forecast_s_default(tmp_path, spy):
     path = experiment_with(tmp_path, live={"save_dir": "live"})
-    assert forecast(path) == 0
+    assert forecast(path, clock=FakeClock(BEFORE_DEADLINE)) == 0
     (call,) = spy
     assert not {"deadline", "wait_for", "poll", "budget", "timeout", "retries", "on_failure", "deliver"} & set(call)
     assert call["ensure"] is False and call["refresh"] == "auto" and call["dry_run"] is False
@@ -552,7 +592,8 @@ def test_status_exits_1_where_nothing_was_forecast(experiment):
 
 
 def refit(experiment, *extra, issue=ISSUE, at="2023-03-07T11:30+01:00"):
-    return cli.main(["refit", str(experiment), "--issue", issue, *extra, "--as-of", at])
+    refresh = [] if "--refresh" in extra else ["--refresh", "never"]
+    return cli.main(["refit", str(experiment), "--issue", issue, *extra, *refresh, "--as-of", at])
 
 
 def test_refit_stores_the_fits_and_a_second_if_due_changes_nothing(experiment, tmp_path):
@@ -644,12 +685,12 @@ def test_snapshot_records_the_data_pipeline_into_the_archive(tmp_path):
     from epftoolbox2.pipelines import DataPipeline
 
     DataPipeline(sources=[CalendarSource("BE")], timezone="Europe/Brussels").save(tmp_path / "data.yaml")
-    argv = ["snapshot", str(tmp_path / "data.yaml"), "--archive", str(tmp_path / "archive"), "--as-of", BEFORE_DEADLINE]
-    assert cli.main(argv) == 0
+    argv = ["snapshot", str(tmp_path / "data.yaml"), "--archive", str(tmp_path / "archive")]
+    assert cli.main(argv, clock=FakeClock(BEFORE_DEADLINE)) == 0
     catalog = SnapshotArchive(tmp_path / "archive").catalog()
     assert len(catalog) == 1 and catalog["status"].tolist() == ["ok"]
     assert catalog["fetched_at"].iloc[0] == pd.Timestamp(BEFORE_DEADLINE).tz_convert("UTC")
-    assert cli.main([*argv[:-2], "--days-back", "0", "--days-ahead", "0", "--as-of", AFTER_DEADLINE]) == 0
+    assert cli.main([*argv, "--days-back", "0", "--days-ahead", "0"], clock=FakeClock(AFTER_DEADLINE)) == 0
     assert len(SnapshotArchive(tmp_path / "archive").catalog()) == 2
 
 

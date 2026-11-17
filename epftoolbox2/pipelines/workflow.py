@@ -535,15 +535,20 @@ class Workflow:
         path = self._resolve(export["path"].format(issue=result.issue))
         return result.export(path, format=export["format"], grid=export["grid"])
 
-    def refit(self, issue: Any = "today", *, if_due: bool = True):
+    def refit(self, issue: Any = "today", *, if_due: bool = True, refresh: str = "auto"):
         """`ModelPipeline.refit` into `live.save_dir` for the issue day: the data pipeline refreshed over the range the fits
-        read (the live section's budget, timeout, retries and on_failure)."""
+        read (the live section's budget, timeout, retries and on_failure); `refresh="never"` reads the per-source caches alone."""
+        if refresh not in ("auto", "never"):
+            raise ValueError(f"refresh must be 'auto' or 'never', got {refresh!r}")
         from ..pipelines._live import data_span, issue_zone, resolve_issue
 
         dp, mp = self._live_pipelines()
         _, horizons = resolve_horizons(self.model_horizon, self.model_horizons, 7)
         day = resolve_issue(issue, issue_zone(mp.information_set, dp))
-        frame = dp.run(*data_span(mp.models, day, horizons, dp), **self._live_data_options())
+        options = self._live_data_options()
+        if refresh == "never":  # as forecast(refresh="never"): no time for any request
+            options.update(cache=True, budget=0, on_failure="cache")
+        frame = dp.run(*data_span(mp.models, day, horizons, dp), **options)
         return mp.refit(frame, self._live_dir(), issue=day, if_due=if_due, **self._run_shape())
 
     def mark_delivered(self, issue: Any, revision: int, receipt: Union[str, Path], dry_run: bool = False) -> dict:
