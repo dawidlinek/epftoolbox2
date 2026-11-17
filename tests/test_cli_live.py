@@ -345,6 +345,24 @@ def test_a_forecast_exports_the_delivered_model_as_the_live_section_says(experim
     assert len(exported) == 48 and exported["status"].eq("ok").all() and exported["prediction"].notna().all()
 
 
+def test_a_failed_export_is_reported_after_the_status_and_the_retry_writes_it(experiment, tmp_path, capsys):
+    target = tmp_path / "out" / f"{ISSUE}.csv"
+    target.mkdir(parents=True)  # a directory where the file goes: the export can't be written
+    assert forecast(experiment) == 1
+    out = capsys.readouterr().out
+    assert "status ok, exit 0, revision 1" in out and "export failed" in out
+    assert out.index("status ok") < out.index("export failed")
+    assert sorted(LiveStore(tmp_path / "live").committed()[ISSUE]) == [1]  # the revision was committed
+    target.rmdir()
+    assert forecast(experiment, "--ensure") == 0  # a noop that exports what is missing
+    assert len(pd.read_csv(target)) == 48
+    stamp = target.stat().st_mtime_ns
+    assert forecast(experiment, "--ensure") == 0 and target.stat().st_mtime_ns == stamp  # and leaves a file alone
+    target.unlink()
+    assert forecast(experiment) == 0  # an unchanged rerun exports it too
+    assert len(pd.read_csv(target)) == 48 and sorted(LiveStore(tmp_path / "live").committed()[ISSUE]) == [1]
+
+
 # --- --as-of is a FakeClock ------------------------------------------------------------------------------------------
 
 
@@ -457,7 +475,7 @@ def spy(monkeypatch):
 
     def stub(self, data, issue="today", save_dir=None, **kwargs):
         calls.append({"issue": issue, "save_dir": save_dir, **kwargs})
-        return ForecastResult(issue="2023-03-07", status="ok", exit_code=0, noop=True)
+        return ForecastResult(issue="2023-03-07", status="ok", exit_code=0, dry_run=True)
 
     monkeypatch.setattr(ModelPipeline, "forecast", stub)
     return calls

@@ -528,11 +528,15 @@ class Workflow:
 
     def export_result(self, result: Any) -> Optional[Path]:
         """Write `live.export` for `result` (path with `{issue}` filled in, relative to the YAML): the delivered model's
-        forecasts. Nothing for a call that has none (busy, late), a dry run, or a noop; None without an export section."""
+        forecasts. Nothing for a call that has none (busy, late), a dry run, or without an export section. A noop (`--ensure`)
+        or unchanged call exports from the committed revision's records only when the file for the issue is missing, so
+        a retry after a failed export writes it and a repeat call leaves a delivered file alone. Returns the path written."""
         export = self._live_settings().export
-        if export is None or result.dry_run or result.noop or result.status in ("busy", "late"):
+        if export is None or result.dry_run or result.status in ("busy", "late"):
             return None
         path = self._resolve(export["path"].format(issue=result.issue))
+        if (result.noop or result.unchanged) and path.exists():
+            return None
         return result.export(path, format=export["format"], grid=export["grid"])
 
     def refit(self, issue: Any = "today", *, if_due: bool = True, refresh: str = "auto"):

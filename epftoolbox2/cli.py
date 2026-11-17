@@ -573,7 +573,6 @@ def cmd_forecast(args: argparse.Namespace) -> int:
         result = workflow.forecast(
             args.issue, ensure=args.ensure, refresh=args.refresh, dry_run=args.dry_run, **options
         )
-        exported = workflow.export_result(result)
     except Exception as exc:
         return _failed(exc)
     detail = [f"issue {result.issue}", f"status {result.status}", f"exit {result.exit_code}"]
@@ -582,9 +581,15 @@ def cmd_forecast(args: argparse.Namespace) -> int:
     detail += [name for name in ("noop", "unchanged", "dry_run") if getattr(result, name)]
     if result.missing:
         detail.append(f"{result.missing} of {result.planned} keys of {result.delivered} missing")
-    if exported is not None:
-        detail.append(f"exported {exported}")
     console.print(", ".join(detail), markup=False, highlight=False)
+    # The status is the forecast's whatever happens to the export: a failed export is its own error, after the status line.
+    try:
+        exported = workflow.export_result(result)
+    except Exception as exc:
+        console.print("The forecast stands; its export failed:", markup=False, highlight=False)
+        return _failed(exc)
+    if exported is not None:
+        console.print(f"exported {exported}", markup=False, highlight=False)
     return result.exit_code
 
 
