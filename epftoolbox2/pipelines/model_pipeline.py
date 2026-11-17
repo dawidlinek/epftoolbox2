@@ -2409,7 +2409,10 @@ class ModelPipeline:
             save_dir: The live directory (made on the first call; a backtest's is refused). None writes nothing and serves
                 from inline fits alone.
             wait_for: {column: "HH:MM"}: before planning, poll while the column lacks a value on a row of the issue day,
-                giving up at that time of the issue day; `"rules"` waits for every column a model may read until its rule's
+                giving up at that time of the issue day. The columns are those the models read on the issue rows:
+                `load_forecast_d+1` is tomorrow's load forecast there, while `load_forecast` is today's, out since yesterday; a
+                column no model reads (no fixed list, no list or `ctx` question of a predictor function) warns, naming the
+                shifted column the models read; `"rules"` waits for every column a model may read until its rule's
                 publication time plus `grace`. Needs a DataPipeline.
             deadline: "HH:MM" of the issue day in the issue zone, or an aware instant: no revision is committed after it (status
                 `late`, exit 30). A "HH:MM" one is recorded in `live.json` for the readers' cut-off.

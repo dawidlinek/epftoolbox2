@@ -12,6 +12,7 @@ grids, `run(forecast_only=True, save_dir=...)`, a late `ctx.value()` at "raise",
 import datetime
 import hashlib
 import json
+import warnings
 from concurrent.futures import Future
 
 import numpy as np
@@ -424,6 +425,23 @@ def test_wait_for_polls_on_the_clock_until_the_column_is_in(tmp_path):
     assert start <= "2023-02-06" and end == "2023-03-10"  # the fits' rows back from the issue day, the targets after it
     written = json.loads((tmp_path / "live" / "issues" / ISSUE / "r1" / "waits.json").read_text())
     assert len(written["polls"]) == 4
+
+
+def test_wait_for_a_column_no_model_reads_warns_with_the_one_they_read(tmp_path):
+    """`wait_for` names issue-row columns: `load` there is the issue day's own value, which no model reads (they read `load_d+1`
+    and `load_d+2`); waiting for it decides nothing, so the call warns and names them. A predictor function's columns count, the
+    ones it asks `ctx` about included, and a column the models read doesn't warn."""
+    source = FakeDataPipeline(DATA, arrives=None, column="wind")
+    with use_clock(FakeClock(pd.Timestamp("2023-03-07 08:50", tz="UTC"))):
+        with pytest.warns(UserWarning, match=r"no model reads 'load'.*'load_d\+1', 'load_d\+2'.*wait for 'load_d\+1'"):
+            simple().forecast(source, ISSUE, None, horizon=2, wait_for={"load": "08:55"})
+        with warnings.catch_warnings():
+            warnings.filterwarnings("error", message="wait_for: no model reads")
+            simple().forecast(source, ISSUE, None, horizon=2, wait_for={"load_d+1": "08:55"})
+            function = pipeline(OLSModel(exaa_when_out, training_window=21, name="a"))
+            function.forecast(source, ISSUE, None, horizon=2, wait_for={"extra_d+1": "08:55"})  # asked through ctx
+        with pytest.warns(UserWarning, match=r"no model reads 'load'.*'load_d\+1', 'load_d\+2'"):
+            function.forecast(source, ISSUE, None, horizon=2, wait_for={"load": "08:55"})
 
 
 def test_wait_for_gives_up_at_its_time_and_the_missing_inputs_are_skips(tmp_path):
