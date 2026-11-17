@@ -1,0 +1,112 @@
+---
+title: Model Families
+description: Every model family at a glance, its classes, unit kind, extra, licence, weights and where it runs (CPU or GPU), with links to each family's page and to the reproduction of the research's model zoo
+sidebar:
+  order: 0
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Every model runs through the same `ModelPipeline`: the refit calendar, the information set, the store, the report and `verify`
+are shared, and so are the record keys, so any two models' forecasts are compared on identical keys. What differs is what one
+fit sees (its *unit kind*), what it needs installed (its *extra*), what it was trained on before your data (its *weights* and
+their licence) and where it runs well.
+
+| Family | Classes | Unit kind | Extra | Licence of what runs | Weights | Runs on | Page |
+|---|---|---|---|---|---|---|---|
+| Linear | `OLSModel`, `RidgeModel`, `LassoCVModel`, `LEARModel` | period | core | the library's (scikit-learn BSD-3) | none | CPU; the engine shares fits across a loop | [OLS](/epftoolbox2/models/ols/), [Ridge](/epftoolbox2/models/ridge/), [LassoCV](/epftoolbox2/models/lasso/), [LEAR](/epftoolbox2/models/lear/) |
+| Naive | `NaiveModel` | period | core | | none | CPU | [Naive](/epftoolbox2/models/naive/) |
+| Residual hybrid | `ResidualModel(base, learner)`, `HistGBModel` | the base's; the learner pooled | core | scikit-learn BSD-3 | none | CPU, one thread a fit | [Residual Model](/epftoolbox2/models/residual/) |
+| Gradient-boosted trees | `LightGBMModel`, `XGBoostModel`, `CatBoostModel` | pooled (or period with `periods="each"`) | `[lightgbm]`, `[xgboost]`, `[catboost]` (`[gbm]` the first two) | MIT, Apache-2.0, Apache-2.0 | none | CPU, one thread a fit; XGBoost also `device="cuda"` | [Trees](/epftoolbox2/models/trees/) |
+| Neural networks | `TorchModel`, `MLPHourlyModel`, `MLPDailyModel` | period (`output="period"`) or day (`output="day"`) | `[torch]` | torch BSD-3 | none | CPU, one thread a fit; a GPU trains a loop's networks in padded stacks | [Neural Networks](/epftoolbox2/models/neural-networks/) |
+| In-context | `TabPFNModel`, `TabICLModel` | period, one padded call per refit block | `[tabpfn]`, `[tabicl]` | Prior Labs License 1.1 (Apache-2.0 with attribution), BSD-3 | TabPFN v2 regression, TabICLv2 | a GPU (6 processes per GPU); a CPU takes 55 to 125 core-hours a market-year | [In-Context Models](/epftoolbox2/models/in-context/) |
+| Foundation | `T0Model`, `ChronosModel`, `PatchTSTFMModel`, `TimestralModel`, `TimesFMModel` | day, over the history of each series (`context` days) | `[t0]`, `[chronos]`, `[patchtst-fm]`, `[timestral]` plus the package from its commit, `[timesfm]` | Apache-2.0; Apache-2.0; Apache-2.0 or OpenMDW-1.0; Mistral's modified MIT (revenue cap, attribution); TimesFM non-commercial | t0-alpha, Chronos-2, PatchTST-FM-r2, Timestral-209M/123M/28M, TimesFM-3 | a GPU in one spawned host process, or a CPU in the pipeline's process | [Foundation Models](/epftoolbox2/models/foundation-models/) |
+| Wrappers | `PooledModel`, `ShapeModel` | the wrapped model's | the wrapped model's | | | | [PooledModel](/epftoolbox2/models/pooled/), [Shape Model](/epftoolbox2/models/shape/) |
+
+## Unit kinds
+
+A *unit* is one fit and the forecasts it makes. Every unit is placed on the same fixed refit calendar (`refit="7D"` refits on
+Mondays counted from 1970-01-05, `refit_from=` moves the origin), uses date-based training spans and honours `newest_target`:
+
+- **period**: the rows of one period of the day (one hour, one quarter-hour), one target column, one fit per (period, horizon,
+  refit day). The linear models, in-context models and `output="period"` networks.
+- **day**: rows are local dates, the inputs day-level (one value per date), the outputs the P periods of the target day, one fit
+  per (horizon, refit day) with a missing slot masked. `output="day"` networks; foundation models are day units whose inputs
+  come from each series' history cut by the information set, in physical time (23 or 25 steps on a DST target day).
+- **pooled**: the (date, period) rows of every period in one fit, each predictor read on the row's own period, the virtual
+  column `period` a feature only when listed. Trees and the residual learner, by default.
+
+## Extras
+
+The core install has no model package and downloads no weights; importing `epftoolbox2`, a data source or a core model imports
+none of them. Each heavy family is an extra, imported by its first fit; a run's pre-flight checks every model's extra (and
+weights) before any model fits and names the install line.
+
+```bash
+pip install 'epftoolbox2[torch]'          # TorchModel, MLPHourlyModel, MLPDailyModel
+pip install 'epftoolbox2[gbm]'            # LightGBMModel, XGBoostModel ([lightgbm], [xgboost] alone; [catboost] apart)
+pip install 'epftoolbox2[tabpfn]'         # TabPFNModel
+pip install 'epftoolbox2[tabicl]'         # TabICLModel
+pip install 'epftoolbox2[t0]'             # T0Model
+pip install 'epftoolbox2[chronos]'        # ChronosModel
+pip install 'epftoolbox2[patchtst-fm]'    # PatchTSTFMModel (Python 3.13 or older)
+pip install 'epftoolbox2[timesfm]'        # TimesFMModel (non-commercial weights)
+pip install 'epftoolbox2[tune]'           # tune.BayesSearch
+```
+
+`[timestral]` installs the runtime's PyPI dependencies; the timestral package itself comes from its pinned commit, which the
+pre-flight checks (the install line is on [Foundation Models](/epftoolbox2/models/foundation-models/#timestrals-runtime)).
+Python builds: `[torch]`, `[tabicl]`, `[lightgbm]`, `[xgboost]` and `[tune]` install on 3.11 to 3.15 and on free-threaded
+3.14t; `[tabpfn]`, `[t0]`, `[chronos]`, `[timesfm]` and `[timestral]` need a build with the GIL (they load safetensors, which has
+no free-threaded wheels); `[catboost]` stops at 3.14 with the GIL; `[patchtst-fm]` needs 3.13 or older and is resolved apart
+from every extra that holds torch (granite-tsfm pins an older torch and scikit-learn), so it can't share an environment with
+them.
+
+<Aside type="note">
+There is no `[all]` extra in this version. One environment can't hold `[patchtst-fm]` with the torch extras, and `[timesfm]`
+and `[timestral]` carry restricted licences, so a combined extra would leave those three out; until it exists, list the extras
+you need.
+</Aside>
+
+## Weights and licences
+
+Families with pretrained weights never download during `run()`, `verify()` or `report()`. Fetch them once with
+`epf weights fetch <Class>` on a machine with network; a restricted licence needs `--accept <licence-id>` on that command line,
+and a gated repository needs your own Hugging Face login and click-through, which the library never does for you. Each class
+has a model card (licence, commercial use, revenue cap, attribution, training corpus and its end, release date, runtime pins,
+the weight files' sha256), recorded in the manifest and printed by `report.provenance()` and the exporters with a contamination
+verdict for the run's own windows ([Licences and Weights](/epftoolbox2/models/licences-and-weights/)).
+
+| Class | Licence; commercial use | Attribution | Corpus (end) | Verdict for windows starting 2024-10-01 and 2025-09-30 |
+|---|---|---|---|---|
+| `TabPFNModel` | Prior Labs License 1.1; yes | "Built with PriorLabs-TabPFN" | synthetic priors | `clean (synthetic)` |
+| `TabICLModel` | BSD-3-Clause; yes | | synthetic priors | `clean (synthetic)` |
+| `T0Model` | Apache-2.0; yes | | GIFT-Eval pretraining split and synthetic (2021-12-31) | `clean` |
+| `ChronosModel` | Apache-2.0; yes | | Chronos and GIFT-Eval corpora, no end date (released 2025-10-30) | `possibly contaminated` (released after both starts) |
+| `PatchTSTFMModel` | Apache-2.0 or OpenMDW-1.0; yes | | GIFT-Eval subset, no dates (released 2026-08-07) | `possibly contaminated` (released after both starts) |
+| `TimestralModel` | Mistral's modified MIT; no rights above USD 20M monthly revenue of the user's company | "2026 - Mistral AI" | undocumented (released 2026-10-15) | `possibly contaminated` (released after both starts) |
+| `TimesFMModel` | TimesFM non-commercial; no | | GIFT-Eval pretraining, Wikipedia to 2023-11, Trends to 2022 (2023-11-30) | `clean` |
+| trees, networks, `HistGBModel` | the package's | | the run's data | `clean` |
+
+The [Licences and Weights](/epftoolbox2/models/licences-and-weights/) page has the verdict rules: a corpus end before a window's
+first issue day is `clean`, an undocumented corpus with a release before it `clean (released before)`, anything else `possibly
+contaminated`.
+
+## CPU or GPU
+
+| Family | CPU | GPU | Determinism |
+|---|---|---|---|
+| Linear, naive, residual hybrid, trees | the place they run; one BLAS or OpenMP thread a fit, `MAX_PROCESSES` processes | XGBoost's `device="cuda"` only (its CPU and GPU forecasts differ; the device is compared on resume) | bitwise alone, in a loop, across shards and resumes |
+| Neural networks | a loop of single-thread fits (faster than one multi-threaded process) | the networks of a loop that share a stack key train together in padded vmap stacks | bitwise alone, in a stack, across shards and resumes, on CPU and on one GPU type |
+| In-context | float32, 55 (TabICL) to 125 (TabPFN) core-hours a market-year of weekly refits | float16 autocast, 6 processes per GPU, about 5 minutes a market-year on an H100 | bitwise on a CPU; a GPU's reruns within 2e-5 (TabICL) |
+| Foundation | one process with `THREADS_PER_PROCESS` torch threads, minutes a market-year (Timestral-209M about half an hour) | one spawned host process per run, seconds a market-year on an H100; t0 fine-tunes about a minute each | zero-shot within the stored files' rounding on both; a GPU fine-tune isn't repeatable, so its checkpoint is stored and reused |
+
+`device="auto"` takes CUDA when a matmul runs on it, else the CPU. CPU and GPU forecasts of the pretrained families differ by
+more than rounding (up to 4.3 EUR/MWh for TabPFN on the research's rows), so the manifest records the device type, the
+precision and the kernels, and a resume on another device refuses.
+
+## How well they do
+
+[Model Zoo Reproduction](/epftoolbox2/models/zoo-reproduction/) runs every family on the research's recent DE_LU and AT data and
+compares each with the research's stored forecasts on identical keys, value by value on the research's own fits and over each
+year on the library's calendar, then rebuilds the research's table of families and its ensembles from the library's members.
