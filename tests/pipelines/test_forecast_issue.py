@@ -341,6 +341,34 @@ def test_an_unchanged_rerun_writes_no_revision_and_a_changed_input_writes_the_ne
     assert {r["revision"] for r in read if r["run_date"] == ISSUE} == {2}
 
 
+@pytest.mark.parametrize("save_format", ["jsonl", "parquet"])
+def test_a_skip_that_would_read_another_list_is_a_new_revision(tmp_path, save_format):
+    """Decision 2 compares records in full: a member skipped in both calls whose list changed (an input its function switches on
+    came out between them) writes a revision, so the last one carries the list the backtest's skip carries; a third call with
+    nothing changed writes none. Before, only predictions, statuses, details and rungs were compared, and the skip kept the
+    earlier list."""
+    rows = DATA.index.normalize() == pd.Timestamp(ISSUE, tz="Europe/Warsaw")
+    late = DATA.copy()
+    late.loc[rows, ["load_d+1", "load_d+2"]] = np.nan  # every forecast of the day is a skip
+    early = late.copy()
+    early.loc[rows, ["extra_d+1", "extra_d+2"]] = np.nan  # before `extra` is out
+
+    def make():
+        return pipeline(OLSModel(exaa_when_out, training_window=21, name="a"))
+
+    live = tmp_path / "live"
+    first = make().forecast(early, ISSUE, live, horizon=2, save_format=save_format)
+    second = make().forecast(late, ISSUE, live, horizon=2, save_format=save_format)
+    third = make().forecast(late, ISSUE, live, horizon=2, save_format=save_format)
+    assert (
+        {r["status"] for r in first.records["a"]}
+        == {r["status"] for r in second.records["a"]}
+        == {"missing_test_predictors"}
+    )
+    assert {r["list_hash"] for r in first.records["a"]} != {r["list_hash"] for r in second.records["a"]}
+    assert [(r.revision, r.unchanged) for r in (first, second, third)] == [(1, False), (2, False), (2, True)]
+
+
 def test_a_dry_run_writes_nothing_anywhere(tmp_path):
     live = tmp_path / "live"
     fresh = simple().forecast(DATA, ISSUE, live, horizon=2, dry_run=True)

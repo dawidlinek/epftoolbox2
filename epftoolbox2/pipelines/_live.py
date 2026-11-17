@@ -670,29 +670,39 @@ def issue_status(
     return OK, 0, rungs
 
 
-def _canonical(records: Mapping[str, Sequence[Dict[str, Any]]], day: str) -> Dict[str, List[Any]]:
-    """What decides whether two revisions are the same: per model and ensemble, each key's prediction, status, detail and rung,
-    sorted by key."""
-    out = {}
-    for name, held in records.items():
-        rows = []
-        for record in held:
-            if str(record.get("run_date")) != day:
-                continue
-            prediction = record.get("prediction")
-            rows.append(
-                (
-                    int(record["hour"]),
-                    int(record["horizon"]),
-                    None if prediction is None else repr(float(prediction)),
-                    record.get("status", STATUS_OK),
-                    record.get("detail"),
-                    record.get("rung"),
-                    record.get("member"),
-                )
-            )
-        out[name] = sorted(rows, key=lambda row: (row[1], row[0]))
-    return out
+def _plain(value: Any) -> Any:
+    """`value` as JSON reads it back: numpy scalars and arrays, tuples and lists as Python numbers and lists."""
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, (np.ndarray, list, tuple)):
+        return [_plain(item) for item in (value.tolist() if isinstance(value, np.ndarray) else value)]
+    return value
+
+
+def _comparable(record: Dict[str, Any]) -> str:
+    """A record as JSON text without the live keys (`revision`, `issued_at`, `mode`, `snapshot`), every other field kept, a
+    skip's `list_hash`, `predictor_list` and `detail` included. A field without a value (None, NaN, as a Parquet store reads back
+    a column a record didn't have) is left out, and a record without `status` is ok, as the store writes it."""
+    out: Dict[str, Any] = {}
+    for key, value in record.items():
+        if key in _LIVE_KEYS:
+            continue
+        value = _plain(value)
+        if value is None or (isinstance(value, float) and value != value):
+            continue
+        out[key] = value
+    out.setdefault("status", STATUS_OK)
+    return json.dumps(out, sort_keys=True, default=str)
+
+
+def _canonical(records: Mapping[str, Sequence[Dict[str, Any]]], day: str) -> Dict[str, List[str]]:
+    """What decides whether two revisions are the same (decision 2): per model and ensemble, every record of the day in full but
+    the live keys (`_comparable`), sorted. A skip that would read another list, or a check that failed on another value, is a
+    change: the new revision records it, so the last revision is the backtest's record of the same frame."""
+    return {
+        name: sorted(_comparable(record) for record in held if str(record.get("run_date")) == day)
+        for name, held in records.items()
+    }
 
 
 def latest_committed(store: LiveStore, day: str) -> Optional[Tuple[int, Any]]:
