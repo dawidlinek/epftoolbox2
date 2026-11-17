@@ -28,8 +28,10 @@ the backtest's own lines. Only which fit (stored or made inline) and which frame
   such dependence.
 
 <Aside type="caution">
-This page is being completed (step 8l of the forecasting layer): the CLI (`epf forecast`, `epf refit`, `epf mark-delivered`,
-`epf status`) and a worked example of a simulated week come next.
+This page is being completed (step 8l of the forecasting layer): a worked example of a simulated week comes next. The commands
+(`epf forecast`, `epf refit`, `epf mark-delivered`, `epf status`, `epf monitor`, `epf snapshot`) and the `live:` section of a
+workflow YAML are on the [CLI page](/epftoolbox2/getting-started/cli/#live-commands-forecast-refit-mark-delivered-status-monitor-snapshot) and in
+[Workflow](/epftoolbox2/workflow/overview/#the-live-section).
 </Aside>
 
 ## One call
@@ -116,6 +118,8 @@ those of a `busy` or `late` one raise, naming the status.
 | 30 | `late` | the deadline passed before a revision could be committed; nothing written but the call line |
 | 75 | `busy` | another call holds `live.lock` (EX_TEMPFAIL) |
 | 1 | error | an exception; the call line says so when it could be written |
+
+`epf forecast` exits with these codes (2 is a usage mistake, argparse's), `--dry-run` with the code the call would give.
 
 The **delivered** model is `deliver=` if given, else the pipeline's last ensemble, else its last model. Its planned keys are
 those the clock gives the issue day (`IssueCalendar`: 23 or 25 hours, 92 or 100 quarter-hours on switch days).

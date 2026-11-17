@@ -346,8 +346,8 @@ class ForecastResult:
 class Workflow:
     def __init__(
         self,
-        data_start: str,                                      # Data fetch start date
-        data_end: str,                                        # Data fetch end date
+        data_start: Optional[str],                            # Data fetch start date (None only with live)
+        data_end: Optional[str],                              # Data fetch end date (None only with live)
         model_test_start: Optional[str] = None,               # Test period start
         model_test_end: Optional[str] = None,                 # Test period end
         data_pipeline: Optional[Union[str, Path]] = None,    # Path to data_pipeline.yaml
@@ -371,11 +371,20 @@ class Workflow:
         model_issue_days: Optional[Sequence[str]] = None,     # Only these weekdays, e.g. ["friday"]
         model_save_format: str = "jsonl",                     # "parquet": one Parquet directory per model (YAML: save_format)
         model_save_coefficients: bool = True,                 # False writes coefficients as [] (YAML: save_coefficients)
+        live: Optional[dict] = None,                        # The live: section of the live commands (YAML: top-level live:)
     ): ...
 
     def run(self) -> EvaluationReport: ...
     def report(self, allow_missing: bool = False) -> EvaluationReport: ...  # Merge save_dir, run evaluators/exporters
     def array_size(self) -> int: ...                          # How many array tasks cover the models: 0 .. size - 1
+
+    # The live commands' calls (the live: section; see Workflow)
+    def forecast(self, issue: Any = "today", *, ensure: bool = False, refresh: str = "auto", dry_run: bool = False, **options: Any): ...  # ModelPipeline.forecast into live.save_dir; options: the live keys (deadline=, wait_for=, ...)
+    def export_result(self, result: Any) -> Optional[Path]: ...  # Write live.export for a ForecastResult
+    def refit(self, issue: Any = "today", *, if_due: bool = True): ...  # ModelPipeline.refit into live.save_dir
+    def mark_delivered(self, issue: Any, revision: int, receipt: Union[str, Path], dry_run: bool = False) -> dict: ...
+    def status(self, issue: Any = "today") -> dict: ...       # Calls, committed revisions, deliveries of one issue day
+    def monitor(self, windows: Sequence[int] = (7, 30, 90), alerts: Any = None, policy: str = "latest"): ...  # MonitorReport
 
     def save(self, path: Union[str, Path]) -> None: ...
 

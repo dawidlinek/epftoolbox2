@@ -148,7 +148,7 @@ about (an auction's result, a TSO's day-ahead forecast, the gate). Every 15 minu
 the six default days is a few kB to a few tens of kB (four 15-minute columns: about 23 kB), so every 15 minutes is about 2 MB
 a day per source.
 
-The `epf snapshot data_pipeline.yaml --archive archive/be` command calls the same function; it comes with the live CLI (step 8i).
+The `epf snapshot data_pipeline.yaml --archive archive/be` command calls the same function (`--days-back` and `--days-ahead` as above, a workflow YAML works too) and exits with `result.exit_code`.
 
 ### cron
 
