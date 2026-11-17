@@ -131,6 +131,13 @@ timestral = [
     "safetensors>=0.4",
     "huggingface_hub>=1",
 ]
+# Every extra whose licence is permissive and which resolves with the others: the LEAR kernels, torch, the tree families, the
+# search, t0, Chronos-2, TabPFN and TabICL. Left out: [patchtst-fm] (resolved apart from every extra that holds torch, see the
+# conflicts below) and [timesfm] and [timestral] (their weights carry flagged licences: non-commercial; a revenue cap), which
+# are installed by name. tabpfn and catboost have no free-threaded (3.14t) wheels, so [all] doesn't install there.
+all = [
+    "epftoolbox2[fast,torch,lightgbm,xgboost,catboost,tune,t0,chronos,tabpfn,tabicl]",
+]
 dev = [
     "pytest>=7.4.0",
     "pytest-cov>=4.1.0",
@@ -164,6 +171,7 @@ conflicts = [
     [{ extra = "patchtst-fm" }, { extra = "tabicl" }],
     [{ extra = "patchtst-fm" }, { extra = "timesfm" }],
     [{ extra = "patchtst-fm" }, { extra = "timestral" }],
+    [{ extra = "patchtst-fm" }, { extra = "all" }],
 ]
 
 [tool.hatch.build.targets.wheel]

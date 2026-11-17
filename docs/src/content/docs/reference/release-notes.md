@@ -309,6 +309,10 @@ an issue day it didn't sample.
 
 ### New
 
+- **`pip install 'epftoolbox2[all]'`**: `[fast]`, `[torch]`, the tree extras, `[tune]`, `[t0]`, `[chronos]`, `[tabpfn]` and
+  `[tabicl]` in one extra. `[timesfm]` and `[timestral]` (flagged licences) and `[patchtst-fm]` (resolved apart from every extra
+  that holds torch) are installed by name. A build with the GIL only (TabPFN and CatBoost have no free-threaded wheels). See
+  [Installation](/epftoolbox2/getting-started/installation/#every-family-at-once-all).
 - **The live commands of `epf`.** `epf forecast experiment.yaml --issue today [--ensure] [--deadline 11:55] [--wait-for col=10:45]
   [--refresh never] [--dry-run] [--as-of ...]` issues one day into a live directory and exits with its status (0 ok, 10 fallback,
   20 skipped, 30 late, 75 busy, 1 error, 2 usage); `epf refit --if-due`, `epf mark-delivered --issue D --revision N --receipt r.json`,
