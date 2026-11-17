@@ -705,7 +705,7 @@ def _entsoe_price_rules(source: Any, prefix: str) -> Dict[str, Availability]:
     if "price" not in source.type:
         return rules
     if getattr(source, "price_exaa", False):
-        zone = "Europe/Vienna" if source._area_name == "AT" else "Europe/Berlin"  # DE_LU, DE_AT_LU
+        zone = "Europe/Vienna" if source._area_name == "AT" else "Europe/Berlin"  # DE_LU
         rules[f"{prefix}price_exaa"] = _exaa_rule(zone)
     if source._area_name == "CH":
         rules[f"{prefix}price"] = Availability.published(
