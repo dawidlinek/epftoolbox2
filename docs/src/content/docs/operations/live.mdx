@@ -147,7 +147,8 @@ A deadline is each call's own: its call line and its revision's commit line hold
 reader's `cutoff="deadline"` reads it there. A revision's files say what it was made from: `inputs.parquet` holds every column a
 model read on the issue rows (by local date in the frame's zone, as the models read them), with each key's list hash, and its hash is the `snapshot` every record of the revision carries; `quality.json` each source's refresh status and
 each input's missing and imputed cells and last valid timestamp; `fits.json` per model and anchor the fit used, its age, and its
-identity (a stored fit's `fit.json` sha256 and digest, an inline fit's rows and their hash). Read revisions with
+identity (a stored fit's `fit.json` sha256 and digest, with `inline_rows_sha256` for units the stored anchor lacked and the call
+fitted; an inline fit's rows and their hash). Read revisions with
 `ModelResultRef(path, ..., policy="latest" | "first" | "delivered")` (see [Caching](/epftoolbox2/model-pipeline/caching/)); a
 backtest's `run()` into a live directory, and `forecast()` into a backtest's, both raise.
 

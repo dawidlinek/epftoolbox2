@@ -83,7 +83,9 @@ a week; `tests/pipelines/test_forecast_issue.py` per list kind, refit and engine
   week's instrumented `_predict_fitted` counts every row it sees).
 - **Stored anchors and predictor functions** (fixed in 8l): a refit planned before a late input was out stores only the list
   without it. Units the exact anchor lacks are fitted inline at the anchor under `fit_missing="previous"` (the default) and
-  `"fit"`; `"skip"`, and an older anchor standing in, leave them as `no_stored_fit` skips. Before the fix, every last revision
+  `"fit"`; `"skip"`, and an older anchor standing in, leave them as `no_stored_fit` skips. Fitted now, they are held to decision 5
+  (`FitTooEarlyError` aborts the call under "previous"), keep their `anchor_notes`, and add `inline_rows_sha256` (their
+  `unit_rows_hash`es) to the anchor's identity in `fits.json`, beside the stored fit's sha256: provenance of every fit served. Before the fix, every last revision
   of a day whose function switches on EXAA lost its first rung.
 - **The refresh range** (`data_span`): from the oldest row a fit of the day reads (an older stored fit's `previous_cap` included),
   less the horizon, the transformers' summed `lookback_days()` and 31 days, to the last target day. The week's is 125 days.
