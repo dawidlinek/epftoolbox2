@@ -695,6 +695,32 @@ def test_monitor_passes_its_windows_the_live_deadline_and_the_issue_days(experim
     assert kwargs["issue_days"] == ["monday", "tuesday"] and kwargs["target"] == "price"
 
 
+def test_monitor_reads_the_actuals_from_the_first_committed_day_to_the_last_one_s_targets(tmp_path, monkeypatch):
+    from epftoolbox2.pipelines import DataPipeline
+
+    path = experiment_with(tmp_path)
+    for day in ("2023-03-06", ISSUE):
+        argv = ["forecast", str(path), "--issue", day, "--refresh", "never", "--as-of", f"{day}T11:30+01:00"]
+        assert cli.main(argv) == 0
+    ranges = []
+    real = DataPipeline.run
+
+    def spy(self, start, end, *args, **kwargs):
+        ranges.append((str(start), str(end)))
+        return real(self, start, end, *args, **kwargs)
+
+    monkeypatch.setattr(DataPipeline, "run", spy)
+    assert monitor(path) == 0
+    # horizon 2: the last issue day's furthest target is 2023-03-09; the end is exclusive, with a day of margin
+    assert ranges == [("2023-03-06", "2023-03-11")]
+
+
+def test_as_of_is_kept_by_monitor_and_status_without_refresh_never(experiment):
+    assert forecast(experiment) == 0
+    assert monitor(experiment) == 0
+    assert cli.main(["status", str(experiment), "--issue", ISSUE, "--as-of", BEFORE_DEADLINE]) == 0
+
+
 def test_monitor_exits_1_without_a_live_directory_or_a_revision(experiment, tmp_path):
     assert monitor(experiment) == 1
     with LiveStore(tmp_path / "live").hold():
