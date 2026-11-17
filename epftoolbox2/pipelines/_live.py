@@ -199,21 +199,22 @@ def history_days(model: Any, day: datetime.date, models: Sequence[Any] = ()) -> 
 
 
 def transformer_lookback(data: Any) -> Tuple[int, List[str]]:
-    """The longest lookback (days) a data pipeline's transformers state (`Transformer.lookback_days`), and the names of those
-    that can't state one."""
-    longest, unknown = 0, []
+    """How many days before a row the data pipeline's transformers read, together (`Transformer.lookback_days`), and the names
+    of those that can't state one. The sum over the list, not the largest: a transformer may read another's output (a rolling
+    window of a lagged column reads back the lag plus the window), and the sum bounds every such chain."""
+    total, unknown = 0, []
     for transformer in getattr(data, "transformers", None) or []:
         days = transformer.lookback_days() if hasattr(transformer, "lookback_days") else None
         if days is None:
             unknown.append(type(transformer).__name__)
         else:
-            longest = max(longest, int(days))
-    return longest, unknown
+            total += int(days)
+    return total, unknown
 
 
 def data_span(models: Sequence[Any], day: datetime.date, horizons: Sequence[int], data: Any = None) -> Tuple[str, str]:
     """The range a refresh asks the data pipeline for: from the oldest row any forecast of D reads (`history_days`), less the
-    horizon, the transformers' longest lookback (`transformer_lookback`) and `LOOKBACK_PAD_DAYS`, to the last target day. A
+    horizon, the transformers' lookback (`transformer_lookback`: their sum) and `LOOKBACK_PAD_DAYS`, to the last target day. A
     transformer that can't state its lookback is warned about: the range may then cut a lag or a window, and `span=` sets it."""
     back = max((history_days(model, day, models) for model in models), default=0)
     lookback, unknown = transformer_lookback(data)

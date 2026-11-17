@@ -31,7 +31,13 @@ from epftoolbox2.models._worker import _worker_init
 from epftoolbox2.pipelines import ModelPipeline, _live
 from epftoolbox2.data.sources import CsvSource
 from epftoolbox2.data.sources.base import DataSource
-from epftoolbox2.data.transformers import LambdaTransformer, RollingStatsTransformer, TimezoneTransformer
+from epftoolbox2.data.transformers import (
+    ImputeTransformer,
+    LagTransformer,
+    LambdaTransformer,
+    RollingStatsTransformer,
+    TimezoneTransformer,
+)
 from epftoolbox2.pipelines import DataPipeline
 from epftoolbox2.pipelines._issue_records import read_snapshot
 from epftoolbox2.results.checks import ForecastChecks
@@ -1037,3 +1043,42 @@ def test_a_live_busy_error_raised_under_the_lock_is_not_reported_as_busy(tmp_pat
     with pytest.raises(LiveBusyError, match="a model's own lock"):
         simple().forecast(DATA, ISSUE, tmp_path / "live", horizon=2)
     assert lines(tmp_path / "live" / "issues.jsonl")[-1]["status"] == "error"
+
+
+def test_a_chain_of_transformers_reads_back_the_sum_of_their_lookbacks(tmp_path):
+    """A rolling window of a lagged column reads back the lag plus the window: 364 + 60 days, where the largest alone (364) and
+    the margin would cut the window on the oldest training rows."""
+    lag = LagTransformer("load", lags=[364], freq="1D")
+    rolling = RollingStatsTransformer("load_d-364", window_days=60, stat="mean", lag_days=1)
+    raw = market(days=540, start="2021-10-01")
+    data = csv_pipeline(raw, tmp_path, lag, rolling)
+    assert _live.transformer_lookback(data) == (364 + 60, [])  # the window ends a day back: days 1-60 before the lag
+    info = InformationSet("11:45", "Europe/Warsaw", rules={**RULES, rolling.output_column: Availability.static()})
+
+    def make():
+        return pipeline(ols(predictors=[*PREDICTORS, rolling.output_column], window=56), info=info)
+
+    whole = data.run("2021-10-01", "2023-03-25")
+    folder = tmp_path / "backtest"
+    make().run(whole, ISSUE, ISSUE, horizon=2, save_dir=str(folder))
+    result = make().forecast(data, ISSUE, None, horizon=2, cache=False)
+    expected = {(r["hour"], r["horizon"]): r["prediction"] for r in lines(folder / "a.jsonl")}
+    got = {(r["hour"], r["horizon"]): r["prediction"] for r in result.records["a"] if r["status"] == "ok"}
+    assert set(got) == set(expected) and len(expected) == 48
+    worst = max(abs(got[key] - expected[key]) / abs(expected[key]) for key in expected)
+    assert worst < 1e-9, worst  # a running-sum mean: equal within relative 1e-9 (see the rolling window test)
+
+
+@pytest.mark.parametrize(
+    "imputer, days",
+    [
+        (ImputeTransformer(["load"], method="ffill", limit="2D"), 2),
+        (ImputeTransformer(["load"], method="previous_day", limit="2D"), 3),
+        (ImputeTransformer(["load"], method="previous_week", limit="1D"), 8),
+        (ImputeTransformer(["load"], method="ffill", limit=6), 6),  # rows read as days: a daily frame's are
+        (ImputeTransformer(["load"], method="ffill"), None),
+    ],
+    ids=["ffill-2D", "previous-day-2D", "previous-week-1D", "ffill-6-rows", "no-limit"],
+)
+def test_an_imputation_reads_back_its_limit_and_the_step_it_fills_from(imputer, days):
+    assert imputer.lookback_days() == days
