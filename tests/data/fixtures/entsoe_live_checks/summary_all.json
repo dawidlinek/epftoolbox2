@@ -1,0 +1,1238 @@
+[
+  {
+    "acknowledgement": false,
+    "area": "AT",
+    "bytes": 14921,
+    "day": "2026-01-14",
+    "fixture": "exaa_AT_A44_pos2_2026-01-14.xml",
+    "grid_points": {
+      "15min": 96,
+      "hourly": 24
+    },
+    "id": "exaa_AT_A44_pos2_2026-01-14",
+    "kind": "exaa",
+    "n_points": 95,
+    "n_timeseries": 1,
+    "no_data": false,
+    "params": {
+      "classificationSequence_AttributeInstanceComponent.position": "2",
+      "documentType": "A44",
+      "in_Domain": "10YAT-APG------L",
+      "out_Domain": "10YAT-APG------L",
+      "periodEnd": "202601142300",
+      "periodStart": "202601132300"
+    },
+    "periods": [
+      {
+        "classification_sequence": "2",
+        "curve_type": "A03",
+        "expected_positions": 96,
+        "max_position": 96,
+        "n_points": 95,
+        "psr_type": null,
+        "resolution": "PT15M",
+        "time_interval_end": "2026-01-14T23:00Z",
+        "time_interval_start": "2026-01-13T23:00Z"
+      }
+    ],
+    "positions_in_series": [
+      "2"
+    ],
+    "reason": "OK",
+    "resolutions": [
+      "PT15M"
+    ],
+    "series_without_position": false,
+    "status": 200,
+    "verdict": "SUPPORTED: position 2 only, native resolution PT15M, full day on both grids",
+    "zone": "Europe/Brussels"
+  },
+  {
+    "acknowledgement": false,
+    "area": "AT",
+    "bytes": 15042,
+    "day": "2026-07-15",
+    "fixture": "exaa_AT_A44_pos2_2026-07-15.xml",
+    "grid_points": {
+      "15min": 96,
+      "hourly": 24
+    },
+    "id": "exaa_AT_A44_pos2_2026-07-15",
+    "kind": "exaa",
+    "n_points": 96,
+    "n_timeseries": 1,
+    "no_data": false,
+    "params": {
+      "classificationSequence_AttributeInstanceComponent.position": "2",
+      "documentType": "A44",
+      "in_Domain": "10YAT-APG------L",
+      "out_Domain": "10YAT-APG------L",
+      "periodEnd": "202607152200",
+      "periodStart": "202607142200"
+    },
+    "periods": [
+      {
+        "classification_sequence": "2",
+        "curve_type": "A03",
+        "expected_positions": 96,
+        "max_position": 96,
+        "n_points": 96,
+        "psr_type": null,
+        "resolution": "PT15M",
+        "time_interval_end": "2026-07-15T22:00Z",
+        "time_interval_start": "2026-07-14T22:00Z"
+      }
+    ],
+    "positions_in_series": [
+      "2"
+    ],
+    "reason": "OK",
+    "resolutions": [
+      "PT15M"
+    ],
+    "series_without_position": false,
+    "status": 200,
+    "verdict": "SUPPORTED: position 2 only, native resolution PT15M, full day on both grids",
+    "zone": "Europe/Brussels"
+  },
+  {
+    "acknowledgement": false,
+    "area": "AT",
+    "bytes": 14767,
+    "day": "2025-01-15",
+    "fixture": "exaa_AT_A44_pos2_2025-01-15.xml",
+    "grid_points": {
+      "15min": 96,
+      "hourly": 24
+    },
+    "id": "exaa_AT_A44_pos2_2025-01-15",
+    "kind": "exaa",
+    "n_points": 94,
+    "n_timeseries": 1,
+    "no_data": false,
+    "params": {
+      "classificationSequence_AttributeInstanceComponent.position": "2",
+      "documentType": "A44",
+      "in_Domain": "10YAT-APG------L",
+      "out_Domain": "10YAT-APG------L",
+      "periodEnd": "202501152300",
+      "periodStart": "202501142300"
+    },
+    "periods": [
+      {
+        "classification_sequence": "2",
+        "curve_type": "A03",
+        "expected_positions": 96,
+        "max_position": 96,
+        "n_points": 94,
+        "psr_type": null,
+        "resolution": "PT15M",
+        "time_interval_end": "2025-01-15T23:00Z",
+        "time_interval_start": "2025-01-14T23:00Z"
+      }
+    ],
+    "positions_in_series": [
+      "2"
+    ],
+    "reason": "OK",
+    "resolutions": [
+      "PT15M"
+    ],
+    "series_without_position": false,
+    "status": 200,
+    "verdict": "SUPPORTED: position 2 only, native resolution PT15M, full day on both grids",
+    "zone": "Europe/Brussels"
+  },
+  {
+    "acknowledgement": false,
+    "area": "AT",
+    "bytes": 14992,
+    "day": "2025-07-15",
+    "fixture": "exaa_AT_A44_pos2_2025-07-15.xml",
+    "grid_points": {
+      "15min": 96,
+      "hourly": 24
+    },
+    "id": "exaa_AT_A44_pos2_2025-07-15",
+    "kind": "exaa",
+    "n_points": 96,
+    "n_timeseries": 1,
+    "no_data": false,
+    "params": {
+      "classificationSequence_AttributeInstanceComponent.position": "2",
+      "documentType": "A44",
+      "in_Domain": "10YAT-APG------L",
+      "out_Domain": "10YAT-APG------L",
+      "periodEnd": "202507152200",
+      "periodStart": "202507142200"
+    },
+    "periods": [
+      {
+        "classification_sequence": "2",
+        "curve_type": "A03",
+        "expected_positions": 96,
+        "max_position": 96,
+        "n_points": 96,
+        "psr_type": null,
+        "resolution": "PT15M",
+        "time_interval_end": "2025-07-15T22:00Z",
+        "time_interval_start": "2025-07-14T22:00Z"
+      }
+    ],
+    "positions_in_series": [
+      "2"
+    ],
+    "reason": "OK",
+    "resolutions": [
+      "PT15M"
+    ],
+    "series_without_position": false,
+    "status": 200,
+    "verdict": "SUPPORTED: position 2 only, native resolution PT15M, full day on both grids",
+    "zone": "Europe/Brussels"
+  },
+  {
+    "acknowledgement": false,
+    "area": "DE_LU",
+    "bytes": 14442,
+    "day": "2026-01-14",
+    "fixture": "exaa_DE_LU_A44_pos2_2026-01-14.xml",
+    "grid_points": {
+      "15min": 96,
+      "hourly": 24
+    },
+    "id": "exaa_DE_LU_A44_pos2_2026-01-14",
+    "kind": "exaa",
+    "n_points": 92,
+    "n_timeseries": 1,
+    "no_data": false,
+    "params": {
+      "classificationSequence_AttributeInstanceComponent.position": "2",
+      "documentType": "A44",
+      "in_Domain": "10Y1001A1001A82H",
+      "out_Domain": "10Y1001A1001A82H",
+      "periodEnd": "202601142300",
+      "periodStart": "202601132300"
+    },
+    "periods": [
+      {
+        "classification_sequence": "2",
+        "curve_type": "A03",
+        "expected_positions": 96,
+        "max_position": 96,
+        "n_points": 92,
+        "psr_type": null,
+        "resolution": "PT15M",
+        "time_interval_end": "2026-01-14T23:00Z",
+        "time_interval_start": "2026-01-13T23:00Z"
+      }
+    ],
+    "positions_in_series": [
+      "2"
+    ],
+    "reason": "OK",
+    "resolutions": [
+      "PT15M"
+    ],
+    "series_without_position": false,
+    "status": 200,
+    "verdict": "SUPPORTED: position 2 only, native resolution PT15M, full day on both grids",
+    "zone": "Europe/Brussels"
+  },
+  {
+    "acknowledgement": false,
+    "area": "DE_LU",
+    "bytes": 14882,
+    "day": "2026-07-15",
+    "fixture": "exaa_DE_LU_A44_pos2_2026-07-15.xml",
+    "grid_points": {
+      "15min": 96,
+      "hourly": 24
+    },
+    "id": "exaa_DE_LU_A44_pos2_2026-07-15",
+    "kind": "exaa",
+    "n_points": 95,
+    "n_timeseries": 1,
+    "no_data": false,
+    "params": {
+      "classificationSequence_AttributeInstanceComponent.position": "2",
+      "documentType": "A44",
+      "in_Domain": "10Y1001A1001A82H",
+      "out_Domain": "10Y1001A1001A82H",
+      "periodEnd": "202607152200",
+      "periodStart": "202607142200"
+    },
+    "periods": [
+      {
+        "classification_sequence": "2",
+        "curve_type": "A03",
+        "expected_positions": 96,
+        "max_position": 96,
+        "n_points": 95,
+        "psr_type": null,
+        "resolution": "PT15M",
+        "time_interval_end": "2026-07-15T22:00Z",
+        "time_interval_start": "2026-07-14T22:00Z"
+      }
+    ],
+    "positions_in_series": [
+      "2"
+    ],
+    "reason": "OK",
+    "resolutions": [
+      "PT15M"
+    ],
+    "series_without_position": false,
+    "status": 200,
+    "verdict": "SUPPORTED: position 2 only, native resolution PT15M, full day on both grids",
+    "zone": "Europe/Brussels"
+  },
+  {
+    "acknowledgement": false,
+    "area": "DE_LU",
+    "bytes": 15015,
+    "day": "2025-01-15",
+    "fixture": "exaa_DE_LU_A44_pos2_2025-01-15.xml",
+    "grid_points": {
+      "15min": 96,
+      "hourly": 24
+    },
+    "id": "exaa_DE_LU_A44_pos2_2025-01-15",
+    "kind": "exaa",
+    "n_points": 96,
+    "n_timeseries": 1,
+    "no_data": false,
+    "params": {
+      "classificationSequence_AttributeInstanceComponent.position": "2",
+      "documentType": "A44",
+      "in_Domain": "10Y1001A1001A82H",
+      "out_Domain": "10Y1001A1001A82H",
+      "periodEnd": "202501152300",
+      "periodStart": "202501142300"
+    },
+    "periods": [
+      {
+        "classification_sequence": "2",
+        "curve_type": "A03",
+        "expected_positions": 96,
+        "max_position": 96,
+        "n_points": 96,
+        "psr_type": null,
+        "resolution": "PT15M",
+        "time_interval_end": "2025-01-15T23:00Z",
+        "time_interval_start": "2025-01-14T23:00Z"
+      }
+    ],
+    "positions_in_series": [
+      "2"
+    ],
+    "reason": "OK",
+    "resolutions": [
+      "PT15M"
+    ],
+    "series_without_position": false,
+    "status": 200,
+    "verdict": "SUPPORTED: position 2 only, native resolution PT15M, full day on both grids",
+    "zone": "Europe/Brussels"
+  },
+  {
+    "acknowledgement": false,
+    "area": "DE_LU",
+    "bytes": 14950,
+    "day": "2025-07-15",
+    "fixture": "exaa_DE_LU_A44_pos2_2025-07-15.xml",
+    "grid_points": {
+      "15min": 96,
+      "hourly": 24
+    },
+    "id": "exaa_DE_LU_A44_pos2_2025-07-15",
+    "kind": "exaa",
+    "n_points": 96,
+    "n_timeseries": 1,
+    "no_data": false,
+    "params": {
+      "classificationSequence_AttributeInstanceComponent.position": "2",
+      "documentType": "A44",
+      "in_Domain": "10Y1001A1001A82H",
+      "out_Domain": "10Y1001A1001A82H",
+      "periodEnd": "202507152200",
+      "periodStart": "202507142200"
+    },
+    "periods": [
+      {
+        "classification_sequence": "2",
+        "curve_type": "A03",
+        "expected_positions": 96,
+        "max_position": 96,
+        "n_points": 96,
+        "psr_type": null,
+        "resolution": "PT15M",
+        "time_interval_end": "2025-07-15T22:00Z",
+        "time_interval_start": "2025-07-14T22:00Z"
+      }
+    ],
+    "positions_in_series": [
+      "2"
+    ],
+    "reason": "OK",
+    "resolutions": [
+      "PT15M"
+    ],
+    "series_without_position": false,
+    "status": 200,
+    "verdict": "SUPPORTED: position 2 only, native resolution PT15M, full day on both grids",
+    "zone": "Europe/Brussels"
+  },
+  {
+    "ack_text": "No matching data found for Data item ENERGY_PRICES [12.1.D] (10Y1001A1001A63L, 10Y1001A1001A63L) and interval 2026-01-13T23:00:00Z/2026-01-14T23:00:00Z.",
+    "acknowledgement": true,
+    "area": "DE_AT_LU",
+    "bytes": 963,
+    "day": "2026-01-14",
+    "fixture": "exaa_DE_AT_LU_A44_pos2_2026-01-14.xml",
+    "id": "exaa_DE_AT_LU_A44_pos2_2026-01-14",
+    "kind": "exaa",
+    "n_points": 0,
+    "no_data": true,
+    "params": {
+      "classificationSequence_AttributeInstanceComponent.position": "2",
+      "documentType": "A44",
+      "in_Domain": "10Y1001A1001A63L",
+      "out_Domain": "10Y1001A1001A63L",
+      "periodEnd": "202601142300",
+      "periodStart": "202601132300"
+    },
+    "periods": [],
+    "positions_in_series": [],
+    "reason": "OK",
+    "resolutions": [],
+    "status": 200,
+    "verdict": "AS EXPECTED: no data returned (zone ended 2018-10-01)",
+    "zone": "Europe/Brussels"
+  },
+  {
+    "ack_text": "No matching data found for Data item ENERGY_PRICES [12.1.D] (10Y1001A1001A63L, 10Y1001A1001A63L) and interval 2026-07-14T22:00:00Z/2026-07-15T22:00:00Z.",
+    "acknowledgement": true,
+    "area": "DE_AT_LU",
+    "bytes": 963,
+    "day": "2026-07-15",
+    "fixture": "exaa_DE_AT_LU_A44_pos2_2026-07-15.xml",
+    "id": "exaa_DE_AT_LU_A44_pos2_2026-07-15",
+    "kind": "exaa",
+    "n_points": 0,
+    "no_data": true,
+    "params": {
+      "classificationSequence_AttributeInstanceComponent.position": "2",
+      "documentType": "A44",
+      "in_Domain": "10Y1001A1001A63L",
+      "out_Domain": "10Y1001A1001A63L",
+      "periodEnd": "202607152200",
+      "periodStart": "202607142200"
+    },
+    "periods": [],
+    "positions_in_series": [],
+    "reason": "OK",
+    "resolutions": [],
+    "status": 200,
+    "verdict": "AS EXPECTED: no data returned (zone ended 2018-10-01)",
+    "zone": "Europe/Brussels"
+  },
+  {
+    "ack_text": "No matching data found for Data item ENERGY_PRICES [12.1.D] (10Y1001A1001A63L, 10Y1001A1001A63L) and interval 2018-01-14T23:00:00Z/2018-01-15T23:00:00Z.",
+    "acknowledgement": true,
+    "area": "DE_AT_LU",
+    "bytes": 963,
+    "day": "2018-01-15",
+    "fixture": "exaa_DE_AT_LU_A44_pos2_2018-01-15.xml",
+    "id": "exaa_DE_AT_LU_A44_pos2_2018-01-15",
+    "kind": "exaa",
+    "n_points": 0,
+    "no_data": true,
+    "params": {
+      "classificationSequence_AttributeInstanceComponent.position": "2",
+      "documentType": "A44",
+      "in_Domain": "10Y1001A1001A63L",
+      "out_Domain": "10Y1001A1001A63L",
+      "periodEnd": "201801152300",
+      "periodStart": "201801142300"
+    },
+    "periods": [],
+    "positions_in_series": [],
+    "reason": "OK",
+    "resolutions": [],
+    "status": 200,
+    "verdict": "NOT SUPPORTED: no data returned (No matching data found for Data item ENERGY_PRICES [12.1.D] (10Y1001A1001A63L, 10Y1001A1001A63L) and interval 2018-01-14T23:00:00Z/2018-01-15T23:00:00Z.)",
+    "zone": "Europe/Brussels"
+  },
+  {
+    "ack_text": "No matching data found for Data item ENERGY_PRICES [12.1.D] (10Y1001A1001A63L, 10Y1001A1001A63L) and interval 2018-07-14T22:00:00Z/2018-07-15T22:00:00Z.",
+    "acknowledgement": true,
+    "area": "DE_AT_LU",
+    "bytes": 963,
+    "day": "2018-07-15",
+    "fixture": "exaa_DE_AT_LU_A44_pos2_2018-07-15.xml",
+    "id": "exaa_DE_AT_LU_A44_pos2_2018-07-15",
+    "kind": "exaa",
+    "n_points": 0,
+    "no_data": true,
+    "params": {
+      "classificationSequence_AttributeInstanceComponent.position": "2",
+      "documentType": "A44",
+      "in_Domain": "10Y1001A1001A63L",
+      "out_Domain": "10Y1001A1001A63L",
+      "periodEnd": "201807152200",
+      "periodStart": "201807142200"
+    },
+    "periods": [],
+    "positions_in_series": [],
+    "reason": "OK",
+    "resolutions": [],
+    "status": 200,
+    "verdict": "NOT SUPPORTED: no data returned (No matching data found for Data item ENERGY_PRICES [12.1.D] (10Y1001A1001A63L, 10Y1001A1001A63L) and interval 2018-07-14T22:00:00Z/2018-07-15T22:00:00Z.)",
+    "zone": "Europe/Brussels"
+  },
+  {
+    "acknowledgement": false,
+    "area": "FI",
+    "bytes": 11527,
+    "day": "2026-01-14",
+    "fixture": "delivery_FI_A65_A01_2026-01-14.xml",
+    "id": "delivery_FI_A65_A01_2026-01-14",
+    "kind": "delivery",
+    "n_points": 83,
+    "n_timeseries": 1,
+    "no_data": false,
+    "params": {
+      "documentType": "A65",
+      "outBiddingZone_Domain": "10YFI-1--------U",
+      "periodEnd": "202601142200",
+      "periodStart": "202601132200",
+      "processType": "A01"
+    },
+    "periods": [
+      {
+        "classification_sequence": null,
+        "curve_type": "A03",
+        "expected_positions": 96,
+        "max_position": 96,
+        "n_points": 83,
+        "psr_type": null,
+        "resolution": "PT15M",
+        "time_interval_end": "2026-01-14T22:00Z",
+        "time_interval_start": "2026-01-13T22:00Z"
+      }
+    ],
+    "positions_in_series": [],
+    "reason": "OK",
+    "resolutions": [
+      "PT15M"
+    ],
+    "series_without_position": true,
+    "status": 200,
+    "verdict": "LOCAL DAYS (starts at Europe/Helsinki midnight; the Brussels-day rule is wrong here): local-midnight: 1 period(s), starts ['2026-01-13T22:00Z']",
+    "zone": "Europe/Helsinki"
+  },
+  {
+    "acknowledgement": false,
+    "area": "FI",
+    "bytes": 19233,
+    "day": "2026-01-14",
+    "fixture": "delivery_FI_A69_A01_2026-01-14.xml",
+    "id": "delivery_FI_A69_A01_2026-01-14",
+    "kind": "delivery",
+    "n_points": 118,
+    "n_timeseries": 2,
+    "no_data": false,
+    "params": {
+      "documentType": "A69",
+      "in_Domain": "10YFI-1--------U",
+      "periodEnd": "202601142200",
+      "periodStart": "202601132200",
+      "processType": "A01"
+    },
+    "periods": [
+      {
+        "classification_sequence": null,
+        "curve_type": "A03",
+        "expected_positions": 96,
+        "max_position": 64,
+        "n_points": 27,
+        "psr_type": "B16",
+        "resolution": "PT15M",
+        "time_interval_end": "2026-01-14T22:00Z",
+        "time_interval_start": "2026-01-13T22:00Z"
+      },
+      {
+        "classification_sequence": null,
+        "curve_type": "A03",
+        "expected_positions": 96,
+        "max_position": 96,
+        "n_points": 91,
+        "psr_type": "B19",
+        "resolution": "PT15M",
+        "time_interval_end": "2026-01-14T22:00Z",
+        "time_interval_start": "2026-01-13T22:00Z"
+      }
+    ],
+    "positions_in_series": [],
+    "reason": "OK",
+    "resolutions": [
+      "PT15M"
+    ],
+    "series_without_position": true,
+    "status": 200,
+    "verdict": "LOCAL DAYS (starts at Europe/Helsinki midnight; the Brussels-day rule is wrong here): local-midnight: 2 period(s), starts ['2026-01-13T22:00Z']",
+    "zone": "Europe/Helsinki"
+  },
+  {
+    "acknowledgement": false,
+    "area": "FI",
+    "bytes": 12426,
+    "day": "2026-07-15",
+    "fixture": "delivery_FI_A65_A01_2026-07-15.xml",
+    "id": "delivery_FI_A65_A01_2026-07-15",
+    "kind": "delivery",
+    "n_points": 91,
+    "n_timeseries": 1,
+    "no_data": false,
+    "params": {
+      "documentType": "A65",
+      "outBiddingZone_Domain": "10YFI-1--------U",
+      "periodEnd": "202607152100",
+      "periodStart": "202607142100",
+      "processType": "A01"
+    },
+    "periods": [
+      {
+        "classification_sequence": null,
+        "curve_type": "A03",
+        "expected_positions": 96,
+        "max_position": 96,
+        "n_points": 91,
+        "psr_type": null,
+        "resolution": "PT15M",
+        "time_interval_end": "2026-07-15T21:00Z",
+        "time_interval_start": "2026-07-14T21:00Z"
+      }
+    ],
+    "positions_in_series": [],
+    "reason": "OK",
+    "resolutions": [
+      "PT15M"
+    ],
+    "series_without_position": true,
+    "status": 200,
+    "verdict": "LOCAL DAYS (starts at Europe/Helsinki midnight; the Brussels-day rule is wrong here): local-midnight: 1 period(s), starts ['2026-07-14T21:00Z']",
+    "zone": "Europe/Helsinki"
+  },
+  {
+    "acknowledgement": false,
+    "area": "FI",
+    "bytes": 25154,
+    "day": "2026-07-15",
+    "fixture": "delivery_FI_A69_A01_2026-07-15.xml",
+    "id": "delivery_FI_A69_A01_2026-07-15",
+    "kind": "delivery",
+    "n_points": 159,
+    "n_timeseries": 2,
+    "no_data": false,
+    "params": {
+      "documentType": "A69",
+      "in_Domain": "10YFI-1--------U",
+      "periodEnd": "202607152100",
+      "periodStart": "202607142100",
+      "processType": "A01"
+    },
+    "periods": [
+      {
+        "classification_sequence": null,
+        "curve_type": "A03",
+        "expected_positions": 96,
+        "max_position": 92,
+        "n_points": 74,
+        "psr_type": "B16",
+        "resolution": "PT15M",
+        "time_interval_end": "2026-07-15T21:00Z",
+        "time_interval_start": "2026-07-14T21:00Z"
+      },
+      {
+        "classification_sequence": null,
+        "curve_type": "A03",
+        "expected_positions": 96,
+        "max_position": 96,
+        "n_points": 85,
+        "psr_type": "B19",
+        "resolution": "PT15M",
+        "time_interval_end": "2026-07-15T21:00Z",
+        "time_interval_start": "2026-07-14T21:00Z"
+      }
+    ],
+    "positions_in_series": [],
+    "reason": "OK",
+    "resolutions": [
+      "PT15M"
+    ],
+    "series_without_position": true,
+    "status": 200,
+    "verdict": "LOCAL DAYS (starts at Europe/Helsinki midnight; the Brussels-day rule is wrong here): local-midnight: 2 period(s), starts ['2026-07-14T21:00Z']",
+    "zone": "Europe/Helsinki"
+  },
+  {
+    "acknowledgement": false,
+    "area": "GR",
+    "bytes": 12135,
+    "day": "2026-01-14",
+    "fixture": "delivery_GR_A65_A01_2026-01-14.xml",
+    "id": "delivery_GR_A65_A01_2026-01-14",
+    "kind": "delivery",
+    "n_points": 90,
+    "n_timeseries": 1,
+    "no_data": false,
+    "params": {
+      "documentType": "A65",
+      "outBiddingZone_Domain": "10YGR-HTSO-----Y",
+      "periodEnd": "202601142200",
+      "periodStart": "202601132200",
+      "processType": "A01"
+    },
+    "periods": [
+      {
+        "classification_sequence": null,
+        "curve_type": "A03",
+        "expected_positions": 96,
+        "max_position": 96,
+        "n_points": 90,
+        "psr_type": null,
+        "resolution": "PT15M",
+        "time_interval_end": "2026-01-14T22:00Z",
+        "time_interval_start": "2026-01-13T22:00Z"
+      }
+    ],
+    "positions_in_series": [],
+    "reason": "OK",
+    "resolutions": [
+      "PT15M"
+    ],
+    "series_without_position": true,
+    "status": 200,
+    "verdict": "LOCAL DAYS (starts at Europe/Athens midnight; the Brussels-day rule is wrong here): local-midnight: 1 period(s), starts ['2026-01-13T22:00Z']",
+    "zone": "Europe/Athens"
+  },
+  {
+    "acknowledgement": false,
+    "area": "GR",
+    "bytes": 19011,
+    "day": "2026-01-14",
+    "fixture": "delivery_GR_A69_A01_2026-01-14.xml",
+    "id": "delivery_GR_A69_A01_2026-01-14",
+    "kind": "delivery",
+    "n_points": 118,
+    "n_timeseries": 2,
+    "no_data": false,
+    "params": {
+      "documentType": "A69",
+      "in_Domain": "10YGR-HTSO-----Y",
+      "periodEnd": "202601142200",
+      "periodStart": "202601132200",
+      "processType": "A01"
+    },
+    "periods": [
+      {
+        "classification_sequence": null,
+        "curve_type": "A03",
+        "expected_positions": 96,
+        "max_position": 72,
+        "n_points": 41,
+        "psr_type": "B16",
+        "resolution": "PT15M",
+        "time_interval_end": "2026-01-14T22:00Z",
+        "time_interval_start": "2026-01-13T22:00Z"
+      },
+      {
+        "classification_sequence": null,
+        "curve_type": "A03",
+        "expected_positions": 96,
+        "max_position": 96,
+        "n_points": 77,
+        "psr_type": "B19",
+        "resolution": "PT15M",
+        "time_interval_end": "2026-01-14T22:00Z",
+        "time_interval_start": "2026-01-13T22:00Z"
+      }
+    ],
+    "positions_in_series": [],
+    "reason": "OK",
+    "resolutions": [
+      "PT15M"
+    ],
+    "series_without_position": true,
+    "status": 200,
+    "verdict": "LOCAL DAYS (starts at Europe/Athens midnight; the Brussels-day rule is wrong here): local-midnight: 2 period(s), starts ['2026-01-13T22:00Z']",
+    "zone": "Europe/Athens"
+  },
+  {
+    "acknowledgement": false,
+    "area": "GR",
+    "bytes": 12016,
+    "day": "2026-07-15",
+    "fixture": "delivery_GR_A65_A01_2026-07-15.xml",
+    "id": "delivery_GR_A65_A01_2026-07-15",
+    "kind": "delivery",
+    "n_points": 89,
+    "n_timeseries": 1,
+    "no_data": false,
+    "params": {
+      "documentType": "A65",
+      "outBiddingZone_Domain": "10YGR-HTSO-----Y",
+      "periodEnd": "202607152100",
+      "periodStart": "202607142100",
+      "processType": "A01"
+    },
+    "periods": [
+      {
+        "classification_sequence": null,
+        "curve_type": "A03",
+        "expected_positions": 96,
+        "max_position": 96,
+        "n_points": 89,
+        "psr_type": null,
+        "resolution": "PT15M",
+        "time_interval_end": "2026-07-15T21:00Z",
+        "time_interval_start": "2026-07-14T21:00Z"
+      }
+    ],
+    "positions_in_series": [],
+    "reason": "OK",
+    "resolutions": [
+      "PT15M"
+    ],
+    "series_without_position": true,
+    "status": 200,
+    "verdict": "LOCAL DAYS (starts at Europe/Athens midnight; the Brussels-day rule is wrong here): local-midnight: 1 period(s), starts ['2026-07-14T21:00Z']",
+    "zone": "Europe/Athens"
+  },
+  {
+    "acknowledgement": false,
+    "area": "GR",
+    "bytes": 20453,
+    "day": "2026-07-15",
+    "fixture": "delivery_GR_A69_A01_2026-07-15.xml",
+    "id": "delivery_GR_A69_A01_2026-07-15",
+    "kind": "delivery",
+    "n_points": 128,
+    "n_timeseries": 2,
+    "no_data": false,
+    "params": {
+      "documentType": "A69",
+      "in_Domain": "10YGR-HTSO-----Y",
+      "periodEnd": "202607152100",
+      "periodStart": "202607142100",
+      "processType": "A01"
+    },
+    "periods": [
+      {
+        "classification_sequence": null,
+        "curve_type": "A03",
+        "expected_positions": 96,
+        "max_position": 84,
+        "n_points": 61,
+        "psr_type": "B16",
+        "resolution": "PT15M",
+        "time_interval_end": "2026-07-15T21:00Z",
+        "time_interval_start": "2026-07-14T21:00Z"
+      },
+      {
+        "classification_sequence": null,
+        "curve_type": "A03",
+        "expected_positions": 96,
+        "max_position": 96,
+        "n_points": 67,
+        "psr_type": "B19",
+        "resolution": "PT15M",
+        "time_interval_end": "2026-07-15T21:00Z",
+        "time_interval_start": "2026-07-14T21:00Z"
+      }
+    ],
+    "positions_in_series": [],
+    "reason": "OK",
+    "resolutions": [
+      "PT15M"
+    ],
+    "series_without_position": true,
+    "status": 200,
+    "verdict": "LOCAL DAYS (starts at Europe/Athens midnight; the Brussels-day rule is wrong here): local-midnight: 2 period(s), starts ['2026-07-14T21:00Z']",
+    "zone": "Europe/Athens"
+  },
+  {
+    "acknowledgement": false,
+    "area": "PT",
+    "bytes": 4281,
+    "day": "2026-01-14",
+    "fixture": "delivery_PT_A65_A01_2026-01-14.xml",
+    "id": "delivery_PT_A65_A01_2026-01-14",
+    "kind": "delivery",
+    "n_points": 24,
+    "n_timeseries": 1,
+    "no_data": false,
+    "params": {
+      "documentType": "A65",
+      "outBiddingZone_Domain": "10YPT-REN------W",
+      "periodEnd": "202601150000",
+      "periodStart": "202601140000",
+      "processType": "A01"
+    },
+    "periods": [
+      {
+        "classification_sequence": null,
+        "curve_type": "A03",
+        "expected_positions": 24,
+        "max_position": 24,
+        "n_points": 24,
+        "psr_type": null,
+        "resolution": "PT60M",
+        "time_interval_end": "2026-01-15T00:00Z",
+        "time_interval_start": "2026-01-14T00:00Z"
+      }
+    ],
+    "positions_in_series": [],
+    "reason": "OK",
+    "resolutions": [
+      "PT60M"
+    ],
+    "series_without_position": true,
+    "status": 200,
+    "verdict": "LOCAL DAYS (starts at Europe/Lisbon midnight; the Brussels-day rule is wrong here): local-midnight: 1 period(s), starts ['2026-01-14T00:00Z']",
+    "zone": "Europe/Lisbon"
+  },
+  {
+    "acknowledgement": false,
+    "area": "PT",
+    "bytes": 10888,
+    "day": "2026-01-14",
+    "fixture": "delivery_PT_A69_A01_2026-01-14.xml",
+    "id": "delivery_PT_A69_A01_2026-01-14",
+    "kind": "delivery",
+    "n_points": 56,
+    "n_timeseries": 3,
+    "no_data": false,
+    "params": {
+      "documentType": "A69",
+      "in_Domain": "10YPT-REN------W",
+      "periodEnd": "202601150000",
+      "periodStart": "202601140000",
+      "processType": "A01"
+    },
+    "periods": [
+      {
+        "classification_sequence": null,
+        "curve_type": "A03",
+        "expected_positions": 24,
+        "max_position": 18,
+        "n_points": 11,
+        "psr_type": "B16",
+        "resolution": "PT60M",
+        "time_interval_end": "2026-01-15T00:00Z",
+        "time_interval_start": "2026-01-14T00:00Z"
+      },
+      {
+        "classification_sequence": null,
+        "curve_type": "A03",
+        "expected_positions": 24,
+        "max_position": 24,
+        "n_points": 21,
+        "psr_type": "B18",
+        "resolution": "PT60M",
+        "time_interval_end": "2026-01-15T00:00Z",
+        "time_interval_start": "2026-01-14T00:00Z"
+      },
+      {
+        "classification_sequence": null,
+        "curve_type": "A03",
+        "expected_positions": 24,
+        "max_position": 24,
+        "n_points": 24,
+        "psr_type": "B19",
+        "resolution": "PT60M",
+        "time_interval_end": "2026-01-15T00:00Z",
+        "time_interval_start": "2026-01-14T00:00Z"
+      }
+    ],
+    "positions_in_series": [],
+    "reason": "OK",
+    "resolutions": [
+      "PT60M"
+    ],
+    "series_without_position": true,
+    "status": 200,
+    "verdict": "LOCAL DAYS (starts at Europe/Lisbon midnight; the Brussels-day rule is wrong here): local-midnight: 3 period(s), starts ['2026-01-14T00:00Z']",
+    "zone": "Europe/Lisbon"
+  },
+  {
+    "acknowledgement": false,
+    "area": "PT",
+    "bytes": 4281,
+    "day": "2026-07-15",
+    "fixture": "delivery_PT_A65_A01_2026-07-15.xml",
+    "id": "delivery_PT_A65_A01_2026-07-15",
+    "kind": "delivery",
+    "n_points": 24,
+    "n_timeseries": 1,
+    "no_data": false,
+    "params": {
+      "documentType": "A65",
+      "outBiddingZone_Domain": "10YPT-REN------W",
+      "periodEnd": "202607152300",
+      "periodStart": "202607142300",
+      "processType": "A01"
+    },
+    "periods": [
+      {
+        "classification_sequence": null,
+        "curve_type": "A03",
+        "expected_positions": 24,
+        "max_position": 24,
+        "n_points": 24,
+        "psr_type": null,
+        "resolution": "PT60M",
+        "time_interval_end": "2026-07-15T23:00Z",
+        "time_interval_start": "2026-07-14T23:00Z"
+      }
+    ],
+    "positions_in_series": [],
+    "reason": "OK",
+    "resolutions": [
+      "PT60M"
+    ],
+    "series_without_position": true,
+    "status": 200,
+    "verdict": "LOCAL DAYS (starts at Europe/Lisbon midnight; the Brussels-day rule is wrong here): local-midnight: 1 period(s), starts ['2026-07-14T23:00Z']",
+    "zone": "Europe/Lisbon"
+  },
+  {
+    "acknowledgement": false,
+    "area": "PT",
+    "bytes": 11189,
+    "day": "2026-07-15",
+    "fixture": "delivery_PT_A69_A01_2026-07-15.xml",
+    "id": "delivery_PT_A69_A01_2026-07-15",
+    "kind": "delivery",
+    "n_points": 58,
+    "n_timeseries": 3,
+    "no_data": false,
+    "params": {
+      "documentType": "A69",
+      "in_Domain": "10YPT-REN------W",
+      "periodEnd": "202607152300",
+      "periodStart": "202607142300",
+      "processType": "A01"
+    },
+    "periods": [
+      {
+        "classification_sequence": null,
+        "curve_type": "A03",
+        "expected_positions": 24,
+        "max_position": 24,
+        "n_points": 18,
+        "psr_type": "B16",
+        "resolution": "PT60M",
+        "time_interval_end": "2026-07-15T23:00Z",
+        "time_interval_start": "2026-07-14T23:00Z"
+      },
+      {
+        "classification_sequence": null,
+        "curve_type": "A03",
+        "expected_positions": 24,
+        "max_position": 23,
+        "n_points": 16,
+        "psr_type": "B18",
+        "resolution": "PT60M",
+        "time_interval_end": "2026-07-15T23:00Z",
+        "time_interval_start": "2026-07-14T23:00Z"
+      },
+      {
+        "classification_sequence": null,
+        "curve_type": "A03",
+        "expected_positions": 24,
+        "max_position": 24,
+        "n_points": 24,
+        "psr_type": "B19",
+        "resolution": "PT60M",
+        "time_interval_end": "2026-07-15T23:00Z",
+        "time_interval_start": "2026-07-14T23:00Z"
+      }
+    ],
+    "positions_in_series": [],
+    "reason": "OK",
+    "resolutions": [
+      "PT60M"
+    ],
+    "series_without_position": true,
+    "status": 200,
+    "verdict": "LOCAL DAYS (starts at Europe/Lisbon midnight; the Brussels-day rule is wrong here): local-midnight: 3 period(s), starts ['2026-07-14T23:00Z']",
+    "zone": "Europe/Lisbon"
+  },
+  {
+    "acknowledgement": false,
+    "area": "IE",
+    "bytes": 7137,
+    "day": "2026-01-14",
+    "fixture": "delivery_IE_A65_A01_2026-01-14.xml",
+    "id": "delivery_IE_A65_A01_2026-01-14",
+    "kind": "delivery",
+    "n_points": 48,
+    "n_timeseries": 1,
+    "no_data": false,
+    "params": {
+      "documentType": "A65",
+      "outBiddingZone_Domain": "10YIE-1001A00010",
+      "periodEnd": "202601150000",
+      "periodStart": "202601140000",
+      "processType": "A01"
+    },
+    "periods": [
+      {
+        "classification_sequence": null,
+        "curve_type": "A03",
+        "expected_positions": 48,
+        "max_position": 48,
+        "n_points": 48,
+        "psr_type": null,
+        "resolution": "PT30M",
+        "time_interval_end": "2026-01-15T00:00Z",
+        "time_interval_start": "2026-01-14T00:00Z"
+      }
+    ],
+    "positions_in_series": [],
+    "reason": "OK",
+    "resolutions": [
+      "PT30M"
+    ],
+    "series_without_position": true,
+    "status": 200,
+    "verdict": "LOCAL DAYS (starts at Europe/Dublin midnight; the Brussels-day rule is wrong here): local-midnight: 1 period(s), starts ['2026-01-14T00:00Z']",
+    "zone": "Europe/Dublin"
+  },
+  {
+    "acknowledgement": false,
+    "area": "IE",
+    "bytes": 5077,
+    "day": "2026-01-14",
+    "fixture": "delivery_IE_A69_A01_2026-01-14.xml",
+    "id": "delivery_IE_A69_A01_2026-01-14",
+    "kind": "delivery",
+    "n_points": 24,
+    "n_timeseries": 1,
+    "no_data": false,
+    "params": {
+      "documentType": "A69",
+      "in_Domain": "10YIE-1001A00010",
+      "periodEnd": "202601150000",
+      "periodStart": "202601140000",
+      "processType": "A01"
+    },
+    "periods": [
+      {
+        "classification_sequence": null,
+        "curve_type": "A03",
+        "expected_positions": 24,
+        "max_position": 24,
+        "n_points": 24,
+        "psr_type": "B19",
+        "resolution": "PT60M",
+        "time_interval_end": "2026-01-15T00:00Z",
+        "time_interval_start": "2026-01-14T00:00Z"
+      }
+    ],
+    "positions_in_series": [],
+    "reason": "OK",
+    "resolutions": [
+      "PT60M"
+    ],
+    "series_without_position": true,
+    "status": 200,
+    "verdict": "LOCAL DAYS (starts at Europe/Dublin midnight; the Brussels-day rule is wrong here): local-midnight: 1 period(s), starts ['2026-01-14T00:00Z']",
+    "zone": "Europe/Dublin"
+  },
+  {
+    "acknowledgement": false,
+    "area": "IE",
+    "bytes": 7137,
+    "day": "2026-07-15",
+    "fixture": "delivery_IE_A65_A01_2026-07-15.xml",
+    "id": "delivery_IE_A65_A01_2026-07-15",
+    "kind": "delivery",
+    "n_points": 48,
+    "n_timeseries": 1,
+    "no_data": false,
+    "params": {
+      "documentType": "A65",
+      "outBiddingZone_Domain": "10YIE-1001A00010",
+      "periodEnd": "202607152300",
+      "periodStart": "202607142300",
+      "processType": "A01"
+    },
+    "periods": [
+      {
+        "classification_sequence": null,
+        "curve_type": "A03",
+        "expected_positions": 48,
+        "max_position": 48,
+        "n_points": 48,
+        "psr_type": null,
+        "resolution": "PT30M",
+        "time_interval_end": "2026-07-15T23:00Z",
+        "time_interval_start": "2026-07-14T23:00Z"
+      }
+    ],
+    "positions_in_series": [],
+    "reason": "OK",
+    "resolutions": [
+      "PT30M"
+    ],
+    "series_without_position": true,
+    "status": 200,
+    "verdict": "LOCAL DAYS (starts at Europe/Dublin midnight; the Brussels-day rule is wrong here): local-midnight: 1 period(s), starts ['2026-07-14T23:00Z']",
+    "zone": "Europe/Dublin"
+  },
+  {
+    "acknowledgement": false,
+    "area": "IE",
+    "bytes": 5061,
+    "day": "2026-07-15",
+    "fixture": "delivery_IE_A69_A01_2026-07-15.xml",
+    "id": "delivery_IE_A69_A01_2026-07-15",
+    "kind": "delivery",
+    "n_points": 24,
+    "n_timeseries": 1,
+    "no_data": false,
+    "params": {
+      "documentType": "A69",
+      "in_Domain": "10YIE-1001A00010",
+      "periodEnd": "202607152300",
+      "periodStart": "202607142300",
+      "processType": "A01"
+    },
+    "periods": [
+      {
+        "classification_sequence": null,
+        "curve_type": "A03",
+        "expected_positions": 24,
+        "max_position": 24,
+        "n_points": 24,
+        "psr_type": "B19",
+        "resolution": "PT60M",
+        "time_interval_end": "2026-07-15T23:00Z",
+        "time_interval_start": "2026-07-14T23:00Z"
+      }
+    ],
+    "positions_in_series": [],
+    "reason": "OK",
+    "resolutions": [
+      "PT60M"
+    ],
+    "series_without_position": true,
+    "status": 200,
+    "verdict": "LOCAL DAYS (starts at Europe/Dublin midnight; the Brussels-day rule is wrong here): local-midnight: 1 period(s), starts ['2026-07-14T23:00Z']",
+    "zone": "Europe/Dublin"
+  }
+]

@@ -1,0 +1,52 @@
+{
+  "acknowledgement": false,
+  "area": "FI",
+  "bytes": 25154,
+  "day": "2026-07-15",
+  "fixture": "delivery_FI_A69_A01_2026-07-15.xml",
+  "id": "delivery_FI_A69_A01_2026-07-15",
+  "kind": "delivery",
+  "n_points": 159,
+  "n_timeseries": 2,
+  "no_data": false,
+  "params": {
+    "documentType": "A69",
+    "in_Domain": "10YFI-1--------U",
+    "periodEnd": "202607152100",
+    "periodStart": "202607142100",
+    "processType": "A01"
+  },
+  "periods": [
+    {
+      "classification_sequence": null,
+      "curve_type": "A03",
+      "expected_positions": 96,
+      "max_position": 92,
+      "n_points": 74,
+      "psr_type": "B16",
+      "resolution": "PT15M",
+      "time_interval_end": "2026-07-15T21:00Z",
+      "time_interval_start": "2026-07-14T21:00Z"
+    },
+    {
+      "classification_sequence": null,
+      "curve_type": "A03",
+      "expected_positions": 96,
+      "max_position": 96,
+      "n_points": 85,
+      "psr_type": "B19",
+      "resolution": "PT15M",
+      "time_interval_end": "2026-07-15T21:00Z",
+      "time_interval_start": "2026-07-14T21:00Z"
+    }
+  ],
+  "positions_in_series": [],
+  "reason": "OK",
+  "resolutions": [
+    "PT15M"
+  ],
+  "series_without_position": true,
+  "status": 200,
+  "verdict": "LOCAL DAYS (starts at Europe/Helsinki midnight; the Brussels-day rule is wrong here): local-midnight: 2 period(s), starts ['2026-07-14T21:00Z']",
+  "zone": "Europe/Helsinki"
+}

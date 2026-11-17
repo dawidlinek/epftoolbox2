@@ -1,0 +1,48 @@
+{
+  "acknowledgement": false,
+  "area": "AT",
+  "bytes": 14921,
+  "day": "2026-01-14",
+  "fixture": "exaa_AT_A44_pos2_2026-01-14.xml",
+  "grid_points": {
+    "15min": 96,
+    "hourly": 24
+  },
+  "id": "exaa_AT_A44_pos2_2026-01-14",
+  "kind": "exaa",
+  "n_points": 95,
+  "n_timeseries": 1,
+  "no_data": false,
+  "params": {
+    "classificationSequence_AttributeInstanceComponent.position": "2",
+    "documentType": "A44",
+    "in_Domain": "10YAT-APG------L",
+    "out_Domain": "10YAT-APG------L",
+    "periodEnd": "202601142300",
+    "periodStart": "202601132300"
+  },
+  "periods": [
+    {
+      "classification_sequence": "2",
+      "curve_type": "A03",
+      "expected_positions": 96,
+      "max_position": 96,
+      "n_points": 95,
+      "psr_type": null,
+      "resolution": "PT15M",
+      "time_interval_end": "2026-01-14T23:00Z",
+      "time_interval_start": "2026-01-13T23:00Z"
+    }
+  ],
+  "positions_in_series": [
+    "2"
+  ],
+  "reason": "OK",
+  "resolutions": [
+    "PT15M"
+  ],
+  "series_without_position": false,
+  "status": 200,
+  "verdict": "SUPPORTED: position 2 only, native resolution PT15M, full day on both grids",
+  "zone": "Europe/Brussels"
+}
