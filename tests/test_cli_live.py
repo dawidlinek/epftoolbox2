@@ -606,6 +606,21 @@ def test_status_exits_1_where_nothing_was_forecast(experiment):
     assert cli.main(["status", str(experiment), "--issue", ISSUE, "--as-of", BEFORE_DEADLINE]) == 1
 
 
+def test_status_and_mark_delivered_read_files_only(experiment, receipt, tmp_path, monkeypatch):
+    assert forecast(experiment) == 0
+
+    def no_build(*args, **kwargs):
+        raise AssertionError("a pipeline was built, or an extra checked, by a call that reads files")
+
+    monkeypatch.setattr(Workflow, "_build_data_pipeline", no_build)
+    monkeypatch.setattr(Workflow, "_build_model_pipeline", no_build)
+    monkeypatch.setattr("epftoolbox2.pipelines.workflow.preflight", no_build)
+    assert cli.main(["status", str(experiment), "--issue", "today", "--as-of", BEFORE_DEADLINE]) == 0
+    assert deliver(experiment, receipt) == 0
+    assert deliver(experiment, receipt, "--dry-run") == 0
+    assert [line["revision"] for line in LiveStore(tmp_path / "live").deliveries(ISSUE)] == [1]
+
+
 # --- epf refit -----------------------------------------------------------------------------------------------------------
 
 

@@ -555,36 +555,40 @@ class Workflow:
         frame = dp.run(*data_span(mp.models, day, horizons, dp), **options)
         return mp.refit(frame, self._live_dir(), issue=day, if_due=if_due, **self._run_shape())
 
-    def mark_delivered(self, issue: Any, revision: int, receipt: Union[str, Path], dry_run: bool = False) -> dict:
-        """`ModelPipeline.mark_delivered` into `live.save_dir`; `issue` may be "today" (in the issue zone)."""
-        _, mp = self._live_pipelines()
-        day = self._issue_day(issue, mp)
-        return mp.mark_delivered(self._live_dir(), day, revision, receipt, dry_run=dry_run)
-
-    def _issue_day(self, issue: Any, mp: ModelPipeline) -> Any:
-        """`issue` as a date for a call that reads no data: "today" is read in the information set's zone, or the one `live.json`
-        records when the set says "data"."""
-        from ..information_set import DATA_ZONE
-        from ..pipelines._live import resolve_issue
+    def _live_store(self) -> Any:
+        """The live directory's store, for the calls that read files alone: no pipeline is built, no extra imported, no key read."""
         from ..results.live import LiveStore
+        from ..results.store import LiveDirectoryError
 
-        zone = None if mp.information_set is None else mp.information_set.issue_timezone
-        if zone is None or zone == DATA_ZONE:
-            zone = LiveStore(self._live_dir()).zone()
+        store = LiveStore(self._live_dir())
+        if not store.is_live():
+            raise LiveDirectoryError(f"{store.save_dir} is no live directory yet: nothing has been forecast into it")
+        return store
+
+    def _issue_day(self, issue: Any, store: Any) -> Any:
+        """`issue` as a date: "today" is read in the issue zone `live.json` records."""
+        from ..pipelines._live import resolve_issue
+
+        zone = store.zone()
         if zone is None:
-            raise ValueError("the issue zone is unknown: give the pipeline an information set with an issue_timezone")
+            raise ValueError(
+                f"{store.identity_path} records no issue_timezone, so 'today' can't be read: give the date"
+            )
         return resolve_issue(issue, zone)
+
+    def mark_delivered(self, issue: Any, revision: int, receipt: Union[str, Path], dry_run: bool = False) -> dict:
+        """Record that `revision` of the issue day was delivered, as `ModelPipeline.mark_delivered` does, from the live directory
+        alone; `issue` may be "today" (in the zone `live.json` records)."""
+        store = self._live_store()
+        day = self._issue_day(issue, store)
+        with store.hold(create=not dry_run):
+            return store.mark_delivered(day, revision, receipt, dry_run=dry_run)
 
     def status(self, issue: Any = "today") -> dict:
         """What the live directory holds for one issue day: its call lines in order, its committed revisions, its deliveries,
-        the newest call's deadline and the newest committed revision's status. Reads files only."""
-        from ..results.live import LiveStore
-
-        _, mp = self._live_pipelines()
-        day = self._issue_day(issue, mp).isoformat()
-        store = LiveStore(self._live_dir())
-        if not store.is_live():
-            raise ValueError(f"{store.save_dir} is no live directory yet: nothing has been forecast into it")
+        the newest call's deadline and the newest committed revision's status. Reads the live directory's files only: no pipeline is built."""
+        store = self._live_store()
+        day = self._issue_day(issue, store).isoformat()
         calls = [line for line in store.calls() if line.get("issue") == day]
         deadlines = [line["deadline"] for line in calls if line.get("deadline")]
         committed = store.committed(day).get(day, {})
