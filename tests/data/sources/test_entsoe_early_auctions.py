@@ -4,6 +4,8 @@ Offline: synthetic A44 documents in the real shape (two TimeSeries told apart by
 and 15-minute periods, both DST switches) behind a fake session. The live checks are the integration tests at the end.
 """
 
+from pathlib import Path
+
 import pandas as pd
 import pytest
 
@@ -165,15 +167,46 @@ class TestExaaColumn:
         assert df["price_exaa"].tolist() == [25.0]
 
 
+class TestLiveFixture:
+    """The EXAA response ENTSO-E returned for AT on 2026-01-14 (tests/data/fixtures/entsoe_live_checks), through the
+    source's own parser: 96 quarter-hours, which the hourly grid averages into 24 hours."""
+
+    XML = (
+        Path(__file__).parents[1] / "fixtures" / "entsoe_live_checks" / "exaa_AT_A44_pos2_2026-01-14.xml"
+    ).read_text()
+
+    def _fetch(self, prefer_15min):
+        sdac = _a44("2026-01-13T23:00Z", "2026-01-14T23:00Z", 24, sequence_two=False)
+        source = _exaa_source(sdac, only_position_two=self.XML, prefer_15min=prefer_15min)
+        return source.fetch(_utc("2026-01-13 23:00"), _utc("2026-01-14 23:00"))
+
+    def test_parses_to_96_quarter_hours(self):
+        parsed = _exaa_source(self.XML)._parse_prices(self.XML, sequence="2")
+        assert {step: len(s) for step, s in parsed.items()} == {pd.Timedelta(minutes=15): 96}
+
+    def test_hourly_grid_has_24_values(self):
+        df = self._fetch(prefer_15min=False)
+        assert len(df) == 24 and df["price_exaa"].notna().all()
+
+    def test_quarter_hour_grid_has_96_values(self):
+        df = self._fetch(prefer_15min=True)
+        assert len(df) == 96 and df["price_exaa"].notna().all()
+
+
 class TestExaaConfiguration:
-    @pytest.mark.parametrize("country", ["AT", "DE_LU", "de_lu", "DE_AT_LU"])
+    @pytest.mark.parametrize("country", ["AT", "DE_LU", "de_lu"])
     def test_available_for_austria_and_germany_luxembourg(self, country):
         assert EntsoeSource(country, KEY, type=["price"], price_exaa=True).price_exaa is True
 
     @pytest.mark.parametrize("country", ["PL", "CH", "FR", "CZ", "HU"])
     def test_other_zones_raise(self, country):
-        with pytest.raises(ValueError, match="AT, DE_LU and DE_AT_LU only"):
+        with pytest.raises(ValueError, match="AT and DE_LU only"):
             EntsoeSource(country, KEY, type=["price"], price_exaa=True)
+
+    def test_germany_before_the_split_of_the_zone_raises(self):
+        # ENTSO-E returned no EXAA position 2 for DE_AT_LU on 2018-01-15 and 2018-07-15 (checked live 2026-11-18).
+        with pytest.raises(ValueError, match="no EXAA position 2 for DE_AT_LU"):
+            EntsoeSource("DE_AT_LU", KEY, type=["price"], price_exaa=True)
 
     def test_needs_price_in_type(self):
         with pytest.raises(ValueError, match="include 'price'"):
@@ -406,12 +439,6 @@ class TestEarlyAuctionsIntegration:
         ):
             df = source.fetch(_utc(start), _utc(end))
             assert len(df) == rows and df.notna().all().all()
-
-    def test_exaa_of_germany_before_the_split_of_the_zone(self, entsoe_api_key):
-        # Unverified until run with a key: DE_AT_LU is the German zone before 2018-10-01.
-        source = EntsoeSource("DE_AT_LU", entsoe_api_key, type=["price"], price_exaa=True)
-        df = source.fetch(_utc("2018-06-01 22:00"), _utc("2018-06-03 22:00"))
-        assert list(df.columns) == ["price", "price_exaa"] and len(df) == 48 and df.notna().all().all()
 
     def test_swiss_auction_price(self, entsoe_api_key):
         df = EntsoeSource("CH", entsoe_api_key, type=["price"]).fetch(
