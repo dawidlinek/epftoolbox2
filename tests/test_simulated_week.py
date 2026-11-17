@@ -157,7 +157,7 @@ class InProcessPool:
 
 @contextlib.contextmanager
 def quiet():
-    """The package's INFO lines off for the week (about a thousand through rich's handler, a third of its time); warnings stay."""
+    """The package's INFO lines off for the week (about a thousand through rich's handler, more than half its time); warnings stay."""
     logging.disable(logging.INFO)
     try:
         yield

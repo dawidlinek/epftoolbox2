@@ -307,7 +307,7 @@ class FakeEntsoe:
 
 class QuietProgress:
     """Stands in for `rich.progress.Progress` in `EntsoeSource.fetch`: the progress bar's display thread, started and stopped
-    on each of the week's ~150 refreshes, is about a third of the week's time and nothing the week checks."""
+    on each of the week's ~150 refreshes, is time spent on nothing the week checks."""
 
     def __init__(self, *columns, **kwargs):
         pass
