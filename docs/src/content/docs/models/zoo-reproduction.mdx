@@ -49,14 +49,15 @@ step-6 branch and `families_scale/` for this page); none of it runs in CI. The d
 | Chronos-2, TimesFM-3 | ≤ 0.1 | ±0.1 % |
 | PatchTST-FM-r2, Timestral-209M | ≤ 1e-3 | ±0.1 % |
 | MLP | the trainer's port, ≤ 1e-5 on the CPU | the top 4 × 4 recipe ±1 % |
-| LEAR + boosted residuals | ≤ 1e-6 with the stored base | ±0.5 % with the library's base |
-| LightGBM global | ≤ 1e-9 | ±0.5 % |
+| LEAR + boosted residuals | ≤ 1e-6 against the research script's rerun, with the stored base; against the stored file within its rounding (5e-5) | ±0.5 % with the library's base |
+| LightGBM global | ≤ 1e-9 against the research script's rerun; against the stored file within its rounding (5e-5) | ±0.5 % |
 | Mitra-v2, TFT | not shipped (Mitra-v2) or later (TFT, after pooled markets) | |
 
 B2's ±0.5 % for refit families comes from the calendar: the research refitted on each year's first target day and every 7 days
 after, the library on Mondays of its fixed epoch, so no fit coincides and agreement over the year is what can be asked (one test
 year resolves about 5 % of the MAE). A zero-shot foundation model has no fit and no calendar: its B1 already covers every
-forecast of both years, so its B2 is the same run's year MAE.
+forecast of both years, so its B2 is the same run's year MAE. B2 gates the test year's MAE, the year of section 4's numbers; the
+validation year is reported beside it. The DM test is part of the gate for TabPFN v2 only; for the others it is reported.
 
 ## GPU and real-weights checks
 
@@ -98,7 +99,7 @@ daily mean absolute error, library against stored.
 | | AT | val / test | 8,736 / 8,760 | 15.9752 / 16.6368 | 15.9787 / 16.5755 | −0.02 % / +0.37 % | 0.94 / 0.27 | met |
 | TabICLv2 (728 days, weekly, the median) | DE_LU | val / test | 8,736 / 8,760 | 18.2191 / 19.7929 | 18.2607 / 19.9165 | −0.23 % / −0.62 % | 0.41 / 0.030 | **not met** (test −0.62 %) |
 | | AT | test (no stored validation year) | 8,760 | 16.9149 | 16.9318 | −0.10 % | 0.76 | met |
-| t0-alpha yearly fine-tune (`T0Model` defaults, 3 seeds), against the stored monthly pooled roll | DE_LU | val / test | 8,736 / 8,760 | 18.5237 / 19.2081 | 18.5229 / 18.9607 | +0.00 % / +1.31 % | 0.99 / 0.10 | reported, not gated |
+| t0-alpha yearly fine-tune (`T0Model` defaults, 3 seeds), against the stored monthly pooled roll | DE_LU | val / test | 8,736 / 8,760 | 18.5237 / 19.2081 | 18.5229 / 18.9607 | +0.00 % / +1.30 % | 0.99 / 0.10 | reported, not gated |
 | | AT | val / test | 8,736 / 8,760 | 16.3693 / 16.3168 | 16.1313 / 16.3282 | +1.48 % / −0.07 % | 0.04 / 0.93 | reported, not gated |
 | t0-alpha zero-shot, ctx 364, load forecast | DE_LU | val / test | 8,736 / 8,760 | 19.2421 / 20.1547 | 19.2421 / 20.1547 | < 0.001 % | | met |
 | | AT | val / test | 8,736 / 8,760 | 16.5069 / 17.1686 | 16.5069 / 17.1686 | < 0.001 % | | met |
@@ -115,8 +116,8 @@ daily mean absolute error, library against stored.
 | | AT | val / test | 8,736 / 8,760 | 15.3007 / 15.8979 | 15.3007 / 15.8979 | < 0.001 % | 0.24 / 0.20 | met |
 | LightGBM global (w728, daily, L2) | DE_LU | val / test | 8,736 / 8,760 | 19.6726 / 22.8881 | 19.6726 / 22.8881 | < 0.001 % | 0.91 / 0.98 | met |
 | | AT | val / test | 8,736 / 8,760 | 17.3634 / 18.9094 | 17.3634 / 18.9094 | < 0.001 % | 0.70 / 0.20 | met |
-| MLP top 4 × 4 (`MLPDailyModel`, Invariant inputs) | DE_LU | val / test | 8,736 / 8,760 | 19.0084 / 20.5366 | 18.8931 / 20.6222 | +0.61 % / −0.42 % | 0.07 / 0.30 | met (test, ±1 %) |
-| | AT | val / test | 8,736 / 8,760 | 16.7784 / 17.6449 | 16.6153 / 17.5632 | +0.98 % / +0.47 % | 0.02 / 0.25 | met (test, ±1 %) |
+| MLP top 4 × 4 (`MLPDailyModel`, Invariant inputs) | DE_LU | val / test | 8,736 / 8,760 | 19.0084 / 20.5366 | 18.8931 / 20.6222 | +0.61 % / −0.41 % | 0.07 / 0.30 | met (±1 %) |
+| | AT | val / test | 8,736 / 8,760 | 16.7784 / 17.6449 | 16.6153 / 17.5632 | +0.98 % / +0.46 % | 0.016 / 0.25 | met (±1 %); the validation year a borderline +0.98 % with a significant DM (p 0.016) |
 | LEAR + boosted residuals, the research's warm-up | DE_LU | val / test | 8,736 / 8,760 | 19.3326 / 19.9048 | 19.2692 / 20.0152 | +0.33 % / −0.55 % | 0.56 / 0.34 | **not met** (test −0.55 %) |
 | | AT | val / test | 8,736 / 8,760 | 16.7984 / 17.3539 | 16.7805 / 17.0602 | +0.11 % / +1.72 % | 0.84 / 0.003 | **not met** (test +1.72 %) |
 | LEAR + boosted residuals, the library's warm-up | DE_LU | val / test | 8,736 / 8,760 | 19.2370 / 20.2520 | 19.2692 / 20.0152 | −0.17 % / +1.18 % | 0.86 / 0.16 | not met |
@@ -130,11 +131,12 @@ market with its two years of forecasts). The MLP's configurations are the resear
 blocks), 4 seeds each, weekly refits; its stored member is zoo_dl's `dlMLPens top4x4` (not the top-8 × 4 and top-4 × 1 variants
 the leaderboard's validation picked). The hybrid's rows are with scikit-learn 1.8.0, the lock's.
 
-The calendar is what moves the in-context years: on the research's own refit days (the epoch moved to its block starts) a test
-year of DE_LU on an H100 gave TabPFN 19.5806 against the stored 19.5806 and TabICL 19.9159 against 19.9165 (8,760 forecasts
-each); on the library's Mondays TabPFN moves by −0.09 % and TabICL by −0.62 %. The yearly t0-alpha fine-tune is the library's
+On the research's own refit days (the epoch moved to its block starts) a test year of DE_LU on an H100 with torch 2.15 and CUDA
+13.2 gave TabPFN 19.5806 against the stored 19.5806 and TabICL 19.9159 against 19.9165 (8,760 forecasts each); on the library's
+Mondays, with torch 2.14.1 and CUDA 12.6, TabPFN is −0.09 % and TabICL −0.62 % from the stored. Both the calendar and the GPU
+stack changed between the two runs, so the move is consistent with the calendar but not attributed to it. The yearly t0-alpha fine-tune is the library's
 default; the stored member re-fine-tuned every month on both markets' windows pooled, so the two are compared, not gated: over
-the two years they are within 1.5 % in both markets, the yearly one 1.3 % behind on DE_LU's test year and level on AT's.
+the two years they are within 1.5 % in both markets, the yearly one 1.30 % behind on DE_LU's test year and level on AT's.
 
 ## What wasn't reproduced, and why
 
@@ -143,23 +145,30 @@ the two years they are within 1.5 % in both markets, the yearly one 1.3 % behind
   rounding; the research's calls held 64 consecutive days (the last one 44), the library's a calendar block of 64, padded, and the
   research ran granite-tsfm 0.3.10 with another torch. Which of these moves which value was not separated (0.3.10 against 0.3.12
   on the CPU: 1.4e-4). Recorded as not reproduced at 1e-3.
-- **TabPFN v2 on a GPU, per value.** One value of the one-day last test block is 0.616 EUR/MWh from the stored one (the other
-  blocks within 0.44, 0.018 on average), above the 0.5 tolerance, with the MAE within 0.005 %. The research called the model on
-  that one row, the library on the block's nominal 7 rows (the row and 6 copies), and under TabPFN's float16 autocast the length
-  of a call moves the last digits further than in float32 (9.3e-4 on the CPU). Recorded as the GPU's half-precision gap, not an
-  adapter error; on the same device and package versions the library equals the research's own code within 4.5e-8.
+- **TabPFN v2 on a GPU, per value.** Up to 0.616 EUR/MWh from the stored values (period 8 of the one-day last test block; the
+  full 7-row blocks up to 0.44; 0.018 on average), above the 0.5 tolerance, with the MAE within 0.005 %. The stored file isn't
+  regenerated by the research's own code in today's environment either (the research's torch, CUDA, tabpfn, numpy and
+  scikit-learn on an H100): on three full-block jobs (one period of a 7-row block each, 21 forecasts) it equals the library within
+  4.5e-8 and both are up to 0.059 from the stored values, and on the one-day block (period 23, the only one it ran there) it is
+  3.0e-3 from the library and 0.046 from the stored value. What else differs from the research's run (the driver, the kernels CUDA picks) wasn't found. TabICL's stored
+  file is regenerated: the research's code is within 1.7e-6 of the library, and both within the files' rounding of it.
 - **TabICLv2 over DE_LU's test year.** −0.62 % against the 0.5 % tolerance (the library better; DM p 0.030), −0.23 % on the
   validation year and −0.10 % on AT's test year. On the research's own refit days the adapter is within the files' rounding
-  (B1, the research's environment) and a whole test year on an H100 (torch 2.15) within 0.004 %, so the gap is the refit
-  calendar's: the research refitted every 7 days from each year's first issue day (a Tuesday), the library on Mondays, so every
-  one of the year's 53 contexts ends on another day. A year resolves about 5 % of the MAE; the tolerance is tighter than what one calendar against another gives this model.
+  (B1, the research's environment), and a whole DE_LU test year on those days was within 0.004 % of the stored MAE, but that year
+  ran on torch 2.15 with CUDA 13.2 and the B2 run on torch 2.14.1 with CUDA 12.6: between the two both the refit calendar (the
+  research's 7-day blocks from each year's first issue day, a Tuesday, against the library's Mondays) and the GPU stack changed.
+  The gap is consistent with the calendar, which moves every one of the year's 53 contexts, but only one other calendar was
+  tried and the two changes weren't separated. A follow-up would run the year from each of the 7 weekdays with `refit_from=` on
+  one environment and see how far the MAE moves with the weekday alone.
 - **LEAR + boosted residuals over the year.** −0.55 % (DE_LU) and +1.72 % (AT) on the test year against the 0.5 % tolerance with
-  scikit-learn 1.8.0, and −0.85 % / +0.58 % with the research's 1.9.1 (step 6k): on the research's own rows the library is exact,
-  so the gap is the year-level spread of the tree. The refit calendar alone moves DE_LU by +0.05 % on test, the library's LEAR
-  base (0.1 to 0.25 % from the research's) by −0.4 %, another `random_state` by −0.5 to −0.8 %, and scikit-learn 1.8.0 against
-  1.9.1 by −0.64 % on the research's rows: a year of this tree moves about 1 % with anything that changes its rows, more than the
-  tolerance. The library's default warm-up (the base from its first full 728-day window, a year later than the research's) gives
-  +1.2 % and +2.3 %.
+  scikit-learn 1.8.0, and −0.85 % / +0.58 % with the research's 1.9.1 (step 6k), on the research's warm-up. On the research's own
+  rows the library equals the research script to the bit, so the gap comes from what B2 changes. For DE_LU the step-6k
+  diagnostics split it: the refit calendar alone moves the test year by +0.05 %, the library's LEAR base (0.1 to 0.25 % from the
+  research's) by −0.4 %, another `random_state` by −0.5 to −0.8 %, and scikit-learn 1.8.0 against 1.9.1 by −0.64 % on the
+  research's rows: a year of this tree moves about 1 % with anything that changes its rows. For AT no such split was run, so the
+  same explanation is not verified there. AT is the more sensitive to scikit-learn: its test year is 17.3539 on 1.8.0 against
+  17.1582 on 1.9.1 (−1.1 %, the same base, warm-up and calendar). The library's default warm-up (the base from its first full
+  728-day window, a year later than the research's) gives +1.2 % and +2.3 %.
 - **The monthly t0-alpha re-fine-tune** (`t0aftroll`, the section's best t0 row) pooled DE_LU and AT windows in each fine-tune; a
   single-market run can't give it, so it waits for pooled markets. The fine-tune mechanics are reproduced (B1 above); the
   library's default yearly fine-tune is reported, not gated.
@@ -179,10 +188,15 @@ Plan section 4's rows, test year (365 days, 8,760 forecasts each, identical keys
 `AverageEnsemble` for the ensembles, rMAE against the weekly naive, DM (one-sided p, plain variance) against the stored LEAR
 window average, which stays the benchmark. Each row once with the stored member and once with the library's where step 6 wraps
 the family. "Ensemble across families (clean), library members" is merge.py's 12 clean candidates with every wrapped family's
-stored member replaced by the library's (TabPFN v2, TabICLv2, PatchTST-FM-r2, TimesFM-3, the MLP's top 4 × 4, Chronos-2,
-t0-alpha, the hybrid where they are among the 12), the rest stored, `top="validation"`; "Top-k of the wrapped families only" takes the 12 best library
-members by validation MAE, without Timestral (possibly contaminated for these windows), and the next row with it. Both choose
-`k` on the validation year as `AverageEnsemble(top="validation")` does.
+stored member replaced by the library's where the 12 hold one: TabPFN v2, TabICLv2, PatchTST-FM-r2 and TimesFM-3 (the same
+recipes), the zero-shot t0-alpha (AT's `t0a`, stored at 341 days of context, the library's at 364), the hybrid (AT's stored
+member is the 728-day-window variant, the library's the research's w0 recipe) and the MLP (the stored member is merge.py's pick,
+top 8 × 4 in DE_LU and top 4 × 1 in AT, the library's the top 4 × 4 recipe: a different recipe). The once-fine-tuned t0-alpha
+(`t0aft`) is not wrapped and stays the stored member, and is chosen. The rest stay stored, `top="validation"`. The three
+top-k rows of the library's members take the 12 best of them by validation MAE: from merge.py's clean list without Timestral;
+without every family whose card gives these windows the verdict "possibly contaminated" (Timestral-209M, Chronos-2 and
+PatchTST-FM-r2, all released after both starts with no corpus end date); and with Timestral. Each chooses `k` on the validation
+year as `AverageEnsemble(top="validation")` does.
 
 **DE_LU**
 
@@ -190,7 +204,8 @@ members by validation MAE, without Timestral (possibly contaminated for these wi
 |---|---|---|---|---|---|---|
 | Ensemble across families (clean) | stored | 18.87 | 0.505 | 0.903 | < 1e-6 | 0.964 |
 | Ensemble across families (clean) | library members, rest stored | 18.84 | 0.504 | 0.902 | < 1e-6 | 0.962 |
-| Top-k of the wrapped families only | library | 18.88 | 0.505 | 0.903 | < 1e-6 | 0.964 |
+| Top-k of the wrapped families, merge.py's clean list minus Timestral | library | 18.88 | 0.505 | 0.903 | < 1e-6 | 0.964 |
+| Top-k of the wrapped families, no card verdict "possibly contaminated" | library | 18.92 | 0.506 | 0.905 | < 1e-6 | 0.966 |
 | Top-k of the wrapped families, with Timestral | library | 18.48 | 0.495 | 0.885 | < 1e-6 | 0.944 |
 | Timestral-209M zero-shot | stored / library | 18.48 / 18.48 | 0.495 | 0.885 | < 1e-6 | 0.944 |
 | t0-alpha monthly re-fine-tune, 3 seeds | stored | 18.96 | 0.507 | 0.907 | < 1e-6 | 0.968 |
@@ -202,7 +217,7 @@ members by validation MAE, without Timestral (possibly contaminated for these wi
 | TimesFM-3 | stored / library | 19.79 / 19.79 | 0.530 | 0.947 | 9.2e-5 | 1.011 |
 | PatchTST-FM-r2 | stored / library | 19.85 / 19.85 | 0.531 | 0.950 | 0.001 | 1.014 |
 | TFT, 3 seeds | stored | 20.27 | 0.542 | 0.970 | 0.034 | 1.035 |
-| LEAR + boosted residuals (w0) | stored / library | 20.02 / 19.90 | 0.536 / 0.533 | 0.958 / 0.953 | 2.6e-4 / 4.7e-5 | 1.022 / 1.017 |
+| LEAR + boosted residuals (w0) | stored / library (scikit-learn 1.8.0; 19.85 on the research's 1.9.1) | 20.02 / 19.90 | 0.536 / 0.533 | 0.958 / 0.953 | 2.6e-4 / 4.7e-5 | 1.022 / 1.017 |
 | Chronos-2 | stored / library | 20.56 / 20.56 | 0.550 | 0.984 | 0.22 | 1.050 |
 | MLP top 4 × 4 | stored / library | 20.62 / 20.54 | 0.552 / 0.550 | 0.987 / 0.983 | 0.16 / 0.10 | 1.053 / 1.049 |
 | LEAR, window average | stored / library | 20.89 / 20.74 | 0.559 / 0.555 | 1 / 0.993 | — / 0.021 | 1.067 / 1.059 |
@@ -214,7 +229,8 @@ members by validation MAE, without Timestral (possibly contaminated for these wi
 |---|---|---|---|---|---|---|
 | Ensemble across families (clean) | stored | 15.96 | 0.558 | 0.898 | < 1e-6 | 0.963 |
 | Ensemble across families (clean) | library members, rest stored | 15.99 | 0.559 | 0.899 | < 1e-6 | 0.965 |
-| Top-k of the wrapped families only | library | 15.99 | 0.559 | 0.899 | < 1e-6 | 0.965 |
+| Top-k of the wrapped families, merge.py's clean list minus Timestral | library | 15.99 | 0.559 | 0.899 | < 1e-6 | 0.965 |
+| Top-k of the wrapped families, no card verdict "possibly contaminated" | library | 16.09 | 0.562 | 0.905 | < 1e-6 | 0.970 |
 | Top-k of the wrapped families, with Timestral | library | 15.90 | 0.555 | 0.894 | < 1e-6 | 0.959 |
 | Timestral-209M zero-shot | stored / library | 15.90 / 15.90 | 0.555 | 0.894 | < 1e-6 | 0.959 |
 | t0-alpha monthly re-fine-tune, 3 seeds | stored | 16.33 | 0.571 | 0.918 | < 1e-6 | 0.985 |
@@ -226,18 +242,21 @@ members by validation MAE, without Timestral (possibly contaminated for these wi
 | TimesFM-3 | stored / library | 16.99 / 16.99 | 0.594 | 0.956 | 0.002 | 1.025 |
 | PatchTST-FM-r2 | stored / library | 16.51 / 16.51 | 0.577 | 0.929 | 6.1e-6 | 0.996 |
 | TFT, 3 seeds | stored | 17.33 | 0.606 | 0.975 | 0.060 | 1.046 |
-| LEAR + boosted residuals (w0) | stored / library | 17.06 / 17.35 | 0.596 / 0.606 | 0.959 / 0.976 | 2.8e-4 / 0.021 | 1.029 / 1.047 |
+| LEAR + boosted residuals (w0) | stored / library (scikit-learn 1.8.0; 17.16 on the research's 1.9.1) | 17.06 / 17.35 | 0.596 / 0.606 | 0.959 / 0.976 | 2.8e-4 / 0.021 | 1.029 / 1.047 |
 | Chronos-2 | stored / library | 17.33 / 17.33 | 0.606 | 0.975 | 0.12 | 1.046 |
 | MLP top 4 × 4 | stored / library | 17.56 / 17.64 | 0.614 / 0.617 | 0.988 / 0.992 | 0.13 / 0.25 | 1.060 / 1.065 |
 | LEAR, window average | stored / library | 17.78 / 17.64 | 0.621 / 0.616 | 1 / 0.992 | — / 0.016 | 1.073 / 1.064 |
 | LightGBM global | stored / library | 18.91 / 18.91 | 0.661 | 1.063 | 1.0 | 1.141 |
 
 With the library's members the clean ensembles choose the same families as merge.py did: in DE_LU Mitra-v2, TabPFN v2,
-TabICLv2, the once-fine-tuned t0-alpha, Toto-2 and TiRex-2, TabPFN and TabICL now the library's (18.84 against 18.87); in AT
-TabPFN v2, the once-fine-tuned t0-alpha and PatchTST-FM-r2, TabPFN and PatchTST-FM-r2 the library's (15.99 against 15.96, the
-library's TabPFN being 0.37 % behind the stored one on AT's test year). The top-k of the library's members alone chose TabICLv2,
-TabPFN v2, the yearly t0-alpha fine-tune and PatchTST-FM-r2 in both markets (18.88 and 15.99): within 0.05 % (DE_LU) and 0.15 %
-(AT) of the stored clean ensemble, which also holds Mitra-v2, Toto-2 and TiRex-2 or the pooled fine-tune. With Timestral it chose
+TabICLv2, the once-fine-tuned t0-alpha (stored), Toto-2 and TiRex-2, TabPFN and TabICL now the library's (18.84 against 18.87);
+in AT TabPFN v2, the once-fine-tuned t0-alpha (stored) and PatchTST-FM-r2, TabPFN and PatchTST-FM-r2 the library's (15.99
+against 15.96, the library's TabPFN being 0.37 % behind the stored one on AT's test year). The top-k of the library's members
+from merge.py's clean list chose TabICLv2, TabPFN v2, the yearly t0-alpha fine-tune and PatchTST-FM-r2 in both markets (18.88 and
+15.99): within 0.05 % (DE_LU) and 0.15 % (AT) of the stored clean ensemble, which also holds Mitra-v2, Toto-2 and TiRex-2 or the
+once-fine-tuned t0-alpha. Without the families whose cards say "possibly contaminated" it chose TabICLv2, TabPFN v2 and the
+yearly t0 fine-tune in DE_LU (18.92) and TabPFN v2, TabICLv2, the yearly t0 fine-tune and TimesFM-3 in AT (16.09), 0.27 % and
+0.75 % behind the stored clean ensemble. With Timestral it chose
 Timestral alone in both markets (its validation MAE is below the next library member's by 0.9 and 0.7 EUR/MWh, and any k above 1
 had a higher validation MAE).
 
