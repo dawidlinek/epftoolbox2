@@ -320,7 +320,7 @@ epf snapshot data_pipeline.yaml --archive archive/de
 | `--issue DAY` | `today` (the default, read in the issue zone on the clock), `tomorrow`, `yesterday` or `YYYY-MM-DD` |
 | `--ensure` | Do nothing, exit `0`, when the issue already has a committed revision (ok or fallback) by the deadline: the safe call for a catch-up slot |
 | `--deadline HH:MM` | No revision is committed after it; replaces `live.deadline` |
-| `--wait-for COLUMN=HH:MM` | Poll until the column has its cells for the issue day, giving up at that time; repeat for more columns, or `rules` alone (mixing them exits 2); replaces `live.wait_for` |
+| `--wait-for COLUMN=HH:MM` | Poll until the column has its cells on the issue day's rows (a column the models read there, such as `load_forecast_d+1`), giving up at that time; repeat for more columns, or `rules` alone (mixing them exits 2); replaces `live.wait_for` |
 | `--refresh never` | Read the per-source caches only and send no request |
 | `--dry-run` | Do everything and write nothing (no revision, call line, export, lock file or cache entry): the exit code the call would give |
 | `--as-of INSTANT` | Run on a fake clock that starts at this instant, which must carry a UTC offset (`2026-10-21T08:45+02:00`): sleeps pass at once. **For replays over cached or offline data**: it needs `--refresh never`, because a real fetch would build a past revision on today's values (exit 2 otherwise) |
