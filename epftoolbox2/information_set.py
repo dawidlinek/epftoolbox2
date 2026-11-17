@@ -646,6 +646,7 @@ ASSUMPTIONS: Dict[str, Tuple[str, Availability, str]] = {
             1,
             note="assumed: A69 wind/solar day-ahead forecast published by 10:00 D-1",
             vintage="latest_revision",
+            day_zone=DATA_ZONE,  # the TSO's own local delivery day, as the rule it replaces (`_A69`)
         ),
         "ENTSO-E A69 day-ahead wind and solar forecasts are published by 10:00 Brussels on the day before delivery, "
         "like the day-ahead load forecast. The legal deadline is 18:00 (Reg. 543/2013 Art. 14(2)(d)), after gate "
@@ -660,6 +661,30 @@ _A31_NOTE = "A65/A31 week-ahead load forecast: Fridays for the next week (Art. 6
 # The week-ahead load forecast: one value per local day of each market's Monday-to-Sunday week, published on the Friday before
 # at 10:00 Brussels, two hours before the 12:00 CET day-ahead gate closure, in every zone (Reg. 543/2013 Art. 6(2)(c)).
 _A31 = Availability.weekly("friday", "10:00", note=_A31_NOTE, vintage=_REVISED, week_zone=DATA_ZONE)
+_A65_A01_NOTE = "A65/A01 day-ahead load forecast: 2 h before gate closure on D-1 (Art. 6(2)(b))"
+_A69_NOTE = (
+    "A69 day-ahead wind/solar forecast: legally by 18:00 Brussels on D-1 (Art. 14(2)(d)); "
+    "accept assumption 'entsoe_a69_by_10' to assume 10:00"
+)
+
+
+def _a65_a01(day_zone: str) -> Availability:
+    """The day-ahead load forecast's rule with its delivery days in `day_zone`: 10:00 Brussels on the date before."""
+    return Availability.published("10:00", 1, note=_A65_A01_NOTE, vintage=_REVISED, day_zone=day_zone)
+
+
+def _a69(day_zone: str) -> Availability:
+    """The day-ahead wind and solar forecast's rule with its delivery days in `day_zone`: 18:00 Brussels on the date before."""
+    return Availability.published("18:00", 1, note=_A69_NOTE, vintage=_REVISED, day_zone=day_zone)
+
+
+# The day-ahead load (A65/A01) and wind/solar (A69) forecasts are submitted by each TSO per local day of its area: every Period
+# starts at the area's own midnight (FI, GR, PT and IE, A65 and A69, winter and summer, checked live on 2026-11-18,
+# `tests/data/fixtures/entsoe_live_checks/`). So the delivery day is a date of the data's zone, each market's own, and the
+# publication instant stays 10:00 (18:00) Brussels on the date before it. An `EntsoeSource` gets the rule in its area's zone
+# (`source_rules`), exact on a frame in any zone.
+_A65_A01 = _a65_a01(DATA_ZONE)
+_A69 = _a69(DATA_ZONE)
 # A68 installed capacity per production type: one value a year, due one week before the end of the year before (Reg. 543/2013
 # Art. 14(1)(a)), so every row of year Y holds a value out before Y began. Read as out at 00:00 seven days before each of its
 # dates, both of the data's zone (timezone None): so for 1 January on its deadline, early enough for every other day of the
@@ -827,23 +852,14 @@ def _built_in_rules() -> Dict[str, Availability]:
         "load_actual": Availability.realised(
             "1h", note="A65/A16 actual load: 1 h after the period (Reg. 543/2013 Art. 6(2)(a))", vintage=_REVISED
         ),
-        "load_forecast": Availability.published(
-            "10:00",
-            1,
-            note="A65/A01 day-ahead load forecast: 2 h before gate closure on D-1 (Art. 6(2)(b))",
-            vintage=_REVISED,
-        ),
+        # Each area's own delivery day, published at 10:00 Brussels the date before (`_A65_A01`). A Brussels day read
+        # Helsinki's 00:00 of D+2 (23:00 of D+1 in Brussels) as published on D, a day early, and Lisbon's 23:00 a day late.
+        "load_forecast": _A65_A01,
         # A31 holds one value per local day of the market's own week, published 2 h before the 12:00 CET gate closure in
         # every zone: the week is read in the data's local dates, the instant stays 10:00 Brussels.
         "load_forecast_daily_min": _A31,
         "load_forecast_daily_max": _A31,
-        "generation_*_forecast": Availability.published(
-            "18:00",
-            1,
-            note="A69 day-ahead wind/solar forecast: legally by 18:00 Brussels on D-1 (Art. 14(2)(d)); "
-            "accept assumption 'entsoe_a69_by_10' to assume 10:00",
-            vintage=_REVISED,
-        ),
+        "generation_*_forecast": _A69,
         "generation_*": Availability.realised(
             "1h", note="A75 actual generation per type: 1 h after the period", vintage=_REVISED
         ),
@@ -914,6 +930,15 @@ def source_rules(sources: Iterable[Any]) -> Dict[str, Availability]:
             if "installed_capacity" in source.type:
                 # The year's value is stamped at the market's 1 January (`_daily_zone`, as the A31 rule's week): its dates.
                 rules[f"{prefix}installed_capacity_*"] = _capacity_rule(source._daily_zone())
+            if not prefix:
+                # The day-ahead load and wind/solar forecasts are per local day of this area, whose TSO submits them, at
+                # their own instants (not re-stamped like A31): its zone (`_timezone`), not the market's a neighbour may be
+                # bound to, and on a frame in any zone. A prefixed column has no rule here, as the other prefixed columns of
+                # an EntsoeSource (`fi_load_actual`, `fi_price`): a user's rule names it.
+                if "load" in source.type:
+                    rules["load_forecast"] = _a65_a01(source._timezone)
+                if "generation" in source.type:
+                    rules["generation_*_forecast"] = _a69(source._timezone)
             if "load" not in source.type:
                 continue
             # A31 week-ahead daily values are stamped at the market's own local midnight (EntsoeSource's
@@ -1568,7 +1593,7 @@ class InformationSet:
 
     def _layers(self) -> List[Tuple[str, Dict[str, Availability]]]:
         layers = [("rules", self.rules)]
-        accepted = {ASSUMPTIONS[a][0]: ASSUMPTIONS[a][1] for a in self.assumptions}
+        accepted = {ASSUMPTIONS[a][0]: self._assumed(*ASSUMPTIONS[a][:2]) for a in self.assumptions}
         if accepted:
             layers.append(("assumptions", accepted))
         if self._source_rules:
@@ -1576,6 +1601,15 @@ class InformationSet:
         if self.use_defaults:
             layers.append(("defaults", _built_in_rules()))
         return layers
+
+    def _assumed(self, pattern: str, rule: Availability) -> Availability:
+        """An assumption's rule for `pattern`, with the delivery days of the source rule it replaces where that has its own
+        (`entsoe_a69_by_10` over an `EntsoeSource`'s A69, whose days are its area's): an assumption moves the publication
+        time only."""
+        source = self._source_rules.get(pattern)
+        if isinstance(source, Availability) and source.kind == rule.kind == "published" and source.day_zone is not None:
+            return replace(rule, day_zone=source.day_zone)
+        return rule
 
     def resolve(self, name: str) -> ResolvedColumn:
         """Find the rule for a column: exact names from the full name down to the base, then glob patterns
@@ -2148,7 +2182,7 @@ class InformationSet:
         for name, (pattern, rule, description) in ASSUMPTIONS.items():
             if name in self.assumptions or col.key != pattern:
                 continue
-            known = clock.available_under(col, rule, rows, step, row_day) <= clock.issue
+            known = clock.available_under(col, self._assumed(pattern, rule), rows, step, row_day) <= clock.issue
             out.append((known, f"known in time if you accept assumption '{name}': {description}"))
         return out
 
@@ -3918,7 +3952,7 @@ def _over_time_available(
     # the later counts.
     data_week = any(_reads_data_dates(one) for one in rules)
     latest = None
-    for week in _data_weeks(ctx) if data_week else (None,):
+    for week in _data_dates(ctx, rules) if data_week else (None,):
         out = np.full(len(day), np.inf)  # what no rule holds for is never known
         held = np.zeros(len(day), dtype=bool)
         for one in rules:
@@ -4031,7 +4065,7 @@ def _delivery_zones(rule: Availability, ctx: _Context, data_week: Optional[str] 
     own = rule.week_zone if rule.kind == "weekly" else rule.day_zone
     if own != DATA_ZONE:
         return (own or rule.timezone or ctx.data_zone,)
-    return (data_week,) if data_week is not None else _data_weeks(ctx)
+    return (data_week,) if data_week is not None else _data_dates(ctx, (rule,))
 
 
 def _reads_data_dates(rule: Availability) -> bool:
@@ -4047,6 +4081,26 @@ def _data_weeks(ctx: _Context) -> Tuple[str, ...]:
     if ctx.issue_zone is None or ctx.issue_zone == ctx.data_zone:
         return (ctx.data_zone,)
     return (ctx.data_zone, ctx.issue_zone)
+
+
+def _data_dates(ctx: _Context, rules: Sequence[Availability]) -> Tuple[str, ...]:
+    """The zones a delivery day (or week) of the data's dates is read in for these rules: `_data_weeks`, and on a frame in no
+    market's zone (UTC, `Etc/`, a fixed offset) the own zone of each published rule of the data's days too. There the issue zone
+    can be no market's either (`issue_timezone="UTC"`), and a CET market's 00:00 read as 23:00 of the day before would be
+    published a day early; the rule's zone (Brussels for A65/A69) is the delivery day such a rule had before it read the data's
+    dates, so it is never earlier than that. A weekly rule's week is `_data_weeks`' alone."""
+    zones = _data_weeks(ctx)
+    if _is_market_zone(ctx.data_zone):
+        return zones
+    for one in rules:
+        if one.kind == "published" and one.day_zone == DATA_ZONE and one.timezone and one.timezone not in zones:
+            zones += (one.timezone,)
+    return zones
+
+
+def _is_market_zone(zone: str) -> bool:
+    """Whether `zone` names a region's clock (`Europe/Warsaw`), not UTC, an `Etc/` zone or a fixed offset (`_market_clock`)."""
+    return not (zone == "UTC" or zone.startswith("Etc/") or "/" not in zone)
 
 
 def _shifts_after_source_lead(shifts: Sequence[Shift]) -> List[Shift]:
