@@ -534,12 +534,20 @@ def week(tmp_path_factory) -> Week:
     return out
 
 
+def once(records) -> Dict[tuple, str]:
+    """`keyed` of a day's records, which must be its 96 keys once each: a duplicate key can't hide behind the mapping."""
+    records = list(records)
+    out = keyed(records)
+    assert len(records) == len(out) == 96, (len(records), len(out))
+    return out
+
+
 def twin(week: Week, name: str, day: datetime.date) -> Dict[tuple, str]:
-    return keyed(lines(week.backtest / f"{name}.jsonl"), day)
+    return once(r for r in lines(week.backtest / f"{name}.jsonl") if r["run_date"] == day.isoformat())
 
 
 def equals_twin(week: Week, day: datetime.date, revision: int, names=NAMES) -> Dict[str, bool]:
-    return {name: keyed(week.revision(name, day, revision)) == twin(week, name, day) for name in names}
+    return {name: once(week.revision(name, day, revision)) == twin(week, name, day) for name in names}
 
 
 LISTS = {
@@ -632,6 +640,11 @@ def jsonable(value):
 def test_wednesday_r2_reads_exaa_and_every_model_equals_the_backtest(week):
     assert all(EXAA in names for names in lists_of(week, WED, 2))
     assert equals_twin(week, WED, 2) == dict.fromkeys(NAMES, True)
+    # main's list with EXAA wasn't in the 10-19 fit (stored on Sunday night, before EXAA of Monday was out): its units were
+    # fitted now, and fits.json says what they read beside the stored fit's sha256.
+    entry = week.json(WED, 2, "fits.json")["models"]["main"]["2026-10-19"]
+    assert entry["source"] == "stored" and entry["inline_units"] == 96 and len(entry["inline_rows_sha256"]) == 64
+    assert "inline_rows_sha256" not in week.json(WED, 1, "fits.json")["models"]["main"]["2026-10-19"]
 
 
 def test_wednesday_r2_is_delivered(week):
@@ -677,6 +690,11 @@ def test_friday_r2_records_main_s_skips_with_the_list_that_reads_exaa(week):
     assert {r["status"] for r in second} == {"missing_test_predictors"}
     for name in ("base", "naive", "live"):
         assert keyed(week.revision(name, FRI, 1)) == keyed(week.revision(name, FRI, 2))
+
+    def without_the_list(rows):
+        return once({k: v for k, v in r.items() if k not in ("list_hash", "predictor_list")} for r in rows)
+
+    assert without_the_list(first) == without_the_list(second)  # main's list alone differs
     assert equals_twin(week, FRI, 2) == dict.fromkeys(NAMES, True)
 
 
@@ -952,6 +970,15 @@ def test_no_key_mixes_revisions(week):
             for record in week.visible(name, policy):
                 by_day.setdefault(record["run_date"], set()).add(record["revision"])
             assert all(len(numbers) == 1 for numbers in by_day.values()), (name, policy)
+
+
+def test_no_live_record_has_an_actual(week):
+    """At 11:45 no target day's price is out (12:57): every live record's actual is missing, whatever its revision."""
+    for day, revisions in week.store().committed().items():
+        for number in revisions:
+            for name in NAMES:
+                actuals = [r.get("actual") for r in week.revision(name, datetime.date.fromisoformat(day), number)]
+                assert actuals and all(a is None or a != a for a in actuals), (name, day, number)
 
 
 def test_no_model_received_a_nan_input(week):

@@ -1071,20 +1071,38 @@ def issue_lists(plan: "IssuePlan") -> Dict[Tuple[int, int], List[str]]:
     return out
 
 
-def _fit_identity(plan: "IssuePlan", anchor: datetime.date, stored: Optional["StoredFit"]) -> Dict[str, Any]:
+def _rows_sha256(plan: "IssuePlan", anchor: datetime.date, keys: Iterable[UnitKey]) -> str:
+    """The sha256 of these units' `unit_rows_hash`es, in key order: what their fits read."""
+    hashes = hashlib.sha256()
+    for key in _sorted_keys(keys):
+        hashes.update(f"{key_text(key)}={unit_rows_hash(plan, anchor, key)}\n".encode())
+    return hashes.hexdigest()
+
+
+def _fit_identity(
+    plan: "IssuePlan",
+    anchor: datetime.date,
+    stored: Optional["StoredFit"],
+    inline: Sequence[UnitKey] = (),
+) -> Dict[str, Any]:
     """What a served forecast's fit was made from (the training data's identity of an issue's records): a stored fit's `fit.json`
-    sha256 and configuration digest; an inline fit's rows (`anchor_rows`) and the sha256 of its units' `unit_rows_hash`es."""
+    sha256 and configuration digest, with `inline_rows_sha256` over the units the stored anchor lacked and this call fitted
+    (`inline`); an inline fit's rows (`anchor_rows`) and the sha256 of its units' `unit_rows_hash`es."""
     if stored is not None:
         path = stored.directory / FIT_FILE
         try:
             digest = hashlib.sha256(path.read_bytes()).hexdigest()
         except OSError:
             digest = None
-        return {"fit_json_sha256": digest, "config_digest": stored.meta.get("config_digest")}
-    hashes = hashlib.sha256()
-    for key in _sorted_keys(plan.items.get(anchor, {})):
-        hashes.update(f"{key_text(key)}={unit_rows_hash(plan, anchor, key)}\n".encode())
-    return {"config_digest": plan.digest, "rows": anchor_rows(plan, anchor), "rows_sha256": hashes.hexdigest()}
+        out = {"fit_json_sha256": digest, "config_digest": stored.meta.get("config_digest")}
+        if inline:
+            out["inline_rows_sha256"] = _rows_sha256(plan, anchor, inline)
+        return out
+    return {
+        "config_digest": plan.digest,
+        "rows": anchor_rows(plan, anchor),
+        "rows_sha256": _rows_sha256(plan, anchor, plan.items.get(anchor, {})),
+    }
 
 
 def plan_issue(
@@ -1816,11 +1834,15 @@ def serve(
             # anchor's issue day before an input was out, and today's revision uses it) are fitted inline at the anchor, the
             # backtest's fit of them, under "previous" too: no older fit stands in for an anchor that is stored.
             missing = _sorted_keys(set(plan.items[anchor]) - set(units)) if stored.anchor == anchor else []
+            inline_keys: List[UnitKey] = []
             if missing and fit_missing != "skip":
                 check_published(plan, [anchor], current_clock().now(), data)
-                units.update(fitted_units(plan, anchor, missing)[1])
+                made, fitted = fitted_units(plan, anchor, missing)
+                units.update(fitted)
+                notes.extend(anchor_notes(plan, [meta for meta, _ in made]))
                 entry["inline_units"] = len(missing)
-            identity[anchor.isoformat()] = _fit_identity(plan, anchor, stored)
+                inline_keys = missing
+            identity[anchor.isoformat()] = _fit_identity(plan, anchor, stored, inline_keys)
             lookup[anchor] = (units, stored.anchor)
             fits[anchor.isoformat()] = entry
         elif inline:
