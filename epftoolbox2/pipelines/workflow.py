@@ -585,6 +585,34 @@ class Workflow:
             "deadline": deadlines[-1] if deadlines else None,  # the newest call's, an instant
         }
 
+    def monitor(self, windows: Sequence[int] = (7, 30, 90), alerts: Any = None, policy: str = "latest"):
+        """`ModelPipeline.monitor` of `live.save_dir`: the actuals are read from the data pipeline over the days the directory has
+        revisions for, the cut-off is the live deadline (the one `live.json` records without one), and the weekdays are the
+        pipeline's issue days."""
+        from ..results.live import LiveStore
+
+        dp, mp = self._live_pipelines()
+        live = self._live_settings()
+        store = LiveStore(self._live_dir())
+        if not store.is_live():
+            raise ValueError(f"{store.save_dir} is no live directory yet: nothing has been forecast into it")
+        days = sorted(store.committed())
+        if not days:
+            raise ValueError(f"{store.save_dir} has no committed revision yet: nothing to monitor")
+        _, horizons = resolve_horizons(self.model_horizon, self.model_horizons, 7)
+        end = pd.Timestamp(days[-1]) + pd.Timedelta(days=max(horizons) + 2)
+        frame = dp.run(days[0], end.date().isoformat(), **self._live_data_options())
+        return mp.monitor(
+            frame,
+            store.save_dir,
+            windows=windows,
+            policy=policy,
+            cutoff=live.deadline or "deadline",
+            alerts=alerts,
+            target=self.model_target,
+            issue_days=self.model_issue_days,
+        )
+
     def to_dict(self) -> dict:
         config: dict = {}
 

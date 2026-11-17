@@ -630,6 +630,17 @@ def cmd_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_monitor(args: argparse.Namespace) -> int:
+    try:
+        report = _live_workflow(args).monitor(args.windows, alerts=args.alert)
+    except Exception as exc:
+        return _failed(exc)
+    console.print(report.tables().to_string(index=False), markup=False, highlight=False, soft_wrap=True)
+    for alert in report.alerts:
+        console.print(f"ALERT {alert.message}", markup=False, highlight=False)
+    return 3 if report.alerts else 0
+
+
 _EXPERIMENT_TEMPLATE = """\
 data_pipeline:
   path: data_pipeline.yaml
@@ -739,6 +750,18 @@ def _wait_for(text: str):
     if not column or not time:
         raise argparse.ArgumentTypeError(f"{text!r} is not COLUMN=HH:MM or 'rules'")
     return column, time
+
+
+def _windows(text: str) -> tuple:
+    try:
+        windows = tuple(int(part) for part in text.split(","))
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"{text!r} is not whole numbers of days separated by commas (7,30,90)"
+        ) from None
+    if not windows or any(window < 1 for window in windows):
+        raise argparse.ArgumentTypeError(f"{text!r}: every window is at least 1 day")
+    return windows
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1050,6 +1073,18 @@ def build_parser() -> argparse.ArgumentParser:
     status_p = live_command("status", "Show what the live directory holds for an issue day")
     status_p.add_argument("--issue", type=_issue_day, default="today", metavar="DAY", help="today, tomorrow or a date")
 
+    monitor_p = live_command(
+        "monitor", "Score the live forecasts against what happened (exit 0, or 3 when an alert fires)"
+    )
+    monitor_p.add_argument(
+        "--windows",
+        type=_windows,
+        default=(7, 30, 90),
+        metavar="7,30,90",
+        help="Windows in issue days (default 7,30,90)",
+    )
+    monitor_p.add_argument("--alert", metavar="alerts.yaml", help="A YAML list of alert rules")
+
     # -- validate --
     val_p = sub.add_parser("validate", help="Validate a pipeline or workflow YAML")
     val_p.add_argument("yaml", metavar="pipeline.yaml", help="Path to YAML file to validate")
@@ -1100,6 +1135,7 @@ def main(argv: Optional[List[str]] = None, clock=None) -> Optional[int]:
         "refit": cmd_refit,
         "mark-delivered": cmd_mark_delivered,
         "status": cmd_status,
+        "monitor": cmd_monitor,
     }
     if clock is None:
         return dispatch[args.cmd](args)

@@ -545,3 +545,54 @@ def test_a_forecast_serves_the_fits_a_refit_stored(experiment, tmp_path):
     assert forecast(experiment) == 0
     fits = json.loads((tmp_path / "live" / "issues" / ISSUE / "r1" / "fits.json").read_text())
     assert fits and "stored" in json.dumps(fits).lower()
+
+
+# --- epf monitor ---------------------------------------------------------------------------------------------------------
+
+
+def monitor(experiment, *extra, at="2023-03-14T12:00+01:00"):
+    return cli.main(["monitor", str(experiment), "--windows", "7", *extra, "--as-of", at])
+
+
+def test_monitor_exits_0_without_an_alert_and_3_when_one_fires(experiment, tmp_path, capsys):
+    assert forecast(experiment) == 0
+    assert monitor(experiment) == 0
+    quiet = tmp_path / "quiet.yaml"
+    quiet.write_text(yaml.safe_dump([{"participation_below": 0.1}]))
+    assert monitor(experiment, "--alert", str(quiet)) == 0
+    loud = tmp_path / "alerts.yaml"
+    loud.write_text(yaml.safe_dump([{"delivered_below": 1.0}]))
+    capsys.readouterr()
+    assert monitor(experiment, "--alert", str(loud)) == 3
+    assert "ALERT" in capsys.readouterr().out
+
+
+def test_monitor_passes_its_windows_the_live_deadline_and_the_issue_days(experiment, tmp_path, monkeypatch):
+    seen = []
+    real = ModelPipeline.monitor
+
+    def spy(self, data, save_dir, **kwargs):
+        seen.append(kwargs)
+        return real(self, data, save_dir, **kwargs)
+
+    monkeypatch.setattr(ModelPipeline, "monitor", spy)
+    path = experiment_with(tmp_path, live=LIVE, issue_days=["monday", "tuesday"])
+    assert forecast(path) == 0
+    assert monitor(path) == 0
+    (kwargs,) = seen
+    assert kwargs["windows"] == (7,) and kwargs["cutoff"] == "11:55"
+    assert kwargs["issue_days"] == ["monday", "tuesday"] and kwargs["target"] == "price"
+
+
+def test_monitor_exits_1_without_a_live_directory_or_a_revision(experiment, tmp_path):
+    assert monitor(experiment) == 1
+    with LiveStore(tmp_path / "live").hold():
+        pass
+    assert monitor(experiment) == 1
+
+
+def test_monitor_windows_must_be_whole_days(experiment):
+    for windows in ("7,x", "0", ""):
+        with pytest.raises(SystemExit) as stop:
+            cli.main(["monitor", str(experiment), "--windows", windows])
+        assert stop.value.code == 2
