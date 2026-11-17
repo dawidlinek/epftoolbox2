@@ -62,7 +62,7 @@ model = TorchModel(module=MLP, module_params={"hidden": [256, 128], "dropout": 0
 | `tf32` | `False` | TF32 products on a GPU for this model's fits |
 | `random_state` | `0` | The base seed every network's seed is drawn from |
 | `newest_target` | `"d-1"` | The newest training target, as for every model ([Time and Calendars](/epftoolbox2/model-pipeline/time-and-calendars/)) |
-| `binary_mask` | `None` | Which rows decide the binary 0/1 inputs left unscaled; with `refit`, each fit's own |
+| `binary_mask` | `None` | Which rows decide the binary 0/1 inputs left unscaled: `None` and `"fit"` read each fit's own rows; `"first_day"` raises with a `refit`, whose default is `"7D"` |
 | `scaler` | `"standard"` | How the inputs are scaled; `output="day"` takes any scaler (the Invariant, `{"name": "asinh", "params": {"standardise": False}}`, did much better on price inputs and is `MLPDailyModel`'s default, see [the research's recipe](#the-researchs-recipe-reproduced)), `output="period"` only `"standard"` |
 | `name` | `"torch"` | The model's name |
 | `module_hash` | `None` | Set by a saved file: the hash of the module's file and its package's version (for a class with no module file, a `session-` token) when it was saved (see [Saving and loading](#saving-and-loading)) |

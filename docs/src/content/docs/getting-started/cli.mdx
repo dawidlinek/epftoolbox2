@@ -160,18 +160,14 @@ epf model model_pipeline.yaml \
     --test-end 2024-01-01
 ```
 
-**Required flags:**
-
-| Flag | Description |
-|------|-------------|
-| `--data FILE` | Input CSV file |
-| `--test-start DATE` | Test period start. Required with `--test-end`, unless `--validation` is given |
-| `--test-end DATE` | Test period end |
+**Required flag:** `--data FILE`, the input CSV file. A window to forecast is also needed: `--test-start` and `--test-end`, `--validation`, or both. With none of them the command exits 1 and says so.
 
 **Optional flags:**
 
 | Flag | Description |
 |------|-------------|
+| `--test-start DATE` | Test period start |
+| `--test-end DATE` | Test period end |
 | `--validation START END` | Validation period, or `--validation previous_year` for each 12 months of the test period served by the 12 months before them. Without a test period only these days are forecast. See [Validation and Test](/epftoolbox2/model-pipeline/validation-and-test/) |
 | `--target COL` | Target column name (default: `price`) |
 | `--horizon N` | Forecast horizon in days: every horizon from 1 to N (default: `7`) |

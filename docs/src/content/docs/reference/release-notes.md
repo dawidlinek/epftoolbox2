@@ -255,8 +255,8 @@ an issue day it didn't sample.
     forecast and no colours, which shifts the sheets after it. The `Summary` sheet's colour scale no longer covers the `forecasts` column, which
     it coloured like an error. `CsvExporter` is unchanged. `summary()` does not warn.
 
-- **Nothing after the issue day decides how a column is scaled.** (This describes `binary_mask="first_day"`, the rule up to 2.3;
-  the new default, `None`, reads each fit's own rows and has none of it, see Changed defaults.) A model leaves a 0/1 column unscaled and decides which columns
+- **`binary_mask="first_day"`: nothing after the issue day decides how a column is scaled.** (Only for `"first_day"`, the rule up to
+  2.3, kept for old results; the default, `None`, reads each fit's own rows and has none of this, see Changed defaults.) A model leaves a 0/1 column unscaled and decides which columns
   those are once per list, period and horizon (and window), from the training rows of one day. A column with no value in those rows,
   such as one that starts inside the test, can't tell. It stayed unscaled for good in a fixed list and in a function's list used on
   every issue day, and was decided on a later issue day of the list otherwise; whether a list was used on every day depended on the
@@ -327,6 +327,10 @@ an issue day it didn't sample.
 
 ### New
 
+- **`epf model` no longer needs `--test-start` and `--test-end`.** Both are optional now, as `--validation` takes a window of its
+  own: `epf model model_pipeline.yaml --data data.csv --validation previous_year` forecasts only the validation days (a validation-only
+  run, the test period untouched). A run with no window at all (none of `--test-start`/`--test-end`, `--validation`) exits 1 with
+  "No window to forecast". `epf verify` still requires both dates. See [CLI Reference](/epftoolbox2/getting-started/cli/#epf-model-model-pipeline-only).
 - **`pip install 'epftoolbox2[all]'`**: `[fast]`, `[torch]`, the tree extras, `[tune]`, `[t0]`, `[chronos]`, `[tabpfn]` and
   `[tabicl]` in one extra. `[timesfm]` and `[timestral]` (flagged licences) and `[patchtst-fm]` (resolved apart from every extra
   that holds torch) are installed by name. A build with the GIL only (TabPFN and CatBoost have no free-threaded wheels). See
@@ -415,13 +419,13 @@ an issue day it didn't sample.
   between final and provisional rows) reads the earlier of the clock's now and the machine's, so a clock ahead of real time
   can't leave provisional values in a real cache; waits on other processes (the tuner's for its workers, a results lock's) stay
   on real time. With `SYSTEM` every number is as before. A test that patched a source module's `time.sleep` must use a
-  `FakeClock` now: the sources no longer import `time`. Two waits keep real time whatever the clock (step 8b): a Retry-After
+  `FakeClock` now: the sources no longer import `time`. Two waits keep real time whatever the clock: a Retry-After
   given as an HTTP date is an instant on the server's clock, read against the machine's, and Energy-Charts' rate limit counts
   and waits real seconds, one limit per endpoint for the process, so a replay on a `FakeClock` against a real server keeps the
   server's limits; a test that drives that rate limit on a fake clock sets the source's `_clock` and `_sleep` (and `_wait`, its
   retries' waits, which follow the current clock). See [Clock](/epftoolbox2/reference/api/#clock).
 - **A refresh with a budget: `DataPipeline.run(..., budget=, deadline=, timeout=, retries=, on_failure=)` and `last_refresh`**
-  (step 8b). `budget` (seconds from now, on the clock) and `deadline` (an instant; a naive one in the pipeline's zone) bound the
+  `budget` (seconds from now, on the clock) and `deadline` (an instant; a naive one in the pipeline's zone) bound the
   whole refresh, the earlier counting (`deadline="11:55"` is that time today in the pipeline's zone, on the clock, never
   tomorrow, and warns when more than 12 h past; another string needs a full date): the sources are asked one after another, each within what is left, a request only while time is left and
   with its timeout cut to it, and a wait that would end at or after the deadline (a backoff, a Retry-After, Energy-Charts' rate
@@ -439,8 +443,7 @@ an issue day it didn't sample.
   and returns the same frame (a non-retried request error of PSE and Energy-Charts is raised with no exception context at all
   now, as ENTSO-E's was, instead of a suppressed one). A full hit of the source cache takes its lock only inside each read, no
   longer across them. See [Refresh with a budget](/epftoolbox2/data-pipeline/caching/#refresh-with-a-budget).
-- **Live directories: revisions visible once committed, deliveries, and readers by policy** (step 8c; the live calls that write them
-  come next). A live pipeline writes into a directory of its own (`live.json`), each call for an issue day a new revision of every
+- **Live directories: revisions visible once committed, deliveries, and readers by policy.** A live pipeline writes into a directory of its own (`live.json`), each call for an issue day a new revision of every
   model's records, numbered 1 + the highest number any line of the day carries and taken before its first record, so a crashed
   revision's number is never reused. Its records end with `issued_at`, `mode` `"live"` and `snapshot` after `revision` (three more
   Parquet columns in live parts), and the revision becomes visible only through its `committed` line in
@@ -457,7 +460,7 @@ an issue day it didn't sample.
   deadline is recorded. Backtest records, readers, manifests and Parquet parts are bit for bit as before (the live columns are in
   live parts alone). A JSONL store now writes records saved after its `flush()` (they were dropped; no backtest saves any), and
   saving into a closed store raises. See [Live records](/epftoolbox2/model-pipeline/caching/#live-records).
-- **`ModelPipeline.monitor`: how a live directory's forecasts did, skill first** (step 8h). `monitor(data, save_dir, *, windows=(7, 30,
+- **`ModelPipeline.monitor`: how a live directory's forecasts did, skill first.** `monitor(data, save_dir, *, windows=(7, 30,
   90), benchmarks=None, policy="latest", cutoff="deadline", backtest=None, alerts=None, target="price")` reads a live directory and
   writes nothing, and returns a `MonitorReport` (`tables()`, `by_window()`, `daily()`, `rungs()`, `quality()`, `alerts`). Each key is
   read from the revision `policy` names (`"latest"`, `"first"`, `"delivered"`) of those committed by the cut-off; its actual is the
@@ -472,7 +475,7 @@ an issue day it didn't sample.
   and `for_days` count issue days (run dates); a day no rung served is a skipped day. `alerts` (a list of mappings or a YAML file: `skill_above` for n days, `participation_below`, `delivered_below`,
   `rung_at_least`, `stale_input`) fire into `report.alerts`. `LossPanel` gained `day_ids` and `run_days`. Nothing that exists moves:
   backtests, records and tables are bit for bit as before. See [Monitoring](/epftoolbox2/operations/monitoring/).
-- **Snapshot archives and `ArchiveSource`: what the sources returned, when, replayed as an honest vintage** (step 8j).
+- **Snapshot archives and `ArchiveSource`: what the sources returned, when, replayed as an honest vintage.**
   `SnapshotArchive(path).record(data_pipeline, days_back=3, days_ahead=2)`, run by a job you schedule (cron, a systemd timer, SLURM:
   the library schedules nothing), fetches every source over the whole local days around today, bypassing every cache, and stores
   each frame as returned with a catalog line: when its answer was in hand on the clock, the range, rows, sha256 and the source's
@@ -483,8 +486,8 @@ an issue day it didn't sample.
   vintage="snapshot")`, which `with_source_rules` puts before every other rule (one naming its columns raises, a pattern matching one warns;
   a name with a built-in rule of the live API warns when read). A fetch with no rows or fewer columns exits `EXIT_WARNING` (4).
   `record_snapshot()`
-  records a pipeline YAML for a scheduled job; `record`'s `budget`, `deadline`, `timeout` and `retries` wait for the refresh budget
-  (step 8b) and raise until then. Nothing that doesn't read an archive moves. See
+  records a pipeline YAML for a scheduled job; `record`'s `budget`, `deadline`, `timeout` and `retries` aren't wired to the refresh budget
+  yet and raise. Nothing that doesn't read an archive moves. See
   [Snapshot Archives](/epftoolbox2/operations/snapshots/) and [ArchiveSource](/epftoolbox2/data-sources/archive/).
 - **Checks before export: `ModelPipeline(checks=ForecastChecks(...))`.** Each model's forecasts of a target day are checked before
   anything uses them: `periods` (every period the clock gives the day: 23, 24 or 24 hours, 92, 96 or 96 quarter-hours, the autumn
@@ -647,7 +650,7 @@ an issue day it didn't sample.
   group. Day units, models that read series and models that fit nothing (bar `bounds`) refuse them, and they aren't supported on a
   `ResidualModel` or on the model a `PooledModel` pools. With all three `None`, the default, no record, manifest or table moves.
   See [Common Parameters](/epftoolbox2/models/common-parameters/#generation-targets).
-- **What a sequence model reads, cut by the information set (internal).** The foundation models to come read series, not lagged
+- **What a sequence model reads, cut by the information set (internal).** Sequence models (the foundation models) read series, not lagged
   columns: `epftoolbox2.models._history` gives each forecast the target's context of a fixed number of steps in physical time,
   ending at its newest value known at the issue time (at the end of D-1 at the latest under `newest_target="d-1"`, the default),
   its past and known-ahead covariates on the same steps (the known-ahead ones to the end of the target day), and the (date, period)
@@ -659,7 +662,7 @@ an issue day it didn't sample.
 - **The `[torch]` extra and `epftoolbox2.nets`.** `pip install 'epftoolbox2[torch]'` installs torch (`uv.lock` takes it from
   PyTorch's CPU index); `epftoolbox2.nets` has `MLP(n_inputs, n_outputs, hidden=(256, 128), dropout=0.0, activation="relu")`, a
   counter-based `Dropout(p)` (its mask a hash of the member's key, the step, the layer and the element), `Linear(in_features,
-  out_features)` and `Activation(name)`, the layers the neural-network families to come stack. Their trainer is in place: members
+  out_features)` and `Activation(name)`, the layers the neural-network families stack. Their trainer: members
   of a fit in a loop or in padded stacks, each member's numbers its own (alone, in a stack of any size or order, with other
   learning rates), early stopping on a random share of the member's own training days with the best weights restored (a member
   that never had a finite loss there counts as failed), TF32 off and torch's threads set for each fit and put back after it,
@@ -674,10 +677,10 @@ an issue day it didn't sample.
   later row's `weather_cutoff` or `as_of` forecast is unknown), so a forecast that reads what it can't know through
   another item of its call is a `leak`, which the probe alone misses where the call is made of the run's own days. Both are on
   by default for the models that predict several items in one call (`_predicts_together`, or naming them with
-  `_co_batch_items(run_day)`) or have a card, the model families to come, and off for every other. `device` sets an attribute
+  `_co_batch_items(run_day)`) or have a card (the model families that need an extra or weights), and off for every other. `device` sets an attribute
   named `device` on the models that have one (`report.devices`; a warning when none has). `epf verify` takes `--device`,
   `--rerun`/`--no-rerun` and `--co-batch`/`--no-co-batch`. `VerifyReport.table()` gains the columns `rerun` and `co_batch`,
-  between `control moved` and `status`, empty for every model of today: **no status or other column moves**. `co_batch_probe`
+  between `control moved` and `status`, empty for every model without them: **no status or other column moves**. `co_batch_probe`
   joins `leakage_probe` in `epftoolbox2.information_set`, and `leakage_probe` and `positive_control` take `span=`. See
   [Verifying a Pipeline](/epftoolbox2/model-pipeline/verification/#rerun-and-co-batch).
 - **Several zones in one run, and `PooledModel`.** `ModelPipeline.run(data={"PL": df_pl, "FI": df_fi, ...})` runs every model once
@@ -695,16 +698,16 @@ an issue day it didn't sample.
   coefficient list per row) has each refit unit fitted once and predicted in one call: the issue rows of every day of the unit's block
   that the frame has with finite inputs, whichever days the run forecasts, padded to the rule's nominal length (7 rows for `"7D"`, 31
   for `"1MS"`) with copies of the first, each forecast taken from its own row. A forecast is then the same to the bit alone, in its
-  block, from any `test_start` and after a resume. It is for the in-context models to come, whose call costs as much for one row as
+  block, from any `test_start` and after a resume. It is for the in-context models, whose call costs as much for one row as
   for a week of them; `block_predict=False` predicts one row at a time, and the manifest records which. Such a class gets
   `_predicts_together` and `_co_batch_items` (the other days of the block), so `verify`'s co-batch check runs on it by default,
   and that check also runs the issue day on the frame cut after its date and requires the same forecasts to the bit
   (`issue_day_cut`, `CutResult` in `epftoolbox2.information_set`): a forecast that depends on which later days its call holds
-  is a `leak`. **No model of today defines it, and none of their numbers moves.** See [Extending](/epftoolbox2/reference/extending/#predicting-a-refit-block-in-one-call).
+  is a `leak`. **No model that existed before defined it, and none of their numbers moves.** See [Extending](/epftoolbox2/reference/extending/#predicting-a-refit-block-in-one-call).
 - **Day and pooled units: one fit of every period of a day at once.** A model class sets `_unit_kind = "day"` (rows are local dates,
   the outputs the P periods of the target day: `_fit_days(x, y, y_mask)` and `_predict_days(fitted, rows)`) or `"pooled"` (the
   (date, period) rows of every period, one output, with `period` a feature when a list names it: `_fit_model` and `_predict_block`,
-  and `target_transform="per_period"` or `"pooled"`), for the neural networks and tree models to come. A unit is fitted on the refit
+  and `target_transform="per_period"` or `"pooled"`), for the neural networks and tree models. A unit is fitted on the refit
   calendar, with dates as rows and `training_span` as for any model (under `newest_target="published"` each period on the W dates
   of its own period unit); a slot with no target (the hour a spring switch skips, the repeated autumn hour) is masked and drops out
   of its period alone;
@@ -715,7 +718,7 @@ an issue day it didn't sample.
   price_h23_d-1`), on every date the run's fits train on (an issue date's input is its last row's value; `verify` checks the whole
   frame). A list may change with the horizon and the issue day, not with the period. Manifests of such models record
   `unit_kind` and `target_transform`, compared on resume; `verify` runs the co-batch check and the cut frame on them by default.
-  **No model of today is one, and none of their numbers, records or manifests moves.** See [Extending](/epftoolbox2/reference/extending/#day-and-pooled-units).
+  **No model that existed before is one, and none of their numbers, records or manifests moves.** See [Extending](/epftoolbox2/reference/extending/#day-and-pooled-units).
 - **Model cards, weights and the pre-flight, for the families that need an extra or pretrained weights.** A family declares a
   `ModelCard` (licence, commercial use, revenue cap, attribution, corpus and its end, release, runtime packages with their pins, weight
   files with their sha256). `ModelPipeline.run`, each `Workflow` array task (before its data pipeline), `epf run` and `verify` (each
@@ -848,10 +851,10 @@ an issue day it didn't sample.
   `allow_restricted_prices=True`. The API allows 2 requests a minute per IP and endpoint: the source throttles itself, waits
   `Retry-After` and caches on disk. See [EnergyChartsSource](/epftoolbox2/data-sources/energy-charts/).
 - **`binary_mask=`: binary columns read on each fit's own rows, so no forecast depends on `test_start`.** Every model that fits takes
-  `binary_mask=None | "first_day" | "fit"`. Introduced with `None` as the rule of every release up to 2.3 (the default became
-  `"fit"`'s rule afterwards, see Changed defaults): without `refit` a list's binary 0/1 columns (left
-  unscaled) are read on the window's first day and kept for the window, so a column that is 0/1 there and not later (night-time
-  solar at 06:00 from a winter start) makes a forecast depend on where the test starts; with `refit` each unit reads its own rows.
+  `binary_mask=None | "first_day" | "fit"`. `None` was the rule of every release up to 2.3 and is now `"fit"`'s rule, `"first_day"` the old one
+  (see Changed defaults). Up to 2.3, without `refit` a list's binary 0/1 columns (left
+  unscaled) were read on the window's first day and kept for the window, so a column that is 0/1 there and not later (night-time
+  solar at 06:00 from a winter start) made a forecast depend on where the test started; with `refit` each unit reads its own rows.
   `"first_day"` names that rule and raises with `refit`. `"fit"` reads each fit's own training rows, before any row is dropped, as a
   refit unit does: its records are `refit="1D"`'s, and runs from any start share their forecasts bit for bit. It moves only forecasts
   whose own rows disagree with the first day's (none of 2,928 on Lago's DE data with OLS, LassoCV or LEAR; on the Polish week-ahead
@@ -955,7 +958,7 @@ an issue day it didn't sample.
   `train_on="matching"` list reads a `latest_revision` or `last_write_stamp` column on a day it trains on, naming it: a revised value
   can move the set of days and no probe sees it. `.during(valid_from=, valid_until=)` gives a rule the days it holds on, and a list of
   rules with disjoint periods is a column's rule over time, for a lag that changed (observed: PSE's settlement prices went from D+4 to
-  D+1 on business date 8 October 2026; the library has no PSE source yet). For such a column the check also reads the training rows
+  D+1 on business date 8 October 2026; `PseSource` now loads them). For such a column the check also reads the training rows
   (with `refit`, those of the refit day's fit) and every slot of a day aggregate, since an older value can come after a newer one;
   `check()` and `late_uses()` take them as `training_rows=TrainingRows(...)` and warn without; a model passes the frame's first date
   (`first_day`), before which no row exists or is judged, so a rule that starts on the frame's first date passes whatever the window.
