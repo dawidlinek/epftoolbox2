@@ -17,7 +17,10 @@ from epftoolbox2.results.availability import _parse_ranges
 from tests.synthetic import PREDICTORS, make_market_data
 
 PUBLISHED_13 = "published 13:00 Europe/Brussels on D-1 of delivery"
-PUBLISHED_10 = "published 10:00 Europe/Brussels on D-1 of delivery"
+PUBLISHED_10 = (
+    "published 10:00 Europe/Brussels on D-1 of delivery "
+    "(delivery days of the data's local dates, never before Europe/Brussels dates)"
+)
 REALISED = "known 1h after the end of the period"
 STATIC = "known in advance"
 INFO = InformationSet("11:45", "Europe/Warsaw")
