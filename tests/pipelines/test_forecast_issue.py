@@ -1082,3 +1082,22 @@ def test_a_chain_of_transformers_reads_back_the_sum_of_their_lookbacks(tmp_path)
 )
 def test_an_imputation_reads_back_its_limit_and_the_step_it_fills_from(imputer, days):
     assert imputer.lookback_days() == days
+
+
+def test_a_noop_on_a_spring_day_plans_the_keys_of_its_frame_s_zone(tmp_path):
+    """A data pipeline without a `timezone`, whose frame a TimezoneTransformer puts in Warsaw: the noop's export plans the 23
+    hours of the spring day as the committed revision did, with no spurious missing row."""
+    raw = market(days=75)
+    path = tmp_path / "market.csv"
+    raw.tz_convert("UTC").rename_axis("datetime").reset_index().to_csv(path, index=False)
+    data = DataPipeline(sources=[CsvSource(str(path))], transformers=[TimezoneTransformer("Europe/Warsaw")])
+    assert data.timezone is None
+    live = tmp_path / "live"
+    first = pipeline(ols()).forecast(
+        data, "2023-03-25", live, horizon=1, cache=False, span=("2023-01-20", "2023-04-01")
+    )
+    noop = pipeline(ols()).forecast(data, "2023-03-25", live, horizon=1, cache=False, ensure=True)
+    assert noop.noop and first.status == "ok"
+    products = noop.table("products")
+    assert len(products) == 23 and (products["status"] == "ok").all()
+    pd.testing.assert_frame_equal(products, first.table("products"))

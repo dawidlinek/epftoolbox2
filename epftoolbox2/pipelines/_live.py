@@ -937,7 +937,9 @@ def _issue(
                 if status in (OK, FALLBACK) and (limit is None or commit.finished <= limit):
                     # What that revision holds, so `frame()` and `export()` give what was committed.
                     held = committed_records(store, issue, settings.names, settings.formats, revision=number)
-                    data_zone = settings.data_zone
+                    # The zone its keys were planned in, as its commit line records it (a data pipeline's `timezone` may be
+                    # None, its frame's zone set by a transformer).
+                    data_zone = commit.line.get("data_timezone") or settings.data_zone
                     return result(
                         status,
                         revision=number,
