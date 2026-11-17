@@ -1,3 +1,4 @@
+import contextlib
 from datetime import date, datetime
 from typing import List, Optional, Tuple, Union, Dict, Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -19,6 +20,7 @@ from epftoolbox2.data.transformers.timezone import TimezoneTransformer
 from epftoolbox2.data.validators.base import Validator
 from epftoolbox2.data.validators.result import ValidationResult
 from epftoolbox2.data.cache_manager import (
+    no_source_cache_writes,
     CACHE_FORMAT_VERSION,
     CacheManager,
     align_to_local_days,
@@ -405,8 +407,10 @@ class DataPipeline:
                 only what its cache holds, which is settled rows, never the last two days before now or a tail the
                 source declared unsettled; its recent cells are missing, never filled with an older value. The run goes
                 on and ``last_refresh`` says what happened.
-            cache_writes: ``False`` reads the caches and writes nothing to them (no file, lock or directory): what isn't
-                cached is fetched and not recorded. For a dry run (``ModelPipeline.forecast(dry_run=True)``).
+            cache_writes: ``False`` reads the per-source and single-file caches and writes nothing to them (no file, lock
+                or directory), nor to a source's own response cache (``EnergyChartsSource``): what isn't cached is fetched and
+                not recorded. ``EpftoolboxBenchmarkSource`` still saves its one-time, md5-checked Zenodo download. For a dry
+                run (``ModelPipeline.forecast(dry_run=True)``).
 
         Without ``budget``, ``deadline``, ``timeout``, ``retries`` and ``on_failure`` a run is what it was before
         they existed: the same requests, waits and frame. ``last_refresh`` holds a ``RefreshRecord`` of the run, each
@@ -437,7 +441,8 @@ class DataPipeline:
         self.validation_results = {}
 
         try:
-            result = self._load_or_fetch_sources(start, end, cache, refresh, cache_writes)
+            with contextlib.nullcontext() if cache_writes else no_source_cache_writes():
+                result = self._load_or_fetch_sources(start, end, cache, refresh, cache_writes)
         finally:
             self.last_refresh = refresh.record(start, end)
         if result.empty:

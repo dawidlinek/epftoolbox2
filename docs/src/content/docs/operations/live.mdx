@@ -99,8 +99,9 @@ What the call does, in order:
 An exception writes an `error` call line (exit 1) when it can and is raised: a late `ctx.value()` under `availability="raise"`
 raises live as in a backtest. `dry_run=True` does everything but write, and refuses what the call would (another issue zone or
 issue days, a live manifest of another configuration): the status and exit code the call would give, nothing in the directory
-(not even the lock file or the call line) and nothing in the sources' caches, which it reads
-(`DataPipeline.run(cache_writes=False)`).
+(not even the lock file or the call line) and nothing in the per-source and single-file caches or Energy-Charts' answer cache,
+which it reads (`DataPipeline.run(cache_writes=False)`). The one thing it may still write is `EpftoolboxBenchmarkSource`'s
+one-time, md5-checked Zenodo download, if that file isn't there yet.
 
 A `noop` and an `unchanged` result hold the committed revision's records, so `frame()` and `export()` give what was committed;
 those of a `busy` or `late` one raise, naming the status.

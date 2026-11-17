@@ -20,6 +20,7 @@ import json
 import os
 import uuid
 from collections import Counter
+import contextvars
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Callable, Dict, Iterator, List, Optional, Tuple
@@ -275,6 +276,29 @@ def _still_published_tail_cap(df: pd.DataFrame, now: pd.Timestamp) -> Optional[p
         step = _local_steps(diffs)[-1]
         caps.append(last_valid + step)
     return min(caps) if caps else None
+
+
+# Whether a source may write a response cache of its own (`EnergyChartsSource`'s): False inside `no_source_cache_writes()`, which
+# `DataPipeline.run(cache_writes=False)` (a dry run's refresh) holds around its sources. Per context, so another thread's runs
+# keep writing theirs.
+_SOURCE_CACHE_WRITES: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "epftoolbox2_source_cache_writes", default=True
+)
+
+
+def source_cache_writes() -> bool:
+    """Whether a source may write its own response cache now (see `no_source_cache_writes`)."""
+    return _SOURCE_CACHE_WRITES.get()
+
+
+@contextmanager
+def no_source_cache_writes() -> Iterator[None]:
+    """Inside, a source reads its own response cache and writes nothing to it."""
+    token = _SOURCE_CACHE_WRITES.set(False)
+    try:
+        yield
+    finally:
+        _SOURCE_CACHE_WRITES.reset(token)
 
 
 class CacheManager:

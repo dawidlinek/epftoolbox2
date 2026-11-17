@@ -536,6 +536,42 @@ def test_a_settled_answer_is_read_from_disk_the_second_time(tmp_path):
     assert len(list((tmp_path / "cache").glob("*.json"))) == 2
 
 
+def test_a_dry_run_s_refresh_reads_the_answers_cache_and_writes_nothing(tmp_path):
+    """`DataPipeline.run(cache_writes=False)` (a dry run's refresh) holds `no_source_cache_writes()`: a cached answer is read, a
+    new one isn't kept."""
+    from epftoolbox2.data.cache_manager import no_source_cache_writes
+    from epftoolbox2.data.transformers import TimezoneTransformer
+    from epftoolbox2.pipelines import DataPipeline
+
+    api = FakeApi()
+    with no_source_cache_writes():
+        first = make(tmp_path, api, type=["forecast", "price"], production_types=["solar"]).fetch(*SPRING_DAY)
+    assert len(api.calls) == 2 and not list((tmp_path / "cache").glob("*.json"))
+    make(tmp_path, api, type=["forecast", "price"], production_types=["solar"]).fetch(*SPRING_DAY)
+    written = {path: path.read_bytes() for path in (tmp_path / "cache").glob("*.json")}
+    with no_source_cache_writes():
+        again = make(tmp_path, api, type=["forecast", "price"], production_types=["solar"]).fetch(*SPRING_DAY)
+    assert len(api.calls) == 4 and {path: path.read_bytes() for path in (tmp_path / "cache").glob("*.json")} == written
+    pd.testing.assert_frame_equal(first, again)
+    seen = []
+
+    class Recording(type(make(tmp_path, api, type=["price"]))):
+        def fetch(self, start, end):
+            from epftoolbox2.data.cache_manager import source_cache_writes
+
+            seen.append(source_cache_writes())
+            return super().fetch(start, end)
+
+    source = Recording("de", type=["price"], cache_dir=str(tmp_path / "other"), prefix="")
+    source.session, source._now = api, lambda: pd.Timestamp("2026-11-08 09:00", tz="UTC")
+    pipeline = DataPipeline(
+        sources=[source], transformers=[TimezoneTransformer("Europe/Berlin")], timezone="Europe/Berlin"
+    )
+    pipeline.run(*SPRING_DAY, cache_writes=False)
+    pipeline.run(*SPRING_DAY)
+    assert seen == [False, True]
+
+
 def test_use_cache_false_asks_every_time_and_writes_nothing(tmp_path):
     api = FakeApi()
     source = make(tmp_path, api, type=["price"], use_cache=False)

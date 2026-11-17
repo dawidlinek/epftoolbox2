@@ -597,6 +597,10 @@ class EnergyChartsSource(DataSource):
         return base / f"{endpoint}-{digest}.json"
 
     def _cache_write(self, path: Path, payload: Dict[str, Any]) -> None:
+        from ..cache_manager import source_cache_writes
+
+        if not source_cache_writes():  # a dry run's refresh reads this cache and writes nothing
+            return
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             tmp = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
