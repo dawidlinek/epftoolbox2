@@ -147,3 +147,41 @@ def test_a_half_hour_profile_slot_is_judged_at_its_own_time_without_being_told()
     assert {(v.predictor, v.period) for v in found} == {
         (name, p) for name in ("load_actual_s20", "load_actual_s30") for p in range(24)
     }
+
+
+@pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason="the built-in A31 rule (week_zone='data') on a market's frame converted to UTC and issued on UTC's clock reads the "
+    "week in UTC dates alone: Warsaw's Monday 00:00 (23:00Z on Sunday) falls in the week before, published a week early",
+)
+def test_a31_on_a_utc_frame_issued_in_utc_is_never_read_before_its_friday():
+    """A Warsaw frame converted to UTC, issued at 12:00 UTC: `_data_weeks` reads UTC's dates and the issue zone's, UTC's too, so
+    the hour from 23:00Z on Sunday is dated to the week before and `load_forecast_daily_max_d+3`, issued on Thursday, is called
+    known though Friday's publication of its week is a day later (15 cells in three January weeks). The A65/A69 rules read
+    Brussels' dates too there (`LATER_OF_DATA_AND_RULE`); A31 has no such floor. Found in review of
+    fix/load-wind-solar-local-days, not fixed there."""
+    first, last = "2025-01-06", "2025-01-26"
+    index = pd.date_range(
+        (pd.Timestamp(first) - pd.Timedelta(days=3)).tz_localize("Europe/Warsaw"),
+        (pd.Timestamp(last) + pd.Timedelta(days=12)).tz_localize("Europe/Warsaw"),
+        freq="h",
+        inclusive="left",
+    ).tz_convert("UTC")
+    info = InformationSet("12:00", "UTC")
+    days = pd.date_range(first, last, freq="D")
+    clock = info._issue_clock(days, index, "1h")
+    early = []
+    for k in range(8):
+        name = f"load_forecast_daily_max_d+{k}" if k else "load_forecast_daily_max"
+        found = clock.available(info._resolve_for(name, 60), np.arange(24), 60)
+        for d, day in enumerate(days):
+            for p in range(24):
+                if found[p, d] > clock.issue[d]:
+                    continue
+                local = (day + pd.Timedelta(days=k, hours=p)).tz_localize("UTC").tz_convert("Europe/Warsaw")
+                date = local.tz_localize(None).normalize()
+                friday = date - pd.Timedelta(days=date.weekday() + 3) + pd.Timedelta(hours=10)
+                if friday.tz_localize("Europe/Brussels") > (day + pd.Timedelta(hours=12)).tz_localize("UTC"):
+                    early.append((str(day.date()), p, name))
+    assert early == [], f"{len(early)} cells known before their week was published, e.g. {early[:3]}"
