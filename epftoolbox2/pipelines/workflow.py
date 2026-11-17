@@ -16,6 +16,7 @@ from ..models._engine import engine_from_yaml
 from ..results.report import EvaluationReport
 from ..results.store import DEFAULT_SAVE_FORMAT, check_save_format
 from ..logging import get_logger
+from ._live_settings import FORECAST_KEYS, LiveSettings
 from ._yaml import dump_yaml
 
 logger = get_logger(__name__)
@@ -151,8 +152,8 @@ class Workflow:
 
     def __init__(
         self,
-        data_start: str,
-        data_end: str,
+        data_start: Optional[str],
+        data_end: Optional[str],
         model_test_start: Optional[str] = None,
         model_test_end: Optional[str] = None,
         data_pipeline: Optional[Union[str, Path]] = None,
@@ -176,7 +177,12 @@ class Workflow:
         model_issue_days: Optional[Sequence[str]] = None,
         model_save_format: str = DEFAULT_SAVE_FORMAT,
         model_save_coefficients: bool = True,
+        live: Union[None, dict, LiveSettings] = None,
     ):
+        if live is None and (data_start is None or data_end is None):
+            raise ValueError(
+                "data_start and data_end are needed to run a backtest: a workflow without them is live-only"
+            )
         resolve_horizons(model_horizon, model_horizons, 7)  # both, or a list that isn't one, raise before anything runs
         resolve_issue_days(model_issue_days)
         check_save_format(model_save_format)
@@ -205,6 +211,13 @@ class Workflow:
         self.model_test = model_test
         self.model_save_format = model_save_format
         self.model_save_coefficients = model_save_coefficients
+        self.live = None if live is None else LiveSettings.from_dict(live)
+        if self.live is not None and self.live.on_failure == "cache" and (cache_path or isinstance(data_cache, str)):
+            raise ValueError(
+                "live.on_failure: cache falls back to the per-source caches, which a single-file cache "
+                "(data_pipeline.cache: <path> or environment.cache_path) doesn't have: use data_pipeline.cache: true, or "
+                "another on_failure"
+            )
         refuse_forecast_only_into_save_dir(self.model_forecast_only, self.model_save_dir)
         self._yaml_dir: Optional[Path] = None  # set by load(), used for relative path resolution
         self._dp_inline: dict = {}  # inline sources/transformers/validators overrides
@@ -309,6 +322,8 @@ class Workflow:
         return self._resolve(self.model_save_dir) if self.model_save_dir else None
 
     def _run_data(self, dp: Optional[DataPipeline] = None):  # noqa: ANN202
+        if self.data_start is None or self.data_end is None:
+            raise ValueError("data_pipeline.start and end are not set: this workflow is live-only (epf forecast)")
         cache = self.cache_path if self.cache_path else self.data_cache
         dp = dp if dp is not None else self._build_data_pipeline()
         return dp.run(start=self.data_start, end=self.data_end, cache=cache)
@@ -421,6 +436,200 @@ class Workflow:
             test=self.model_test,
         )
 
+    # --- live calls (step 8i): `epf forecast`, `refit`, `status`, `mark-delivered` and `monitor` -------------------------------
+
+    def _live_settings(self) -> LiveSettings:
+        if self.live is None:
+            raise ValueError(
+                "this workflow has no live: section (live.save_dir at least): see the docs page Live Forecasts"
+            )
+        if self.model_index is not None:
+            raise ValueError(
+                "live calls run the whole pipeline: a workflow with environment.model_index is an array task"
+            )
+        return self.live
+
+    def _live_pipelines(self) -> tuple:
+        """The data pipeline and the model pipeline of a live call: as `run` builds them, with the information set knowing the
+        configured sources' columns."""
+        self._live_settings()
+        self._apply_environment()
+        mp = self._build_model_pipeline()
+        dp = self._build_data_pipeline()
+        if mp.information_set is not None:
+            mp.information_set = mp.information_set.with_source_rules([*dp.sources, *dp.transformers])
+        preflight(mp.models)
+        return dp, mp
+
+    def _live_dir(self) -> Path:
+        return self._resolve(self._live_settings().save_dir)
+
+    def _live_cache(self) -> Any:
+        """The cache of a live refresh: the workflow's cache path or setting, and the per-source caches when it sets none (the
+        fallback to the cache, `on_failure="cache"`, needs them)."""
+        return (self.cache_path or self.data_cache) or True
+
+    def _live_data_options(self) -> dict:
+        """What a refresh of the data pipeline takes besides its range (`refit` and `monitor`): the live section's limits and
+        the cache. `forecast()` takes the same from its own arguments."""
+        from ..pipelines._live import seconds
+
+        live = self._live_settings()
+        options = {
+            "cache": self._live_cache(),
+            "budget": seconds(live.budget, "budget"),
+            "timeout": seconds(live.timeout, "timeout"),
+            "retries": live.retries,
+            "on_failure": live.on_failure,
+        }
+        return {key: value for key, value in options.items() if value is not None}
+
+    def _run_shape(self) -> dict:
+        """The run arguments `forecast`, `refit` and `monitor` share with `run`."""
+        return {
+            "target": self.model_target,
+            "horizon": self.model_horizon,
+            "horizons": self.model_horizons,
+            "freq": self.model_freq,
+            "issue_days": self.model_issue_days,
+        }
+
+    def forecast(
+        self,
+        issue: Any = "today",
+        *,
+        ensure: bool = False,
+        refresh: str = "auto",
+        dry_run: bool = False,
+        **options: Any,
+    ):
+        """`ModelPipeline.forecast` of the live section: the data pipeline refreshed, the models served into `live.save_dir`.
+
+        The keys of the section that `forecast()` takes reach it as written; `options` (the same names) replace them for this
+        call. Returns the `ForecastResult`; `export_result` writes `live.export`."""
+        live = self._live_settings()
+        unknown = sorted(set(options) - set(FORECAST_KEYS))
+        if unknown:
+            raise TypeError(f"forecast() takes the live keys {list(FORECAST_KEYS)}, not {unknown}")
+        dp, mp = self._live_pipelines()
+        merged = {**live.forecast_options(), **{key: value for key, value in options.items() if value is not None}}
+        return mp.forecast(
+            dp,
+            issue,
+            self._live_dir(),
+            ensure=ensure,
+            refresh=refresh,
+            dry_run=dry_run,
+            save_format=self.model_save_format,
+            cache=self._live_cache(),
+            **merged,
+            **self._run_shape(),
+        )
+
+    def export_result(self, result: Any) -> Optional[Path]:
+        """Write `live.export` for `result` (path with `{issue}` filled in, relative to the YAML): the delivered model's
+        forecasts. Nothing for a call that has none (busy, late), a dry run, or without an export section. A noop (`--ensure`)
+        or unchanged call exports from the committed revision's records only when the file for the issue is missing, so
+        a retry after a failed export writes it and a repeat call leaves a delivered file alone. Returns the path written."""
+        export = self._live_settings().export
+        if export is None or result.dry_run or result.status in ("busy", "late"):
+            return None
+        path = self._resolve(export["path"].format(issue=result.issue))
+        if (result.noop or result.unchanged) and path.exists():
+            return None
+        return result.export(path, format=export["format"], grid=export["grid"])
+
+    def refit(self, issue: Any = "today", *, if_due: bool = True, refresh: str = "auto"):
+        """`ModelPipeline.refit` into `live.save_dir` for the issue day: the data pipeline refreshed over the range the fits
+        read (the live section's budget, timeout, retries and on_failure); `refresh="never"` reads the per-source caches alone."""
+        if refresh not in ("auto", "never"):
+            raise ValueError(f"refresh must be 'auto' or 'never', got {refresh!r}")
+        from ..pipelines._live import data_span, issue_zone, resolve_issue
+
+        dp, mp = self._live_pipelines()
+        _, horizons = resolve_horizons(self.model_horizon, self.model_horizons, 7)
+        day = resolve_issue(issue, issue_zone(mp.information_set, dp))
+        options = self._live_data_options()
+        if refresh == "never":  # as forecast(refresh="never"): no time for any request
+            options.update(cache=True, budget=0, on_failure="cache")
+        frame = dp.run(*data_span(mp.models, day, horizons, dp), **options)
+        return mp.refit(frame, self._live_dir(), issue=day, if_due=if_due, **self._run_shape())
+
+    def _live_store(self) -> Any:
+        """The live directory's store, for the calls that read files alone: no pipeline is built, no extra imported, no key read."""
+        from ..results.live import LiveStore
+        from ..results.store import LiveDirectoryError
+
+        store = LiveStore(self._live_dir())
+        if not store.is_live():
+            raise LiveDirectoryError(f"{store.save_dir} is no live directory yet: nothing has been forecast into it")
+        return store
+
+    def _issue_day(self, issue: Any, store: Any) -> Any:
+        """`issue` as a date: "today" is read in the issue zone `live.json` records."""
+        from ..pipelines._live import resolve_issue
+
+        zone = store.zone()
+        if zone is None:
+            raise ValueError(
+                f"{store.identity_path} records no issue_timezone, so 'today' can't be read: give the date"
+            )
+        return resolve_issue(issue, zone)
+
+    def mark_delivered(self, issue: Any, revision: int, receipt: Union[str, Path], dry_run: bool = False) -> dict:
+        """Record that `revision` of the issue day was delivered, as `ModelPipeline.mark_delivered` does, from the live directory
+        alone; `issue` may be "today" (in the zone `live.json` records)."""
+        store = self._live_store()
+        day = self._issue_day(issue, store)
+        with store.hold(create=not dry_run):
+            return store.mark_delivered(day, revision, receipt, dry_run=dry_run)
+
+    def status(self, issue: Any = "today") -> dict:
+        """What the live directory holds for one issue day: its call lines in order, its committed revisions, its deliveries,
+        the newest call's deadline and the newest committed revision's status. Reads the live directory's files only: no pipeline is built."""
+        store = self._live_store()
+        day = self._issue_day(issue, store).isoformat()
+        calls = [line for line in store.calls() if line.get("issue") == day]
+        deadlines = [line["deadline"] for line in calls if line.get("deadline")]
+        committed = store.committed(day).get(day, {})
+        latest = committed[max(committed)] if committed else None
+        return {
+            "issue": day,
+            "calls": calls,
+            "committed": sorted(committed),
+            "latest": None if latest is None else {"revision": latest.revision, "status": latest.line.get("status")},
+            "deliveries": store.deliveries(day),
+            "deadline": deadlines[-1] if deadlines else None,  # the newest call's, an instant
+        }
+
+    def monitor(self, windows: Sequence[int] = (7, 30, 90), alerts: Any = None, policy: str = "latest"):
+        """`ModelPipeline.monitor` of `live.save_dir`: the actuals are read from the data pipeline over the days the directory has
+        revisions for, the cut-off is the live deadline (the one `live.json` records without one), and the weekdays are the
+        pipeline's issue days."""
+        from ..results.live import LiveStore
+
+        dp, mp = self._live_pipelines()
+        live = self._live_settings()
+        store = LiveStore(self._live_dir())
+        if not store.is_live():
+            raise ValueError(f"{store.save_dir} is no live directory yet: nothing has been forecast into it")
+        days = sorted(store.committed())
+        if not days:
+            raise ValueError(f"{store.save_dir} has no committed revision yet: nothing to monitor")
+        _, horizons = resolve_horizons(self.model_horizon, self.model_horizons, 7)
+        end = pd.Timestamp(days[-1]) + pd.Timedelta(days=max(horizons) + 2)
+        frame = dp.run(days[0], end.date().isoformat(), **self._live_data_options())
+        return mp.monitor(
+            frame,
+            store.save_dir,
+            windows=windows,
+            policy=policy,
+            cutoff=live.deadline or "deadline",
+            alerts=alerts,
+            target=self.model_target,
+            issue_days=self.model_issue_days,
+        )
+
     def to_dict(self) -> dict:
         config: dict = {}
 
@@ -438,7 +647,12 @@ class Workflow:
         if env:
             config["environment"] = env
 
-        dp: dict = {"start": self.data_start, "end": self.data_end, "cache": self.data_cache}
+        dp: dict = {}
+        if self.data_start is not None:  # a live-only workflow has none: forecast() computes the range from the models
+            dp["start"] = self.data_start
+        if self.data_end is not None:
+            dp["end"] = self.data_end
+        dp["cache"] = self.data_cache
         if self.data_pipeline is not None:
             dp["path"] = self.data_pipeline
         dp.update(self._dp_inline)
@@ -476,6 +690,8 @@ class Workflow:
             mp["path"] = self.model_pipeline
         mp.update(self._mp_inline)
         config["model_pipeline"] = mp
+        if self.live is not None:
+            config["live"] = self.live.to_dict()
 
         return _plain(config)
 
@@ -495,11 +711,13 @@ class Workflow:
         dp = config["data_pipeline"]
         mp = config["model_pipeline"]
 
+        if "live" in config and config["live"] is None:
+            raise ValueError("live: needs save_dir, the live directory")
         workflow = cls(
             data_pipeline=dp.get("path"),
             model_pipeline=mp.get("path"),
-            data_start=dp["start"],
-            data_end=dp["end"],
+            data_start=dp["start"] if "live" not in config else dp.get("start"),
+            data_end=dp["end"] if "live" not in config else dp.get("end"),
             data_cache=dp.get("cache", False),
             model_test_start=mp.get("test_start"),
             model_test_end=mp.get("test_end"),
@@ -521,6 +739,7 @@ class Workflow:
             models_per_task=env.get("models_per_task"),
             model_save_format=mp.get("save_format", DEFAULT_SAVE_FORMAT),
             model_save_coefficients=mp.get("save_coefficients", True),
+            live=config.get("live"),
         )
         workflow._yaml_dir = path.parent
         workflow._dp_inline = {k: dp[k] for k in _DP_SECTIONS if k in dp}

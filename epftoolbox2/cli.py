@@ -1,5 +1,6 @@
 import argparse
 import contextlib
+import datetime
 import sys
 from pathlib import Path
 from typing import List, Optional
@@ -541,6 +542,121 @@ def cmd_validate(args: argparse.Namespace) -> None:
         sys.exit(1)
 
 
+# ---------------------------------------------------------------------------
+# Live commands (step 8i): forecast, refit, mark-delivered, status, monitor, snapshot
+#
+# Each returns its exit code (`main` hands it to the shell): `forecast` the code of the issue status (0 ok, 10 fallback,
+# 20 skipped, 30 late, 75 busy), `monitor` 0 or 3 (an alert fired), `snapshot` 0, 4 (a warning) or 1, the others 0, and every
+# command 1 when it raised (the message goes to the console). A usage mistake is argparse's 2.
+# ---------------------------------------------------------------------------
+
+
+def _live_workflow(args: argparse.Namespace):
+    from .pipelines.workflow import Workflow
+
+    return Workflow.load(args.yaml)
+
+
+def _failed(exc: BaseException) -> int:
+    console.print(f"[red]Error:[/red] {escape(f'{type(exc).__name__}: {exc}')}")
+    return 1
+
+
+def cmd_forecast(args: argparse.Namespace) -> int:
+    try:
+        workflow = _live_workflow(args)
+        options = {}
+        if args.deadline is not None:
+            options["deadline"] = args.deadline
+        if args.wait_for:
+            options["wait_for"] = "rules" if args.wait_for == ["rules"] else dict(args.wait_for)
+        result = workflow.forecast(
+            args.issue, ensure=args.ensure, refresh=args.refresh, dry_run=args.dry_run, **options
+        )
+    except Exception as exc:
+        return _failed(exc)
+    detail = [f"issue {result.issue}", f"status {result.status}", f"exit {result.exit_code}"]
+    if result.revision is not None:
+        detail.append(f"revision {result.revision}")
+    detail += [name for name in ("noop", "unchanged", "dry_run") if getattr(result, name)]
+    if result.missing:
+        detail.append(f"{result.missing} of {result.planned} keys of {result.delivered} missing")
+    console.print(", ".join(detail), markup=False, highlight=False)
+    # The status is the forecast's whatever happens to the export: a failed export is its own error, after the status line.
+    try:
+        exported = workflow.export_result(result)
+    except Exception as exc:
+        console.print("The forecast stands; its export failed:", markup=False, highlight=False)
+        return _failed(exc)
+    if exported is not None:
+        console.print(f"exported {exported}", markup=False, highlight=False)
+    return result.exit_code
+
+
+def cmd_refit(args: argparse.Namespace) -> int:
+    try:
+        result = _live_workflow(args).refit(args.issue, if_due=args.if_due, refresh=args.refresh)
+    except Exception as exc:
+        return _failed(exc)
+    for model, anchors in result.fitted.items():
+        console.print(f"{model}: fitted {', '.join(anchors) or 'nothing'}", markup=False, highlight=False)
+    if result.noop:
+        console.print(f"issue {result.issue}: nothing to fit", markup=False, highlight=False)
+    return 0
+
+
+def cmd_mark_delivered(args: argparse.Namespace) -> int:
+    try:
+        line = _live_workflow(args).mark_delivered(args.issue, args.revision, args.receipt, dry_run=args.dry_run)
+    except Exception as exc:
+        return _failed(exc)
+    verb = "would record" if args.dry_run else "recorded"
+    console.print(
+        f"{verb} the delivery of revision {line['revision']} of {line['issue']}", markup=False, highlight=False
+    )
+    return 0
+
+
+def cmd_status(args: argparse.Namespace) -> int:
+    try:
+        status = _live_workflow(args).status(args.issue)
+    except Exception as exc:
+        return _failed(exc)
+    lines = [f"issue {status['issue']}  (deadline {status['deadline'] or 'none recorded'})"]
+    for call in status["calls"]:
+        revision = "-" if call.get("revision") is None else f"r{call['revision']}"
+        kept = "committed" if call.get("committed") else "not committed"
+        lines.append(f"  {call.get('finished', call.get('started', '?'))}  {revision:>4}  {call.get('status')}  {kept}")
+    latest = status["latest"]
+    lines.append("latest committed: " + ("none" if latest is None else f"r{latest['revision']} ({latest['status']})"))
+    for delivery in status["deliveries"]:
+        lines.append(f"  delivered r{delivery['revision']} at {delivery['delivered_at']}")
+    console.print("\n".join(lines), markup=False, highlight=False)
+    return 0
+
+
+def cmd_monitor(args: argparse.Namespace) -> int:
+    try:
+        report = _live_workflow(args).monitor(args.windows, alerts=args.alert)
+    except Exception as exc:
+        return _failed(exc)
+    console.print(report.tables().to_string(index=False), markup=False, highlight=False, soft_wrap=True)
+    for alert in report.alerts:
+        console.print(f"ALERT {alert.message}", markup=False, highlight=False)
+    return 3 if report.alerts else 0
+
+
+def cmd_snapshot(args: argparse.Namespace) -> int:
+    from .data.archive import record_snapshot
+
+    try:
+        result = record_snapshot(args.yaml, args.archive, days_back=args.days_back, days_ahead=args.days_ahead)
+    except Exception as exc:
+        return _failed(exc)
+    console.print(result.summary(), markup=False, highlight=False)
+    return result.exit_code
+
+
 _EXPERIMENT_TEMPLATE = """\
 data_pipeline:
   path: data_pipeline.yaml
@@ -616,6 +732,59 @@ def cmd_init(args: argparse.Namespace) -> None:
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
+
+
+AS_OF_HELP = (
+    "Run on a fake clock starting at this instant (with a UTC offset, e.g. 2026-10-21T08:45+02:00): sleeps pass at once. "
+    "For replays over cached or offline data, so forecast and refit need --refresh never with it (a real fetch would put "
+    "today's values under a past time)"
+)
+
+
+def _issue_day(text: str) -> str:
+    """An issue day argument: today, tomorrow, yesterday, or an ISO date."""
+    relative = {"today": "today", "tomorrow": "today_d+1", "yesterday": "today_d-1"}
+    if text.lower() in relative:
+        return relative[text.lower()]
+    try:
+        return datetime.date.fromisoformat(text).isoformat()
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{text!r} is not today, tomorrow, yesterday or a date (YYYY-MM-DD)") from None
+
+
+def _as_of(text: str):
+    import pandas as pd
+
+    try:
+        instant = pd.Timestamp(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{text!r} is not an instant") from None
+    if instant is pd.NaT or instant.tzinfo is None:
+        raise argparse.ArgumentTypeError(
+            f"{text!r} has no UTC offset: whose clock it is can't be told (2026-10-21T08:45+02:00)"
+        )
+    return instant
+
+
+def _wait_for(text: str):
+    if text == "rules":
+        return "rules"
+    column, _, time = text.partition("=")
+    if not column or not time:
+        raise argparse.ArgumentTypeError(f"{text!r} is not COLUMN=HH:MM or 'rules'")
+    return column, time
+
+
+def _windows(text: str) -> tuple:
+    try:
+        windows = tuple(int(part) for part in text.split(","))
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"{text!r} is not whole numbers of days separated by commas (7,30,90)"
+        ) from None
+    if not windows or any(window < 1 for window in windows):
+        raise argparse.ArgumentTypeError(f"{text!r}: every window is at least 1 day")
+    return windows
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -866,6 +1035,96 @@ def build_parser() -> argparse.ArgumentParser:
         "read), and finish a later rung's setup a killed worker left",
     )
 
+    # -- live commands --
+    def live_command(
+        name: str,
+        help_text: str,
+        yaml_help: str = "Path to workflow YAML (with a live: section)",
+        as_of_help: Optional[str] = AS_OF_HELP,
+    ):
+        command = sub.add_parser(name, help=help_text)
+        command.add_argument("yaml", metavar="experiment.yaml", help=yaml_help)
+        if as_of_help is not None:
+            command.add_argument("--as-of", type=_as_of, metavar="INSTANT", help=as_of_help)
+        return command
+
+    forecast_p = live_command(
+        "forecast", "Issue one day's live forecasts into the live directory (exit 0/10/20/30/75/1)"
+    )
+    forecast_p.add_argument(
+        "--issue", type=_issue_day, default="today", metavar="DAY", help="today, tomorrow or a date"
+    )
+    forecast_p.add_argument(
+        "--ensure",
+        action="store_true",
+        help="Do nothing when the issue already has a committed revision by the deadline",
+    )
+    forecast_p.add_argument(
+        "--deadline", metavar="HH:MM", help="No revision is committed after it (overrides live.deadline)"
+    )
+    forecast_p.add_argument(
+        "--wait-for",
+        action="append",
+        type=_wait_for,
+        metavar="COLUMN=HH:MM",
+        help="Poll until the column has its cells for the issue day, giving up at that time; repeat for more columns, or "
+        "`rules` alone (overrides live.wait_for)",
+    )
+    forecast_p.add_argument(
+        "--refresh", choices=("auto", "never"), default="auto", help="never: read the caches only, send no request"
+    )
+    forecast_p.add_argument(
+        "--dry-run", action="store_true", help="Do everything, write nothing: the exit code it would give"
+    )
+
+    refit_p = live_command("refit", "Fit and store the models' fits for an issue day (exit 0, or 1)")
+    refit_p.add_argument("--issue", type=_issue_day, default="today", metavar="DAY", help="today, tomorrow or a date")
+    refit_p.add_argument(
+        "--refresh", choices=("auto", "never"), default="auto", help="never: read the caches only, send no request"
+    )
+    refit_p.add_argument(
+        "--if-due",
+        action="store_true",
+        help="Fit only what is not stored with this configuration (otherwise refit anyway)",
+    )
+
+    delivered_p = live_command("mark-delivered", "Record that a revision was delivered (exit 0, or 1)")
+    delivered_p.add_argument("--issue", type=_issue_day, required=True, metavar="DAY", help="The issue day")
+    delivered_p.add_argument("--revision", type=int, required=True, metavar="N", help="The revision delivered")
+    delivered_p.add_argument(
+        "--receipt", required=True, metavar="FILE", help="What the platform answered (kept by hash)"
+    )
+    delivered_p.add_argument("--dry-run", action="store_true", help="Check everything, write nothing")
+
+    status_p = live_command("status", "Show what the live directory holds for an issue day")
+    status_p.add_argument("--issue", type=_issue_day, default="today", metavar="DAY", help="today, tomorrow or a date")
+
+    monitor_p = live_command(
+        "monitor", "Score the live forecasts against what happened (exit 0, or 3 when an alert fires)"
+    )
+    monitor_p.add_argument(
+        "--windows",
+        type=_windows,
+        default=(7, 30, 90),
+        metavar="7,30,90",
+        help="Windows in issue days (default 7,30,90)",
+    )
+    monitor_p.add_argument("--alert", metavar="alerts.yaml", help="A YAML list of alert rules")
+
+    snapshot_p = live_command(
+        "snapshot",
+        "Record every source's raw download into an archive (exit 0, 4 with a warning, 1)",
+        "Path to a DataPipeline or workflow YAML",
+        as_of_help="Refused: an archive records real fetches, and a fake time would stamp today's values as a past vintage",
+    )
+    snapshot_p.add_argument("--archive", required=True, metavar="DIR", help="The archive directory")
+    snapshot_p.add_argument(
+        "--days-back", type=int, default=3, metavar="N", help="Days before now to fetch (default 3)"
+    )
+    snapshot_p.add_argument(
+        "--days-ahead", type=int, default=2, metavar="N", help="Days after now to fetch (default 2)"
+    )
+
     # -- validate --
     val_p = sub.add_parser("validate", help="Validate a pipeline or workflow YAML")
     val_p.add_argument("yaml", metavar="pipeline.yaml", help="Path to YAML file to validate")
@@ -876,14 +1135,48 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main() -> None:
-    args = build_parser().parse_args()
+def _check_usage(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    """The mistakes of a command line that argparse can't see: each exits with 2."""
+    as_of = getattr(args, "as_of", None)
+    if args.cmd == "snapshot" and as_of is not None:
+        parser.error(
+            "snapshot doesn't take --as-of: an archive records what the sources answer now, and a fake time would stamp "
+            "today's values as a past vintage"
+        )
+    if args.cmd in ("forecast", "refit") and as_of is not None and args.refresh != "never":
+        parser.error(
+            f"{args.cmd} --as-of is for replays over cached or offline data: add --refresh never (a real fetch would build a "
+            "past revision on today's values)"
+        )
+    wait_for = getattr(args, "wait_for", None) or []
+    if "rules" in wait_for and len(wait_for) > 1:
+        parser.error("--wait-for rules stands alone: it can't be mixed with COLUMN=HH:MM")
+
+
+def main(argv: Optional[List[str]] = None, clock=None) -> Optional[int]:
+    """Run `epf` with `argv` (`sys.argv[1:]` by default) and return its exit code, for the live commands, which have codes of
+    their own (the table in the docs page Command Line); the older commands return None and exit with 1 when they fail.
+
+    `clock` (an `epftoolbox2.clock.Clock`, a `FakeClock` in tests) is the clock the command runs on; `--as-of INSTANT` of the live
+    commands makes one, so the two can't both be given. A usage mistake exits with 2 (argparse's `SystemExit`).
+    """
+    parser = build_parser()
+    args = parser.parse_args(argv)
 
     if args.cmd is None:
         from .tui import run_interactive
 
         run_interactive()
-        return
+        return None
+
+    _check_usage(parser, args)
+    as_of = getattr(args, "as_of", None)
+    if as_of is not None:
+        if clock is not None:
+            parser.error("--as-of sets the clock, and main() was given one too: use one of them")
+        from .clock import FakeClock
+
+        clock = FakeClock(as_of)
 
     dispatch = {
         "run": cmd_run,
@@ -897,9 +1190,20 @@ def main() -> None:
         "tune": cmd_tune,
         "validate": cmd_validate,
         "init": cmd_init,
+        "forecast": cmd_forecast,
+        "refit": cmd_refit,
+        "mark-delivered": cmd_mark_delivered,
+        "status": cmd_status,
+        "monitor": cmd_monitor,
+        "snapshot": cmd_snapshot,
     }
-    dispatch[args.cmd](args)
+    if clock is None:
+        return dispatch[args.cmd](args)
+    from .clock import use_clock
+
+    with use_clock(clock):
+        return dispatch[args.cmd](args)
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

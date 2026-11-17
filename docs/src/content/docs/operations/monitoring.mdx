@@ -167,7 +167,7 @@ Each alert that fires is an `Alert` in `monitored.alerts` with its `rule`, `mess
 `threshold` and `through` (the last issue day it looked at); no alert is an empty list. The rules read the report as it is:
 `skill_above` the skill of each issue day, `rung_at_least` every key of the days up to the newest due one, scored or not,
 and `stale_input` the quality records (a record that doesn't name the column says nothing about it). A key the rule doesn't know
-raises, so a typo never silently disables an alert. `epf monitor` will exit 3 on an alert (step 8i).
+raises, so a typo never silently disables an alert. `epf monitor experiment.yaml --windows 7,30,90 --alert alerts.yaml` ([CLI](/epftoolbox2/getting-started/cli/#live-commands-forecast-refit-mark-delivered-status-monitor-snapshot)) prints the tables and exits 3 when an alert fires, 0 otherwise.
 
 <Aside type="note">
 Monitoring covers point forecasts. Coverage and pinball loss of probabilistic forecasts are not in it yet.
