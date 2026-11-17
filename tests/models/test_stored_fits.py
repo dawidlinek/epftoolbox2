@@ -877,6 +877,21 @@ def test_the_inline_units_of_a_stored_anchor_have_their_training_rows_in_the_ide
     )
 
 
+def test_the_inline_units_of_a_stored_anchor_keep_their_notes(tmp_path, monkeypatch):
+    """What `anchor_notes` says of units fitted now (an engine unit whose model path fails) reaches the served notes, as it does
+    for an anchor fitted inline whole."""
+    data, live, make = stored_without_wind(tmp_path)
+    seen = []
+
+    def spy(plan, units):
+        seen.append(len(units))
+        return ["a note of the inline units"]
+
+    monkeypatch.setattr(_fits, "anchor_notes", spy)
+    served = serve_one(make(), data, live, "2023-03-22")
+    assert seen == [48] and "a note of the inline units" in served.notes
+
+
 def test_an_inline_unit_at_a_stored_anchor_is_refused_before_its_targets_are_out(tmp_path):
     """Decision 5 on the units a stored anchor lacks: on 2023-03-17 the 2023-03-20 anchor's targets aren't out, so "previous",
     which fits them now, raises FitTooEarlyError and the call writes nothing (it used to leave them as skips); "skip" fits

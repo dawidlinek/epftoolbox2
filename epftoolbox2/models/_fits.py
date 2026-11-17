@@ -1837,7 +1837,9 @@ def serve(
             inline_keys: List[UnitKey] = []
             if missing and fit_missing != "skip":
                 check_published(plan, [anchor], current_clock().now(), data)
-                units.update(fitted_units(plan, anchor, missing)[1])
+                made, fitted = fitted_units(plan, anchor, missing)
+                units.update(fitted)
+                notes.extend(anchor_notes(plan, [meta for meta, _ in made]))
                 entry["inline_units"] = len(missing)
                 inline_keys = missing
             identity[anchor.isoformat()] = _fit_identity(plan, anchor, stored, inline_keys)
