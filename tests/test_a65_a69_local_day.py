@@ -2,12 +2,16 @@
 
 Every TSO submits these per its area's own local day: each Period's timeInterval starts at the area's local midnight (FI and GR
 at 22:00Z in winter and 21:00Z in summer, PT and IE at 00:00Z and 23:00Z, for A65 and A69 alike; the live responses are in
-`tests/data/fixtures/entsoe_live_checks/`). So the built-in rules read the delivery day in the data's local dates
-(`Availability.published(..., day_zone="data")`), an `EntsoeSource`'s rule in its area's zone, and the publication instant
-stays 10:00 (A65) or 18:00 (A69) Brussels on the date before. They used to read a Brussels day: east of Brussels the first hour
-of a day (Helsinki's 00:00 is 23:00 the day before in Brussels) was taken as published a day early, a look-ahead of one hour a
-day, and west of it the last hour (Lisbon's 23:00 is the next day's 00:00 in Brussels) a day late. In every zone on Brussels'
-clock (DE_LU, AT, PL) nothing moves, to the bit.
+`tests/data/fixtures/entsoe_live_checks/`), and the publication instant stays 10:00 (A65) or 18:00 (A69) Brussels on the date
+before. The rules used to read a Brussels day: east of Brussels the first hour of a day (Helsinki's 00:00 is 23:00 the day before
+in Brussels) was taken as published a day early, a look-ahead of one hour a day, and west of it the last hour (Lisbon's 23:00 is
+the next day's 00:00 in Brussels) a day late.
+
+The built-in rules, which can't tell whose column they judge, read the later of the data's local date and Brussels'
+(`day_zone="later_of_data_and_rule"`): each area's own day east of Brussels on its own frame, and never earlier than the Brussels
+day on any frame (a Madrid value on a Lisbon frame at 23:00 is Madrid's next day). An `EntsoeSource`'s rule reads its area's own
+day, exact on any frame, where that is never behind Brussels or was checked (PT, IE); other areas west of Brussels keep the
+Brussels day. In every zone on Brussels' clock (DE_LU, AT, PL) nothing moves, to the bit.
 
 The truth is written from that description alone (`published` below) and compared with the cells the check reads.
 """
@@ -23,9 +27,12 @@ import pandas as pd
 import pytest
 
 from epftoolbox2.data.sources.entsoe import EntsoeSource
+from epftoolbox2.data.sources.entsoe import AREA_TIMEZONES
 from epftoolbox2.information_set import (
+    _LOCAL_DAY_WEST_OF_BRUSSELS,
     _STEP_MINUTES,
     ASSUMPTIONS,
+    LATER_OF_DATA_AND_RULE,
     Availability,
     InformationSet,
     InformationSetError,
@@ -85,10 +92,13 @@ def known_cells(info, name, zone, freq, first, last, frame_zone=None):
     return found <= issue[None, :], skipped
 
 
-def by_hand(column, area_zone, zone, freq, first, last, horizon, hours=0, issue="12:00", issue_zone=None):
+def by_hand(
+    column, area_zone, zone, freq, first, last, horizon, hours=0, issue="12:00", issue_zone=None, floor_zone=None
+):
     """The truth as [period, issue day] for `column_d+{horizon}` (with `hours` an elapsed `_h+k` shift after it) on a frame of
     `zone`'s clock: the slot's instant, its local date in the area's zone, and that date's publication against the issue.
-    A daily row's value is its whole date, read at the date's last slot."""
+    A daily row's value is its whole date, read at the date's last slot. With `floor_zone` the delivery date is the later of
+    the area's and that zone's: what the built-in rules read ("Europe/Brussels")."""
     days = pd.date_range(first, last, freq="D").date
     step = _STEP_MINUTES[freq]
     n = periods_per_day(freq)
@@ -99,6 +109,8 @@ def by_hand(column, area_zone, zone, freq, first, last, horizon, hours=0, issue=
             wall += pd.Timedelta(hours=23) if freq == "1D" else pd.Timedelta(minutes=p * step)
             instant = wall.tz_localize(zone, ambiguous=False, nonexistent="shift_forward") + pd.Timedelta(hours=hours)
             delivery = instant.tz_convert(area_zone).date()
+            if floor_zone is not None:
+                delivery = max(delivery, instant.tz_convert(floor_zone).date())
             out[p, d] = published(column, delivery) <= issued(day, issue, issue_zone or zone)
     return out
 
@@ -161,8 +173,9 @@ def fixture_case(fixture: str):
 @pytest.mark.parametrize("fixture", DELIVERY)
 def test_the_fixture_s_slot_is_known_exactly_when_its_local_day_is_published(fixture):
     """FI and GR: the slot at local 00:00 of day X isn't known at the issue on X-2 (A65 `_d+2`) or X-1 (A69 `_d+1`), and the
-    Brussels day called it known: the look-ahead. PT and IE: the slot at local 23:00 of X is known on X-1, and the Brussels day
-    called it unpublished: too strict."""
+    Brussels day called it known: the look-ahead, gone from the built-in rule and the source's. PT and IE: the slot at local
+    23:00 of X is known on X-1, which the source's rule says; the Brussels day called it unpublished, and the built-in rule,
+    never earlier than the Brussels day, still does."""
     area, zone, delivery, column, horizon, slot, issue, freq, period, east = fixture_case(fixture)
     issue_day = delivery - datetime.timedelta(days=horizon)
     index = pd.date_range(
@@ -183,11 +196,16 @@ def test_the_fixture_s_slot_is_known_exactly_when_its_local_day_is_published(fix
         info.check(expanded, "load_actual", freq, index, str(issue_day), str(issue_day))
 
     source = EntsoeSource(area, api_key="test-key", type=["load", "generation"])
-    for info in (
-        InformationSet(issue, zone),  # the built-in rule, issued on the market's clock
-        InformationSet(issue, "Europe/Brussels").with_source_rules([source]),  # the source's, on Brussels' clock
+    for info, known in (
+        # The built-in rule on the market's clock: unknown in both, as the slot's own day east, as the Brussels day west.
+        (InformationSet(issue, zone), False),
+        (
+            InformationSet(issue, "Europe/Brussels").with_source_rules([source]),
+            truth,
+        ),  # the source's, on Brussels' clock
+        (InformationSet(issue, zone).with_source_rules([source]), truth),
     ):
-        if truth:
+        if known:
             check(info)
         else:
             with pytest.raises(InformationSetError, match=re.escape(name)):
@@ -217,7 +235,9 @@ NAMES = [(LOAD, 0, 0), (LOAD, 1, 0), (LOAD, 2, 0), (LOAD, 0, 35), (WIND, 1, 0), 
 
 
 @pytest.mark.parametrize(("zone", "freq", "window"), GRID)
-def test_the_built_in_rules_publish_each_market_s_own_day(zone, freq, window):
+def test_the_built_in_rules_publish_each_market_s_own_day_never_before_brussels_day(zone, freq, window):
+    """On a frame in its market's zone: Helsinki's, Athens' and Bucharest's own day, Warsaw's (Brussels'), and the Brussels day
+    in Lisbon and Dublin, whose own day only an `EntsoeSource`'s rule reads."""
     info = InformationSet("12:00", zone)
     first, last = WINDOWS[window]
     for column, horizon, hours in NAMES:
@@ -226,13 +246,13 @@ def test_the_built_in_rules_publish_each_market_s_own_day(zone, freq, window):
         name = f"{column}_d+{horizon}" if horizon else column
         name = f"{name}_h+{hours}" if hours else name
         known, skipped = known_cells(info, name, zone, freq, first, last)
-        expected = by_hand(column, zone, zone, freq, first, last, horizon, hours)
+        expected = by_hand(column, zone, zone, freq, first, last, horizon, hours, floor_zone="Europe/Brussels")
         wrong = np.argwhere((known != expected) & ~skipped)
         assert not len(wrong), (name, [(int(p), int(d), bool(known[p, d])) for p, d in wrong[:5]])
 
 
 @pytest.mark.parametrize("area", [*EAST, *WEST, *CET])
-@pytest.mark.parametrize("frame_zone", ["UTC", "Europe/Brussels", None])
+@pytest.mark.parametrize("frame_zone", ["UTC", "Europe/Brussels", "Europe/London", None])
 def test_the_source_s_rule_is_exact_on_a_frame_in_any_zone(area, frame_zone):
     """An `EntsoeSource`'s rule reads the delivery day in its area's zone, so it holds on a UTC frame, or a frame on Brussels'
     clock, issued at noon Brussels: where the data's dates alone can't name the area's day."""
@@ -256,38 +276,51 @@ def test_the_source_s_rule_is_exact_on_a_frame_in_any_zone(area, frame_zone):
 YEAR = ("2025-01-01", "2025-12-31")  # both switches
 
 
-def year_counts(zone: str, freq: str, name: str):
+def year_counts(zone: str, freq: str, name: str, area: str = None):
+    """Known cells over 2025 issued at noon on the market's clock, by the Brussels-day rule and by today's: the built-in one, or
+    with `area` that `EntsoeSource`'s."""
     before, skipped = known_cells(InformationSet("12:00", zone, rules=BEFORE), name, zone, freq, *YEAR)
-    after, _ = known_cells(InformationSet("12:00", zone), name, zone, freq, *YEAR)
+    info = InformationSet("12:00", zone)
+    if area is not None:
+        info = info.with_source_rules([EntsoeSource(area, api_key="test-key", type=["load", "generation"])])
+    after, _ = known_cells(info, name, zone, freq, *YEAR)
     return before & ~skipped, after & ~skipped
 
 
-@pytest.mark.parametrize("zone", list(EAST.values()))
+@pytest.mark.parametrize("area", list(EAST))
 @pytest.mark.parametrize(("freq", "per_day"), [("1h", 1), ("15min", 4)])
-def test_east_of_brussels_the_first_hour_of_a_day_is_no_longer_read_a_day_early(zone, freq, per_day):
+@pytest.mark.parametrize("source", [False, True])
+def test_east_of_brussels_the_first_hour_of_a_day_is_no_longer_read_a_day_early(area, freq, per_day, source):
     """Issued at noon on each day of 2025: A65 `_d+2` and A69 `_d+1` were called known in the first hour of the day (one hour
-    a day: 365 cells at 1h, 1460 at 15min), published a day after the issue. Nothing else moves, nothing becomes known."""
+    a day: 365 cells at 1h, 1460 at 15min), published a day after the issue. Nothing else moves, nothing becomes known: by the
+    built-in rule and by the source's alike."""
+    zone, area = EAST[area], area if source else None
     for name in (f"{LOAD}_d+2", f"{WIND}_d+1"):
-        before, after = year_counts(zone, freq, name)
+        before, after = year_counts(zone, freq, name, area)
         removed = before & ~after
         assert int(removed.sum()) == 365 * per_day, name
         assert set(np.argwhere(removed)[:, 0].tolist()) == set(range(per_day)), name  # the local hour from 00:00
         assert not (after & ~before).any(), name
     for name in (LOAD, f"{LOAD}_d+1", f"{WIND}_d+2"):  # D's own day, D+1's whole day at 10:00, nothing of D+2 at 18:00
-        before, after = year_counts(zone, freq, name)
+        before, after = year_counts(zone, freq, name, area)
         assert np.array_equal(before, after), name
 
 
-@pytest.mark.parametrize("zone", list(WEST.values()))
+@pytest.mark.parametrize("area", list(WEST))
 @pytest.mark.parametrize(("freq", "per_day"), [("1h", 1), ("15min", 4)])
-def test_west_of_brussels_the_last_hour_of_a_day_is_no_longer_read_a_day_late(zone, freq, per_day):
+def test_west_of_brussels_the_source_s_rule_no_longer_reads_the_last_hour_a_day_late(area, freq, per_day):
     """Issued at noon on the market's clock: A65 `_d+1` in the last hour of the day (Lisbon's and Dublin's 23:00 is the next
-    day in Brussels) is out since 10:00 Brussels, and used to be called unpublished. Nothing becomes unknown."""
-    before, after = year_counts(zone, freq, f"{LOAD}_d+1")
+    day in Brussels) is out since 10:00 Brussels, and the Brussels day called it unpublished. The source's rule (PT and IE were
+    checked live) says so; nothing becomes unknown. The built-in rule, never earlier than the Brussels day, keeps it unknown."""
+    zone = WEST[area]
+    before, after = year_counts(zone, freq, f"{LOAD}_d+1", area)
     added = after & ~before
     assert int(added.sum()) == 365 * per_day
     assert set(np.argwhere(added)[:, 0].tolist()) == set(range(periods_per_day(freq) - per_day, periods_per_day(freq)))
     assert not (before & ~after).any()
+    for name in (LOAD, f"{LOAD}_d+1", f"{LOAD}_d+2", f"{WIND}_d+1"):
+        before, built_in = year_counts(zone, freq, name)
+        assert np.array_equal(before, built_in), name
 
 
 CET_NAMES = [
@@ -311,7 +344,7 @@ CET_NAMES = [
 def test_on_brussels_clock_every_instant_is_the_one_it_was(area, freq):
     """DE_LU, AT and PL over 2025: every availability instant the check reads, built-in, the source's rule and the accepted
     A69 assumption, equals the Brussels-day rule's to the bit, on a frame in the market's zone, in UTC (issued at noon UTC,
-    Brussels or the market's) and at UTC+1."""
+    Brussels or the market's), at UTC+1, and on frames west of it (Lisbon issued on Lisbon's clock, London on UTC's)."""
     zone = CET[area]
     source = EntsoeSource(area, api_key="test-key", type=["load", "generation"])
     old_assumption = {"generation_*_forecast": Availability.published("10:00", 1, vintage="latest_revision")}
@@ -322,6 +355,8 @@ def test_on_brussels_clock_every_instant_is_the_one_it_was(area, freq):
         ("UTC", "Europe/Brussels"),
         ("UTC", zone),
         ("Etc/GMT-1", "Etc/GMT-1"),
+        ("Europe/Lisbon", "Europe/Lisbon"),
+        ("Europe/London", "UTC"),
     ]:
         index = frame_index(zone, freq, *YEAR)
         if frame_zone is not None:
@@ -342,6 +377,67 @@ def test_on_brussels_clock_every_instant_is_the_one_it_was(area, freq):
                 old, _, _ = available(before, name, index, freq, *YEAR)
                 new, _, _ = available(after, name, index, freq, *YEAR)
                 assert np.array_equal(old, new), (frame_zone, issue_zone, name)
+
+
+AREA_ZONES = ["Europe/Madrid", "Europe/Warsaw", "Europe/Helsinki", "Europe/Lisbon", "Europe/Dublin"]
+FRAMES = [
+    None,
+    "Europe/Lisbon",
+    "Europe/London",
+    "Atlantic/Reykjavik",
+    "America/New_York",
+    "UTC",
+    "Europe/Brussels",
+    "Europe/Helsinki",
+]
+
+
+@pytest.mark.parametrize("area_zone", AREA_ZONES)
+def test_the_built_in_rules_are_never_earlier_than_the_brussels_day(area_zone):
+    """Whatever the frame's zone and the issue clock (Brussels, UTC, the frame's), no instant of the built-in rules is earlier
+    than the Brussels-day rule's: a Madrid value on a Lisbon frame at 23:00, Madrid's next day, read in Lisbon's dates alone was
+    called known a day early (21 cells of three January weeks), Warsaw on a London frame too, Helsinki on a Lisbon frame twice."""
+    first, last = WINDOWS["january"]
+    for frame_zone in FRAMES:
+        index = frame_index(area_zone, "1h", first, last)
+        if frame_zone is not None:
+            index = index.tz_convert(frame_zone)
+        for issue_zone in ("Europe/Brussels", "UTC", frame_zone or area_zone):
+            for name in (f"{LOAD}_d+1", f"{LOAD}_d+2", f"{LOAD}_h+35", WIND, f"{WIND}_d+1"):
+                old, _, _ = available(InformationSet("12:00", issue_zone, rules=BEFORE), name, index, "1h", first, last)
+                new, _, _ = available(InformationSet("12:00", issue_zone), name, index, "1h", first, last)
+                assert (new >= old).all(), (frame_zone, issue_zone, name)
+
+
+@pytest.mark.parametrize(
+    ("area_zone", "frame_zone", "column", "horizon", "early"),
+    [
+        ("Europe/Madrid", "Europe/Lisbon", LOAD, 1, 0),  # 21 by the data's dates alone
+        ("Europe/Madrid", "Europe/Lisbon", WIND, 0, 0),
+        ("Europe/Warsaw", "Europe/London", LOAD, 1, 0),
+        ("Europe/Helsinki", "Europe/Lisbon", LOAD, 1, 21),  # as the Brussels day: 42 by the data's dates alone
+    ],
+)
+def test_a_frame_west_of_its_area_reads_no_value_earlier_than_the_brussels_day(
+    area_zone, frame_zone, column, horizon, early
+):
+    """The reviewer's frames, issued at noon on the frame's clock: the cells called known before their area's day was published,
+    by the built-in rule (as many as the Brussels day called, never more) and by the area's source rule (none)."""
+    first, last = WINDOWS["january"]
+    name = f"{column}_d+{horizon}" if horizon else column
+    truth = by_hand(column, area_zone, frame_zone, "1h", first, last, horizon)
+    counts = []
+    for rules in (BEFORE, None):
+        known, skipped = known_cells(
+            InformationSet("12:00", frame_zone, rules=rules), name, area_zone, "1h", first, last, frame_zone
+        )
+        counts.append(int((known & ~truth & ~skipped).sum()))
+    assert counts == [early, early]
+    exact = InformationSet(
+        "12:00", frame_zone, rules={"*": Availability.published(TIMES[column], 1, day_zone=area_zone)}
+    )
+    known, skipped = known_cells(exact, name, area_zone, "1h", first, last, frame_zone)
+    assert not (known & ~truth & ~skipped).any()
 
 
 # ---------------------------------------------------------------------------
@@ -381,7 +477,7 @@ def single_process(monkeypatch):
 TEST = ("2025-01-13", "2025-01-26")
 
 
-def tso_keys(zone: str, freq: str, rules=None) -> set:
+def tso_keys(zone: str, freq: str, rules=None, area=None, save_to=None) -> set:
     """NaiveModel of `load_forecast_d+{horizon}`, h = 1, 2, issued at noon on the market's clock; each `_d+k` column holds the
     ordinal of the local date its slot is delivered on, so a forecast says which day it read."""
     start = pd.Timestamp("2025-01-10").tz_localize(zone)
@@ -390,10 +486,13 @@ def tso_keys(zone: str, freq: str, rules=None) -> set:
     frame = pd.DataFrame({"y": np.arange(len(index), dtype=float)}, index=index)
     for k in range(3):
         frame[f"{LOAD}_d+{k}"] = (ordinal + k).astype(float)
+    info = InformationSet("12:00", zone, rules=rules)
+    if area is not None:
+        info = info.with_source_rules([EntsoeSource(area, api_key="test-key", type=["load"])])
     report = (
-        ModelPipeline(information_set=InformationSet("12:00", zone, rules=rules), availability="raise")
+        ModelPipeline(information_set=info, availability="raise")
         .add_model(NaiveModel([f"{LOAD}_d+{{horizon}}"], name="TSO"))
-        .run(frame, target="y", freq=freq, test=TEST, horizon=2)
+        .run(frame, target="y", freq=freq, test=TEST, horizon=2, save_dir=save_to)
     )
     keys = set()
     for record in report.refs["TSO"].iter_records():
@@ -403,32 +502,54 @@ def tso_keys(zone: str, freq: str, rules=None) -> set:
     return keys
 
 
-def keys_by_hand(zone: str, freq: str) -> set:
+def keys_by_hand(zone: str, freq: str, floor_zone=None) -> set:
+    days = pd.date_range(*TEST).date
     out = set()
-    for day in pd.date_range(*TEST).date:
-        for horizon in (1, 2):
-            if published(LOAD, day + datetime.timedelta(days=horizon)) <= issued(day, "12:00", zone):
-                out |= {(day.isoformat(), period, horizon) for period in range(periods_per_day(freq))}
+    for horizon in (1, 2):
+        known = by_hand(LOAD, zone, zone, freq, *TEST, horizon, floor_zone=floor_zone)
+        out |= {(days[d].isoformat(), int(p), horizon) for p, d in np.argwhere(known)}
     return out
 
 
 @pytest.mark.parametrize(
-    ("zone", "freq", "removed", "added"),
+    ("zone", "freq", "area", "removed", "added"),
     [
-        ("Europe/Helsinki", "1h", 14, 0),  # period 0 of D+2 on each of 14 days, forecast before its value existed
-        ("Europe/Helsinki", "15min", 56, 0),  # periods 0-3
-        ("Europe/Athens", "1h", 14, 0),
-        ("Europe/Lisbon", "1h", 0, 14),  # period 23 of D+1, out since 10:00 Brussels, called unpublished
-        ("Europe/Warsaw", "1h", 0, 0),
+        ("Europe/Helsinki", "1h", None, 14, 0),  # period 0 of D+2 on each of 14 days, forecast before its value existed
+        ("Europe/Helsinki", "15min", None, 56, 0),  # periods 0-3
+        ("Europe/Helsinki", "1h", "FI", 14, 0),
+        ("Europe/Athens", "1h", None, 14, 0),
+        ("Europe/Lisbon", "1h", None, 0, 0),  # the built-in rule keeps the Brussels day west of Brussels
+        ("Europe/Lisbon", "1h", "PT", 0, 14),  # period 23 of D+1, out since 10:00 Brussels, called unpublished
+        ("Europe/Warsaw", "1h", None, 0, 0),
     ],
 )
-def test_a_naive_forecast_of_the_tso_exists_exactly_where_its_value_was_out(zone, freq, removed, added, single_process):
-    after = tso_keys(zone, freq)
-    assert after == keys_by_hand(zone, freq)
+def test_a_naive_forecast_of_the_tso_exists_exactly_where_its_value_was_out(
+    zone, freq, area, removed, added, single_process
+):
+    after = tso_keys(zone, freq, area=area)
+    assert after == keys_by_hand(zone, freq, floor_zone=None if area else "Europe/Brussels")
     before = tso_keys(zone, freq, rules=BEFORE)
     assert len(before - after) == removed
     assert len(after - before) == added
     assert all(horizon == 2 for _, _, horizon in before - after)
+    assert all(horizon == 1 for _, _, horizon in after - before)
+
+
+def test_a_known_only_run_written_with_the_brussels_day_refuses_to_resume(tmp_path, single_process):
+    """`training_cut["known_only"]` records each column's rule without its note and class: the Brussels-day rule has no
+    `day_zone`, today's has one, so results written before refuse to resume rather than mix the two."""
+    from epftoolbox2.results.manifest import ManifestMismatchError
+
+    tso_keys("Europe/Helsinki", "1h", rules=BEFORE, save_to=str(tmp_path))
+    manifest = json.loads(next(tmp_path.glob("*.manifest.json")).read_text())
+    assert manifest["training_cut"]["known_only"]["rules"][f"{LOAD}_d+2"] == {
+        "kind": "published",
+        "time": "10:00",
+        "days_before": 1,
+        "timezone": "Europe/Brussels",
+    }
+    with pytest.raises(ManifestMismatchError, match="training_cut"):
+        tso_keys("Europe/Helsinki", "1h", save_to=str(tmp_path))
 
 
 # ---------------------------------------------------------------------------
@@ -436,7 +557,7 @@ def test_a_naive_forecast_of_the_tso_exists_exactly_where_its_value_was_out(zone
 # ---------------------------------------------------------------------------
 
 
-def test_the_built_in_rules_read_the_data_s_dates_and_publish_in_brussels():
+def test_the_built_in_rules_read_the_later_of_the_data_s_dates_and_brussels_and_publish_in_brussels():
     for name, time in (("load_forecast", "10:00"), ("generation_*_forecast", "18:00")):
         rule = default_rules()[name]
         assert (rule.kind, rule.time, rule.days_before, rule.timezone, rule.day_zone) == (
@@ -444,12 +565,13 @@ def test_the_built_in_rules_read_the_data_s_dates_and_publish_in_brussels():
             time,
             1,
             "Europe/Brussels",
-            "data",
+            LATER_OF_DATA_AND_RULE,
         )
-        assert rule.describe().endswith("(delivery days of the data's local dates)")
+        assert rule.describe().endswith("(delivery days of the data's local dates, never before Europe/Brussels dates)")
+        assert rule.to_dict()["day_zone"] == "later_of_data_and_rule"  # what `training_cut` records
         assert Availability.from_dict(rule.to_dict()) == rule
     assumed = ASSUMPTIONS["entsoe_a69_by_10"][1]
-    assert (assumed.time, assumed.timezone, assumed.day_zone) == ("10:00", "Europe/Brussels", "data")
+    assert (assumed.time, assumed.timezone, assumed.day_zone) == ("10:00", "Europe/Brussels", LATER_OF_DATA_AND_RULE)
 
 
 def test_an_entsoe_source_s_rule_reads_its_area_s_day_not_the_bound_market_s():
@@ -486,7 +608,7 @@ def test_an_entsoe_source_without_the_type_or_with_a_prefix_adds_no_rule():
     no rule, as `fi_load_actual` and `fi_price` haven't: a rule of yours names it."""
     load = InformationSet().with_source_rules([EntsoeSource("FI", api_key="test-key", type=["load"])])
     assert load.resolve(LOAD).rule.day_zone == "Europe/Helsinki"
-    assert load.resolve(WIND).rule.day_zone == "data"  # the built-in rule
+    assert load.resolve(WIND).rule.day_zone == LATER_OF_DATA_AND_RULE  # the built-in rule
     prefixed = InformationSet().with_source_rules(
         [EntsoeSource("FI", api_key="test-key", type=["load", "generation"], prefix="fi")]
     )
@@ -496,12 +618,51 @@ def test_an_entsoe_source_without_the_type_or_with_a_prefix_adds_no_rule():
 
 
 def test_the_a69_assumption_keeps_the_source_s_day_and_moves_the_time_only():
-    source = EntsoeSource("FI", api_key="test-key", type=["generation"])
-    info = InformationSet("12:00", "Europe/Brussels", assumptions=["entsoe_a69_by_10"]).with_source_rules([source])
-    resolved = info.resolve(WIND)
-    assert resolved.layer == "assumptions"
-    assert (resolved.rule.time, resolved.rule.day_zone) == ("10:00", "Europe/Helsinki")
-    assert InformationSet(assumptions=["entsoe_a69_by_10"]).resolve(WIND).rule.day_zone == "data"
+    for area, day_zone in (("FI", "Europe/Helsinki"), ("GB", None)):
+        source = EntsoeSource(area, api_key="test-key", type=["generation"])
+        info = InformationSet("12:00", "Europe/Brussels", assumptions=["entsoe_a69_by_10"]).with_source_rules([source])
+        resolved = info.resolve(WIND)
+        assert resolved.layer == "assumptions"
+        assert (resolved.rule.time, resolved.rule.day_zone) == ("10:00", day_zone)
+    assert InformationSet(assumptions=["entsoe_a69_by_10"]).resolve(WIND).rule.day_zone == LATER_OF_DATA_AND_RULE
+
+
+# Areas west of Brussels whose own day nobody checked: their source rule keeps the Brussels day. PT and IE were checked live.
+UNCHECKED_WEST = {"GB", "UK", "GB_IFA", "GB_IFA2", "GB_ELECLINK", "GB_NIR", "IE_SEM", "IS"}
+
+
+def test_a_source_rule_reads_its_area_s_day_only_where_that_is_never_earlier_or_was_checked():
+    """The area's own zone where it is never behind Brussels (only ever later, so never a look-ahead) or the area is PT or IE
+    (checked live); the Brussels day for every other area west of Brussels, whose own day would be looser and is unverified."""
+    seen = {}
+    for area, zone in {
+        **AREA_TIMEZONES,
+        "DE_LU": "Europe/Brussels",
+        "PL": "Europe/Brussels",
+        "ES": "Europe/Brussels",
+    }.items():
+        source = EntsoeSource(area, api_key="test-key", type=["load", "generation"])
+        rules = InformationSet().with_source_rules([source])
+        days = {rules.resolve(name).rule.day_zone for name in (LOAD, WIND)}
+        assert len(days) == 1, area
+        seen[area] = days.pop()
+        assert seen[area] == (None if area in UNCHECKED_WEST else zone), area
+    assert _LOCAL_DAY_WEST_OF_BRUSSELS == {"PT", "IE"}
+    assert {area for area, zone in seen.items() if zone in ("Europe/Lisbon", "Europe/Dublin")} == {"PT", "IE"}
+
+
+@pytest.mark.parametrize("area", ["GB", "IS", "IE_SEM"])
+def test_an_unchecked_area_west_of_brussels_keeps_the_brussels_day(area):
+    zone = EntsoeSource(area, api_key="test-key", type=["load"])._timezone
+    source = EntsoeSource(area, api_key="test-key", type=["load", "generation"])
+    index = frame_index(zone, "1h", *WINDOWS["january"])
+    for issue_zone in (zone, "Europe/Brussels"):
+        before = InformationSet("12:00", issue_zone, rules=BEFORE)
+        after = InformationSet("12:00", issue_zone).with_source_rules([source])
+        for name in (f"{LOAD}_d+1", WIND):
+            old, _, _ = available(before, name, index, "1h", *WINDOWS["january"])
+            new, _, _ = available(after, name, index, "1h", *WINDOWS["january"])
+            assert np.array_equal(old, new), (issue_zone, name)
 
 
 def test_a_user_s_published_rule_keeps_the_day_of_its_own_zone():
@@ -512,9 +673,39 @@ def test_a_user_s_published_rule_keeps_the_day_of_its_own_zone():
     assert known[0].all() and not known[1:].any()  # Helsinki's 00:00 dated to Brussels' day before
 
 
-def test_on_a_utc_frame_issued_in_utc_a_data_day_is_never_earlier_than_brussels():
+@pytest.mark.parametrize(
+    ("area_zone", "frame_zone", "issue_zone"),
+    [
+        ("Europe/Lisbon", "UTC", "Europe/Lisbon"),  # exact: Lisbon's date is never before UTC's
+        ("Europe/Berlin", "UTC", "UTC"),
+        ("Europe/Lisbon", None, "Europe/Brussels"),
+        ("Europe/Helsinki", "Etc/GMT-1", "Europe/Helsinki"),
+        ("Europe/Warsaw", "Europe/London", "Europe/London"),
+    ],
+)
+def test_a_user_s_data_day_rule_reads_the_data_s_and_the_issue_zone_s_dates_as_it_always_did(
+    area_zone, frame_zone, issue_zone
+):
+    """`day_zone="data"` reads the later of the data's and the issue zone's dates, nothing else: no rule zone is added, on a frame
+    in UTC or anywhere, so every instant equals the later of the two rules naming those zones."""
+    first, last = WINDOWS["january"]
+    index = frame_index(area_zone, "1h", first, last)
+    if frame_zone is not None:
+        index = index.tz_convert(frame_zone)
+    data_zone = frame_zone or area_zone
+
+    def instants(day_zone):
+        rule = {"tso": Availability.published("10:00", 1, day_zone=day_zone)}
+        return available(InformationSet("12:00", issue_zone, rules=rule), "tso_d+1", index, "1h", first, last)[0]
+
+    assert np.array_equal(instants("data"), np.maximum(instants(data_zone), instants(issue_zone)))
+    if area_zone == "Europe/Lisbon" and frame_zone == "UTC":
+        assert np.array_equal(instants("data"), instants("Europe/Lisbon"))
+
+
+def test_on_a_utc_frame_issued_in_utc_the_built_in_day_is_never_earlier_than_brussels():
     """A frame in no market's zone issued on no market's clock: the data's dates would put a CET market's 00:00 on the day
-    before (23:00Z), a day early. The rule's own zone is read too, and the later counts: the Brussels day it had before."""
+    before (23:00Z), a day early. The built-in rules read Brussels' date too, and the later counts: the Brussels day."""
     first, last = WINDOWS["january"]
     for zone in ("Europe/Berlin", "Europe/Helsinki", "Europe/Lisbon"):
         old, _ = known_cells(
@@ -523,7 +714,7 @@ def test_on_a_utc_frame_issued_in_utc_a_data_day_is_never_earlier_than_brussels(
         new, _ = known_cells(InformationSet("12:00", "UTC"), f"{LOAD}_d+1", zone, "1h", first, last, "UTC")
         assert np.array_equal(old, new), zone
     data_only, _ = known_cells(
-        InformationSet("12:00", "UTC", rules={LOAD: Availability.published("10:00", 1, timezone="UTC")}),
+        InformationSet("12:00", "UTC", rules={LOAD: Availability.published("10:00", 1, day_zone="data")}),
         f"{LOAD}_d+1",
         "Europe/Berlin",
         "1h",
@@ -531,4 +722,4 @@ def test_on_a_utc_frame_issued_in_utc_a_data_day_is_never_earlier_than_brussels(
         last,
         "UTC",
     )
-    assert data_only.sum() > new.sum()  # what the UTC day alone would have called known
+    assert data_only.sum() > new.sum()  # what the UTC day alone (a user's "data" rule) calls known
