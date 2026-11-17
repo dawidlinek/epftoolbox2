@@ -200,6 +200,7 @@ class ModelPipeline:
         target: str = "price",            # The column the actuals are read from
         issue_days: Optional[Sequence[str]] = None,  # Weekdays the pipeline issues on, as for run; None: live.json's, else every day
     ) -> MonitorReport: ...               # LiveDirectoryError for a directory that isn't live
+
     def forecast(                         # One live call of an issue day into a live directory (Live Forecasts page)
         self,
         data: Any,                        # A DataPipeline (refreshed here) or a DataFrame (used as given)
